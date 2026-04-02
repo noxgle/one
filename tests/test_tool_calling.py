@@ -156,3 +156,24 @@ async def test_turn_end_emitted_on_non_retryable_error(tmp_path: Path):
     assert "provider down" in turn_end[-1]["error"]
 
     assert any(e.get("type") == "agent_end" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_queue_and_active_tools_introspection(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory()
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["ls", "read"])
+
+    assert agent.active_tools == ["ls", "read"]
+
+    await agent.steer("a")
+    await agent.follow_up("b")
+    queues = agent.get_pending_queues()
+    assert queues["steering"] == ["a"]
+    assert queues["followUp"] == ["b"]

@@ -211,6 +211,10 @@ class AgentSession:
         return len(self._steering) + len(self._follow_up)
 
     @property
+    def active_tools(self) -> list[str]:
+        return list(self._active_tools)
+
+    @property
     def steering_mode(self) -> str:
         return self.settings_manager.get_steering_mode()
 
@@ -477,6 +481,12 @@ class AgentSession:
     async def follow_up(self, text: str, images: list[dict[str, Any]] | None = None) -> None:
         self._follow_up.append(text)
         self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
+
+    def get_pending_queues(self) -> dict[str, list[str]]:
+        return {
+            "steering": list(self._steering),
+            "followUp": list(self._follow_up),
+        }
 
     async def compact(self, custom_instructions: str | None = None) -> dict[str, Any]:
         self._is_compacting = True

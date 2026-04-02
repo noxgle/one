@@ -15,6 +15,7 @@ class InteractiveMode:
 
         def on_event(event: dict) -> None:
             nonlocal assistant_streamed
+            et = event.get("type")
             if event.get("type") == "message_start":
                 msg = event.get("message", {})
                 if msg.get("role") == "assistant":
@@ -40,9 +41,20 @@ class InteractiveMode:
                     print("", flush=True)
                 elif not assistant_streamed:
                     print("[Brak treści odpowiedzi modelu]", flush=True)
-            if event.get("type") == "turn_end" and event.get("ok") is False:
+            if et == "turn_end" and event.get("ok") is False:
                 err = (event.get("error") or "Unknown error").strip()
                 print(f"[Błąd] {err}", flush=True)
+            if et == "tool_call_start":
+                print(f"[Tool] {event.get('tool')} {json.dumps(event.get('args', {}), ensure_ascii=False)}", flush=True)
+            if et == "tool_call_end":
+                ok = bool(event.get("ok"))
+                status = "OK" if ok else "ERR"
+                print(f"[Tool:{status}] {event.get('tool')}", flush=True)
+            if et == "auto_retry_start":
+                print(
+                    f"[Retry] próba {event.get('attempt')}/{event.get('maxAttempts')} za {event.get('delayMs')}ms: {event.get('errorMessage')}",
+                    flush=True,
+                )
 
         session.subscribe(on_event)
         print("Interactive mode. Type /exit to quit. Use /help for commands.")
@@ -52,13 +64,20 @@ class InteractiveMode:
             usage_text = ""
             if usage:
                 usage_text = f" | ctx:{usage['percent']:.1f}%"
-            print(f"[{model_label} | thinking:{session.thinking_level}{usage_text}]")
+            queues = session.get_pending_queues()
+            cwd_label = session.session_manager.cwd
+            print(
+                f"[{model_label} | thinking:{session.thinking_level}{usage_text} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
+            )
             line = input("\n> ")
+            if not line.strip():
+                continue
             if line.strip() in {"/exit", "/quit"}:
                 break
             if line.strip() == "/help":
                 print(
-                    "/exit /quit | /help | /stats | /state | /model <provider/model> | /thinking <level>\n"
+                    "/exit /quit | /help | /stats | /state | /queue | /tools | /clear\n"
+                    "/model <provider/model> | /thinking <level>\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /login | /config [key] [value]\n"
                     "/bash <command>"
                 )
@@ -81,6 +100,15 @@ class InteractiveMode:
                         indent=2,
                     )
                 )
+                continue
+            if line.strip() == "/queue":
+                print(json.dumps(session.get_pending_queues(), ensure_ascii=False, indent=2))
+                continue
+            if line.strip() == "/tools":
+                print(json.dumps({"tools": session.active_tools}, ensure_ascii=False, indent=2))
+                continue
+            if line.strip() == "/clear":
+                print("\033[2J\033[H", end="")
                 continue
             if line.startswith("/model "):
                 val = line[len("/model ") :].strip()
