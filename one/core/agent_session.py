@@ -52,6 +52,7 @@ class AgentSession:
         self._steering: list[str] = []
         self._follow_up: list[str] = []
         self._active_tools = tools or list(all_tools.keys())
+        self._abort_requested = False
 
         if not self.messages:
             if self.model:
@@ -151,6 +152,12 @@ class AgentSession:
                 "tool": tool_name,
                 "args": args,
                 "result": text,
+                "outputText": text,
+                "content": result.get("content"),
+                "details": result.get("details"),
+                "exitCode": result.get("exitCode"),
+                "truncated": result.get("truncated"),
+                "fullOutputPath": result.get("fullOutputPath"),
                 "rawResult": result,
             }
         except Exception as e:
@@ -160,6 +167,7 @@ class AgentSession:
                 "tool": tool_name,
                 "args": args,
                 "error": error_text,
+                "errorType": e.__class__.__name__,
             }
             self._emit({"type": "tool_call_error", "tool": tool_name, "args": args, "error": error_text})
 
@@ -351,6 +359,7 @@ class AgentSession:
             raise RuntimeError("Invalid streamingBehavior")
 
         self._is_streaming = True
+        self._abort_requested = False
         self._emit({"type": "agent_start"})
         user_msg = {"role": "user", "content": text, "timestamp": int(time.time() * 1000)}
         self.messages.append(user_msg)
@@ -368,7 +377,29 @@ class AgentSession:
                 tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
                 final_assistant: dict[str, Any] | None = None
                 for _ in range(max_tool_steps):
+                    if self._abort_requested:
+                        final_assistant = {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "Request aborted."}],
+                            "provider": self.model.provider if self.model else None,
+                            "model": self.model.id if self.model else None,
+                            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                            "stopReason": "abort",
+                            "timestamp": int(time.time() * 1000),
+                        }
+                        break
                     assistant = await self._invoke_provider(self._flatten_messages_for_provider())
+                    if self._abort_requested:
+                        final_assistant = {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "Request aborted."}],
+                            "provider": self.model.provider if self.model else None,
+                            "model": self.model.id if self.model else None,
+                            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                            "stopReason": "abort",
+                            "timestamp": int(time.time() * 1000),
+                        }
+                        break
                     assistant_text = self._assistant_text(assistant)
                     tool_call = self._try_parse_tool_call(assistant_text)
 
@@ -418,7 +449,16 @@ class AgentSession:
                             }
                         )
                 self._emit({"type": "message_end", "message": final_assistant})
-                self._emit({"type": "turn_end", "ok": True, "attempt": attempt + 1, "message": final_assistant, "toolResults": tool_results})
+                self._emit(
+                    {
+                        "type": "turn_end",
+                        "ok": True,
+                        "attempt": attempt + 1,
+                        "aborted": final_assistant.get("stopReason") == "abort",
+                        "message": final_assistant,
+                        "toolResults": tool_results,
+                    }
+                )
                 self._emit({"type": "agent_end", "messages": [user_msg, final_assistant]})
                 break
             except Exception as e:
@@ -466,6 +506,10 @@ class AgentSession:
                 self._retrying = False
 
         self._is_streaming = False
+
+        if self._abort_requested:
+            self._abort_requested = False
+            return
 
         if self._steering:
             msg = self._steering.pop(0)
@@ -544,7 +588,7 @@ class AgentSession:
             await asyncio.sleep(0.02)
 
     async def abort(self) -> None:
-        self._is_streaming = False
+        self._abort_requested = True
 
     async def navigate_tree(self, target_id: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
         options = options or {}

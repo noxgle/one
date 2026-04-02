@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -48,6 +50,21 @@ class _FailingProvider:
         headers: dict[str, str] | None = None,
     ) -> Any:
         raise RuntimeError("provider down")
+
+
+class _SlowProvider:
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        from one.providers.base import ChatResult
+
+        await asyncio.sleep(0.1)
+        return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
 
 
 @pytest.mark.asyncio
@@ -177,3 +194,52 @@ async def test_queue_and_active_tools_introspection(tmp_path: Path):
     queues = agent.get_pending_queues()
     assert queues["steering"] == ["a"]
     assert queues["followUp"] == ["b"]
+
+
+@pytest.mark.asyncio
+async def test_tool_error_payload_contains_contract_fields(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 2, "timeoutSec": 1}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["ls"])
+    agent.providers = {"openai": _FakeProvider(['{"tool":"read","args":{"path":"x"}}', "done"])}
+
+    await agent.prompt("trigger disabled tool")
+    tool_msg = next(m for m in agent.messages if m.get("role") == "toolResult")
+    payload = json.loads(tool_msg["content"])
+    assert payload["ok"] is False
+    assert payload["tool"] == "read"
+    assert payload["errorType"] == "RuntimeError"
+    assert "disabled" in payload["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_abort_stops_turn_with_abort_message(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"retry": {"enabled": False}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium")
+    agent.providers = {"openai": _SlowProvider()}
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    task = asyncio.create_task(agent.prompt("run and abort"))
+    await asyncio.sleep(0.02)
+    await agent.abort()
+    await task
+
+    assert agent.get_last_assistant_text() == "Request aborted."
+    turn_end = [e for e in events if e.get("type") == "turn_end"]
+    assert turn_end
+    assert turn_end[-1]["aborted"] is True
