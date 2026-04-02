@@ -8,10 +8,31 @@ from .base import ChatResult, ProviderAdapter
 
 
 class OpenAICompatibleAdapter(ProviderAdapter):
-    def __init__(self, name: str, base_url: str, endpoint: str = "/v1/chat/completions") -> None:
+    def __init__(
+        self,
+        name: str,
+        base_url: str,
+        endpoint: str = "/v1/chat/completions",
+        *,
+        supports_reasoning_effort: bool = True,
+        default_temperature: float | None = 0.1,
+    ) -> None:
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.endpoint = endpoint
+        self.supports_reasoning_effort = supports_reasoning_effort
+        self.default_temperature = default_temperature
+
+    def _build_payload(self, model: str, messages: list[dict[str, Any]], thinking_level: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+        }
+        if self.default_temperature is not None:
+            payload["temperature"] = self.default_temperature
+        if self.supports_reasoning_effort:
+            payload["reasoning_effort"] = "high" if thinking_level in {"high", "xhigh"} else "medium"
+        return payload
 
     async def chat(
         self,
@@ -21,12 +42,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         thinking_level: str,
         headers: dict[str, str] | None = None,
     ) -> ChatResult:
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.1,
-            "reasoning_effort": "high" if thinking_level in {"high", "xhigh"} else "medium",
-        }
+        payload = self._build_payload(model, messages, thinking_level)
         req_headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",

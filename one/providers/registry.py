@@ -20,7 +20,13 @@ def build_provider_registry() -> dict[str, ProviderAdapter]:
         "anthropic": AnthropicAdapter(),
         "gemini": GeminiAdapter(),
         "openrouter": OpenAICompatibleAdapter("openrouter", openrouter_base),
-        "ollama-cloud": OpenAICompatibleAdapter("ollama-cloud", ollama_cloud_base),
+        # Ollama Cloud rejects some OpenAI-specific fields like reasoning_effort.
+        "ollama-cloud": OpenAICompatibleAdapter(
+            "ollama-cloud",
+            ollama_cloud_base,
+            supports_reasoning_effort=False,
+            default_temperature=None,
+        ),
     }
 
     if azure_base:
