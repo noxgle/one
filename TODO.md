@@ -12,6 +12,8 @@
   - [x] pętla model -> tool -> model
   - [x] eventy `tool_call_start/end`, `tool_call_error`, `turn_start/end`, `auto_retry_start/end`
   - [x] limity bezpieczeństwa (`tools.maxSteps`, `tools.timeoutSec`)
+  - [x] abort semantics (przerwanie promptu także podczas requestu do providera)
+  - [x] ograniczenie payloadu `toolResult` do kontekstu modelu (cap znaków)
   - [ ] domknięcie parity edge-case'ów i semantyki retry 1:1 z TS
 - [ ] Dodać pełne wsparcie providerów + auth/login parity
   - [x] auth precedence `runtime -> file -> env`
@@ -50,6 +52,8 @@
 
 ### 3. Providers/Auth
 - [x] Rozszerzona lista providerów (w tym `ollama-cloud`)
+- [x] Adapter `ollama-cloud` bez pól nieobsługiwanych (`reasoning_effort`, wymuszone `temperature`)
+- [x] Lepsza diagnostyka błędów provider API (status + body)
 - [ ] Dodać `/login` i pełne flow subskrypcji/OAuth
 - [x] Utrzymany precedence: runtime override -> plik auth -> env
 
