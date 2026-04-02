@@ -243,3 +243,27 @@ async def test_abort_stops_turn_with_abort_message(tmp_path: Path):
     turn_end = [e for e in events if e.get("type") == "turn_end"]
     assert turn_end
     assert turn_end[-1]["aborted"] is True
+
+
+@pytest.mark.asyncio
+async def test_tool_result_message_payload_is_capped_for_context(tmp_path: Path):
+    big_text = "x" * 20000
+    (tmp_path / "big.txt").write_text(big_text, encoding="utf-8")
+
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 2, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["read"])
+    agent.providers = {"openai": _FakeProvider(['{"tool":"read","args":{"path":"big.txt"}}', "done"])}
+
+    await agent.prompt("read big")
+    tool_msg = next(m for m in agent.messages if m.get("role") == "toolResult")
+    payload = json.loads(tool_msg["content"])
+    result = payload["result"]
+    assert len(result) <= 13000
+    assert "truncated to 12000 chars" in result

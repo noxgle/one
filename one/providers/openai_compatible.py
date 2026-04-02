@@ -52,7 +52,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.post(f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers)
-            resp.raise_for_status()
+            if resp.is_error:
+                body = ""
+                try:
+                    parsed = resp.json()
+                    body = str(parsed.get("error") or parsed)
+                except Exception:
+                    body = resp.text[:1000]
+                raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
             data = resp.json()
 
         choice = (data.get("choices") or [{}])[0]

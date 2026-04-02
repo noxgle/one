@@ -24,6 +24,8 @@ class ModelCycleResult:
 
 
 class AgentSession:
+    _TOOL_RESULT_MAX_CHARS = 12_000
+
     def __init__(
         self,
         session_manager: SessionManager,
@@ -102,6 +104,32 @@ class AgentSession:
                 return {"tool": tool, "args": args}
         return None
 
+    def _build_tool_result_message_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        msg_payload: dict[str, Any] = {
+            "ok": bool(payload.get("ok", False)),
+            "tool": payload.get("tool"),
+            "args": payload.get("args", {}),
+        }
+        if msg_payload["ok"]:
+            text = str(payload.get("result") or payload.get("outputText") or "")
+            if len(text) > self._TOOL_RESULT_MAX_CHARS:
+                text = (
+                    text[: self._TOOL_RESULT_MAX_CHARS]
+                    + f"\n\n[Tool output truncated to {self._TOOL_RESULT_MAX_CHARS} chars for model context.]"
+                )
+            msg_payload["result"] = text
+            if payload.get("truncated") is True:
+                msg_payload["truncated"] = True
+            if payload.get("exitCode") is not None:
+                msg_payload["exitCode"] = payload.get("exitCode")
+            if payload.get("fullOutputPath"):
+                msg_payload["fullOutputPath"] = payload.get("fullOutputPath")
+        else:
+            msg_payload["error"] = payload.get("error")
+            if payload.get("errorType"):
+                msg_payload["errorType"] = payload.get("errorType")
+        return msg_payload
+
     async def _execute_tool_by_name(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
         if tool_name not in self._active_tools:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
@@ -171,9 +199,10 @@ class AgentSession:
             }
             self._emit({"type": "tool_call_error", "tool": tool_name, "args": args, "error": error_text})
 
+        message_payload = self._build_tool_result_message_payload(payload)
         msg = {
             "role": "toolResult",
-            "content": json.dumps(payload, ensure_ascii=False),
+            "content": json.dumps(message_payload, ensure_ascii=False),
             "timestamp": int(time.time() * 1000),
         }
         self.messages.append(msg)
