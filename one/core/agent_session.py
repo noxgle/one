@@ -51,7 +51,7 @@ class AgentSession:
         self._pending_bash_messages: list[dict[str, Any]] = []
         self._steering: list[str] = []
         self._follow_up: list[str] = []
-        self._active_tools = tools or ["read", "bash", "edit", "write"]
+        self._active_tools = tools or list(all_tools.keys())
 
         if not self.messages:
             if self.model:
@@ -161,6 +161,7 @@ class AgentSession:
                 "args": args,
                 "error": error_text,
             }
+            self._emit({"type": "tool_call_error", "tool": tool_name, "args": args, "error": error_text})
 
         msg = {
             "role": "toolResult",
@@ -169,7 +170,7 @@ class AgentSession:
         }
         self.messages.append(msg)
         self.session_manager.append_message(msg)
-        self._emit({"type": "tool_call_end", "tool": tool_name, "result": payload})
+        self._emit({"type": "tool_call_end", "tool": tool_name, "ok": payload.get("ok", False), "result": payload})
         return payload
 
     def subscribe(self, listener: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
@@ -357,7 +358,7 @@ class AgentSession:
         attempt = 0
         while True:
             try:
-                self._emit({"type": "turn_start"})
+                self._emit({"type": "turn_start", "attempt": attempt + 1})
                 tool_results: list[dict[str, Any]] = []
                 max_tool_steps = max(1, self.settings_manager.get_tool_max_steps())
                 tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
@@ -390,6 +391,16 @@ class AgentSession:
                         "stopReason": "tool_step_limit",
                         "timestamp": int(time.time() * 1000),
                     }
+                else:
+                    assistant_text = self._assistant_text(final_assistant).strip()
+                    if not assistant_text:
+                        final_assistant["content"] = [
+                            {
+                                "type": "text",
+                                "text": "Model zwrócił pustą odpowiedź. Spróbuj ponownie lub zmień model.",
+                            }
+                        ]
+                        final_assistant["stopReason"] = final_assistant.get("stopReason") or "empty_response"
 
                 self.messages.append(final_assistant)
                 self.session_manager.append_message(final_assistant)
@@ -403,14 +414,19 @@ class AgentSession:
                             }
                         )
                 self._emit({"type": "message_end", "message": final_assistant})
-                self._emit({"type": "turn_end", "message": final_assistant, "toolResults": tool_results})
+                self._emit({"type": "turn_end", "ok": True, "attempt": attempt + 1, "message": final_assistant, "toolResults": tool_results})
                 self._emit({"type": "agent_end", "messages": [user_msg, final_assistant]})
                 break
             except Exception as e:
-                if not retry_cfg.get("enabled", True) or attempt >= int(retry_cfg.get("maxRetries", 3)):
+                retries_enabled = bool(retry_cfg.get("enabled", True))
+                max_retries = int(retry_cfg.get("maxRetries", 3))
+                error_text = str(e).strip() or e.__class__.__name__
+                will_retry = retries_enabled and attempt < max_retries
+                self._emit({"type": "turn_end", "ok": False, "attempt": attempt + 1, "error": error_text, "willRetry": will_retry})
+                if not will_retry:
                     error_msg = {
                         "role": "assistant",
-                        "content": [{"type": "text", "text": str(e)}],
+                        "content": [{"type": "text", "text": error_text}],
                         "provider": self.model.provider if self.model else None,
                         "model": self.model.id if self.model else None,
                         "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
@@ -419,6 +435,13 @@ class AgentSession:
                     }
                     self.messages.append(error_msg)
                     self.session_manager.append_message(error_msg)
+                    self._emit({"type": "message_start", "message": error_msg})
+                    self._emit(
+                        {
+                            "type": "message_update",
+                            "assistantMessageEvent": {"type": "text_delta", "delta": error_text},
+                        }
+                    )
                     self._emit({"type": "message_end", "message": error_msg})
                     self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
                     break
@@ -429,13 +452,13 @@ class AgentSession:
                     {
                         "type": "auto_retry_start",
                         "attempt": attempt,
-                        "maxAttempts": int(retry_cfg.get("maxRetries", 3)),
+                        "maxAttempts": max_retries,
                         "delayMs": delay_ms,
-                        "errorMessage": str(e),
+                        "errorMessage": error_text,
                     }
                 )
                 await asyncio.sleep(delay_ms / 1000)
-                self._emit({"type": "auto_retry_end", "success": attempt <= int(retry_cfg.get("maxRetries", 3)), "attempt": attempt})
+                self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": True})
                 self._retrying = False
 
         self._is_streaming = False
@@ -589,7 +612,7 @@ class AgentSession:
         user_messages = sum(1 for m in self.messages if m.get("role") == "user")
         assistant_messages = sum(1 for m in self.messages if m.get("role") == "assistant")
         tool_results = sum(1 for m in self.messages if m.get("role") == "toolResult")
-        tool_calls = 0
+        tool_calls = tool_results
         input_tokens = 0
         output_tokens = 0
         cache_read = 0

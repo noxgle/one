@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import tempfile
-from pathlib import Path
 
 from .common import truncate_tail
 
@@ -28,7 +26,8 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
     except asyncio.TimeoutError:
         proc.kill()
         try:
-            await asyncio.wait_for(proc.wait(), timeout=1)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=1)
+            output += out or b""
         except asyncio.TimeoutError:
             # Avoid hanging forever on buggy shell/process states.
             pass

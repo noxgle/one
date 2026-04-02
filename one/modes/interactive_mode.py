@@ -38,6 +38,11 @@ class InteractiveMode:
                     print(text, end="", flush=True)
                 if text:
                     print("", flush=True)
+                elif not assistant_streamed:
+                    print("[Brak treści odpowiedzi modelu]", flush=True)
+            if event.get("type") == "turn_end" and event.get("ok") is False:
+                err = (event.get("error") or "Unknown error").strip()
+                print(f"[Błąd] {err}", flush=True)
 
         session.subscribe(on_event)
         print("Interactive mode. Type /exit to quit. Use /help for commands.")

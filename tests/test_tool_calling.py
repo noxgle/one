@@ -38,6 +38,18 @@ class _FakeProvider:
         return ChatResult(text=self.responses[idx], raw={}, usage={}, stop_reason="stop")
 
 
+class _FailingProvider:
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        raise RuntimeError("provider down")
+
+
 @pytest.mark.asyncio
 async def test_tool_calling_multistep_cycle(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
@@ -119,3 +131,28 @@ async def test_tool_timeout_surfaces_error(tmp_path: Path):
     tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
     assert tool_results
     assert "timeout" in tool_results[0]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_turn_end_emitted_on_non_retryable_error(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"retry": {"enabled": False}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium")
+    agent.providers = {"openai": _FailingProvider()}
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("fail now")
+
+    turn_end = [e for e in events if e.get("type") == "turn_end"]
+    assert turn_end
+    assert turn_end[-1]["ok"] is False
+    assert "provider down" in turn_end[-1]["error"]
+
+    assert any(e.get("type") == "agent_end" for e in events)
