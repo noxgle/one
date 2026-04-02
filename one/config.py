@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+APP_NAME = "one"
+CONFIG_DIR_NAME = ".one"
+VERSION = "0.1.0"
+ENV_AGENT_DIR = f"{APP_NAME.upper()}_CODING_AGENT_DIR"
+
+
+def _expand(path: str) -> str:
+    return str(Path(path).expanduser())
+
+
+def get_agent_dir() -> str:
+    env = os.getenv(ENV_AGENT_DIR)
+    if env:
+        return _expand(env)
+    return str(Path.home() / CONFIG_DIR_NAME / "agent")
+
+
+def get_models_path() -> str:
+    return str(Path(get_agent_dir()) / "models.json")
+
+
+def get_auth_path() -> str:
+    return str(Path(get_agent_dir()) / "auth.json")
+
+
+def get_settings_path() -> str:
+    return str(Path(get_agent_dir()) / "settings.json")
+
+
+def get_sessions_dir() -> str:
+    return str(Path(get_agent_dir()) / "sessions")
+
+
+def get_package_json(path: str | None = None) -> dict:
+    p = Path(path or "package.json")
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return {}
