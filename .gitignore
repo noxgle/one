@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+.one/
+.codex
+one.egg-info/
+
+*.log
+*.tmp
