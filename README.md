@@ -11,6 +11,19 @@ pip install -e .[dev]
 one --help
 ```
 
+## Global install (run `one` from any directory)
+
+```bash
+chmod +x scripts/install.sh
+./scripts/install.sh
+```
+
+Installer creates:
+- virtualenv in `~/.one/venv`
+- launcher in `~/.local/bin/one`
+
+After that, `one` works from any directory (if `~/.local/bin` is on your `PATH`).
+
 ## Local llama.cpp provider
 
 `one` supports local `llama.cpp` server mode via OpenAI-compatible API.
