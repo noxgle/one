@@ -374,6 +374,30 @@ async def test_tool_call_parses_string_args_for_bash(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tool_call_parses_llama_cpp_style_write_payload(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["write"])
+    malformed = (
+        '{"tool":"write","args":{"file":"out.py","content":"def x():\\n'
+        '    return 1\\n"}}<tool_call|><|tool_response>'
+    ).replace("\\n", "\n")
+    agent.providers = {"openai": _FakeProvider([malformed, "DONE"])}
+
+    await agent.prompt("zapisz plik")
+    assert agent.get_last_assistant_text() == "DONE"
+    out_file = tmp_path / "out.py"
+    assert out_file.exists()
+    assert "def x():" in out_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_deferred_action_response_gets_tool_nudge(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
 

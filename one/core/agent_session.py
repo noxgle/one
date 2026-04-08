@@ -102,8 +102,53 @@ class AgentSession:
                 .replace("“", '"')
                 .replace("”", '"')
                 .replace("’", "'")
+                .replace("<tool_call|>", "")
+                .replace("<|tool_call|>", "")
+                .replace("<tool_response>", "")
+                .replace("<|tool_response>", "")
                 .strip()
             )
+
+        def json_loads_relaxed(raw: str) -> Any:
+            try:
+                return json.loads(raw)
+            except Exception:
+                pass
+
+            # Repair invalid control chars (raw newline/tab) inside quoted JSON strings.
+            repaired: list[str] = []
+            in_string = False
+            escaped = False
+            for ch in raw:
+                if in_string:
+                    if escaped:
+                        repaired.append(ch)
+                        escaped = False
+                        continue
+                    if ch == "\\":
+                        repaired.append(ch)
+                        escaped = True
+                        continue
+                    if ch == '"':
+                        repaired.append(ch)
+                        in_string = False
+                        continue
+                    if ch == "\n":
+                        repaired.append("\\n")
+                        continue
+                    if ch == "\r":
+                        repaired.append("\\r")
+                        continue
+                    if ch == "\t":
+                        repaired.append("\\t")
+                        continue
+                    repaired.append(ch)
+                    continue
+
+                repaired.append(ch)
+                if ch == '"':
+                    in_string = True
+            return json.loads("".join(repaired))
 
         def balanced_json_objects(s: str) -> list[str]:
             objs: list[str] = []
@@ -160,7 +205,7 @@ class AgentSession:
 
         for c in unique_candidates:
             try:
-                obj = json.loads(c)
+                obj = json_loads_relaxed(c)
             except Exception:
                 continue
             if not isinstance(obj, dict):
@@ -252,12 +297,16 @@ class AgentSession:
 
         cwd = self.session_manager.cwd
         fn = tool.fn
+        path_arg = args.get("path") or args.get("file")
         if tool_name == "read":
-            result = fn(cwd, args.get("path", ""), args.get("offset"), args.get("limit"))
+            result = fn(cwd, path_arg or "", args.get("offset"), args.get("limit"))
         elif tool_name == "write":
-            result = fn(cwd, args.get("path", ""), args.get("content", ""))
+            content_arg = args.get("content")
+            if content_arg is None:
+                content_arg = args.get("text", "")
+            result = fn(cwd, path_arg or "", content_arg)
         elif tool_name == "edit":
-            result = fn(cwd, args.get("path", ""), args.get("edits", []))
+            result = fn(cwd, path_arg or "", args.get("edits", []))
         elif tool_name == "grep":
             result = fn(cwd, args.get("pattern", ""), args.get("path", "."))
         elif tool_name == "find":
