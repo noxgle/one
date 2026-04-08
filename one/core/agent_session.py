@@ -79,6 +79,19 @@ class AgentSession:
             return getter()
 
     def _try_parse_tool_call(self, text: str) -> dict[str, Any] | None:
+        def normalize_tool_args(tool: str, raw_args: Any) -> dict[str, Any] | None:
+            if isinstance(raw_args, dict):
+                return raw_args
+            if isinstance(raw_args, str):
+                t = tool.strip().lower()
+                if t == "bash":
+                    return {"command": raw_args}
+                if t in {"read", "write", "edit", "ls"}:
+                    return {"path": raw_args}
+                if t in {"grep", "find"}:
+                    return {"pattern": raw_args}
+            return None
+
         def normalize_jsonish(s: str) -> str:
             # Common LLM output quirks: smart quotes and BOM.
             return (
@@ -150,9 +163,15 @@ class AgentSession:
             if not isinstance(obj, dict):
                 continue
             tool = obj.get("tool") or obj.get("name")
-            args = obj.get("args") or obj.get("input") or {}
-            if isinstance(tool, str) and isinstance(args, dict):
-                return {"tool": tool, "args": args}
+            args = obj.get("args")
+            if args is None:
+                args = obj.get("input")
+            if args is None:
+                args = {}
+            if isinstance(tool, str):
+                normalized_args = normalize_tool_args(tool, args)
+                if normalized_args is not None:
+                    return {"tool": tool, "args": normalized_args}
         return None
 
     def _should_tool_nudge(self, assistant_text: str, step: int, tool_results: list[dict[str, Any]]) -> bool:

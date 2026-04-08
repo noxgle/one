@@ -345,6 +345,36 @@ async def test_tool_call_parsed_from_mixed_text_and_bom(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tool_call_parses_string_args_for_bash(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["bash"])
+    agent.providers = {
+        "openai": _FakeProvider(
+            [
+                '{"tool":"bash","args":"pwd"}',
+                "DONE",
+            ]
+        )
+    }
+
+    await agent.prompt("pokaż pliki")
+    assert agent.get_last_assistant_text() == "DONE"
+    tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
+    assert tool_results
+    payload = json.loads(tool_results[0]["content"])
+    assert payload["ok"] is True
+    assert payload["tool"] == "bash"
+    assert payload["args"]["command"] == "pwd"
+
+
+@pytest.mark.asyncio
 async def test_deferred_action_response_gets_tool_nudge(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
 
