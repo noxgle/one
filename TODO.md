@@ -23,10 +23,10 @@
   - [x] wsparcie `openai`, `anthropic`, `gemini`, `openrouter`, `ollama-cloud`
   - [x] `/login` flow practical: walidacja provider/model + ustawianie default provider/model
   - [ ] pełny `/login` parity (subskrypcja/OAuth flow jak w `pi`)
-- [ ] Uzupełnić CLI parity (komendy pakietowe/config)
+- [x] Uzupełnić CLI parity (komendy pakietowe/config) (P0 practical)
   - [x] komendy `install/remove/update/list/config`
   - [x] idempotencja i walidacja usage + spójne exit codes dla error path
-  - [ ] domknięcie pełnej semantyki parity z TS
+  - [x] semantyka flag `--mode/--print/--session/--fork` + usage errors/exit codes (P0 practical)
 
 ## P1 — Integracje i protokoły
 
@@ -66,7 +66,7 @@
 
 ### 4. CLI parity
 - [x] Dodane i utwardzone komendy: `install/remove/update/list/config`
-- [ ] Ujednolicić semantykę flag i zachowanie trybów
+- [x] Ujednolicić semantykę flag i zachowanie trybów (P0 practical)
 
 ### 5. RPC parity
 - [ ] Dodać brakujące komendy sesji/modelu/compaction/bash

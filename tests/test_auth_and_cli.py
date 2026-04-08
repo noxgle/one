@@ -126,3 +126,51 @@ def test_cli_flag_validation_errors(tmp_path: Path):
     bad_thinking = run_cmd(["--thinking", "bad"])
     assert bad_thinking.returncode == 2
     assert "invalid --thinking value" in bad_thinking.stdout.lower()
+
+
+def test_cli_flag_semantics_mode_print_session_fork(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    def run_cmd(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "one.cli.main", *args],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+    cases = [
+        (["--mode", "rpc", "--print"], "--print cannot be combined with --mode rpc"),
+        (["--no-session", "--session", "x"], "--no-session cannot be combined"),
+        (["--session", "x", "--continue"], "--session cannot be combined with --continue"),
+        (["--session", "x", "--resume"], "--session cannot be combined with --resume"),
+        (["--continue", "--resume"], "--continue cannot be combined with --resume"),
+        (["--fork", "x", "--session", "y"], "--fork cannot be combined"),
+    ]
+    for args, expected in cases:
+        res = run_cmd(args)
+        assert res.returncode == 2
+        assert expected in res.stdout
+
+
+def test_cli_unknown_tools_is_usage_error(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    res = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "--tools", "read,not-a-tool", "--print", "hello"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert res.returncode == 2
+    assert "Unknown tools: not-a-tool" in res.stdout

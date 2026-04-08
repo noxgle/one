@@ -170,9 +170,6 @@ async def _run(argv: list[str]) -> int:
         print(f"Exported to: {path}")
         return 0
 
-    if parsed.fork and (parsed.session or parsed.continue_session or parsed.resume or parsed.no_session):
-        raise SystemExit("Error: --fork cannot be combined with --session/--continue/--resume/--no-session")
-
     loader = DefaultResourceLoader(
         cwd=cwd,
         agent_dir=agent_dir,
@@ -250,7 +247,8 @@ async def _run(argv: list[str]) -> int:
 
     bad_tools = [t for t in tool_names if t not in all_tools]
     if bad_tools:
-        raise SystemExit(f"Unknown tools: {', '.join(bad_tools)}")
+        print(f"Unknown tools: {', '.join(bad_tools)}")
+        return 2
 
     scoped_models = []
     if parsed.models:
@@ -288,14 +286,7 @@ async def _run(argv: list[str]) -> int:
     )
     host = AgentSessionRuntimeHost(bootstrap, runtime)
 
-    if parsed.mode == "rpc":
-        await run_rpc_mode(host)
-        return 0
-
     if parsed.print_mode or parsed.mode in {"text", "json"}:
-        if parsed.mode == "rpc":
-            print("--print cannot be combined with --mode rpc")
-            return 2
         code = await run_print_mode(
             host,
             {
@@ -305,6 +296,10 @@ async def _run(argv: list[str]) -> int:
             },
         )
         return code
+
+    if parsed.mode == "rpc":
+        await run_rpc_mode(host)
+        return 0
 
     interactive = InteractiveMode(host, {"verbose": parsed.verbose})
     await interactive.run()

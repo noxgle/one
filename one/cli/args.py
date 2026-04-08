@@ -111,6 +111,22 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     if mode and mode not in VALID_MODES:
         errors.append(f"Invalid --mode value: {mode}. Allowed: {', '.join(sorted(VALID_MODES))}")
 
+    if ns.print_mode and mode == "rpc":
+        errors.append("--print cannot be combined with --mode rpc")
+
+    if ns.no_session and (ns.session or ns.continue_session or ns.resume or ns.fork):
+        errors.append("--no-session cannot be combined with --session/--continue/--resume/--fork")
+
+    if ns.session and ns.continue_session:
+        errors.append("--session cannot be combined with --continue")
+    if ns.session and ns.resume:
+        errors.append("--session cannot be combined with --resume")
+    if ns.continue_session and ns.resume:
+        errors.append("--continue cannot be combined with --resume")
+
+    if ns.fork and (ns.session or ns.continue_session or ns.resume):
+        errors.append("--fork cannot be combined with --session/--continue/--resume")
+
     return ParsedArgs(
         command=command,
         command_args=command_args,
