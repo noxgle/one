@@ -34,10 +34,11 @@
 - [ ] Uzupełnić RPC parity (komendy, eventy, streaming, extension UI)
 - [ ] Zaimplementować pełny runtime extensions/skills/packages
 - [ ] Dopracować session/compaction parity (branching, migracje, eksport)
-- [x] Zaimplementować pełne TUI (`rich`) z obsługą zmiennych theme (v1 practical)
-  - [x] Layout v1: header/status/body/input/footer
-  - [x] Loader theme z JSON (`--theme`) + style mapowanie
+- [x] Zaimplementować pełne TUI (`textual`) z obsługą theme i streamingu (v2 practical)
+  - [x] Layout v2: main stream + sidebar + input
+  - [x] Built-in theme switch (`default`, `light`, `hacker`, `solarized`, `fallout`)
   - [x] Render eventów runtime (`turn_*`, `tool_*`, `retry_*`) w widoku TUI
+  - [x] Live text streaming w TUI (delta events)
   - [ ] Podpiąć extension widgets/overlays do warstwy TUI
   - [ ] Snapshot/regression testy renderingu TUI
 
@@ -56,17 +57,20 @@
 - [x] Footer/status token usage + retry state (praktyczna parity)
 - [x] Komendy i skróty klawiszowe jak w `pi` (P0 practical: aliasy, `Ctrl+C/Ctrl+D/Ctrl+L/Ctrl+R`, queue/model/thinking control)
 - [x] UI hooks dla extension widgets/overlays (P0 practical: eventy + interactive `/extui` + RPC commands)
+- [x] TUI v2 (Textual): scrollable stream, theme switch, prosty rendering czatu, tool blocks
 
 ### 2. Tool-calling
 - [x] Ujednolicony kontrakt wywołań narzędzi (baseline)
 - [x] Obsługa błędów/retry/tool-result event parity (praktyczna)
 - [x] Snapshoty regresyjne dla `turn_*`, `tool_*`, `retry_*` + edge-case abort/retry/queue
+- [x] Live streaming deltas z providerów do runtime/event bus
 - [ ] Dodać pełny flow 1:1 bez uproszczeń względem `pi` (poza zakresem P0 practical)
 
 ### 3. Providers/Auth
 - [x] Rozszerzona lista providerów (w tym `ollama-cloud`)
 - [x] Adapter `ollama-cloud` bez pól nieobsługiwanych (`reasoning_effort`, wymuszone `temperature`)
 - [x] Lepsza diagnostyka błędów provider API (status + body)
+- [x] Streaming response support: OpenAI-compatible, Anthropic, Gemini
 - [x] Dodać `/login` practical flow (provider/key/model + defaults)
 - [ ] Dodać pełny `/login` parity subskrypcji/OAuth
 - [x] Utrzymany precedence: runtime override -> plik auth -> env

@@ -11,7 +11,7 @@ pip install -e .[dev]
 one --help
 ```
 
-Run TUI mode:
+Run TUI mode (Textual v2):
 
 ```bash
 one --mode tui
@@ -22,12 +22,19 @@ Built-in TUI themes:
 - `light`
 - `hacker`
 - `solarized`
+- `fallout`
 
 Switch theme in TUI:
 
 ```text
 /theme solarized
 ```
+
+TUI highlights:
+- live response streaming (provider-dependent; OpenAI-compatible/Anthropic/Gemini supported)
+- scrollable main stream with scrollbar
+- simplified main stream view (`> ...` for user messages)
+- tool lifecycle visible in stream (`tool start`, `tool ok/err`)
 
 ## Global install (run `one` from any directory)
 

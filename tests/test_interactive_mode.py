@@ -282,7 +282,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
 
     assert "Use /help for commands" in out
     assert "Shortcuts: Ctrl+C abort/exit" in out
-    assert "Model set to openai/gpt-4o" in out
+    assert "Model set to openai/gpt-4o (saved as default)" in out
     assert "Thinking level set to low" in out
     assert "Theme set to solarized" in out
     assert "Queued steering message." in out
@@ -321,9 +321,11 @@ async def test_interactive_model_command_supports_dynamic_known_provider(monkeyp
     await mode.run()
     out = capsys.readouterr().out
 
-    assert "Model set to openrouter/google/gemma-4-31b-it:free (dynamic)" in out
+    assert "Model set to openrouter/google/gemma-4-31b-it:free (dynamic, saved as default)" in out
     assert session.model.provider == "openrouter"
     assert session.model.id == "google/gemma-4-31b-it:free"
+    assert session.settings_manager.default_provider == "openrouter"
+    assert session.settings_manager.default_model == "google/gemma-4-31b-it:free"
 
 
 @pytest.mark.asyncio

@@ -276,16 +276,21 @@ class InteractiveMode:
                     print(f"Model not found: {provider}/{model_id}")
                     continue
                 await session.set_model(model)
+                # Persist model choice as new default for next sessions.
+                session.settings_manager.set_default_provider(model.provider)
+                session.settings_manager.set_default_model(model.id)
                 if session.model_registry.find(provider, model_id) is None:
-                    print(f"Model set to {provider}/{model_id} (dynamic)")
+                    print(f"Model set to {provider}/{model_id} (dynamic, saved as default)")
                 else:
-                    print(f"Model set to {provider}/{model_id}")
+                    print(f"Model set to {provider}/{model_id} (saved as default)")
                 continue
             if line.strip() == "/model-cycle":
                 result = await session.cycle_model()
                 if not result:
                     print("No available models to cycle.")
                 else:
+                    session.settings_manager.set_default_provider(result.model.provider)
+                    session.settings_manager.set_default_model(result.model.id)
                     print(f"Model cycled to {result.model.provider}/{result.model.id}")
                 continue
             if line.startswith("/thinking "):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass
@@ -22,5 +22,6 @@ class ProviderAdapter:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> ChatResult:
         raise NotImplementedError

@@ -603,7 +603,12 @@ class AgentSession:
         await self.set_model(nxt)
         return ModelCycleResult(model=nxt, thinkingLevel=self.thinking_level, isScoped=False)
 
-    async def _invoke_provider(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _invoke_provider(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        allow_live_stream: bool = True,
+    ) -> dict[str, Any]:
         if not self.model:
             raise RuntimeError("No model selected")
         provider = self.providers.get(self.model.provider)
@@ -616,13 +621,68 @@ class AgentSession:
         if not auth.get("ok"):
             raise RuntimeError(auth.get("error", "Authentication failed"))
 
-        res = await provider.chat(
-            api_key=auth["apiKey"],
-            model=self.model.id,
-            messages=messages,
-            thinking_level=self.thinking_level,
-            headers=auth.get("headers"),
-        )
+        # Stream deltas live when possible, but suppress tool-call shaped payloads.
+        streamed_started = False
+        streamed_buffer = ""
+        streamed_suppressed = False
+        streamed_msg = {
+            "role": "assistant",
+            "content": [],
+            "provider": self.model.provider,
+            "model": self.model.id,
+            "timestamp": int(time.time() * 1000),
+        }
+
+        def _on_delta(delta: str) -> None:
+            nonlocal streamed_started, streamed_buffer, streamed_suppressed
+            if not delta:
+                return
+            streamed_buffer += delta
+            if streamed_suppressed:
+                return
+            if not streamed_started:
+                sample = streamed_buffer.lstrip()
+                # Delay rendering until we are reasonably sure it's user-facing prose, not tool JSON.
+                if len(sample) < 48:
+                    return
+                if sample.startswith("{") or sample.startswith("```") or sample.startswith("TOOL_CALL:"):
+                    toolish = ('"tool"' in sample) or ('"args"' in sample) or ('"name"' in sample) or ("call:" in sample)
+                    if toolish:
+                        streamed_suppressed = True
+                        return
+                    if len(sample) < 220:
+                        return
+                streamed_started = True
+                self._emit({"type": "message_start", "message": streamed_msg})
+                if streamed_buffer:
+                    self._emit(
+                        {
+                            "type": "message_update",
+                            "assistantMessageEvent": {"type": "text_delta", "delta": streamed_buffer},
+                        }
+                    )
+                    streamed_buffer = ""
+                return
+
+            self._emit(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": delta},
+                }
+            )
+
+        chat_kwargs = {
+            "api_key": auth["apiKey"],
+            "model": self.model.id,
+            "messages": messages,
+            "thinking_level": self.thinking_level,
+            "headers": auth.get("headers"),
+        }
+        sig = inspect.signature(provider.chat)
+        if allow_live_stream and "on_delta" in sig.parameters:
+            chat_kwargs["on_delta"] = _on_delta
+
+        res = await provider.chat(**chat_kwargs)
 
         return {
             "role": "assistant",
@@ -638,6 +698,8 @@ class AgentSession:
             },
             "stopReason": res.stop_reason,
             "timestamp": int(time.time() * 1000),
+            "_streamedStart": streamed_started,
+            "_streamedMessage": streamed_msg,
         }
 
     def _flatten_messages_for_provider(self) -> list[dict[str, Any]]:
@@ -698,7 +760,7 @@ class AgentSession:
                     if self._abort_requested:
                         final_assistant = self._abort_assistant_message()
                         break
-                    assistant = await self._invoke_provider(self._flatten_messages_for_provider())
+                    assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
                     if self._abort_requested:
                         final_assistant = self._abort_assistant_message()
                         break
@@ -717,7 +779,8 @@ class AgentSession:
                                         "If tools are not required, respond with FINAL_ANSWER:<text>."
                                     ),
                                 }
-                            ]
+                            ],
+                            allow_live_stream=False,
                         )
                         nudged_text = self._assistant_text(nudged)
                         nudged_tool_call = self._try_parse_tool_call(nudged_text)
@@ -786,16 +849,21 @@ class AgentSession:
 
                 self.messages.append(final_assistant)
                 self.session_manager.append_message(final_assistant)
-                self._emit({"type": "message_start", "message": final_assistant})
-                for chunk in final_assistant.get("content", []):
-                    if chunk.get("type") == "text":
-                        self._emit(
-                            {
-                                "type": "message_update",
-                                "assistantMessageEvent": {"type": "text_delta", "delta": chunk.get("text", "")},
-                            }
-                        )
-                self._emit({"type": "message_end", "message": final_assistant})
+                streamed_started = bool(final_assistant.pop("_streamedStart", False))
+                streamed_msg = final_assistant.pop("_streamedMessage", None)
+                if streamed_started and isinstance(streamed_msg, dict):
+                    self._emit({"type": "message_end", "message": final_assistant})
+                else:
+                    self._emit({"type": "message_start", "message": final_assistant})
+                    for chunk in final_assistant.get("content", []):
+                        if chunk.get("type") == "text":
+                            self._emit(
+                                {
+                                    "type": "message_update",
+                                    "assistantMessageEvent": {"type": "text_delta", "delta": chunk.get("text", "")},
+                                }
+                            )
+                    self._emit({"type": "message_end", "message": final_assistant})
                 self._emit(
                     {
                         "type": "turn_end",

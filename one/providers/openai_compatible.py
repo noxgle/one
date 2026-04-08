@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, Callable
 
 import httpx
 
@@ -60,25 +61,70 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> ChatResult:
         payload = self._build_payload(model, messages, thinking_level)
+        use_stream = callable(on_delta)
+        if use_stream:
+            payload["stream"] = True
         req_headers = self._build_headers(api_key, headers)
+        if not use_stream:
+            async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+                resp = await client.post(f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers)
+                if resp.is_error:
+                    body = ""
+                    try:
+                        parsed = resp.json()
+                        body = str(parsed.get("error") or parsed)
+                    except Exception:
+                        body = resp.text[:1000]
+                    raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
+                data = resp.json()
 
-        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            resp = await client.post(f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers)
-            if resp.is_error:
-                body = ""
-                try:
-                    parsed = resp.json()
-                    body = str(parsed.get("error") or parsed)
-                except Exception:
-                    body = resp.text[:1000]
-                raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
-            data = resp.json()
+            choice = (data.get("choices") or [{}])[0]
+            msg = choice.get("message", {})
+            text = msg.get("content") or ""
+            usage = data.get("usage") or {}
+            stop = choice.get("finish_reason")
+            return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop)
 
-        choice = (data.get("choices") or [{}])[0]
-        msg = choice.get("message", {})
-        text = msg.get("content") or ""
-        usage = data.get("usage") or {}
-        stop = choice.get("finish_reason")
-        return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop)
+        text_parts: list[str] = []
+        usage: dict[str, Any] = {}
+        stop_reason: str | None = None
+        raw_last: dict[str, Any] = {}
+
+        async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
+            async with client.stream("POST", f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers) as resp:
+                if resp.is_error:
+                    body = (await resp.aread()).decode("utf-8", errors="ignore")[:1000]
+                    raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
+
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except Exception:
+                        continue
+                    raw_last = chunk
+                    if isinstance(chunk.get("usage"), dict):
+                        usage = chunk["usage"]
+                    choice = (chunk.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    piece = delta.get("content")
+                    if piece:
+                        text_parts.append(str(piece))
+                        try:
+                            on_delta(str(piece))
+                        except Exception:
+                            pass
+                    if choice.get("finish_reason"):
+                        stop_reason = choice.get("finish_reason")
+
+        full_text = "".join(text_parts)
+        return ChatResult(text=full_text, raw=raw_last, usage=usage, stop_reason=stop_reason)
