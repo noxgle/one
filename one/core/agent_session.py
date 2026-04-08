@@ -274,6 +274,19 @@ class AgentSession:
         def parse_raw_function_call(raw_text: str) -> dict[str, Any] | None:
             s = normalize_jsonish(raw_text)
 
+            # llama.cpp tokenized raw-call format, e.g.:
+            # <|tool_call>call:bash{args:<|"|>echo ok<|"|>}<tool_call|>
+            tokenized = re.search(
+                r"call:([a-zA-Z0-9_.-]+)\s*\{\s*args\s*:\s*<\|\"?\|>([\s\S]*?)<\|\"?\|>\s*\}",
+                s,
+            )
+            if tokenized:
+                tool_name = tokenized.group(1).strip()
+                raw_args = tokenized.group(2).strip()
+                normalized_args = normalize_tool_args(tool_name, raw_args)
+                if normalized_args is not None:
+                    return {"tool": tool_name, "args": normalized_args}
+
             # Try JSON-like objects first (often with name/arguments fields).
             for c in [s, *balanced_json_objects(s)]:
                 try:

@@ -479,6 +479,30 @@ async def test_tool_call_parses_llama_cpp_write_payload_with_missing_outer_brace
 
 
 @pytest.mark.asyncio
+async def test_tool_call_parses_llama_cpp_tokenized_raw_call_format(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = ModelInfo(
+        provider="openai",
+        id="gpt-4.1",
+        tool_parser=[{"type": "raw-function-call"}, {"type": "json"}],
+    )
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["bash"])
+    raw = '<|tool_call>call:bash{args:<|"|>echo TOK_OK > /tmp/one_tok.txt<|"|>}<tool_call|><|tool_response>'
+    agent.providers = {"openai": _FakeProvider([raw, "DONE"])}
+
+    await agent.prompt("wykonaj")
+    assert agent.get_last_assistant_text() == "DONE"
+    out_file = Path("/tmp/one_tok.txt")
+    assert out_file.exists()
+    assert out_file.read_text(encoding="utf-8").strip() == "TOK_OK"
+
+
+@pytest.mark.asyncio
 async def test_deferred_action_response_gets_tool_nudge(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
 
