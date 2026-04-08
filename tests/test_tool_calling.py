@@ -453,6 +453,32 @@ async def test_tool_call_respects_raw_function_call_parser_order(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_tool_call_parses_llama_cpp_write_payload_with_missing_outer_brace(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["write"])
+    malformed = (
+        '{"tool":"write","args":{"file":"p1.py","content":"def is_palindrome(s):\\n'
+        '    processed_s = \\"\\".join(ch for ch in s if ch.isalnum()).lower()\\n'
+        '    return processed_s == processed_s[::-1]\\n"}'
+    )
+    agent.providers = {"openai": _FakeProvider([malformed, "DONE"])}
+
+    await agent.prompt("zapisz p1")
+    assert agent.get_last_assistant_text() == "DONE"
+    out_file = tmp_path / "p1.py"
+    assert out_file.exists()
+    written = out_file.read_text(encoding="utf-8")
+    assert "def is_palindrome(s):" in written
+
+
+@pytest.mark.asyncio
 async def test_deferred_action_response_gets_tool_nudge(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
 

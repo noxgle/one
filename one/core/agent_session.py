@@ -165,7 +165,10 @@ class AgentSession:
                 return None
             content_start = content_key.end()
 
+            # Prefer full closure (`"}}`) but tolerate malformed payloads with one missing brace.
             end_match = re.search(r'"\s*}\s*}\s*$', s)
+            if not end_match:
+                end_match = re.search(r'"\s*}\s*$', s)
             if not end_match or end_match.start() < content_start:
                 return None
             content_raw = s[content_start : end_match.start()]
