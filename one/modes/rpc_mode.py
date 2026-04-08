@@ -49,6 +49,9 @@ async def run_rpc_mode(runtime_host: Any) -> None:
         cid = cmd.get("id")
         try:
             if ctype == "prompt":
+                if session.is_streaming and not cmd.get("streamingBehavior"):
+                    output(error(cid, ctype, "streamingBehavior is required while streaming"))
+                    continue
                 asyncio.create_task(session.prompt(cmd.get("message", ""), {"streamingBehavior": cmd.get("streamingBehavior")}))
                 output(success(cid, ctype))
             elif ctype == "steer":
@@ -135,6 +138,13 @@ async def run_rpc_mode(runtime_host: Any) -> None:
             elif ctype == "export_html":
                 path = await session.export_to_html(cmd.get("outputPath"))
                 output(success(cid, ctype, {"path": path}))
+            elif ctype == "export_jsonl":
+                path = session.export_to_jsonl(cmd.get("outputPath"))
+                output(success(cid, ctype, {"path": path}))
+            elif ctype == "import_session":
+                result = await runtime_host.import_from_jsonl(cmd.get("sessionPath"))
+                await rebind()
+                output(success(cid, ctype, result))
             elif ctype == "switch_session":
                 result = await runtime_host.switch_session(cmd.get("sessionPath"))
                 await rebind()
@@ -152,6 +162,14 @@ async def run_rpc_mode(runtime_host: Any) -> None:
                 output(success(cid, ctype))
             elif ctype == "get_messages":
                 output(success(cid, ctype, {"messages": session.messages}))
+            elif ctype == "get_context_usage":
+                output(success(cid, ctype, {"contextUsage": session.get_context_usage()}))
+            elif ctype == "wait_for_idle":
+                await session.wait_for_idle()
+                output(success(cid, ctype))
+            elif ctype == "reload_resources":
+                await session.reload()
+                output(success(cid, ctype))
             elif ctype == "get_queue":
                 output(success(cid, ctype, session.get_pending_queues()))
             elif ctype == "get_tools":

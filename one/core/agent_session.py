@@ -714,9 +714,11 @@ class AgentSession:
 
         if self._steering:
             msg = self._steering.pop(0)
+            self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
             await self.prompt(msg)
         elif self._follow_up:
             msg = self._follow_up.pop(0)
+            self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
             await self.prompt(msg)
 
     async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> None:

@@ -101,3 +101,28 @@ def test_cli_package_and_config_commands(tmp_path: Path):
     update_missing = run_cmd_no_check(["update", "pkg-a"])
     assert update_missing.returncode == 1
     assert "not installed" in update_missing.stdout.lower()
+
+
+def test_cli_flag_validation_errors(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    def run_cmd(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "one.cli.main", *args],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+    bad_mode = run_cmd(["--mode", "bad"])
+    assert bad_mode.returncode == 2
+    assert "invalid --mode value" in bad_mode.stdout.lower()
+
+    bad_thinking = run_cmd(["--thinking", "bad"])
+    assert bad_thinking.returncode == 2
+    assert "invalid --thinking value" in bad_thinking.stdout.lower()

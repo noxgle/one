@@ -53,6 +53,12 @@ class InteractiveMode:
                 ok = bool(event.get("ok"))
                 status = "OK" if ok else "ERR"
                 print(f"[Tool:{status}] {event.get('tool')}", flush=True)
+            if et == "tool_call_parse_failed":
+                print("[Tool] Parse failed for tool-call candidate, continuing with assistant output.", flush=True)
+            if et == "tool_call_nudge_start":
+                print("[Tool] Requesting tool-call nudge...", flush=True)
+            if et == "tool_call_nudge_end":
+                print(f"[Tool] Nudge used: {bool(event.get('used'))}", flush=True)
             if et == "auto_retry_start":
                 retry_state = f"retry-{event.get('attempt')}"
                 print(
@@ -63,6 +69,9 @@ class InteractiveMode:
                 retry_state = "idle"
             if et == "turn_end":
                 retry_state = "idle"
+            if et == "queue_update":
+                q = event
+                print(f"[Queue] s={len(q.get('steering', []))} f={len(q.get('followUp', []))}", flush=True)
 
         session.subscribe(on_event)
         print("Interactive mode. Type /exit to quit. Use /help for commands.")
@@ -94,8 +103,8 @@ class InteractiveMode:
                 break
             if line.strip() == "/help":
                 print(
-                    "/exit /quit | /help | /stats | /state | /queue | /tools | /clear | /abort\n"
-                    "/model <provider/model> | /thinking <level>\n"
+                    "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort\n"
+                    "/model <provider/model> | /model-cycle | /thinking <level> | /thinking-cycle\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /login [provider] [apiKey] [model]\n"
                     "/retry <on|off> | /config [key] [value]\n"
                     "/bash <command>"
@@ -104,7 +113,7 @@ class InteractiveMode:
             if line.strip() == "/stats":
                 print(json.dumps(session.get_session_stats(), ensure_ascii=False, indent=2))
                 continue
-            if line.strip() == "/state":
+            if line.strip() in {"/state", "/status"}:
                 print(
                     json.dumps(
                         {
@@ -112,6 +121,8 @@ class InteractiveMode:
                             "thinkingLevel": session.thinking_level,
                             "isStreaming": session.is_streaming,
                             "pendingMessageCount": session.pending_message_count,
+                            "pendingQueues": session.get_pending_queues(),
+                            "activeTools": session.active_tools,
                             "sessionId": session.session_id,
                             "sessionFile": session.session_file,
                         },
@@ -152,10 +163,21 @@ class InteractiveMode:
                 else:
                     print(f"Model set to {provider}/{model_id}")
                 continue
+            if line.strip() == "/model-cycle":
+                result = await session.cycle_model()
+                if not result:
+                    print("No available models to cycle.")
+                else:
+                    print(f"Model cycled to {result.model.provider}/{result.model.id}")
+                continue
             if line.startswith("/thinking "):
                 level = line[len("/thinking ") :].strip()
                 session.set_thinking_level(level)
                 print(f"Thinking level set to {level}")
+                continue
+            if line.strip() == "/thinking-cycle":
+                level = session.cycle_thinking_level()
+                print(f"Thinking level cycled to {level}")
                 continue
             if line.startswith("/steer "):
                 await session.steer(line[len("/steer ") :].strip())

@@ -21,6 +21,11 @@ from .args import parse_args, print_help
 async def _run(argv: list[str]) -> int:
     parsed = parse_args(argv)
 
+    if parsed.errors:
+        for err in parsed.errors:
+            print(err)
+        return 2
+
     if parsed.version:
         print(VERSION)
         return 0
@@ -288,6 +293,9 @@ async def _run(argv: list[str]) -> int:
         return 0
 
     if parsed.print_mode or parsed.mode in {"text", "json"}:
+        if parsed.mode == "rpc":
+            print("--print cannot be combined with --mode rpc")
+            return 2
         code = await run_print_mode(
             host,
             {

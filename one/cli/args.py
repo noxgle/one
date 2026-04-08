@@ -47,6 +47,7 @@ class ParsedArgs:
     verbose: bool = False
     messages: list[str] = field(default_factory=list)
     file_args: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
 
 def parse_args(argv: list[str]) -> ParsedArgs:
@@ -101,13 +102,14 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         else:
             plain.append(m)
 
+    errors: list[str] = []
     thinking = ns.thinking
     if thinking and thinking not in VALID_THINKING_LEVELS:
-        thinking = None
+        errors.append(f"Invalid --thinking value: {thinking}. Allowed: {', '.join(sorted(VALID_THINKING_LEVELS))}")
 
     mode = ns.mode
     if mode and mode not in VALID_MODES:
-        mode = None
+        errors.append(f"Invalid --mode value: {mode}. Allowed: {', '.join(sorted(VALID_MODES))}")
 
     return ParsedArgs(
         command=command,
@@ -145,6 +147,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         verbose=ns.verbose,
         messages=plain,
         file_args=file_args,
+        errors=errors,
     )
 
 
