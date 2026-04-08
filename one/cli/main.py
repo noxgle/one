@@ -60,23 +60,49 @@ async def _run(argv: list[str]) -> int:
             print(json.dumps({"packages": settings.get_packages()}, ensure_ascii=False, indent=2))
             return 0
         if cmd == "install":
-            if not args:
-                raise SystemExit("Usage: one install <package>")
+            if len(args) != 1:
+                print("Usage: one install <package>")
+                return 2
+            package = args[0].strip()
+            if not package:
+                print("Package name cannot be empty")
+                return 2
             packages = settings.get_packages()
-            packages.append(args[0])
+            if package in packages:
+                print(f"Package already installed: {package}")
+                return 0
+            packages.append(package)
             settings.set_packages(packages)
-            print(f"Installed package reference: {args[0]}")
+            print(f"Installed package reference: {package}")
             return 0
         if cmd == "remove":
-            if not args:
-                raise SystemExit("Usage: one remove <package>")
-            packages = [p for p in settings.get_packages() if p != args[0]]
+            if len(args) != 1:
+                print("Usage: one remove <package>")
+                return 2
+            package = args[0].strip()
+            if not package:
+                print("Package name cannot be empty")
+                return 2
+            current = settings.get_packages()
+            if package not in current:
+                print(f"Package not installed: {package}")
+                return 1
+            packages = [p for p in current if p != package]
             settings.set_packages(packages)
-            print(f"Removed package reference: {args[0]}")
+            print(f"Removed package reference: {package}")
             return 0
         if cmd == "update":
-            # Placeholder parity behavior: confirm package refs are present.
-            target = args[0] if args else "all"
+            if len(args) > 1:
+                print("Usage: one update [package]")
+                return 2
+            installed = settings.get_packages()
+            if not args:
+                print(f"Updated package reference(s): all ({len(installed)} installed)")
+                return 0
+            target = args[0].strip()
+            if target not in installed:
+                print(f"Package not installed: {target}")
+                return 1
             print(f"Updated package reference(s): {target}")
             return 0
         if cmd == "config":
@@ -90,6 +116,9 @@ async def _run(argv: list[str]) -> int:
                         cur = cur.get(part)  # type: ignore[assignment]
                     else:
                         cur = None
+                if cur is None:
+                    print(f"Config key not found: {args[0]}")
+                    return 1
                 print(json.dumps({"key": args[0], "value": cur}, ensure_ascii=False, indent=2))
                 return 0
             raw = " ".join(args[1:])
@@ -98,7 +127,11 @@ async def _run(argv: list[str]) -> int:
                 val = json.loads(raw)
             except Exception:
                 pass
-            settings.set_config_value(args[0], val)
+            try:
+                settings.set_config_value(args[0], val)
+            except ValueError as e:
+                print(str(e))
+                return 2
             print(f"Updated config: {args[0]}")
             return 0
 

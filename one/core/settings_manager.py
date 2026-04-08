@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,9 @@ class SettingsManager:
         parts = [p for p in key.split(".") if p]
         if not parts:
             raise ValueError("Invalid config key")
+        for part in parts:
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", part):
+                raise ValueError(f"Invalid config key segment: {part}")
         cur: dict[str, Any] = self._global
         for part in parts[:-1]:
             if part not in cur or not isinstance(cur[part], dict):
