@@ -14,6 +14,7 @@ PROVIDER_ENV_MAP = {
     "gemini": "GEMINI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "ollama-cloud": "OLLAMA_CLOUD_API_KEY",
+    "llama.cpp": "LLAMA_CPP_API_KEY",
 }
 
 

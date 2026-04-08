@@ -17,7 +17,10 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("gemini", "gemini-2.5-flash", reasoning=True, context_window=1_000_000),
     ModelInfo("openrouter", "openai/gpt-4.1", reasoning=True, context_window=1_000_000),
     ModelInfo("ollama-cloud", "glm-5:cloud", reasoning=True, context_window=128_000),
+    ModelInfo("llama.cpp", "local", reasoning=False, context_window=32_768),
 ]
+
+NO_AUTH_PROVIDERS: set[str] = {"llama.cpp"}
 
 
 class ModelRegistry:
@@ -78,12 +81,16 @@ class ModelRegistry:
         return None
 
     def has_configured_auth(self, model: ModelInfo) -> bool:
+        if model.provider in NO_AUTH_PROVIDERS:
+            return True
         return bool(self._auth.get_api_key(model.provider))
 
     def get_available(self) -> list[ModelInfo]:
         return [m for m in self._models if self.has_configured_auth(m)]
 
     def get_api_key_and_headers(self, model: ModelInfo) -> dict[str, Any]:
+        if model.provider in NO_AUTH_PROVIDERS:
+            return {"ok": True, "apiKey": "", "headers": {}}
         key = self._auth.get_api_key(model.provider)
         if not key:
             env_var = self._auth.env_var_for_provider(model.provider)

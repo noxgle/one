@@ -48,6 +48,18 @@ def test_model_registry_resolve_dynamic_known_provider():
     assert m.id == "my-model-v1"
 
 
+def test_model_registry_llama_cpp_available_without_auth() -> None:
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth)
+    model = registry.find("llama.cpp", "local")
+    assert model is not None
+    available = registry.get_available()
+    assert any(m.provider == "llama.cpp" and m.id == "local" for m in available)
+    auth_data = registry.get_api_key_and_headers(model)
+    assert auth_data["ok"] is True
+    assert auth_data["apiKey"] == ""
+
+
 def test_cli_package_and_config_commands(tmp_path: Path):
     env = os.environ.copy()
     env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")

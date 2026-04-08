@@ -34,6 +34,16 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             payload["reasoning_effort"] = "high" if thinking_level in {"high", "xhigh"} else "medium"
         return payload
 
+    def _build_headers(self, api_key: str, headers: dict[str, str] | None = None) -> dict[str, str]:
+        req_headers = {
+            "Content-Type": "application/json",
+        }
+        if api_key:
+            req_headers["Authorization"] = f"Bearer {api_key}"
+        if headers:
+            req_headers.update(headers)
+        return req_headers
+
     async def chat(
         self,
         api_key: str,
@@ -43,12 +53,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         headers: dict[str, str] | None = None,
     ) -> ChatResult:
         payload = self._build_payload(model, messages, thinking_level)
-        req_headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        if headers:
-            req_headers.update(headers)
+        req_headers = self._build_headers(api_key, headers)
 
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.post(f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers)
