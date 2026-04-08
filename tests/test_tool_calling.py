@@ -13,6 +13,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.core.types import ModelInfo
 
 
 class _Loader:
@@ -422,6 +423,33 @@ async def test_tool_call_parses_llama_cpp_write_payload_with_unescaped_quotes(tm
     written = out_file.read_text(encoding="utf-8")
     assert "def is_palindrome(s):" in written
     assert 'processed_s = "".join' in written
+
+
+@pytest.mark.asyncio
+async def test_tool_call_respects_raw_function_call_parser_order(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = ModelInfo(
+        provider="openai",
+        id="gpt-4.1",
+        tool_parser=[{"type": "raw-function-call"}, {"type": "json"}],
+    )
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["write"])
+    raw = (
+        'name: write\n'
+        'arguments: {"path":"raw_order.py","content":"print(\\"ok\\")\\n"}'
+    )
+    agent.providers = {"openai": _FakeProvider([raw, "DONE"])}
+
+    await agent.prompt("zapisz")
+    assert agent.get_last_assistant_text() == "DONE"
+    out_file = tmp_path / "raw_order.py"
+    assert out_file.exists()
+    assert 'print("ok")' in out_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

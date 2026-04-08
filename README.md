@@ -64,7 +64,11 @@ You can also set endpoint per model in `models.json`:
         "id": "local",
         "reasoning": false,
         "contextWindow": 32768,
-        "url": "http://192.168.200.38:8089"
+        "url": "http://192.168.200.38:8089",
+        "toolParser": [
+          { "type": "raw-function-call" },
+          { "type": "json" }
+        ]
       }
     ]
   }

@@ -13,6 +13,7 @@ class ModelInfo:
     reasoning: bool = True
     context_window: int | None = None
     base_url: str | None = None
+    tool_parser: list[dict[str, Any]] | None = None
 
 
 @dataclass

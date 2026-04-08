@@ -17,7 +17,14 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("gemini", "gemini-2.5-flash", reasoning=True, context_window=1_000_000),
     ModelInfo("openrouter", "openai/gpt-4.1", reasoning=True, context_window=1_000_000),
     ModelInfo("ollama-cloud", "glm-5:cloud", reasoning=True, context_window=128_000),
-    ModelInfo("llama.cpp", "local", reasoning=False, context_window=32_768, base_url="http://127.0.0.1:8080"),
+    ModelInfo(
+        "llama.cpp",
+        "local",
+        reasoning=False,
+        context_window=32_768,
+        base_url="http://127.0.0.1:8080",
+        tool_parser=[{"type": "raw-function-call"}, {"type": "json"}],
+    ),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp"}
@@ -40,6 +47,7 @@ class ModelRegistry:
                                 reasoning=model.get("reasoning", True),
                                 context_window=model.get("contextWindow"),
                                 base_url=model.get("url") or model.get("baseUrl"),
+                                tool_parser=model.get("toolParser"),
                             )
                         )
             except Exception:
@@ -81,7 +89,14 @@ class ModelRegistry:
         if found:
             return found
         if allow_dynamic and provider.strip() and model_id.strip():
-            return ModelInfo(provider=provider, id=model_id, reasoning=True, context_window=None, base_url=None)
+            return ModelInfo(
+                provider=provider,
+                id=model_id,
+                reasoning=True,
+                context_window=None,
+                base_url=None,
+                tool_parser=None,
+            )
         return None
 
     def has_configured_auth(self, model: ModelInfo) -> bool:

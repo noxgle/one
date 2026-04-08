@@ -209,46 +209,122 @@ class AgentSession:
                             start = -1
             return objs
 
-        candidates: list[str] = []
-        stripped = normalize_jsonish(text)
-        if stripped.startswith("{") and stripped.endswith("}"):
-            candidates.append(stripped)
-
-        for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text):
-            candidates.append(normalize_jsonish(m.group(1)))
-
-        marker = "TOOL_CALL:"
-        if marker in text:
-            candidates.append(normalize_jsonish(text.split(marker, 1)[1]))
-
-        # Fallback: extract balanced JSON objects from arbitrary text.
-        candidates.extend(normalize_jsonish(x) for x in balanced_json_objects(text))
-
-        seen: set[str] = set()
-        unique_candidates: list[str] = []
-        for c in candidates:
-            if c in seen:
-                continue
-            seen.add(c)
-            unique_candidates.append(c)
-
-        for c in unique_candidates:
-            try:
-                obj = json_loads_relaxed(c)
-            except Exception:
-                continue
-            if not isinstance(obj, dict):
-                continue
+        def parse_from_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
             tool = obj.get("tool") or obj.get("name")
             args = obj.get("args")
             if args is None:
                 args = obj.get("input")
+            if args is None and "arguments" in obj:
+                args = obj.get("arguments")
             if args is None:
                 args = {}
+            if isinstance(args, str):
+                # raw-function-call often encodes arguments as JSON string.
+                try:
+                    parsed_args = json_loads_relaxed(args)
+                    if isinstance(parsed_args, dict):
+                        args = parsed_args
+                except Exception:
+                    pass
             if isinstance(tool, str):
                 normalized_args = normalize_tool_args(tool, args)
                 if normalized_args is not None:
                     return {"tool": tool, "args": normalized_args}
+            return None
+
+        def parse_json_candidates(raw_text: str) -> dict[str, Any] | None:
+            candidates: list[str] = []
+            stripped = normalize_jsonish(raw_text)
+            if stripped.startswith("{") and stripped.endswith("}"):
+                candidates.append(stripped)
+
+            for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw_text):
+                candidates.append(normalize_jsonish(m.group(1)))
+
+            marker = "TOOL_CALL:"
+            if marker in raw_text:
+                candidates.append(normalize_jsonish(raw_text.split(marker, 1)[1]))
+
+            # Fallback: extract balanced JSON objects from arbitrary text.
+            candidates.extend(normalize_jsonish(x) for x in balanced_json_objects(raw_text))
+
+            seen: set[str] = set()
+            unique_candidates: list[str] = []
+            for c in candidates:
+                if c in seen:
+                    continue
+                seen.add(c)
+                unique_candidates.append(c)
+
+            for c in unique_candidates:
+                try:
+                    obj = json_loads_relaxed(c)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                parsed = parse_from_obj(obj)
+                if parsed is not None:
+                    return parsed
+            return None
+
+        def parse_raw_function_call(raw_text: str) -> dict[str, Any] | None:
+            s = normalize_jsonish(raw_text)
+
+            # Try JSON-like objects first (often with name/arguments fields).
+            for c in [s, *balanced_json_objects(s)]:
+                try:
+                    obj = json_loads_relaxed(c)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                parsed = parse_from_obj(obj)
+                if parsed is not None and ("arguments" in obj or obj.get("type") in {"raw-function-call", "function_call"}):
+                    return parsed
+
+            # Text fallback: name: <tool> arguments: { ... }
+            m_name = re.search(r"\bname\s*[:=]\s*\"?([a-zA-Z0-9_.-]+)\"?", s)
+            if not m_name:
+                return None
+            m_args = re.search(r"\barguments\s*[:=]\s*(\{[\s\S]*\})", s)
+            if not m_args:
+                return None
+            try:
+                args_obj = json_loads_relaxed(m_args.group(1))
+            except Exception:
+                return None
+            if not isinstance(args_obj, dict):
+                return None
+            normalized_args = normalize_tool_args(m_name.group(1), args_obj)
+            if normalized_args is None:
+                return None
+            return {"tool": m_name.group(1), "args": normalized_args}
+
+        parser_order = ["json", "raw-function-call"]
+        if self.model and self.model.tool_parser:
+            parsed_order: list[str] = []
+            for p in self.model.tool_parser:
+                if isinstance(p, dict):
+                    p_type = str(p.get("type", "")).strip().lower()
+                    if p_type:
+                        parsed_order.append(p_type)
+                elif isinstance(p, str):
+                    p_type = p.strip().lower()
+                    if p_type:
+                        parsed_order.append(p_type)
+            if parsed_order:
+                parser_order = parsed_order
+
+        for parser_type in parser_order:
+            if parser_type == "json":
+                parsed = parse_json_candidates(text)
+                if parsed is not None:
+                    return parsed
+            elif parser_type in {"raw-function-call", "raw_function_call"}:
+                parsed = parse_raw_function_call(text)
+                if parsed is not None:
+                    return parsed
 
         # Final fallback: recover common llama.cpp pseudo-JSON write payloads.
         fallback = parse_write_pseudo_json(text)
