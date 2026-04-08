@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 APP_NAME = "one"
@@ -21,9 +22,15 @@ def get_agent_dir() -> str:
     xdg_home = Path(_expand(os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")))
     xdg_agent_dir = xdg_home / APP_NAME
     legacy_agent_dir = Path.home() / LEGACY_CONFIG_DIR_NAME / "agent"
-    # Backward compatibility: if legacy path exists and new path does not, keep using legacy.
+    # One-time migration from legacy ~/.one/agent -> ~/.config/one.
     if not xdg_agent_dir.exists() and legacy_agent_dir.exists():
-        return str(legacy_agent_dir)
+        try:
+            xdg_agent_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(legacy_agent_dir, xdg_agent_dir)
+            return str(xdg_agent_dir)
+        except Exception:
+            # If migration fails, keep backward-compatible behavior.
+            return str(legacy_agent_dir)
     return str(xdg_agent_dir)
 
 
