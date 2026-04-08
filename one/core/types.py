@@ -12,6 +12,7 @@ class ModelInfo:
     id: str
     reasoning: bool = True
     context_window: int | None = None
+    base_url: str | None = None
 
 
 @dataclass

@@ -33,3 +33,20 @@ one --provider llama.cpp --model local --llama-cpp-url http://192.168.200.38:808
 ```
 
 `llama.cpp` local provider does not require an API key by default.
+
+You can also set endpoint per model in `models.json`:
+
+```json
+{
+  "providers": {
+    "llama.cpp": [
+      {
+        "id": "local",
+        "reasoning": false,
+        "contextWindow": 32768,
+        "url": "http://192.168.200.38:8089"
+      }
+    ]
+  }
+}
+```

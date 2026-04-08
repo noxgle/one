@@ -17,7 +17,7 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("gemini", "gemini-2.5-flash", reasoning=True, context_window=1_000_000),
     ModelInfo("openrouter", "openai/gpt-4.1", reasoning=True, context_window=1_000_000),
     ModelInfo("ollama-cloud", "glm-5:cloud", reasoning=True, context_window=128_000),
-    ModelInfo("llama.cpp", "local", reasoning=False, context_window=32_768),
+    ModelInfo("llama.cpp", "local", reasoning=False, context_window=32_768, base_url="http://127.0.0.1:8080"),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp"}
@@ -39,6 +39,7 @@ class ModelRegistry:
                                 id=model["id"],
                                 reasoning=model.get("reasoning", True),
                                 context_window=model.get("contextWindow"),
+                                base_url=model.get("url") or model.get("baseUrl"),
                             )
                         )
             except Exception:
@@ -48,13 +49,16 @@ class ModelRegistry:
     @staticmethod
     def _dedupe_models(models: list[ModelInfo]) -> list[ModelInfo]:
         out: list[ModelInfo] = []
-        seen: set[tuple[str, str]] = set()
+        index_by_key: dict[tuple[str, str], int] = {}
         for m in models:
             key = (m.provider, m.id)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(m)
+            idx = index_by_key.get(key)
+            if idx is None:
+                index_by_key[key] = len(out)
+                out.append(m)
+            else:
+                # Later definitions (e.g. models.json) override builtin entries.
+                out[idx] = m
         return out
 
     def all(self) -> list[ModelInfo]:
@@ -77,7 +81,7 @@ class ModelRegistry:
         if found:
             return found
         if allow_dynamic and provider.strip() and model_id.strip():
-            return ModelInfo(provider=provider, id=model_id, reasoning=True, context_window=None)
+            return ModelInfo(provider=provider, id=model_id, reasoning=True, context_window=None, base_url=None)
         return None
 
     def has_configured_auth(self, model: ModelInfo) -> bool:

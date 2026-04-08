@@ -53,3 +53,16 @@ def test_provider_registry_llama_cpp_uses_env_base_url(monkeypatch) -> None:
     provider = registry["llama.cpp"]
     assert isinstance(provider, OpenAICompatibleAdapter)
     assert provider.base_url == "http://192.168.200.38:8089"
+
+
+def test_openai_compatible_with_base_url_returns_reconfigured_adapter() -> None:
+    adapter = OpenAICompatibleAdapter(
+        "llama.cpp",
+        "http://127.0.0.1:8080",
+        supports_reasoning_effort=False,
+        default_temperature=None,
+    )
+    changed = adapter.with_base_url("http://192.168.200.38:8089")
+    assert changed.base_url == "http://192.168.200.38:8089"
+    assert changed.supports_reasoning_effort is False
+    assert changed.default_temperature is None

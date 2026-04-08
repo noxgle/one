@@ -12,6 +12,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 from one.core.types import ModelInfo
+from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
 from one.tools.index import all_tools
 
@@ -411,6 +412,8 @@ class AgentSession:
         provider = self.providers.get(self.model.provider)
         if not provider:
             raise RuntimeError(f"Unsupported provider: {self.model.provider}")
+        if self.model.base_url and isinstance(provider, OpenAICompatibleAdapter):
+            provider = provider.with_base_url(self.model.base_url)
 
         auth = self.model_registry.get_api_key_and_headers(self.model)
         if not auth.get("ok"):

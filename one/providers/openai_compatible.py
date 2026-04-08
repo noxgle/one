@@ -34,6 +34,15 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             payload["reasoning_effort"] = "high" if thinking_level in {"high", "xhigh"} else "medium"
         return payload
 
+    def with_base_url(self, base_url: str) -> "OpenAICompatibleAdapter":
+        return OpenAICompatibleAdapter(
+            self.name,
+            base_url,
+            endpoint=self.endpoint,
+            supports_reasoning_effort=self.supports_reasoning_effort,
+            default_temperature=self.default_temperature,
+        )
+
     def _build_headers(self, api_key: str, headers: dict[str, str] | None = None) -> dict[str, str]:
         req_headers = {
             "Content-Type": "application/json",

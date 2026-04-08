@@ -60,6 +60,32 @@ def test_model_registry_llama_cpp_available_without_auth() -> None:
     assert auth_data["apiKey"] == ""
 
 
+def test_model_registry_reads_llama_cpp_url_from_models_json(tmp_path: Path) -> None:
+    models_path = tmp_path / "models.json"
+    models_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "llama.cpp": [
+                        {
+                            "id": "local",
+                            "reasoning": False,
+                            "contextWindow": 32768,
+                            "url": "http://192.168.200.38:8089",
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth, str(models_path))
+    model = registry.find("llama.cpp", "local")
+    assert model is not None
+    assert model.base_url == "http://192.168.200.38:8089"
+
+
 def test_cli_package_and_config_commands(tmp_path: Path):
     env = os.environ.copy()
     env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
