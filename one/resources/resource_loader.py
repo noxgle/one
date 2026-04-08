@@ -171,7 +171,7 @@ class DefaultResourceLoader:
                 "- Be concise in responses.\n"
                 "- Show file paths clearly when changing or discussing files.\n"
                 "- Use tools when needed instead of claiming no access.\n"
-                "- For tool calls, return only valid JSON {\"tool\":\"...\",\"args\":{...}}.\n"
+                "- For tool calls, Return ONLY JSON. No prose. No explanations. {\"tool\":\"...\",\"args\":{...}}.\n"
             )
 
             agents_files = self.get_agents_files().get("agentsFiles", [])

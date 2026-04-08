@@ -292,6 +292,68 @@ async def test_tool_result_message_payload_is_capped_for_context(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_tool_call_parsed_from_mixed_text_and_bom(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["read"])
+    agent.providers = {
+        "openai": _FakeProvider(
+            [
+                '\ufeffJasne, użyję narzędzia: {"tool":"read","args":{"path":"a.txt"}}',
+                "DONE",
+            ]
+        )
+    }
+
+    await agent.prompt("go")
+    assert agent.get_last_assistant_text() == "DONE"
+    tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
+    assert tool_results
+    assert '"tool": "read"' in tool_results[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_action_response_gets_tool_nudge(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["read"])
+    provider = _FakeProvider(
+        [
+            "Sprawdzę to i zacznę od diagnostyki.",
+            '{"tool":"read","args":{"path":"a.txt"}}',
+            "DONE",
+        ]
+    )
+    agent.providers = {"openai": provider}
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("sprawdź")
+
+    assert agent.get_last_assistant_text() == "DONE"
+    tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
+    assert tool_results
+    assert any(e.get("type") == "tool_call_nudge_start" for e in events)
+    assert any(e.get("type") == "tool_call_nudge_end" and e.get("used") is True for e in events)
+
+
+@pytest.mark.asyncio
 async def test_retry_then_success_emits_reason_completed(tmp_path: Path):
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")

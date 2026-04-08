@@ -78,19 +78,70 @@ class AgentSession:
             return getter()
 
     def _try_parse_tool_call(self, text: str) -> dict[str, Any] | None:
+        def normalize_jsonish(s: str) -> str:
+            # Common LLM output quirks: smart quotes and BOM.
+            return (
+                s.replace("\ufeff", "")
+                .replace("“", '"')
+                .replace("”", '"')
+                .replace("’", "'")
+                .strip()
+            )
+
+        def balanced_json_objects(s: str) -> list[str]:
+            objs: list[str] = []
+            depth = 0
+            start = -1
+            in_string = False
+            escaped = False
+            for i, ch in enumerate(s):
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif ch == "\\":
+                        escaped = True
+                    elif ch == '"':
+                        in_string = False
+                    continue
+                if ch == '"':
+                    in_string = True
+                    continue
+                if ch == "{":
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif ch == "}":
+                    if depth > 0:
+                        depth -= 1
+                        if depth == 0 and start >= 0:
+                            objs.append(s[start : i + 1])
+                            start = -1
+            return objs
+
         candidates: list[str] = []
-        stripped = text.strip()
+        stripped = normalize_jsonish(text)
         if stripped.startswith("{") and stripped.endswith("}"):
             candidates.append(stripped)
 
         for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text):
-            candidates.append(m.group(1).strip())
+            candidates.append(normalize_jsonish(m.group(1)))
 
         marker = "TOOL_CALL:"
         if marker in text:
-            candidates.append(text.split(marker, 1)[1].strip())
+            candidates.append(normalize_jsonish(text.split(marker, 1)[1]))
 
+        # Fallback: extract balanced JSON objects from arbitrary text.
+        candidates.extend(normalize_jsonish(x) for x in balanced_json_objects(text))
+
+        seen: set[str] = set()
+        unique_candidates: list[str] = []
         for c in candidates:
+            if c in seen:
+                continue
+            seen.add(c)
+            unique_candidates.append(c)
+
+        for c in unique_candidates:
             try:
                 obj = json.loads(c)
             except Exception:
@@ -102,6 +153,31 @@ class AgentSession:
             if isinstance(tool, str) and isinstance(args, dict):
                 return {"tool": tool, "args": args}
         return None
+
+    def _should_tool_nudge(self, assistant_text: str, step: int, tool_results: list[dict[str, Any]]) -> bool:
+        if step != 0:
+            return False
+        if tool_results:
+            return False
+        if not self._active_tools:
+            return False
+        t = assistant_text.strip()
+        if not t:
+            return False
+        # Generic (language-agnostic) signal: short/meta first response, often "I'll check..."
+        if len(t) > 280:
+            return False
+        # If it already looks like a substantial answer, do not force a nudge.
+        if "\n" in t and len(t) > 140:
+            return False
+        return True
+
+    @staticmethod
+    def _strip_final_answer_prefix(text: str) -> str:
+        marker = "FINAL_ANSWER:"
+        if text.startswith(marker):
+            return text[len(marker) :].strip()
+        return text
 
     def _build_tool_result_message_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         msg_payload: dict[str, Any] = {
@@ -418,7 +494,7 @@ class AgentSession:
                 max_tool_steps = max(1, self.settings_manager.get_tool_max_steps())
                 tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
                 final_assistant: dict[str, Any] | None = None
-                for _ in range(max_tool_steps):
+                for step in range(max_tool_steps):
                     if self._abort_requested:
                         final_assistant = self._abort_assistant_message()
                         break
@@ -428,6 +504,51 @@ class AgentSession:
                         break
                     assistant_text = self._assistant_text(assistant)
                     tool_call = self._try_parse_tool_call(assistant_text)
+                    if tool_call is None and self._should_tool_nudge(assistant_text, step=step, tool_results=tool_results):
+                        self._emit({"type": "tool_call_nudge_start"})
+                        nudged = await self._invoke_provider(
+                            self._flatten_messages_for_provider()
+                            + [
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "Decide now: if tools are required, respond ONLY with JSON "
+                                        '{"tool":"<name>","args":{...}} and no extra text. '
+                                        "If tools are not required, respond with FINAL_ANSWER:<text>."
+                                    ),
+                                }
+                            ]
+                        )
+                        nudged_text = self._assistant_text(nudged)
+                        nudged_tool_call = self._try_parse_tool_call(nudged_text)
+                        if nudged_tool_call:
+                            tool_call = nudged_tool_call
+                            assistant = nudged
+                            assistant_text = nudged_text
+                            self._emit({"type": "tool_call_nudge_end", "used": True})
+                        else:
+                            nudged_text = self._strip_final_answer_prefix(nudged_text)
+                            nudged["content"] = [{"type": "text", "text": nudged_text}]
+                            assistant = nudged
+                            assistant_text = nudged_text
+                            self._emit({"type": "tool_call_nudge_end", "used": False})
+                    if tool_call is None:
+                        toolish = (
+                            '"tool"' in assistant_text
+                            and '"args"' in assistant_text
+                            and (
+                                assistant_text.strip().startswith("{")
+                                or "```" in assistant_text
+                                or "TOOL_CALL:" in assistant_text
+                            )
+                        )
+                        if toolish:
+                            self._emit(
+                                {
+                                    "type": "tool_call_parse_failed",
+                                    "sample": assistant_text[:500],
+                                }
+                            )
 
                     if tool_call:
                         tool_payload = await self._run_tool_call(tool_call["tool"], tool_call["args"], timeout_sec=tool_timeout_sec)
