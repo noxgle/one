@@ -12,9 +12,10 @@ class InteractiveMode:
     async def run(self) -> None:
         session = self.runtime_host.session
         assistant_streamed = False
+        retry_state = "idle"
 
         def on_event(event: dict) -> None:
-            nonlocal assistant_streamed
+            nonlocal assistant_streamed, retry_state
             et = event.get("type")
             if event.get("type") == "message_start":
                 msg = event.get("message", {})
@@ -51,10 +52,15 @@ class InteractiveMode:
                 status = "OK" if ok else "ERR"
                 print(f"[Tool:{status}] {event.get('tool')}", flush=True)
             if et == "auto_retry_start":
+                retry_state = f"retry-{event.get('attempt')}"
                 print(
                     f"[Retry] próba {event.get('attempt')}/{event.get('maxAttempts')} za {event.get('delayMs')}ms: {event.get('errorMessage')}",
                     flush=True,
                 )
+            if et == "auto_retry_end":
+                retry_state = "idle"
+            if et == "turn_end":
+                retry_state = "idle"
 
         session.subscribe(on_event)
         print("Interactive mode. Type /exit to quit. Use /help for commands.")
@@ -64,21 +70,32 @@ class InteractiveMode:
             usage_text = ""
             if usage:
                 usage_text = f" | ctx:{usage['percent']:.1f}%"
+            stats = session.get_session_stats()
+            tokens_total = int(((stats.get("tokens") or {}).get("total")) or 0)
             queues = session.get_pending_queues()
             cwd_label = session.session_manager.cwd
             print(
-                f"[{model_label} | thinking:{session.thinking_level}{usage_text} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
+                f"[{model_label} | thinking:{session.thinking_level}{usage_text} | tokens:{tokens_total} | retry:{retry_state} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
             )
-            line = input("\n> ")
+            try:
+                line = input("\n> ")
+            except KeyboardInterrupt:
+                if session.is_streaming:
+                    await session.abort()
+                    print("\n[Abort requested]", flush=True)
+                    continue
+                print("")
+                break
             if not line.strip():
                 continue
             if line.strip() in {"/exit", "/quit"}:
                 break
             if line.strip() == "/help":
                 print(
-                    "/exit /quit | /help | /stats | /state | /queue | /tools | /clear\n"
+                    "/exit /quit | /help | /stats | /state | /queue | /tools | /clear | /abort\n"
                     "/model <provider/model> | /thinking <level>\n"
-                    "/steer <text> | /follow <text> | /compact [instructions] | /login | /config [key] [value]\n"
+                    "/steer <text> | /follow <text> | /compact [instructions] | /login [provider] [apiKey] [model]\n"
+                    "/retry <on|off> | /config [key] [value]\n"
                     "/bash <command>"
                 )
                 continue
@@ -109,6 +126,10 @@ class InteractiveMode:
                 continue
             if line.strip() == "/clear":
                 print("\033[2J\033[H", end="")
+                continue
+            if line.strip() == "/abort":
+                await session.abort()
+                print("Abort requested.")
                 continue
             if line.startswith("/model "):
                 val = line[len("/model ") :].strip()
@@ -141,15 +162,46 @@ class InteractiveMode:
                 result = await session.compact(instructions)
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 continue
-            if line.strip() == "/login":
-                provider = input("Provider (e.g. openai/openrouter/ollama-cloud): ").strip()
-                api_key = input("API key: ").strip()
-                if not provider or not api_key:
-                    print("Provider and API key are required.")
+            if line.startswith("/login"):
+                rest = line[len("/login") :].strip()
+                parts = rest.split() if rest else []
+                provider = parts[0] if len(parts) >= 1 else input("Provider (e.g. openai/openrouter/ollama-cloud): ").strip()
+                if not provider:
+                    print("Provider is required.")
                     continue
+                known_providers = session.model_registry.providers()
+                if provider not in known_providers:
+                    print(f"Unknown provider: {provider}. Available: {', '.join(known_providers)}")
+                    continue
+                api_key = parts[1] if len(parts) >= 2 else input("API key: ").strip()
+                if not api_key:
+                    print("API key is required.")
+                    continue
+                model_input = parts[2] if len(parts) >= 3 else input("Default model (optional): ").strip()
+                selected_model = None
+                if model_input:
+                    selected_model = session.model_registry.find(provider, model_input)
+                    if not selected_model:
+                        models = [m.id for m in session.model_registry.models_for_provider(provider)]
+                        print(f"Model not found for {provider}: {model_input}. Available: {', '.join(models)}")
+                        continue
                 session.model_registry.set_stored_api_key(provider, api_key)
                 session.settings_manager.set_default_provider(provider)
-                print(f"Stored key and set default provider to {provider}.")
+                if selected_model:
+                    session.settings_manager.set_default_model(selected_model.id)
+                    await session.set_model(selected_model)
+                print(
+                    f"Stored key for {provider}."
+                    + (f" Default model set to {selected_model.id}." if selected_model else "")
+                )
+                continue
+            if line.startswith("/retry "):
+                mode = line[len("/retry ") :].strip().lower()
+                if mode not in {"on", "off"}:
+                    print("Usage: /retry <on|off>")
+                    continue
+                session.set_auto_retry_enabled(mode == "on")
+                print(f"Auto-retry set to {mode}.")
                 continue
             if line.startswith("/config"):
                 rest = line[len("/config") :].strip()

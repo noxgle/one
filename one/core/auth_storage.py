@@ -51,6 +51,9 @@ class AuthStorage:
                 return val
         return None
 
+    def env_var_for_provider(self, provider: str) -> str | None:
+        return PROVIDER_ENV_MAP.get(provider)
+
     @classmethod
     def create(cls, path: str | None = None) -> "AuthStorage":
         return cls(path=path)

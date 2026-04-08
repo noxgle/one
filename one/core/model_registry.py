@@ -44,6 +44,12 @@ class ModelRegistry:
     def all(self) -> list[ModelInfo]:
         return list(self._models)
 
+    def providers(self) -> list[str]:
+        return sorted({m.provider for m in self._models})
+
+    def models_for_provider(self, provider: str) -> list[ModelInfo]:
+        return [m for m in self._models if m.provider == provider]
+
     def find(self, provider: str, model_id: str) -> ModelInfo | None:
         for m in self._models:
             if m.provider == provider and m.id == model_id:
@@ -59,7 +65,9 @@ class ModelRegistry:
     def get_api_key_and_headers(self, model: ModelInfo) -> dict[str, Any]:
         key = self._auth.get_api_key(model.provider)
         if not key:
-            return {"ok": False, "error": f"No API key found for {model.provider}"}
+            env_var = self._auth.env_var_for_provider(model.provider)
+            hint = f" (set {env_var} or use /login)" if env_var else " (use /login)"
+            return {"ok": False, "error": f"No API key found for {model.provider}{hint}"}
         return {"ok": True, "apiKey": key, "headers": {}}
 
     def set_stored_api_key(self, provider: str, api_key: str) -> None:

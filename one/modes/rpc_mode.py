@@ -82,6 +82,9 @@ async def run_rpc_mode(runtime_host: Any) -> None:
                             "autoCompactionEnabled": session.auto_compaction_enabled,
                             "messageCount": len(session.messages),
                             "pendingMessageCount": session.pending_message_count,
+                            "pendingQueues": session.get_pending_queues(),
+                            "activeTools": session.active_tools,
+                            "autoRetryEnabled": session.auto_retry_enabled,
                         },
                     )
                 )
@@ -149,6 +152,10 @@ async def run_rpc_mode(runtime_host: Any) -> None:
                 output(success(cid, ctype))
             elif ctype == "get_messages":
                 output(success(cid, ctype, {"messages": session.messages}))
+            elif ctype == "get_queue":
+                output(success(cid, ctype, session.get_pending_queues()))
+            elif ctype == "get_tools":
+                output(success(cid, ctype, {"tools": session.active_tools}))
             elif ctype == "get_commands":
                 skills = session.resource_loader.get_skills().get("skills", [])
                 prompts = session.resource_loader.get_prompts().get("prompts", [])
