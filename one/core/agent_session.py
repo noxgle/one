@@ -150,6 +150,35 @@ class AgentSession:
                     in_string = True
             return json.loads("".join(repaired))
 
+        def parse_write_pseudo_json(raw: str) -> dict[str, Any] | None:
+            s = normalize_jsonish(raw)
+            if '"tool":"write"' not in s and '"tool": "write"' not in s and '"name":"write"' not in s and '"name": "write"' not in s:
+                return None
+
+            file_match = re.search(r'"(?:path|file)"\s*:\s*"([^"]+)"', s)
+            if not file_match:
+                return None
+            path = file_match.group(1)
+
+            content_key = re.search(r'"content"\s*:\s*"', s)
+            if not content_key:
+                return None
+            content_start = content_key.end()
+
+            end_match = re.search(r'"\s*}\s*}\s*$', s)
+            if not end_match or end_match.start() < content_start:
+                return None
+            content_raw = s[content_start : end_match.start()]
+
+            # Best-effort unescape; keep raw quotes/newlines when model emitted invalid JSON.
+            content = (
+                content_raw.replace('\\"', '"')
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+            )
+            return {"tool": "write", "args": {"path": path, "content": content}}
+
         def balanced_json_objects(s: str) -> list[str]:
             objs: list[str] = []
             depth = 0
@@ -220,6 +249,11 @@ class AgentSession:
                 normalized_args = normalize_tool_args(tool, args)
                 if normalized_args is not None:
                     return {"tool": tool, "args": normalized_args}
+
+        # Final fallback: recover common llama.cpp pseudo-JSON write payloads.
+        fallback = parse_write_pseudo_json(text)
+        if fallback is not None:
+            return fallback
         return None
 
     def _should_tool_nudge(self, assistant_text: str, step: int, tool_results: list[dict[str, Any]]) -> bool:
