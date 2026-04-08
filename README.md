@@ -21,8 +21,15 @@ chmod +x scripts/install.sh
 Installer creates:
 - virtualenv in `~/.one/venv`
 - launcher in `~/.local/bin/one`
+- config in `~/.config/one` (or legacy `~/.one/agent` if already present)
 
 After that, `one` works from any directory (if `~/.local/bin` is on your `PATH`).
+
+You can override config location with:
+
+```bash
+export ONE_CODING_AGENT_DIR=/custom/path
+```
 
 ## Local llama.cpp provider
 
