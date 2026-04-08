@@ -20,6 +20,7 @@ class _DummySettings:
         self._global: dict[str, Any] = {"tools": {"maxSteps": 6}}
         self.default_provider: str | None = None
         self.default_model: str | None = None
+        self.theme: str = "default"
 
     def get_global_settings(self) -> dict[str, Any]:
         return self._global
@@ -39,6 +40,12 @@ class _DummySettings:
 
     def set_default_model(self, model: str | None) -> None:
         self.default_model = model
+
+    def get_theme(self) -> str:
+        return self.theme
+
+    def set_theme(self, theme: str) -> None:
+        self.theme = theme
 
 
 class _DummyModelRegistry:
@@ -248,10 +255,12 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
         "/model",
         "/thinking",
         "/queue",
+        "/theme",
         "/tools",
         "/clear",
         "/model openai/gpt-4o",
         "/thinking low",
+        "/theme solarized",
         "/steer abc",
         "/follow def",
         "/queue clear steering",
@@ -275,6 +284,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert "Shortcuts: Ctrl+C abort/exit" in out
     assert "Model set to openai/gpt-4o" in out
     assert "Thinking level set to low" in out
+    assert "Theme set to solarized" in out
     assert "Queued steering message." in out
     assert "Queued follow-up message." in out
     assert "Stored key for openai." in out
@@ -288,6 +298,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert session.model.id == "gpt-4.1"
     assert session.settings_manager.default_provider == "openai"
     assert session.settings_manager.default_model == "gpt-4.1"
+    assert session.settings_manager.theme == "solarized"
     assert "openai" not in session.model_registry.stored_keys
     assert session.retry_enabled is False
     assert session.get_pending_queues()["steering"] == []

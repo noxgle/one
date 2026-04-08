@@ -139,7 +139,7 @@ class InteractiveMode:
             print(
                 f"[{model_label} | thinking:{session.thinking_level}{usage_text} | tokens:{tokens_total} | retry:{retry_state} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
             )
-            print("[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /abort | /exit]")
+            print("[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /theme [name] | /abort | /exit]")
             try:
                 line = input("\n> ")
             except EOFError:
@@ -172,7 +172,7 @@ class InteractiveMode:
             if line.strip() == "/help":
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort\n"
-                    "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle\n"
+                    "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/bash <command>"
@@ -223,6 +223,28 @@ class InteractiveMode:
                 continue
             if line.strip() == "/clear":
                 print("\033[2J\033[H", end="")
+                continue
+            if line.strip() == "/theme":
+                current_theme = session.settings_manager.get_theme()
+                print(
+                    json.dumps(
+                        {
+                            "current": current_theme,
+                            "usage": "/theme <name>",
+                            "builtins": ["default", "light", "hacker", "solarized"],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                continue
+            if line.startswith("/theme "):
+                theme_name = line[len("/theme ") :].strip()
+                if not theme_name:
+                    print("Usage: /theme <name>")
+                    continue
+                session.settings_manager.set_theme(theme_name)
+                print(f"Theme set to {theme_name}")
                 continue
             if line.strip() == "/model":
                 current = f"{session.model.provider}/{session.model.id}" if session.model else "none"
