@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import uuid
 
 import pytest
 
@@ -105,6 +106,8 @@ class _DummySession:
         self.retry_enabled = True
         self.aborted = False
         self.prompt_calls: list[str] = []
+        self._extui_pending: dict[str, dict[str, Any]] = {}
+        self._extui_history: list[dict[str, Any]] = []
 
     def subscribe(self, listener: Any) -> None:
         self._listeners.append(listener)
@@ -169,6 +172,54 @@ class _DummySession:
 
     async def prompt(self, text: str) -> None:
         self.prompt_calls.append(text)
+
+    def request_extension_ui(
+        self,
+        extension: str,
+        ui_type: str,
+        payload: dict[str, Any] | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        if ui_type not in {"widget", "overlay"}:
+            raise ValueError("uiType must be one of: widget, overlay")
+        req = {
+            "id": uuid.uuid4().hex[:12],
+            "extension": extension,
+            "uiType": ui_type,
+            "title": title or "",
+            "payload": payload or {},
+            "status": "pending",
+            "createdAt": 0,
+        }
+        self._extui_pending[req["id"]] = req
+        return req
+
+    def respond_extension_ui(
+        self,
+        request_id: str,
+        payload: dict[str, Any] | None = None,
+        cancelled: bool = False,
+    ) -> dict[str, Any]:
+        req = self._extui_pending.pop(request_id, None)
+        if req is None:
+            raise ValueError(f"Extension UI request not found: {request_id}")
+        resp = {
+            "requestId": request_id,
+            "extension": req["extension"],
+            "uiType": req["uiType"],
+            "payload": payload or {},
+            "cancelled": cancelled,
+            "createdAt": req["createdAt"],
+            "respondedAt": 1,
+        }
+        self._extui_history.append(resp)
+        return resp
+
+    def get_extension_ui_state(self) -> dict[str, Any]:
+        return {"pending": list(self._extui_pending.values()), "history": list(self._extui_history)}
+
+    def clear_extension_ui_history(self) -> None:
+        self._extui_history = []
 
 
 class _DummyHost:
@@ -330,3 +381,24 @@ async def test_interactive_login_status_lists_providers(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert '"providers": [' in out
     assert '"provider": "openai"' in out
+
+
+@pytest.mark.asyncio
+async def test_interactive_extui_hooks(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    commands = [
+        '/extui request demo-ext widget {"title":"X"}',
+        "/extui list",
+        "/extui respond bad-id {}",
+        "/extui clear",
+        "/extui list",
+        "/exit",
+    ]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+    await mode.run()
+    out = capsys.readouterr().out
+    assert '"extension": "demo-ext"' in out
+    assert '"pending": [' in out
+    assert "Extension UI request not found: bad-id" in out
+    assert "Extension UI history cleared." in out

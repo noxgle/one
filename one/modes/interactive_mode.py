@@ -110,6 +110,16 @@ class InteractiveMode:
             if et == "queue_update":
                 q = event
                 print(f"[Queue] s={len(q.get('steering', []))} f={len(q.get('followUp', []))}", flush=True)
+            if et == "extension_ui_request":
+                print(
+                    f"[ExtUI] request {event.get('id')} {event.get('extension')} {event.get('uiType')}",
+                    flush=True,
+                )
+            if et == "extension_ui_response":
+                print(
+                    f"[ExtUI] response {event.get('requestId')} cancelled={bool(event.get('cancelled'))}",
+                    flush=True,
+                )
 
         session.subscribe(on_event)
         while True:
@@ -164,7 +174,7 @@ class InteractiveMode:
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort\n"
                     "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
-                    "/retry <on|off> | /config [key] [value]\n"
+                    "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/bash <command>"
                 )
                 continue
@@ -393,6 +403,73 @@ class InteractiveMode:
                     print((result.get("output") or "").rstrip())
                 except Exception as e:
                     print(str(e))
+                continue
+            if line.strip() in {"/extui", "/ext-ui"}:
+                print("Usage: /extui <list|request|respond|cancel|clear> ...")
+                continue
+            if line.startswith("/extui ") or line.startswith("/ext-ui "):
+                rest = line.split(" ", 1)[1].strip()
+                parts = rest.split(maxsplit=3)
+                if not parts:
+                    print("Usage: /extui <list|request|respond|cancel|clear> ...")
+                    continue
+                sub = parts[0].lower()
+                if sub == "list":
+                    print(json.dumps(session.get_extension_ui_state(), ensure_ascii=False, indent=2))
+                    continue
+                if sub == "clear":
+                    session.clear_extension_ui_history()
+                    print("Extension UI history cleared.")
+                    continue
+                if sub == "request":
+                    # /extui request <extension> <widget|overlay> [jsonPayload]
+                    if len(parts) < 3:
+                        print("Usage: /extui request <extension> <widget|overlay> [jsonPayload]")
+                        continue
+                    extension = parts[1]
+                    ui_type = parts[2]
+                    payload: dict[str, Any] = {}
+                    if len(parts) >= 4 and parts[3].strip():
+                        try:
+                            parsed = json.loads(parts[3])
+                            payload = parsed if isinstance(parsed, dict) else {"value": parsed}
+                        except Exception:
+                            print("Invalid JSON payload for /extui request")
+                            continue
+                    try:
+                        req = session.request_extension_ui(extension=extension, ui_type=ui_type, payload=payload)
+                    except ValueError as e:
+                        print(str(e))
+                        continue
+                    print(json.dumps(req, ensure_ascii=False, indent=2))
+                    continue
+                if sub in {"respond", "cancel"}:
+                    # /extui respond <requestId> [jsonPayload]
+                    if len(parts) < 2:
+                        print("Usage: /extui respond <requestId> [jsonPayload]")
+                        continue
+                    request_id = parts[1]
+                    payload: dict[str, Any] = {}
+                    if sub == "respond" and len(parts) >= 3 and parts[2].strip():
+                        raw_payload = rest.split(maxsplit=2)[2]
+                        try:
+                            parsed = json.loads(raw_payload)
+                            payload = parsed if isinstance(parsed, dict) else {"value": parsed}
+                        except Exception:
+                            print("Invalid JSON payload for /extui respond")
+                            continue
+                    try:
+                        resp = session.respond_extension_ui(
+                            request_id=request_id,
+                            payload=payload,
+                            cancelled=sub == "cancel",
+                        )
+                    except ValueError as e:
+                        print(str(e))
+                        continue
+                    print(json.dumps(resp, ensure_ascii=False, indent=2))
+                    continue
+                print("Usage: /extui <list|request|respond|cancel|clear> ...")
                 continue
             if line.startswith("/"):
                 print(f"Unknown command: {line.strip()}. Use /help.")

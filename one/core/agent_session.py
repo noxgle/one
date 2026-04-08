@@ -5,6 +5,7 @@ import inspect
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -56,6 +57,8 @@ class AgentSession:
         self._follow_up: list[str] = []
         self._active_tools = tools or list(all_tools.keys())
         self._abort_requested = False
+        self._extension_ui_pending: dict[str, dict[str, Any]] = {}
+        self._extension_ui_history: list[dict[str, Any]] = []
 
         if not self.messages:
             if self.model:
@@ -964,3 +967,60 @@ class AgentSession:
 
     async def dispose(self) -> None:
         return
+
+    def request_extension_ui(
+        self,
+        extension: str,
+        ui_type: str,
+        payload: dict[str, Any] | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        kind = (ui_type or "").strip().lower()
+        if kind not in {"widget", "overlay"}:
+            raise ValueError("uiType must be one of: widget, overlay")
+        req = {
+            "id": uuid.uuid4().hex[:12],
+            "extension": extension.strip() or "unknown",
+            "uiType": kind,
+            "title": title or "",
+            "payload": payload or {},
+            "status": "pending",
+            "createdAt": int(time.time() * 1000),
+        }
+        self._extension_ui_pending[req["id"]] = req
+        self._emit({"type": "extension_ui_request", **req})
+        return req
+
+    def respond_extension_ui(
+        self,
+        request_id: str,
+        payload: dict[str, Any] | None = None,
+        cancelled: bool = False,
+    ) -> dict[str, Any]:
+        req = self._extension_ui_pending.pop(request_id, None)
+        if not req:
+            raise ValueError(f"Extension UI request not found: {request_id}")
+        resp = {
+            "requestId": request_id,
+            "extension": req.get("extension"),
+            "uiType": req.get("uiType"),
+            "payload": payload or {},
+            "cancelled": bool(cancelled),
+            "createdAt": req.get("createdAt"),
+            "respondedAt": int(time.time() * 1000),
+        }
+        self._extension_ui_history.append(resp)
+        if len(self._extension_ui_history) > 100:
+            self._extension_ui_history = self._extension_ui_history[-100:]
+        self._emit({"type": "extension_ui_response", **resp})
+        return resp
+
+    def get_extension_ui_state(self) -> dict[str, Any]:
+        pending = sorted(self._extension_ui_pending.values(), key=lambda x: int(x.get("createdAt", 0)))
+        return {
+            "pending": pending,
+            "history": list(self._extension_ui_history),
+        }
+
+    def clear_extension_ui_history(self) -> None:
+        self._extension_ui_history = []

@@ -49,7 +49,7 @@
 - [x] Header/status context usage
 - [x] Footer/status token usage + retry state (praktyczna parity)
 - [x] Komendy i skróty klawiszowe jak w `pi` (P0 practical: aliasy, `Ctrl+C/Ctrl+D/Ctrl+L/Ctrl+R`, queue/model/thinking control)
-- [ ] UI hooks dla extension widgets/overlays
+- [x] UI hooks dla extension widgets/overlays (P0 practical: eventy + interactive `/extui` + RPC commands)
 
 ### 2. Tool-calling
 - [x] Ujednolicony kontrakt wywołań narzędzi (baseline)

@@ -183,6 +183,27 @@ async def run_rpc_mode(runtime_host: Any) -> None:
                 for s in skills:
                     commands.append({"name": f"skill:{s.get('name')}", "description": "", "source": "skill", "sourceInfo": s.get("filePath")})
                 output(success(cid, ctype, {"commands": commands}))
+            elif ctype == "get_extension_ui":
+                output(success(cid, ctype, session.get_extension_ui_state()))
+            elif ctype == "request_extension_ui":
+                req = session.request_extension_ui(
+                    extension=cmd.get("extension", "unknown"),
+                    ui_type=cmd.get("uiType", "widget"),
+                    payload=cmd.get("payload") if isinstance(cmd.get("payload"), dict) else {},
+                    title=cmd.get("title"),
+                )
+                output(success(cid, ctype, req))
+            elif ctype == "respond_extension_ui":
+                payload = cmd.get("payload") if isinstance(cmd.get("payload"), dict) else {}
+                resp = session.respond_extension_ui(
+                    request_id=cmd.get("requestId", ""),
+                    payload=payload,
+                    cancelled=bool(cmd.get("cancelled", False)),
+                )
+                output(success(cid, ctype, resp))
+            elif ctype == "clear_extension_ui":
+                session.clear_extension_ui_history()
+                output(success(cid, ctype))
             else:
                 output(error(cid, ctype or "unknown", f"Unknown command: {ctype}"))
         except EOFError:
