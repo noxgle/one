@@ -33,6 +33,21 @@ def test_auth_error_message_has_provider_hint(monkeypatch):
     assert "OPENAI_API_KEY" in res["error"]
 
 
+def test_auth_storage_uses_generic_env_var_for_unknown_provider(monkeypatch):
+    monkeypatch.setenv("CUSTOM_PROVIDER_API_KEY", "custom-key")
+    auth = AuthStorage.in_memory()
+    assert auth.get_api_key("custom-provider") == "custom-key"
+
+
+def test_model_registry_resolve_dynamic_known_provider():
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth)
+    m = registry.resolve("custom-provider", "my-model-v1", allow_dynamic=True)
+    assert m is not None
+    assert m.provider == "custom-provider"
+    assert m.id == "my-model-v1"
+
+
 def test_cli_package_and_config_commands(tmp_path: Path):
     env = os.environ.copy()
     env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")

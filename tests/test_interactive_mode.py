@@ -55,6 +55,14 @@ class _DummyModelRegistry:
                 return m
         return None
 
+    def resolve(self, provider: str, model_id: str, *, allow_dynamic: bool = False) -> ModelInfo | None:
+        found = self.find(provider, model_id)
+        if found:
+            return found
+        if allow_dynamic and provider.strip() and model_id.strip():
+            return ModelInfo(provider=provider, id=model_id)
+        return None
+
     def providers(self) -> list[str]:
         return sorted({m.provider for m in self._models})
 
@@ -191,14 +199,35 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
 
 
 @pytest.mark.asyncio
+async def test_interactive_model_command_supports_dynamic_known_provider(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+
+    commands = [
+        "/model openrouter/google/gemma-4-31b-it:free",
+        "/exit",
+    ]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Model set to openrouter/google/gemma-4-31b-it:free (dynamic)" in out
+    assert session.model.provider == "openrouter"
+    assert session.model.id == "google/gemma-4-31b-it:free"
+
+
+@pytest.mark.asyncio
 async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
     session = _DummySession()
     mode = InteractiveMode(_DummyHost(session))
 
     commands = [
+        "/model",
         "/model nope",
         "/retry maybe",
-        "/login badprovider sk",
+        "/login custom-provider sk",
+        "/unknown-cmd",
         "/bash",
         "/exit",
     ]
@@ -209,4 +238,6 @@ async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
 
     assert "Usage: /model <provider>/<model-id>" in out
     assert "Usage: /retry <on|off>" in out
-    assert "Unknown provider: badprovider." in out
+    assert "Stored key for custom-provider." in out
+    assert "Unknown command: /unknown-cmd. Use /help." in out
+    assert session.prompt_calls == []

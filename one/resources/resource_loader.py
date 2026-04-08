@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -142,8 +143,59 @@ class DefaultResourceLoader:
     def get_agents_files(self) -> dict[str, Any]:
         return {"agentsFiles": self._agents_files}
 
-    def get_system_prompt(self) -> str:
-        base = self.system_prompt or "You are a coding agent."
+    def get_system_prompt(self, selected_tools: list[str] | None = None) -> str:
+        tools = selected_tools or ["read", "bash", "edit", "write"]
+
+        if self.system_prompt:
+            prompt = self.system_prompt
+        else:
+            has_bash = "bash" in tools
+            has_read = "read" in tools
+            has_grep = "grep" in tools
+            has_find = "find" in tools
+            has_ls = "ls" in tools
+            if has_bash and (has_grep or has_find or has_ls):
+                file_ops_guideline = "Prefer grep/find/ls tools over bash for file exploration."
+            elif has_bash:
+                file_ops_guideline = "Use bash for file operations when dedicated tools are unavailable."
+            else:
+                file_ops_guideline = "Use available read/search tools for file exploration."
+
+            tools_list = "\n".join(f"- {t}" for t in tools) if tools else "(none)"
+            prompt = (
+                "You are an expert coding assistant operating inside one, a terminal coding agent harness.\n"
+                "You help users by reading files, executing commands, editing code, and writing new files.\n\n"
+                f"Available tools:\n{tools_list}\n\n"
+                "Guidelines:\n"
+                f"- {file_ops_guideline}\n"
+                "- Be concise in responses.\n"
+                "- Show file paths clearly when changing or discussing files.\n"
+                "- Use tools when needed instead of claiming no access.\n"
+                "- For tool calls, return only valid JSON {\"tool\":\"...\",\"args\":{...}}.\n"
+            )
+
+            agents_files = self.get_agents_files().get("agentsFiles", [])
+            if agents_files:
+                prompt += "\n# Project Context\n\n"
+                for entry in agents_files:
+                    p = entry.get("path", "")
+                    c = (entry.get("content", "") or "").strip()
+                    if not c:
+                        continue
+                    prompt += f"## {p}\n\n{c}\n\n"
+
+            if has_read:
+                skills = self.get_skills().get("skills", [])
+                if skills:
+                    prompt += "\n# Skills\n\n"
+                    for skill in skills:
+                        name = skill.get("name") or "unknown-skill"
+                        path = skill.get("filePath") or ""
+                        prompt += f"- {name}: {path}\n"
+
         if self.append_system_prompt:
-            base = f"{base}\n\n{self.append_system_prompt}"
-        return base
+            prompt = f"{prompt}\n\n{self.append_system_prompt}"
+
+        prompt += f"\nCurrent date: {date.today().isoformat()}"
+        prompt += f"\nCurrent working directory: {self.cwd.replace('\\\\', '/')}"
+        return prompt

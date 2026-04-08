@@ -18,6 +18,10 @@ PROVIDER_ENV_MAP = {
 
 
 class AuthStorage:
+    @staticmethod
+    def _default_env_var(provider: str) -> str:
+        return provider.upper().replace("-", "_").replace(".", "_") + "_API_KEY"
+
     def __init__(self, path: str | None = None, in_memory: bool = False) -> None:
         self._path = Path(path or get_auth_path()) if not in_memory else None
         self._runtime: dict[str, str] = {}
@@ -44,15 +48,14 @@ class AuthStorage:
         stored = self._data.get("apiKeys", {}).get(provider)
         if stored:
             return stored
-        env = PROVIDER_ENV_MAP.get(provider)
-        if env:
-            val = os.getenv(env)
-            if val:
-                return val
+        env = PROVIDER_ENV_MAP.get(provider) or self._default_env_var(provider)
+        val = os.getenv(env)
+        if val:
+            return val
         return None
 
     def env_var_for_provider(self, provider: str) -> str | None:
-        return PROVIDER_ENV_MAP.get(provider)
+        return PROVIDER_ENV_MAP.get(provider) or self._default_env_var(provider)
 
     @classmethod
     def create(cls, path: str | None = None) -> "AuthStorage":

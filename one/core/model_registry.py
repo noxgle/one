@@ -40,6 +40,19 @@ class ModelRegistry:
                         )
             except Exception:
                 pass
+        self._models = self._dedupe_models(self._models)
+
+    @staticmethod
+    def _dedupe_models(models: list[ModelInfo]) -> list[ModelInfo]:
+        out: list[ModelInfo] = []
+        seen: set[tuple[str, str]] = set()
+        for m in models:
+            key = (m.provider, m.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(m)
+        return out
 
     def all(self) -> list[ModelInfo]:
         return list(self._models)
@@ -54,6 +67,14 @@ class ModelRegistry:
         for m in self._models:
             if m.provider == provider and m.id == model_id:
                 return m
+        return None
+
+    def resolve(self, provider: str, model_id: str, *, allow_dynamic: bool = False) -> ModelInfo | None:
+        found = self.find(provider, model_id)
+        if found:
+            return found
+        if allow_dynamic and provider.strip() and model_id.strip():
+            return ModelInfo(provider=provider, id=model_id, reasoning=True, context_window=None)
         return None
 
     def has_configured_auth(self, model: ModelInfo) -> bool:

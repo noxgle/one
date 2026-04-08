@@ -5,22 +5,27 @@
 ### P0 — Największe braki funkcjonalne
 
 - [ ] Zaimplementować pełny interactive TUI parity z `pi`
-  - [x] status line (model/thinking/context/cwd/queue)
-  - [x] podstawowe komendy slash (`/help`, `/stats`, `/state`, `/model`, `/thinking`, `/steer`, `/follow`, `/compact`, `/login`, `/config`, `/bash`, `/queue`, `/tools`, `/clear`)
+  - [x] status line (model/thinking/context/cwd/queue/tokens/retry-state)
+  - [x] podstawowe komendy slash (`/help`, `/stats`, `/state`, `/model`, `/thinking`, `/steer`, `/follow`, `/compact`, `/login`, `/config`, `/bash`, `/queue`, `/tools`, `/clear`, `/abort`, `/retry`)
+  - [x] podstawowa obsługa skrótów/sterowania (`Ctrl+C` -> abort podczas streamingu)
   - [ ] pełna parity skrótów klawiszowych i układu TUI jak w TS
 - [ ] Zaimplementować pełny i stabilny tool-calling flow (jak w `pi`)
   - [x] pętla model -> tool -> model
   - [x] eventy `tool_call_start/end`, `tool_call_error`, `turn_start/end`, `auto_retry_start/end`
   - [x] limity bezpieczeństwa (`tools.maxSteps`, `tools.timeoutSec`)
   - [x] abort semantics (przerwanie promptu także podczas requestu do providera)
-  - [x] ograniczenie payloadu `toolResult` do kontekstu modelu (cap znaków)
+  - [x] ograniczenie payloadu `toolResult` do kontekstu modelu (cap znaków + head/tail fallback)
+  - [x] reason-aware `turn_end` (`completed/abort/error/tool_step_limit`)
+  - [x] kolejki `steer/follow_up` zachowane przy abort/retry
   - [ ] domknięcie parity edge-case'ów i semantyki retry 1:1 z TS
 - [ ] Dodać pełne wsparcie providerów + auth/login parity
   - [x] auth precedence `runtime -> file -> env`
   - [x] wsparcie `openai`, `anthropic`, `gemini`, `openrouter`, `ollama-cloud`
+  - [x] `/login` flow practical: walidacja provider/model + ustawianie default provider/model
   - [ ] pełny `/login` parity (subskrypcja/OAuth flow jak w `pi`)
 - [ ] Uzupełnić CLI parity (komendy pakietowe/config)
-  - [x] komendy `install/remove/update/list/config` (baseline)
+  - [x] komendy `install/remove/update/list/config`
+  - [x] idempotencja i walidacja usage + spójne exit codes dla error path
   - [ ] domknięcie pełnej semantyki parity z TS
 
 ## P1 — Integracje i protokoły
@@ -41,24 +46,25 @@
 
 ### 1. Interactive TUI
 - [x] Header/status context usage
-- [ ] Footer/status tokenów/kosztu parity z `pi`
+- [x] Footer/status token usage + retry state (praktyczna parity)
 - [ ] Komendy i skróty klawiszowe jak w `pi`
 - [ ] UI hooks dla extension widgets/overlays
 
 ### 2. Tool-calling
 - [x] Ujednolicony kontrakt wywołań narzędzi (baseline)
-- [x] Obsługa błędów/retry/tool-result event parity (baseline)
+- [x] Obsługa błędów/retry/tool-result event parity (praktyczna)
 - [ ] Dodać pełny flow 1:1 bez uproszczeń względem `pi`
 
 ### 3. Providers/Auth
 - [x] Rozszerzona lista providerów (w tym `ollama-cloud`)
 - [x] Adapter `ollama-cloud` bez pól nieobsługiwanych (`reasoning_effort`, wymuszone `temperature`)
 - [x] Lepsza diagnostyka błędów provider API (status + body)
-- [ ] Dodać `/login` i pełne flow subskrypcji/OAuth
+- [x] Dodać `/login` practical flow (provider/key/model + defaults)
+- [ ] Dodać pełny `/login` parity subskrypcji/OAuth
 - [x] Utrzymany precedence: runtime override -> plik auth -> env
 
 ### 4. CLI parity
-- [x] Dodane komendy: `install/remove/update/list/config`
+- [x] Dodane i utwardzone komendy: `install/remove/update/list/config`
 - [ ] Ujednolicić semantykę flag i zachowanie trybów
 
 ### 5. RPC parity

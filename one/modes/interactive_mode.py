@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from one.core.types import ModelInfo
+
 
 class InteractiveMode:
     def __init__(self, runtime_host: Any, options: dict[str, Any] | None = None) -> None:
@@ -127,6 +129,9 @@ class InteractiveMode:
             if line.strip() == "/clear":
                 print("\033[2J\033[H", end="")
                 continue
+            if line.strip() == "/model":
+                print("Usage: /model <provider>/<model-id>")
+                continue
             if line.strip() == "/abort":
                 await session.abort()
                 print("Abort requested.")
@@ -137,12 +142,15 @@ class InteractiveMode:
                     print("Usage: /model <provider>/<model-id>")
                     continue
                 provider, model_id = val.split("/", 1)
-                model = session.model_registry.find(provider, model_id)
+                model = session.model_registry.resolve(provider, model_id, allow_dynamic=True)
                 if not model:
                     print(f"Model not found: {provider}/{model_id}")
                     continue
                 await session.set_model(model)
-                print(f"Model set to {provider}/{model_id}")
+                if session.model_registry.find(provider, model_id) is None:
+                    print(f"Model set to {provider}/{model_id} (dynamic)")
+                else:
+                    print(f"Model set to {provider}/{model_id}")
                 continue
             if line.startswith("/thinking "):
                 level = line[len("/thinking ") :].strip()
@@ -165,31 +173,31 @@ class InteractiveMode:
             if line.startswith("/login"):
                 rest = line[len("/login") :].strip()
                 parts = rest.split() if rest else []
-                provider = parts[0] if len(parts) >= 1 else input("Provider (e.g. openai/openrouter/ollama-cloud): ").strip()
+                provider = parts[0] if len(parts) >= 1 else input("Provider: ").strip()
                 if not provider:
                     print("Provider is required.")
-                    continue
-                known_providers = session.model_registry.providers()
-                if provider not in known_providers:
-                    print(f"Unknown provider: {provider}. Available: {', '.join(known_providers)}")
                     continue
                 api_key = parts[1] if len(parts) >= 2 else input("API key: ").strip()
                 if not api_key:
                     print("API key is required.")
                     continue
-                model_input = parts[2] if len(parts) >= 3 else input("Default model (optional): ").strip()
+                if len(parts) >= 3:
+                    model_input = parts[2]
+                elif parts:
+                    model_input = ""
+                else:
+                    model_input = input("Default model (optional): ").strip()
                 selected_model = None
                 if model_input:
-                    selected_model = session.model_registry.find(provider, model_input)
+                    selected_model = session.model_registry.resolve(provider, model_input, allow_dynamic=True)
                     if not selected_model:
-                        models = [m.id for m in session.model_registry.models_for_provider(provider)]
-                        print(f"Model not found for {provider}: {model_input}. Available: {', '.join(models)}")
+                        print(f"Model not found for {provider}: {model_input}")
                         continue
                 session.model_registry.set_stored_api_key(provider, api_key)
                 session.settings_manager.set_default_provider(provider)
                 if selected_model:
                     session.settings_manager.set_default_model(selected_model.id)
-                    await session.set_model(selected_model)
+                    await session.set_model(ModelInfo(provider=selected_model.provider, id=selected_model.id, reasoning=selected_model.reasoning, context_window=selected_model.context_window))
                 print(
                     f"Stored key for {provider}."
                     + (f" Default model set to {selected_model.id}." if selected_model else "")
@@ -238,6 +246,9 @@ class InteractiveMode:
                     print((result.get("output") or "").rstrip())
                 except Exception as e:
                     print(str(e))
+                continue
+            if line.startswith("/"):
+                print(f"Unknown command: {line.strip()}. Use /help.")
                 continue
             await session.prompt(line)
 

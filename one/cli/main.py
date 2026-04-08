@@ -223,10 +223,10 @@ async def _run(argv: list[str]) -> int:
     if parsed.model:
         if "/" in parsed.model and not parsed.provider:
             p, m = parsed.model.split("/", 1)
-            model = registry.find(p, m)
+            model = registry.resolve(p, m, allow_dynamic=True)
         else:
             provider = parsed.provider or settings.get_default_provider() or "openai"
-            model = registry.find(provider, parsed.model)
+            model = registry.resolve(provider, parsed.model, allow_dynamic=True)
     if not model:
         avail = registry.get_available()
         if avail:

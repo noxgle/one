@@ -67,16 +67,15 @@ class AgentSession:
             return "".join(x.get("text", "") for x in content if x.get("type") == "text")
         return str(content)
 
-    def _tool_system_prompt(self) -> str:
-        names = ", ".join(self._active_tools) if self._active_tools else "none"
-        return (
-            "You can use local tools.\n"
-            f"Available tools: {names}.\n"
-            "When a tool is needed, respond ONLY with JSON in this exact shape:\n"
-            '{"tool":"<name>","args":{...}}\n'
-            "Do not add markdown, code fences, or extra text in tool-call responses.\n"
-            "When enough information is available, respond normally in plain text."
-        )
+    def _build_runtime_system_prompt(self) -> str:
+        getter = getattr(self.resource_loader, "get_system_prompt", None)
+        if not callable(getter):
+            return "You are an expert coding assistant."
+        try:
+            return getter(selected_tools=self._active_tools)
+        except TypeError:
+            # Backward compatibility with older loaders/mocks.
+            return getter()
 
     def _try_parse_tool_call(self, text: str) -> dict[str, Any] | None:
         candidates: list[str] = []
@@ -367,8 +366,7 @@ class AgentSession:
 
     def _flatten_messages_for_provider(self) -> list[dict[str, Any]]:
         msgs = [
-            {"role": "system", "content": self.resource_loader.get_system_prompt()},
-            {"role": "system", "content": self._tool_system_prompt()},
+            {"role": "system", "content": self._build_runtime_system_prompt()},
         ]
         for m in self.messages:
             role = m.get("role")
