@@ -1,20 +1,58 @@
 from __future__ import annotations
 
+import atexit
 import json
+from pathlib import Path
 from typing import Any
 
 from one.core.types import ModelInfo
+from one.config import get_agent_dir
+
+try:
+    import readline  # type: ignore
+except Exception:  # pragma: no cover
+    readline = None
 
 
 class InteractiveMode:
+    _THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"]
+
     def __init__(self, runtime_host: Any, options: dict[str, Any] | None = None) -> None:
         self.runtime_host = runtime_host
         self.options = options or {}
+        self._history_initialized = False
+
+    def _setup_readline(self) -> None:
+        if self._history_initialized:
+            return
+        self._history_initialized = True
+        if readline is None:
+            return
+        try:
+            history_path = Path(get_agent_dir()) / "interactive.history"
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            if history_path.exists():
+                readline.read_history_file(str(history_path))
+            readline.parse_and_bind("set editing-mode emacs")
+            readline.parse_and_bind("tab: complete")
+            readline.parse_and_bind('"\\C-l": clear-screen')
+            def _save_history() -> None:
+                try:
+                    readline.write_history_file(str(history_path))
+                except Exception:
+                    return
+
+            atexit.register(_save_history)
+        except Exception:
+            # History/key bindings are best-effort only.
+            return
 
     async def run(self) -> None:
+        self._setup_readline()
         session = self.runtime_host.session
         assistant_streamed = False
         retry_state = "idle"
+        printed_banner = False
 
         def on_event(event: dict) -> None:
             nonlocal assistant_streamed, retry_state
@@ -74,8 +112,11 @@ class InteractiveMode:
                 print(f"[Queue] s={len(q.get('steering', []))} f={len(q.get('followUp', []))}", flush=True)
 
         session.subscribe(on_event)
-        print("Interactive mode. Type /exit to quit. Use /help for commands.")
         while True:
+            if not printed_banner:
+                print("Interactive mode. Type /exit to quit. Use /help for commands.")
+                print("Shortcuts: Ctrl+C abort/exit | Ctrl+L clear | Ctrl+R history search | Up/Down history")
+                printed_banner = True
             model_label = f"{session.model.provider}/{session.model.id}" if session.model else "no-model"
             usage = session.get_context_usage()
             usage_text = ""
@@ -88,8 +129,12 @@ class InteractiveMode:
             print(
                 f"[{model_label} | thinking:{session.thinking_level}{usage_text} | tokens:{tokens_total} | retry:{retry_state} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
             )
+            print("[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /abort | /exit]")
             try:
                 line = input("\n> ")
+            except EOFError:
+                print("")
+                break
             except KeyboardInterrupt:
                 if session.is_streaming:
                     await session.abort()
@@ -99,12 +144,25 @@ class InteractiveMode:
                 break
             if not line.strip():
                 continue
+            aliases = {
+                "/q": "/exit",
+                "/h": "/help",
+                "/s": "/status",
+                "/st": "/status",
+                "/m": "/model",
+                "/t": "/thinking",
+                "/c": "/clear",
+                "/qq": "/queue clear",
+                "/mc": "/model-cycle",
+                "/tc": "/thinking-cycle",
+            }
+            line = aliases.get(line.strip(), line)
             if line.strip() in {"/exit", "/quit"}:
                 break
             if line.strip() == "/help":
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort\n"
-                    "/model <provider/model> | /model-cycle | /thinking <level> | /thinking-cycle\n"
+                    "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /login [provider] [apiKey] [model]\n"
                     "/retry <on|off> | /config [key] [value]\n"
                     "/bash <command>"
@@ -134,6 +192,22 @@ class InteractiveMode:
             if line.strip() == "/queue":
                 print(json.dumps(session.get_pending_queues(), ensure_ascii=False, indent=2))
                 continue
+            if line.startswith("/queue "):
+                mode = line[len("/queue ") :].strip().lower()
+                if mode.startswith("clear"):
+                    target = "all"
+                    parts = mode.split(maxsplit=1)
+                    if len(parts) == 2:
+                        target = parts[1]
+                    try:
+                        cleared = session.clear_pending_queues(target)
+                    except ValueError:
+                        print("Usage: /queue clear [all|steering|follow]")
+                        continue
+                    print(json.dumps(cleared, ensure_ascii=False, indent=2))
+                    continue
+                print("Usage: /queue or /queue clear [all|steering|follow]")
+                continue
             if line.strip() == "/tools":
                 print(json.dumps({"tools": session.active_tools}, ensure_ascii=False, indent=2))
                 continue
@@ -141,7 +215,19 @@ class InteractiveMode:
                 print("\033[2J\033[H", end="")
                 continue
             if line.strip() == "/model":
-                print("Usage: /model <provider>/<model-id>")
+                current = f"{session.model.provider}/{session.model.id}" if session.model else "none"
+                providers = session.model_registry.providers()
+                print(
+                    json.dumps(
+                        {
+                            "current": current,
+                            "providers": providers,
+                            "usage": "/model <provider>/<model-id>",
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
                 continue
             if line.strip() == "/abort":
                 await session.abort()
@@ -174,6 +260,19 @@ class InteractiveMode:
                 level = line[len("/thinking ") :].strip()
                 session.set_thinking_level(level)
                 print(f"Thinking level set to {level}")
+                continue
+            if line.strip() == "/thinking":
+                print(
+                    json.dumps(
+                        {
+                            "current": session.thinking_level,
+                            "levels": list(self._THINKING_LEVELS),
+                            "usage": "/thinking <off|minimal|low|medium|high|xhigh>",
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
                 continue
             if line.strip() == "/thinking-cycle":
                 level = session.cycle_thinking_level()

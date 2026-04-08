@@ -104,11 +104,36 @@ class _DummySession:
     def get_pending_queues(self) -> dict[str, list[str]]:
         return {"steering": list(self._steering), "followUp": list(self._follow)}
 
+    def clear_pending_queues(self, target: str = "all") -> dict[str, list[str]]:
+        t = (target or "all").strip().lower()
+        if t in {"all", "both"}:
+            self._steering.clear()
+            self._follow.clear()
+        elif t in {"steering", "steer", "s"}:
+            self._steering.clear()
+        elif t in {"follow", "followup", "follow_up", "f"}:
+            self._follow.clear()
+        else:
+            raise ValueError("target must be one of: all, steering, follow")
+        return {"steering": list(self._steering), "followUp": list(self._follow)}
+
     async def set_model(self, model: ModelInfo) -> None:
         self.model = model
 
+    async def cycle_model(self):
+        self.model = ModelInfo(provider="openai", id="gpt-4o")
+        return type(
+            "R",
+            (),
+            {"model": self.model, "thinkingLevel": self.thinking_level, "isScoped": False},
+        )()
+
     def set_thinking_level(self, level: str) -> None:
         self.thinking_level = level
+
+    def cycle_thinking_level(self) -> str:
+        self.thinking_level = "low"
+        return self.thinking_level
 
     async def steer(self, text: str) -> None:
         self._steering.append(text)
@@ -155,6 +180,8 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
         "/help",
         "/stats",
         "/state",
+        "/model",
+        "/thinking",
         "/queue",
         "/tools",
         "/clear",
@@ -162,6 +189,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
         "/thinking low",
         "/steer abc",
         "/follow def",
+        "/queue clear steering",
         "/compact now",
         "/login openai sk-test gpt-4.1",
         "/retry off",
@@ -177,6 +205,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     out = capsys.readouterr().out
 
     assert "Use /help for commands" in out
+    assert "Shortcuts: Ctrl+C abort/exit" in out
     assert "Model set to openai/gpt-4o" in out
     assert "Thinking level set to low" in out
     assert "Queued steering message." in out
@@ -192,7 +221,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert session.settings_manager.default_model == "gpt-4.1"
     assert session.model_registry.stored_keys["openai"] == "sk-test"
     assert session.retry_enabled is False
-    assert session.get_pending_queues()["steering"] == ["abc"]
+    assert session.get_pending_queues()["steering"] == []
     assert session.get_pending_queues()["followUp"] == ["def"]
     assert session.aborted is True
     assert session.prompt_calls == []
@@ -225,6 +254,8 @@ async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
     commands = [
         "/model",
         "/model nope",
+        "/thinking",
+        "/queue clear nope",
         "/retry maybe",
         "/login custom-provider sk",
         "/unknown-cmd",
@@ -237,7 +268,33 @@ async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
     out = capsys.readouterr().out
 
     assert "Usage: /model <provider>/<model-id>" in out
+    assert "Usage: /queue clear [all|steering|follow]" in out
     assert "Usage: /retry <on|off>" in out
     assert "Stored key for custom-provider." in out
     assert "Unknown command: /unknown-cmd. Use /help." in out
     assert session.prompt_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_short_aliases(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+
+    commands = [
+        "/st",
+        "/m",
+        "/t",
+        "/mc",
+        "/tc",
+        "/qq",
+        "/c",
+        "/q",
+    ]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+
+    await mode.run()
+    out = capsys.readouterr().out
+    assert '"sessionId": "sid"' in out
+    assert "Model cycled to" in out or "No available models to cycle." in out
+    assert "Thinking level cycled to" in out
+    assert '"levels": [' in out

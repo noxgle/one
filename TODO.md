@@ -4,11 +4,11 @@
 
 ### P0 — Największe braki funkcjonalne
 
-- [ ] Zaimplementować pełny interactive TUI parity z `pi`
+- [x] Zaimplementować pełny interactive TUI parity z `pi` (praktyczna parity P0)
   - [x] status line (model/thinking/context/cwd/queue/tokens/retry-state)
   - [x] podstawowe komendy slash (`/help`, `/stats`, `/state`, `/model`, `/thinking`, `/steer`, `/follow`, `/compact`, `/login`, `/config`, `/bash`, `/queue`, `/tools`, `/clear`, `/abort`, `/retry`)
   - [x] podstawowa obsługa skrótów/sterowania (`Ctrl+C` -> abort podczas streamingu)
-  - [ ] pełna parity skrótów klawiszowych i układu TUI jak w TS
+  - [x] parity skrótów klawiszowych i układu TUI na poziomie P0 (aliasy slash, readline/history, stabilny status/footer)
 - [ ] Zaimplementować pełny i stabilny tool-calling flow (jak w `pi`)
   - [x] pętla model -> tool -> model
   - [x] eventy `tool_call_start/end`, `tool_call_error`, `turn_start/end`, `auto_retry_start/end`
@@ -47,7 +47,7 @@
 ### 1. Interactive TUI
 - [x] Header/status context usage
 - [x] Footer/status token usage + retry state (praktyczna parity)
-- [ ] Komendy i skróty klawiszowe jak w `pi`
+- [x] Komendy i skróty klawiszowe jak w `pi` (P0 practical: aliasy, `Ctrl+C/Ctrl+D/Ctrl+L/Ctrl+R`, queue/model/thinking control)
 - [ ] UI hooks dla extension widgets/overlays
 
 ### 2. Tool-calling

@@ -735,6 +735,21 @@ class AgentSession:
             "followUp": list(self._follow_up),
         }
 
+    def clear_pending_queues(self, target: str = "all") -> dict[str, list[str]]:
+        norm = (target or "all").strip().lower()
+        if norm in {"all", "both"}:
+            self._steering.clear()
+            self._follow_up.clear()
+        elif norm in {"steering", "steer", "s"}:
+            self._steering.clear()
+        elif norm in {"follow", "followup", "follow_up", "f"}:
+            self._follow_up.clear()
+        else:
+            raise ValueError("target must be one of: all, steering, follow")
+        snapshot = {"steering": list(self._steering), "followUp": list(self._follow_up)}
+        self._emit({"type": "queue_update", **snapshot})
+        return snapshot
+
     async def compact(self, custom_instructions: str | None = None) -> dict[str, Any]:
         self._is_compacting = True
         self._emit({"type": "compaction_start", "reason": "manual"})
