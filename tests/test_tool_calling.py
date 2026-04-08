@@ -67,6 +67,26 @@ class _SlowProvider:
         return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
 
 
+class _FlakyProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        from one.providers.base import ChatResult
+
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary provider issue")
+        return ChatResult(text="RECOVERED", raw={}, usage={}, stop_reason="stop")
+
+
 @pytest.mark.asyncio
 async def test_tool_calling_multistep_cycle(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
@@ -170,6 +190,7 @@ async def test_turn_end_emitted_on_non_retryable_error(tmp_path: Path):
     turn_end = [e for e in events if e.get("type") == "turn_end"]
     assert turn_end
     assert turn_end[-1]["ok"] is False
+    assert turn_end[-1]["reason"] == "error"
     assert "provider down" in turn_end[-1]["error"]
 
     assert any(e.get("type") == "agent_end" for e in events)
@@ -243,6 +264,7 @@ async def test_abort_stops_turn_with_abort_message(tmp_path: Path):
     turn_end = [e for e in events if e.get("type") == "turn_end"]
     assert turn_end
     assert turn_end[-1]["aborted"] is True
+    assert turn_end[-1]["reason"] == "abort"
 
 
 @pytest.mark.asyncio
@@ -267,3 +289,53 @@ async def test_tool_result_message_payload_is_capped_for_context(tmp_path: Path)
     result = payload["result"]
     assert len(result) <= 13000
     assert "truncated to 12000 chars" in result
+
+
+@pytest.mark.asyncio
+async def test_retry_then_success_emits_reason_completed(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"retry": {"enabled": True, "maxRetries": 2, "baseDelayMs": 1, "maxDelayMs": 1}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium")
+    agent.providers = {"openai": _FlakyProvider()}
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("retry once")
+
+    assert agent.get_last_assistant_text() == "RECOVERED"
+    turn_ends = [e for e in events if e.get("type") == "turn_end"]
+    assert len(turn_ends) >= 2
+    assert turn_ends[0]["ok"] is False
+    assert turn_ends[-1]["ok"] is True
+    assert turn_ends[-1]["reason"] in {"stop", "completed"}
+
+
+@pytest.mark.asyncio
+async def test_abort_does_not_drop_queued_messages(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"retry": {"enabled": False}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium")
+    agent.providers = {"openai": _SlowProvider()}
+
+    task = asyncio.create_task(agent.prompt("long task"))
+    await asyncio.sleep(0.02)
+    await agent.steer("next-a")
+    await agent.follow_up("next-b")
+    await agent.abort()
+    await task
+
+    queues = agent.get_pending_queues()
+    assert queues["steering"] == ["next-a"]
+    assert queues["followUp"] == ["next-b"]

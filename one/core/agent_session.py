@@ -113,8 +113,12 @@ class AgentSession:
         if msg_payload["ok"]:
             text = str(payload.get("result") or payload.get("outputText") or "")
             if len(text) > self._TOOL_RESULT_MAX_CHARS:
+                head = int(self._TOOL_RESULT_MAX_CHARS * 0.7)
+                tail = self._TOOL_RESULT_MAX_CHARS - head
                 text = (
-                    text[: self._TOOL_RESULT_MAX_CHARS]
+                    text[:head]
+                    + "\n\n...[truncated]...\n\n"
+                    + text[-tail:]
                     + f"\n\n[Tool output truncated to {self._TOOL_RESULT_MAX_CHARS} chars for model context.]"
                 )
             msg_payload["result"] = text
@@ -129,6 +133,17 @@ class AgentSession:
             if payload.get("errorType"):
                 msg_payload["errorType"] = payload.get("errorType")
         return msg_payload
+
+    def _abort_assistant_message(self) -> dict[str, Any]:
+        return {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Request aborted."}],
+            "provider": self.model.provider if self.model else None,
+            "model": self.model.id if self.model else None,
+            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+            "stopReason": "abort",
+            "timestamp": int(time.time() * 1000),
+        }
 
     async def _execute_tool_by_name(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
         if tool_name not in self._active_tools:
@@ -407,27 +422,11 @@ class AgentSession:
                 final_assistant: dict[str, Any] | None = None
                 for _ in range(max_tool_steps):
                     if self._abort_requested:
-                        final_assistant = {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": "Request aborted."}],
-                            "provider": self.model.provider if self.model else None,
-                            "model": self.model.id if self.model else None,
-                            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                            "stopReason": "abort",
-                            "timestamp": int(time.time() * 1000),
-                        }
+                        final_assistant = self._abort_assistant_message()
                         break
                     assistant = await self._invoke_provider(self._flatten_messages_for_provider())
                     if self._abort_requested:
-                        final_assistant = {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": "Request aborted."}],
-                            "provider": self.model.provider if self.model else None,
-                            "model": self.model.id if self.model else None,
-                            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                            "stopReason": "abort",
-                            "timestamp": int(time.time() * 1000),
-                        }
+                        final_assistant = self._abort_assistant_message()
                         break
                     assistant_text = self._assistant_text(assistant)
                     tool_call = self._try_parse_tool_call(assistant_text)
@@ -484,6 +483,7 @@ class AgentSession:
                         "ok": True,
                         "attempt": attempt + 1,
                         "aborted": final_assistant.get("stopReason") == "abort",
+                        "reason": final_assistant.get("stopReason") or "completed",
                         "message": final_assistant,
                         "toolResults": tool_results,
                     }
@@ -495,7 +495,16 @@ class AgentSession:
                 max_retries = int(retry_cfg.get("maxRetries", 3))
                 error_text = str(e).strip() or e.__class__.__name__
                 will_retry = retries_enabled and attempt < max_retries
-                self._emit({"type": "turn_end", "ok": False, "attempt": attempt + 1, "error": error_text, "willRetry": will_retry})
+                self._emit(
+                    {
+                        "type": "turn_end",
+                        "ok": False,
+                        "attempt": attempt + 1,
+                        "reason": "error",
+                        "error": error_text,
+                        "willRetry": will_retry,
+                    }
+                )
                 if not will_retry:
                     error_msg = {
                         "role": "assistant",
@@ -530,8 +539,52 @@ class AgentSession:
                         "errorMessage": error_text,
                     }
                 )
+                if self._abort_requested:
+                    abort_msg = self._abort_assistant_message()
+                    self.messages.append(abort_msg)
+                    self.session_manager.append_message(abort_msg)
+                    self._emit({"type": "message_start", "message": abort_msg})
+                    self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
+                    self._emit({"type": "message_end", "message": abort_msg})
+                    self._emit(
+                        {
+                            "type": "turn_end",
+                            "ok": True,
+                            "attempt": attempt,
+                            "aborted": True,
+                            "reason": "abort",
+                            "message": abort_msg,
+                            "toolResults": [],
+                        }
+                    )
+                    self._emit({"type": "agent_end", "messages": [user_msg, abort_msg]})
+                    self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
+                    self._retrying = False
+                    break
                 await asyncio.sleep(delay_ms / 1000)
-                self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": True})
+                if self._abort_requested:
+                    abort_msg = self._abort_assistant_message()
+                    self.messages.append(abort_msg)
+                    self.session_manager.append_message(abort_msg)
+                    self._emit({"type": "message_start", "message": abort_msg})
+                    self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
+                    self._emit({"type": "message_end", "message": abort_msg})
+                    self._emit(
+                        {
+                            "type": "turn_end",
+                            "ok": True,
+                            "attempt": attempt,
+                            "aborted": True,
+                            "reason": "abort",
+                            "message": abort_msg,
+                            "toolResults": [],
+                        }
+                    )
+                    self._emit({"type": "agent_end", "messages": [user_msg, abort_msg]})
+                    self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
+                    self._retrying = False
+                    break
+                self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": True, "aborted": False})
                 self._retrying = False
 
         self._is_streaming = False
