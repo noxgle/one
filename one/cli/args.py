@@ -7,7 +7,7 @@ from typing import Any
 from one.config import APP_NAME
 
 VALID_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
-VALID_MODES = {"text", "json", "rpc"}
+VALID_MODES = {"text", "json", "rpc", "tui"}
 
 
 @dataclass
@@ -184,7 +184,7 @@ Options:
   --llama-cpp-url <url>
   --system-prompt <text>
   --append-system-prompt <text>
-  --mode <text|json|rpc>
+  --mode <text|json|rpc|tui>
   --print, -p
   --continue, -c
   --resume, -r

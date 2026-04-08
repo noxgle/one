@@ -34,6 +34,12 @@
 - [ ] Uzupełnić RPC parity (komendy, eventy, streaming, extension UI)
 - [ ] Zaimplementować pełny runtime extensions/skills/packages
 - [ ] Dopracować session/compaction parity (branching, migracje, eksport)
+- [x] Zaimplementować pełne TUI (`rich`) z obsługą zmiennych theme (v1 practical)
+  - [x] Layout v1: header/status/body/input/footer
+  - [x] Loader theme z JSON (`--theme`) + style mapowanie
+  - [x] Render eventów runtime (`turn_*`, `tool_*`, `retry_*`) w widoku TUI
+  - [ ] Podpiąć extension widgets/overlays do warstwy TUI
+  - [ ] Snapshot/regression testy renderingu TUI
 
 ## P2 — Jakość i zgodność
 

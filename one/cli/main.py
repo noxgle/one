@@ -11,7 +11,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
-from one.modes import InteractiveMode, run_print_mode, run_rpc_mode
+from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode
 from one.resources.resource_loader import DefaultResourceLoader
 from one.tools.index import all_tools
 
@@ -301,6 +301,11 @@ async def _run(argv: list[str]) -> int:
 
     if parsed.mode == "rpc":
         await run_rpc_mode(host)
+        return 0
+
+    if parsed.mode == "tui":
+        tui = TuiMode(host, {"verbose": parsed.verbose, "theme": settings.get_theme()})
+        await tui.run()
         return 0
 
     interactive = InteractiveMode(host, {"verbose": parsed.verbose})

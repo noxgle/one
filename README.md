@@ -11,6 +11,24 @@ pip install -e .[dev]
 one --help
 ```
 
+Run TUI mode:
+
+```bash
+one --mode tui
+```
+
+Built-in TUI themes:
+- `default`
+- `light`
+- `hacker`
+- `solarized`
+
+Switch theme in TUI:
+
+```text
+/theme solarized
+```
+
 ## Global install (run `one` from any directory)
 
 ```bash
