@@ -87,6 +87,30 @@ class _FlakyProvider:
         return ChatResult(text="RECOVERED", raw={}, usage={}, stop_reason="stop")
 
 
+class _FailThenStableProvider:
+    def __init__(self, fail_calls: int = 1, success_delay_sec: float = 0.0) -> None:
+        self.fail_calls = fail_calls
+        self.success_delay_sec = success_delay_sec
+        self.calls = 0
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        from one.providers.base import ChatResult
+
+        self.calls += 1
+        if self.calls <= self.fail_calls:
+            raise RuntimeError("transient")
+        if self.success_delay_sec > 0:
+            await asyncio.sleep(self.success_delay_sec)
+        return ChatResult(text="OK", raw={}, usage={}, stop_reason="stop")
+
+
 @pytest.mark.asyncio
 async def test_tool_calling_multistep_cycle(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
@@ -401,3 +425,31 @@ async def test_abort_does_not_drop_queued_messages(tmp_path: Path):
     queues = agent.get_pending_queues()
     assert queues["steering"] == ["next-a"]
     assert queues["followUp"] == ["next-b"]
+
+
+@pytest.mark.asyncio
+async def test_retry_success_then_queue_drains_once_without_duplication(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"retry": {"enabled": True, "maxRetries": 2, "baseDelayMs": 1, "maxDelayMs": 1}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium")
+    provider = _FailThenStableProvider(fail_calls=1, success_delay_sec=0.03)
+    agent.providers = {"openai": provider}
+
+    task = asyncio.create_task(agent.prompt("start"))
+    await asyncio.sleep(0.005)
+    await agent.steer("s1")
+    await agent.follow_up("f1")
+    await task
+
+    user_messages = [m for m in agent.messages if m.get("role") == "user"]
+    contents = [m.get("content") for m in user_messages]
+    assert contents.count("start") == 1
+    assert contents.count("s1") == 1
+    assert contents.count("f1") == 1
+    assert agent.get_pending_queues() == {"steering": [], "followUp": []}

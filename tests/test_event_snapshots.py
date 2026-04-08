@@ -73,6 +73,22 @@ class _SlowProvider:
         return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
 
 
+class _AlwaysFailProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        self.calls += 1
+        raise RuntimeError("always-fail")
+
+
 def _mk_agent(tmp_path: Path, tools: list[str] | None = None, settings_override: dict[str, Any] | None = None) -> AgentSession:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
@@ -99,6 +115,8 @@ def _compact(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if "aborted" in e:
             item["aborted"] = e.get("aborted")
         if e.get("type") == "tool_call_start":
+            item["tool"] = e.get("tool")
+        if e.get("type") == "tool_call_error":
             item["tool"] = e.get("tool")
         if e.get("type") == "tool_call_end":
             item["tool"] = e.get("tool")
@@ -161,3 +179,54 @@ async def test_event_snapshot_abort_path(tmp_path: Path):
     compact = _compact(events)
     assert {"type": "turn_end", "attempt": 1, "ok": True, "reason": "abort", "aborted": True} in compact
     assert {"type": "agent_end"} in compact
+
+
+@pytest.mark.asyncio
+async def test_event_snapshot_tool_error_lifecycle(tmp_path: Path):
+    agent = _mk_agent(tmp_path, tools=["ls"])
+    agent.providers = {"openai": _Provider(['{"tool":"read","args":{"path":"missing.txt"}}', "DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("go")
+    assert _compact(events) == [
+        {"type": "agent_start"},
+        {"type": "message_start"},
+        {"type": "message_end"},
+        {"type": "turn_start", "attempt": 1},
+        {"type": "tool_call_start", "tool": "read"},
+        {"type": "tool_call_error", "tool": "read"},
+        {"type": "tool_call_end", "ok": False, "tool": "read"},
+        {"type": "message_start"},
+        {"type": "message_update"},
+        {"type": "message_end"},
+        {"type": "turn_end", "attempt": 1, "ok": True, "reason": "stop", "aborted": False},
+        {"type": "agent_end"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_event_snapshot_abort_during_retry_keeps_queue(tmp_path: Path):
+    agent = _mk_agent(
+        tmp_path,
+        settings_override={"retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 50, "maxDelayMs": 50}},
+    )
+    agent.providers = {"openai": _AlwaysFailProvider()}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    task = asyncio.create_task(agent.prompt("go"))
+    await asyncio.sleep(0.01)
+    await agent.steer("queued-steer")
+    await agent.follow_up("queued-follow")
+    await agent.abort()
+    await task
+
+    compact = _compact(events)
+    # First failing turn should be marked retryable.
+    assert {"type": "turn_end", "attempt": 1, "ok": False, "reason": "error", "willRetry": True} in compact
+    # Retry cycle should start and end as aborted (without consuming queued messages).
+    assert {"type": "auto_retry_start", "attempt": 1} in compact
+    assert {"type": "auto_retry_end", "attempt": 1, "willRetry": False, "aborted": True} in compact
+    assert {"type": "turn_end", "attempt": 1, "ok": True, "reason": "abort", "aborted": True} in compact
+    assert agent.get_pending_queues() == {"steering": ["queued-steer"], "followUp": ["queued-follow"]}

@@ -17,7 +17,7 @@
   - [x] ograniczenie payloadu `toolResult` do kontekstu modelu (cap znaków + head/tail fallback)
   - [x] reason-aware `turn_end` (`completed/abort/error/tool_step_limit`)
   - [x] kolejki `steer/follow_up` zachowane przy abort/retry
-  - [ ] domknięcie parity edge-case'ów i semantyki retry 1:1 z TS
+  - [x] domknięcie parity edge-case'ów i semantyki retry/abort/queue (P0 practical)
 - [ ] Dodać pełne wsparcie providerów + auth/login parity
   - [x] auth precedence `runtime -> file -> env`
   - [x] wsparcie `openai`, `anthropic`, `gemini`, `openrouter`, `ollama-cloud`
@@ -53,7 +53,8 @@
 ### 2. Tool-calling
 - [x] Ujednolicony kontrakt wywołań narzędzi (baseline)
 - [x] Obsługa błędów/retry/tool-result event parity (praktyczna)
-- [ ] Dodać pełny flow 1:1 bez uproszczeń względem `pi`
+- [x] Snapshoty regresyjne dla `turn_*`, `tool_*`, `retry_*` + edge-case abort/retry/queue
+- [ ] Dodać pełny flow 1:1 bez uproszczeń względem `pi` (poza zakresem P0 practical)
 
 ### 3. Providers/Auth
 - [x] Rozszerzona lista providerów (w tym `ollama-cloud`)
