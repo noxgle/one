@@ -22,6 +22,7 @@
   - [x] auth precedence `runtime -> file -> env`
   - [x] wsparcie `openai`, `anthropic`, `gemini`, `openrouter`, `ollama-cloud`
   - [x] `/login` flow practical: walidacja provider/model + ustawianie default provider/model
+  - [x] `/login status` + `/logout <provider>` + no-auth provider flow (`llama.cpp`)
   - [ ] pełny `/login` parity (subskrypcja/OAuth flow jak w `pi`)
 - [x] Uzupełnić CLI parity (komendy pakietowe/config) (P0 practical)
   - [x] komendy `install/remove/update/list/config`

@@ -163,7 +163,7 @@ class InteractiveMode:
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort\n"
                     "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle\n"
-                    "/steer <text> | /follow <text> | /compact [instructions] | /login [provider] [apiKey] [model]\n"
+                    "/steer <text> | /follow <text> | /compact [instructions] | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value]\n"
                     "/bash <command>"
                 )
@@ -294,13 +294,30 @@ class InteractiveMode:
             if line.startswith("/login"):
                 rest = line[len("/login") :].strip()
                 parts = rest.split() if rest else []
+                if parts and parts[0] == "status":
+                    if len(parts) == 2:
+                        print(
+                            json.dumps(
+                                session.model_registry.get_provider_auth_status(parts[1]),
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                        )
+                    else:
+                        providers = session.model_registry.providers()
+                        statuses = [session.model_registry.get_provider_auth_status(p) for p in providers]
+                        print(json.dumps({"providers": statuses}, ensure_ascii=False, indent=2))
+                    continue
                 provider = parts[0] if len(parts) >= 1 else input("Provider: ").strip()
                 if not provider:
                     print("Provider is required.")
                     continue
-                api_key = parts[1] if len(parts) >= 2 else input("API key: ").strip()
-                if not api_key:
-                    print("API key is required.")
+                requires_api_key = session.model_registry.requires_api_key(provider)
+                api_key = parts[1] if len(parts) >= 2 else (input("API key: ").strip() if requires_api_key else "")
+                if requires_api_key and not api_key:
+                    env_var = session.model_registry.get_provider_auth_status(provider).get("envVar")
+                    hint = f" or set {env_var}" if env_var else ""
+                    print(f"API key is required for {provider}{hint}.")
                     continue
                 if len(parts) >= 3:
                     model_input = parts[2]
@@ -314,15 +331,24 @@ class InteractiveMode:
                     if not selected_model:
                         print(f"Model not found for {provider}: {model_input}")
                         continue
-                session.model_registry.set_stored_api_key(provider, api_key)
+                if api_key:
+                    session.model_registry.set_stored_api_key(provider, api_key)
                 session.settings_manager.set_default_provider(provider)
                 if selected_model:
                     session.settings_manager.set_default_model(selected_model.id)
                     await session.set_model(ModelInfo(provider=selected_model.provider, id=selected_model.id, reasoning=selected_model.reasoning, context_window=selected_model.context_window))
                 print(
-                    f"Stored key for {provider}."
+                    (f"Stored key for {provider}." if api_key else f"Configured provider {provider}.")
                     + (f" Default model set to {selected_model.id}." if selected_model else "")
                 )
+                continue
+            if line.startswith("/logout "):
+                provider = line[len("/logout ") :].strip()
+                if not provider:
+                    print("Usage: /logout <provider>")
+                    continue
+                session.model_registry.remove_stored_api_key(provider)
+                print(f"Removed stored key for {provider}.")
                 continue
             if line.startswith("/retry "):
                 mode = line[len("/retry ") :].strip().lower()

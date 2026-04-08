@@ -22,6 +22,15 @@ def test_auth_precedence_runtime_file_env(tmp_path: Path, monkeypatch):
     assert auth.get_api_key("openai") == "from-runtime"
 
 
+def test_auth_storage_remove_stored_api_key(tmp_path: Path):
+    auth_path = tmp_path / "auth.json"
+    auth = AuthStorage.create(str(auth_path))
+    auth.set_stored_api_key("openai", "secret")
+    assert auth.get_api_key("openai") == "secret"
+    auth.remove_stored_api_key("openai")
+    assert auth.get_api_key("openai") is None
+
+
 def test_auth_error_message_has_provider_hint(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     auth = AuthStorage.in_memory()
@@ -58,6 +67,8 @@ def test_model_registry_llama_cpp_available_without_auth() -> None:
     auth_data = registry.get_api_key_and_headers(model)
     assert auth_data["ok"] is True
     assert auth_data["apiKey"] == ""
+    status = registry.get_provider_auth_status("llama.cpp")
+    assert status["requiresApiKey"] is False
 
 
 def test_model_registry_reads_llama_cpp_url_from_models_json(tmp_path: Path) -> None:

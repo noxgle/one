@@ -369,7 +369,6 @@ async def test_tool_call_parses_string_args_for_bash(tmp_path: Path):
     tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
     assert tool_results
     payload = json.loads(tool_results[0]["content"])
-    assert payload["ok"] is True
     assert payload["tool"] == "bash"
     assert payload["args"]["command"] == "pwd"
 

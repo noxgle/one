@@ -43,6 +43,14 @@ class AuthStorage:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
 
+    def remove_stored_api_key(self, provider: str) -> None:
+        keys = self._data.setdefault("apiKeys", {})
+        if provider in keys:
+            del keys[provider]
+        if self._path:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+
     def get_api_key(self, provider: str) -> str | None:
         if provider in self._runtime:
             return self._runtime[provider]

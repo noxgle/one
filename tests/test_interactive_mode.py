@@ -72,6 +72,20 @@ class _DummyModelRegistry:
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
         self.stored_keys[provider] = api_key
 
+    def remove_stored_api_key(self, provider: str) -> None:
+        self.stored_keys.pop(provider, None)
+
+    def requires_api_key(self, provider: str) -> bool:
+        return provider != "llama.cpp"
+
+    def get_provider_auth_status(self, provider: str) -> dict[str, Any]:
+        return {
+            "provider": provider,
+            "requiresApiKey": self.requires_api_key(provider),
+            "configured": provider in self.stored_keys,
+            "envVar": provider.upper().replace("-", "_").replace(".", "_") + "_API_KEY",
+        }
+
 
 class _DummySession:
     def __init__(self) -> None:
@@ -192,6 +206,8 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
         "/queue clear steering",
         "/compact now",
         "/login openai sk-test gpt-4.1",
+        "/login status openai",
+        "/logout openai",
         "/retry off",
         "/config tools.maxSteps 9",
         "/config tools.maxSteps",
@@ -211,6 +227,8 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert "Queued steering message." in out
     assert "Queued follow-up message." in out
     assert "Stored key for openai." in out
+    assert '"provider": "openai"' in out
+    assert "Removed stored key for openai." in out
     assert "Auto-retry set to off." in out
     assert "Updated tools.maxSteps." in out
     assert "ran:echo hi" in out
@@ -219,7 +237,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert session.model.id == "gpt-4.1"
     assert session.settings_manager.default_provider == "openai"
     assert session.settings_manager.default_model == "gpt-4.1"
-    assert session.model_registry.stored_keys["openai"] == "sk-test"
+    assert "openai" not in session.model_registry.stored_keys
     assert session.retry_enabled is False
     assert session.get_pending_queues()["steering"] == []
     assert session.get_pending_queues()["followUp"] == ["def"]
@@ -257,6 +275,7 @@ async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
         "/thinking",
         "/queue clear nope",
         "/retry maybe",
+        "/login llama.cpp",
         "/login custom-provider sk",
         "/unknown-cmd",
         "/bash",
@@ -270,6 +289,7 @@ async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
     assert "Usage: /model <provider>/<model-id>" in out
     assert "Usage: /queue clear [all|steering|follow]" in out
     assert "Usage: /retry <on|off>" in out
+    assert "Configured provider llama.cpp." in out
     assert "Stored key for custom-provider." in out
     assert "Unknown command: /unknown-cmd. Use /help." in out
     assert session.prompt_calls == []
@@ -298,3 +318,15 @@ async def test_interactive_short_aliases(monkeypatch, capsys):
     assert "Model cycled to" in out or "No available models to cycle." in out
     assert "Thinking level cycled to" in out
     assert '"levels": [' in out
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_status_lists_providers(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    commands = ["/login status", "/exit"]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+    await mode.run()
+    out = capsys.readouterr().out
+    assert '"providers": [' in out
+    assert '"provider": "openai"' in out

@@ -105,6 +105,20 @@ class ModelRegistry:
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
         self._auth.set_stored_api_key(provider, api_key)
 
+    def remove_stored_api_key(self, provider: str) -> None:
+        self._auth.remove_stored_api_key(provider)
+
+    def requires_api_key(self, provider: str) -> bool:
+        return provider not in NO_AUTH_PROVIDERS
+
+    def get_provider_auth_status(self, provider: str) -> dict[str, Any]:
+        return {
+            "provider": provider,
+            "requiresApiKey": self.requires_api_key(provider),
+            "configured": bool(self._auth.get_api_key(provider)),
+            "envVar": self._auth.env_var_for_provider(provider),
+        }
+
     def register_provider(self, _name: str, _config: dict[str, Any]) -> None:
         return
 
