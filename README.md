@@ -26,6 +26,8 @@ export LLAMA_CPP_BASE_URL=http://127.0.0.1:8080
 
 ```bash
 one --provider llama.cpp --model local
+# custom endpoint:
+one --provider llama.cpp --model local --llama-cpp-url http://192.168.200.38:8089
 # or in interactive mode:
 # /model llama.cpp/local
 ```

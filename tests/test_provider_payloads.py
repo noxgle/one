@@ -45,3 +45,11 @@ def test_openai_compatible_headers_without_api_key() -> None:
 def test_provider_registry_includes_llama_cpp() -> None:
     registry = build_provider_registry()
     assert "llama.cpp" in registry
+
+
+def test_provider_registry_llama_cpp_uses_env_base_url(monkeypatch) -> None:
+    monkeypatch.setenv("LLAMA_CPP_BASE_URL", "http://192.168.200.38:8089")
+    registry = build_provider_registry()
+    provider = registry["llama.cpp"]
+    assert isinstance(provider, OpenAICompatibleAdapter)
+    assert provider.base_url == "http://192.168.200.38:8089"

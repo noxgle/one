@@ -17,6 +17,7 @@ class ParsedArgs:
     provider: str | None = None
     model: str | None = None
     api_key: str | None = None
+    llama_cpp_url: str | None = None
     system_prompt: str | None = None
     append_system_prompt: str | None = None
     thinking: str | None = None
@@ -65,6 +66,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--provider")
     parser.add_argument("--model")
     parser.add_argument("--api-key")
+    parser.add_argument("--llama-cpp-url")
     parser.add_argument("--system-prompt")
     parser.add_argument("--append-system-prompt")
     parser.add_argument("--thinking")
@@ -133,6 +135,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         provider=ns.provider,
         model=ns.model,
         api_key=ns.api_key,
+        llama_cpp_url=ns.llama_cpp_url,
         system_prompt=ns.system_prompt,
         append_system_prompt=ns.append_system_prompt,
         thinking=thinking,
@@ -178,6 +181,7 @@ Options:
   --provider <name>
   --model <pattern>
   --api-key <key>
+  --llama-cpp-url <url>
   --system-prompt <text>
   --append-system-prompt <text>
   --mode <text|json|rpc>

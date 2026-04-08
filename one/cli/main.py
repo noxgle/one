@@ -36,6 +36,8 @@ async def _run(argv: list[str]) -> int:
 
     if parsed.offline:
         os.environ[f"{APP_NAME.upper()}_OFFLINE"] = "1"
+    if parsed.llama_cpp_url:
+        os.environ["LLAMA_CPP_BASE_URL"] = parsed.llama_cpp_url
 
     cwd = str(Path.cwd())
     fallback_agent_dir_path = Path(cwd) / ".one" / "agent"

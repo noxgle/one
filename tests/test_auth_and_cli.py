@@ -186,3 +186,29 @@ def test_cli_unknown_tools_is_usage_error(tmp_path: Path):
     )
     assert res.returncode == 2
     assert "Unknown tools: not-a-tool" in res.stdout
+
+
+def test_cli_accepts_llama_cpp_url_flag(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    res = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "one.cli.main",
+            "--llama-cpp-url",
+            "http://192.168.200.38:8089",
+            "--list-models",
+            "llama.cpp",
+        ],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert res.returncode == 0
+    assert "llama.cpp/local" in res.stdout
