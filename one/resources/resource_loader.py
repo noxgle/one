@@ -1,8 +1,129 @@
 from __future__ import annotations
 
-from datetime import date
+import os
+import platform
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+
+def _current_time() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _system_env() -> str:
+    """Human-readable OS description, e.g. \"Ubuntu 24.04\" or \"Linux 6.8.0\"."""
+    try:
+        info = platform.freedesktop_os_release()
+        name = info.get("NAME") or platform.system() or "Linux"
+        version = info.get("VERSION_ID") or platform.release() or ""
+        return f"{name} {version}".strip()
+    except Exception:
+        return f"{platform.system()} {platform.release()}".strip()
+
+
+def _user_privileges() -> str:
+    try:
+        if hasattr(os, "geteuid"):
+            return "root" if os.geteuid() == 0 else "user"
+    except Exception:
+        pass
+    return "user"
+
+
+def _build_header(cwd: str) -> str:
+    return (
+        f"Current time: {_current_time()}\n"
+        f"workspace={cwd.replace(chr(92), '/')}\n"
+        f"env={_system_env()}\n"
+        f"user_privileges={_user_privileges()}\n"
+    )
+
+
+TOOL_ARG_SCHEMAS: dict[str, str] = {
+    "read": "{path, offset?, limit?}",
+    "bash": "{command, timeout?}",
+    "edit": "{path, edits: [{oldString, newString}]}",
+    "write": "{path, content}",
+    "grep": "{pattern, path?}",
+    "find": "{pattern?, path?}",
+    "ls": "{path?}",
+    "finish": "{summary, goal_success}  # end the task; summary is shown to the user",
+}
+
+# Injected via replace() (not str.format) because the text contains literal JSON braces.
+_BASE_PROMPT = """You are an autonomous terminal agent. Solve the task via shell/file ops.
+
+REASONING & ADAPTATION
+- Perform internal reasoning BEFORE generating actions
+- Base decisions strictly on observed outputs and current system state
+- After each result, reassess assumptions
+- If assumptions fail, adapt strategy
+- Prefer observed evidence over initial expectations
+- Do NOT output reasoning
+
+PLANNING RULES
+- Create a plan ONLY if no active plan exists and the task requires >2 steps or deep analysis.
+- Deep analysis includes: log correlation, root cause investigation, audits, state comparison, hypothesis testing.
+- Do NOT plan for single commands, simple reads, or stateless queries.
+- Never create a new plan if one is already active.
+- Maximum 1 plan creation per task.
+- If a plan exists: continue execution within the existing plan; adapt inside the plan instead of creating a new one.
+
+ACTION STRATEGY
+- Decide FIRST whether any tool is needed. Greetings, questions, small talk and stateless queries need NO tool.
+- If no tool is needed, answer directly: {"tool":"finish","args":{"summary":"<your answer>","goal_success":true}}.
+- Return exactly ONE tool call per response; the harness loops until the task is done.
+- If the task needs multiple steps, keep returning the next step in the following response.
+- If uncertainty exists, prefer the simplest next step.
+- Execution order = order of your responses.
+- Stop immediately once the answer is delivered. Do not invent extra steps.
+
+EXECUTION FLOW
+- Maximum 15 total actions per task.
+- If 3 consecutive steps show no progress, change strategy.
+- Call 'finish' the moment the objective is reached or the answer is delivered. Never add extra steps after success.
+- Never use bash to echo chat/greeting text; respond through finish.summary.
+
+TOOLS (JSON only, double quotes):
+__TOOLS__
+
+ERROR HANDLING
+- After bash execution check exit_code: 0 -> success; !=0 -> retry (max 2, modified command), fix, skip, or fail.
+- Never retry identical failing commands.
+- If multiple strategies fail, stop.
+
+IDEMPOTENCY
+- Check before modifying files or installing packages.
+- Avoid duplicate operations.
+- Ensure retries do not create inconsistent state.
+
+RESOURCE CONTROL
+- Default timeout 30s if not specified.
+- Avoid recursive filesystem scans unless required.
+- Avoid unbounded output.
+- No background daemons or infinite loops.
+
+CONSTRAINTS
+- Each command runs in an isolated shell (no persistent cd).
+- No interactive tools (nano, vim, top, etc.).
+- Autonomous mode: do not ask the user.
+
+CONTEXT OPTIMIZATION
+- If input data is large, use read/grep to distill it BEFORE further steps.
+- Never pass raw large outputs directly to next steps.
+- Prefer distilled summaries over full logs.
+
+RESPONSE FORMAT (STRICT JSON ONLY)
+Return ONLY JSON. No prose. No explanations.
+Return exactly ONE dict per response:
+1) No tool needed (greeting, question, task done): {"tool":"finish","args":{"summary":"<answer text>","goal_success":true}}
+2) Tool needed: {"tool":"<name>","args":{...}}
+RULES:
+- Each response must be a single valid tool call.
+- No extra fields.
+- No text outside JSON.
+"""
 
 
 class DefaultResourceLoader:
@@ -147,32 +268,10 @@ class DefaultResourceLoader:
         tools = selected_tools or ["read", "bash", "edit", "write"]
 
         if self.system_prompt:
-            prompt = self.system_prompt
+            prompt = f"{_build_header(self.cwd)}\n\n{self.system_prompt}"
         else:
-            has_bash = "bash" in tools
-            has_read = "read" in tools
-            has_grep = "grep" in tools
-            has_find = "find" in tools
-            has_ls = "ls" in tools
-            if has_bash and (has_grep or has_find or has_ls):
-                file_ops_guideline = "Prefer grep/find/ls tools over bash for file exploration."
-            elif has_bash:
-                file_ops_guideline = "Use bash for file operations when dedicated tools are unavailable."
-            else:
-                file_ops_guideline = "Use available read/search tools for file exploration."
-
-            tools_list = "\n".join(f"- {t}" for t in tools) if tools else "(none)"
-            prompt = (
-                "You are an expert coding assistant operating inside one, a terminal coding agent harness.\n"
-                "You help users by reading files, executing commands, editing code, and writing new files.\n\n"
-                f"Available tools:\n{tools_list}\n\n"
-                "Guidelines:\n"
-                f"- {file_ops_guideline}\n"
-                "- Be concise in responses.\n"
-                "- Show file paths clearly when changing or discussing files.\n"
-                "- Use tools when needed instead of claiming no access.\n"
-                "- For tool calls, Return ONLY JSON. No prose. No explanations. {\"tool\":\"...\",\"args\":{...}}.\n"
-            )
+            tools_list = "\n".join(f"- {t} {TOOL_ARG_SCHEMAS.get(t, '{}')}" for t in tools) if tools else "(none)"
+            prompt = _build_header(self.cwd) + _BASE_PROMPT.replace("__TOOLS__", tools_list)
 
             agents_files = self.get_agents_files().get("agentsFiles", [])
             if agents_files:
@@ -184,7 +283,7 @@ class DefaultResourceLoader:
                         continue
                     prompt += f"## {p}\n\n{c}\n\n"
 
-            if has_read:
+            if "read" in tools:
                 skills = self.get_skills().get("skills", [])
                 if skills:
                     prompt += "\n# Skills\n\n"
@@ -196,6 +295,4 @@ class DefaultResourceLoader:
         if self.append_system_prompt:
             prompt = f"{prompt}\n\n{self.append_system_prompt}"
 
-        prompt += f"\nCurrent date: {date.today().isoformat()}"
-        prompt += f"\nCurrent working directory: {self.cwd.replace('\\\\', '/')}"
         return prompt

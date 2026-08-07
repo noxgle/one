@@ -5,6 +5,7 @@ from typing import Any, Callable
 from .bash import bash_tool
 from .edit import edit_tool
 from .find import find_tool
+from .finish import finish_tool
 from .grep import grep_tool
 from .ls import ls_tool
 from .read import read_tool
@@ -28,6 +29,7 @@ all_tools: dict[str, ToolDef] = {
     "grep": ToolDef("grep", "Search file contents", grep_tool),
     "find": ToolDef("find", "Find files by pattern", find_tool),
     "ls": ToolDef("ls", "List directory contents", ls_tool),
+    "finish": ToolDef("finish", "End the task with a summary and success flag", finish_tool),
 }
 
 coding_tools = [all_tools["read"], all_tools["bash"], all_tools["edit"], all_tools["write"]]

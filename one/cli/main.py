@@ -240,7 +240,7 @@ async def _run(argv: list[str]) -> int:
             settings.get_default_model(),
         )
 
-    tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls"]
+    tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls", "finish"]
     if parsed.no_tools:
         tool_names = parsed.tools or []
     elif parsed.tools:

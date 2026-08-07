@@ -196,7 +196,7 @@ Options:
   --session-dir <dir>
   --no-session
   --models <patterns>
-  --tools <read,bash,edit,write,grep,find,ls>
+  --tools <read,bash,edit,write,grep,find,ls,finish>
   --no-tools
   --extension, -e <path>
   --no-extensions

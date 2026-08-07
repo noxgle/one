@@ -229,6 +229,11 @@ class AgentSession:
                         args = parsed_args
                 except Exception:
                     pass
+            if not args and tool == "finish":
+                # Flat form: {"tool":"finish","summary":"...","goal_success":true}
+                flat = {k: v for k, v in obj.items() if k not in ("tool", "name", "args", "input", "arguments")}
+                if flat:
+                    args = flat
             if isinstance(tool, str):
                 normalized_args = normalize_tool_args(tool, args)
                 if normalized_args is not None:
@@ -414,6 +419,21 @@ class AgentSession:
             "timestamp": int(time.time() * 1000),
         }
 
+    def _finish_assistant_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = payload.get("rawResult") or {}
+        summary = str(raw.get("summary") or payload.get("result") or "Task complete.").strip()
+        goal_success = bool(raw.get("goal_success", payload.get("goal_success", True)))
+        return {
+            "role": "assistant",
+            "content": [{"type": "text", "text": summary}],
+            "provider": self.model.provider if self.model else None,
+            "model": self.model.id if self.model else None,
+            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+            "stopReason": "completed",
+            "goalSuccess": goal_success,
+            "timestamp": int(time.time() * 1000),
+        }
+
     async def _execute_tool_by_name(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
         if tool_name not in self._active_tools:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
@@ -441,6 +461,8 @@ class AgentSession:
             result = fn(cwd, args.get("path", "."))
         elif tool_name == "bash":
             result = fn(cwd, args.get("command", ""), args.get("timeout"), self.settings_manager.get_shell_command_prefix())
+        elif tool_name == "finish":
+            result = fn(args.get("summary", ""), bool(args.get("goal_success", True)))
         else:
             raise RuntimeError(f"Unsupported tool: {tool_name}")
 
@@ -829,6 +851,11 @@ class AgentSession:
                     if tool_call:
                         tool_payload = await self._run_tool_call(tool_call["tool"], tool_call["args"], timeout_sec=tool_timeout_sec)
                         tool_results.append(tool_payload)
+                        if tool_call["tool"] == "finish" and tool_payload.get("ok"):
+                            # Terminal tool: end the turn with the summary as the
+                            # final assistant message; no further provider calls.
+                            final_assistant = self._finish_assistant_message(tool_payload)
+                            break
                         continue
 
                     final_assistant = assistant

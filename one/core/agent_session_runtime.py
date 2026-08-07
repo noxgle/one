@@ -74,7 +74,7 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
     if tools:
         tool_names = [t.name if hasattr(t, "name") else str(t) for t in tools]
     else:
-        tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls"]
+        tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls", "finish"]
 
     session = AgentSession(
         session_manager=session_manager,

@@ -611,3 +611,93 @@ async def test_retry_success_then_queue_drains_once_without_duplication(tmp_path
     assert contents.count("s1") == 1
     assert contents.count("f1") == 1
     assert agent.get_pending_queues() == {"steering": [], "followUp": []}
+
+
+def test_finish_tool_registered_in_defaults() -> None:
+    from one.tools.index import all_tools
+
+    assert "finish" in all_tools
+    # AgentSession defaults its active tools to all_tools keys when none are passed.
+    assert "finish" in list(all_tools.keys())
+
+
+@pytest.mark.asyncio
+async def test_finish_tool_ends_turn_with_summary(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["read", "finish"])
+    provider = _FakeProvider(['{"tool":"finish","args":{"summary":"All done.","goal_success":true}}'])
+    agent.providers = {"openai": provider}
+
+    seen_turn_end: dict[str, Any] = {}
+
+    def on_event(event: dict[str, Any]) -> None:
+        if event.get("type") == "turn_end":
+            seen_turn_end.update(event)
+
+    agent.subscribe(on_event)
+    await agent.prompt("Finish the task.")
+
+    # finish is terminal: no further provider calls, final message is the summary.
+    assert provider.calls == 1
+    assert agent.get_last_assistant_text() == "All done."
+    last = agent.messages[-1]
+    assert last.get("goalSuccess") is True
+    assert last.get("stopReason") == "completed"
+    assert seen_turn_end.get("ok") is True
+    assert seen_turn_end.get("reason") == "completed"
+    tool_results = seen_turn_end.get("toolResults", [])
+    assert len(tool_results) == 1
+    assert tool_results[0]["tool"] == "finish"
+    assert tool_results[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_finish_tool_flat_args_format(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["finish"])
+    provider = _FakeProvider(['{"tool":"finish","summary":"Flat done.","goal_success":false}'])
+    agent.providers = {"openai": provider}
+
+    await agent.prompt("Finish.")
+    assert provider.calls == 1
+    assert agent.get_last_assistant_text() == "Flat done."
+    assert agent.messages[-1].get("goalSuccess") is False
+    assert agent.messages[-1].get("stopReason") == "completed"
+
+
+@pytest.mark.asyncio
+async def test_finish_tool_disabled_raises_and_continues(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    # finish is not in the active set here.
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["ls"])
+    provider = _FakeProvider(['{"tool":"finish","args":{"summary":"nope","goal_success":true}}', "DONE"])
+    agent.providers = {"openai": provider}
+
+    await agent.prompt("Try finish.")
+
+    assert agent.get_last_assistant_text() == "DONE"
+    assert provider.calls == 2
+    tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
+    assert tool_results
+    assert "disabled" in tool_results[0]["content"]
