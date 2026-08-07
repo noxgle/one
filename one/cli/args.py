@@ -37,6 +37,7 @@ class ParsedArgs:
     no_extensions: bool = False
     print_mode: bool = False
     export: str | None = None
+    export_format: str = "html"
     no_skills: bool = False
     skills: list[str] = field(default_factory=list)
     prompt_templates: list[str] = field(default_factory=list)
@@ -84,6 +85,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--no-extensions", "-ne", action="store_true")
     parser.add_argument("--print", "-p", action="store_true", dest="print_mode")
     parser.add_argument("--export")
+    parser.add_argument("--export-format", choices=["html", "jsonl"], default="html")
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--no-skills", "-ns", action="store_true")
     parser.add_argument("--prompt-template", action="append", default=[])
@@ -155,6 +157,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         no_extensions=ns.no_extensions,
         print_mode=ns.print_mode,
         export=ns.export,
+        export_format=ns.export_format,
         no_skills=ns.no_skills,
         skills=list(ns.skill),
         prompt_templates=list(ns.prompt_template),
@@ -204,6 +207,7 @@ Options:
   --theme <path>
   --no-themes
   --export <file>
+  --export-format <html|jsonl>
   --list-models [search]
   --offline
   --verbose

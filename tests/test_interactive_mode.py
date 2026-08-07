@@ -329,6 +329,46 @@ async def test_interactive_model_command_supports_dynamic_known_provider(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_interactive_model_command_provider_only(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+
+    commands = [
+        "/model openai",
+        "/exit",
+    ]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+
+    await mode.run()
+    out = capsys.readouterr().out
+
+    # Provider-only picks the provider's first registered model.
+    assert "Model set to openai/gpt-4.1 (saved as default)" in out
+    assert session.model.provider == "openai"
+    assert session.model.id == "gpt-4.1"
+    assert session.settings_manager.default_provider == "openai"
+    assert session.settings_manager.default_model == "gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_interactive_model_command_provider_only_unknown(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+
+    commands = [
+        "/model nope",
+        "/exit",
+    ]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Provider not found or has no models: nope" in out
+    assert session.model.id == "gpt-4.1"  # unchanged
+
+
+@pytest.mark.asyncio
 async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
     session = _DummySession()
     mode = InteractiveMode(_DummyHost(session))
@@ -350,7 +390,8 @@ async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
     await mode.run()
     out = capsys.readouterr().out
 
-    assert "Usage: /model <provider>/<model-id>" in out
+    assert '"usage": "/model <provider>/<model-id>"' in out
+    assert "Provider not found or has no models: nope" in out
     assert "Usage: /queue clear [all|steering|follow]" in out
     assert "Usage: /retry <on|off>" in out
     assert "Configured provider llama.cpp." in out

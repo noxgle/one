@@ -137,7 +137,10 @@ class AgentSessionRuntimeHost:
         target = current.get_entry(entry_id)
         if target and target.get("type") == "message" and target.get("message", {}).get("role") == "user":
             content = target.get("message", {}).get("content", "")
-            old_text = content if isinstance(content, str) else ""
+            if isinstance(content, list):
+                old_text = "".join(x.get("text", "") for x in content if x.get("type") == "text")
+            else:
+                old_text = str(content)
         new_path = current.create_branched_session(entry_id)
         if new_path:
             manager = SessionManager.open(new_path, current.session_dir)

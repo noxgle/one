@@ -57,11 +57,15 @@ def test_model_registry_resolve_dynamic_known_provider():
     assert m.id == "my-model-v1"
 
 
-def test_model_registry_llama_cpp_available_without_auth() -> None:
+def test_model_registry_llama_cpp_available_without_auth(tmp_path: Path) -> None:
     auth = AuthStorage.in_memory()
-    registry = ModelRegistry.create(auth)
+    # Isolate from the real ~/.config/one/models.json (builtins only).
+    registry = ModelRegistry.create(auth, str(tmp_path / "no" / "models.json"))
     model = registry.find("llama.cpp", "local")
     assert model is not None
+    # Builtin model must not hardcode a base URL, otherwise it would override
+    # LLAMA_CPP_BASE_URL / --llama-cpp-url in _invoke_provider.
+    assert model.base_url is None
     available = registry.get_available()
     assert any(m.provider == "llama.cpp" and m.id == "local" for m in available)
     auth_data = registry.get_api_key_and_headers(model)
@@ -69,6 +73,75 @@ def test_model_registry_llama_cpp_available_without_auth() -> None:
     assert auth_data["apiKey"] == ""
     status = registry.get_provider_auth_status("llama.cpp")
     assert status["requiresApiKey"] is False
+
+
+def test_models_json_url_overrides_builtin_llama_cpp_base_url(tmp_path: Path) -> None:
+    models_path = tmp_path / "models.json"
+    models_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "llama.cpp": [
+                        {
+                            "id": "local",
+                            "reasoning": False,
+                            "contextWindow": 32768,
+                            "url": "http://192.168.200.20:8089",
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth, str(models_path))
+    model = registry.find("llama.cpp", "local")
+    assert model is not None
+    # models.json url must override the builtin (previously hardcoded) URL.
+    assert model.base_url == "http://192.168.200.20:8089"
+
+
+def test_placeholder_api_key_not_configured(tmp_path: Path) -> None:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "YOUR_OPENAI_API_KEY_HERE")
+    registry = ModelRegistry.create(auth, str(tmp_path / "no" / "models.json"))
+    openai_model = registry.find("openai", "gpt-4.1")
+    assert openai_model is not None
+    # Placeholder keys must not count as configured auth.
+    assert registry.has_configured_auth(openai_model) is False
+    assert registry.get_api_key_and_headers(openai_model)["ok"] is False
+    avail = registry.get_available()
+    assert all(m.provider != "openai" for m in avail)
+    assert any(m.provider == "llama.cpp" and m.id == "local" for m in avail)
+
+
+def test_select_default_prefers_exact_default(tmp_path: Path) -> None:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "sk-real-key-123")
+    registry = ModelRegistry.create(auth, str(tmp_path / "no" / "models.json"))
+    model = registry.select_default("openai", "gpt-4o")
+    assert model is not None and model.id == "gpt-4o"
+
+
+def test_select_default_falls_back_to_default_provider(tmp_path: Path) -> None:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "sk-real-key-123")
+    registry = ModelRegistry.create(auth, str(tmp_path / "no" / "models.json"))
+    # Stale default model id -> falls back to the default provider's first model.
+    model = registry.select_default("openai", "gpt-99-nonexistent")
+    assert model is not None and model.provider == "openai"
+
+
+def test_select_default_placeholder_provider_falls_to_llama(tmp_path: Path) -> None:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "YOUR_OPENAI_API_KEY_HERE")
+    registry = ModelRegistry.create(auth, str(tmp_path / "no" / "models.json"))
+    # openai has only a placeholder key -> not available, default resolves to llama.cpp.
+    model = registry.select_default("openai", "gpt-4.1")
+    assert model is not None
+    assert model.provider == "llama.cpp"
+    assert model.id == "local"
 
 
 def test_model_registry_reads_llama_cpp_url_from_models_json(tmp_path: Path) -> None:

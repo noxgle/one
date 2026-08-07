@@ -13,7 +13,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "defaultModel": None,
     "defaultThinkingLevel": "medium",
     "enabledModels": [],
-    "compaction": {"enabled": True},
+    "compaction": {
+        "enabled": True,
+        "thresholdPercent": 85,
+        "recentTokens": 8192,
+        "minKeptMessages": 20,
+        "summarizeWithModel": True,
+        "maxSummaryInputTokens": 20000,
+    },
     "retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 1500, "maxDelayMs": 20000},
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
@@ -130,6 +137,24 @@ class SettingsManager:
 
     def get_retry_enabled(self) -> bool:
         return bool(self.get_retry_settings().get("enabled", True))
+
+    def get_compaction_settings(self) -> dict[str, Any]:
+        return self.merged().get("compaction", {})
+
+    def get_compaction_threshold_percent(self) -> float:
+        return float(self.get_compaction_settings().get("thresholdPercent", 85))
+
+    def get_compaction_recent_tokens(self) -> int:
+        return int(self.get_compaction_settings().get("recentTokens", 8192))
+
+    def get_compaction_min_kept_messages(self) -> int:
+        return int(self.get_compaction_settings().get("minKeptMessages", 20))
+
+    def get_compaction_summarize_with_model(self) -> bool:
+        return bool(self.get_compaction_settings().get("summarizeWithModel", True))
+
+    def get_compaction_max_summary_input_tokens(self) -> int:
+        return int(self.get_compaction_settings().get("maxSummaryInputTokens", 20000))
 
     def get_tool_settings(self) -> dict[str, Any]:
         return self.merged().get("tools", {})

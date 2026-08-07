@@ -168,7 +168,10 @@ async def _run(argv: list[str]) -> int:
         await loader.reload()
         model = registry.all()[0] if registry.all() else None
         session = AgentSession(manager, settings, registry, loader, model, settings.get_default_thinking_level())
-        path = await session.export_to_html(parsed.messages[0] if parsed.messages else None)
+        if parsed.export_format == "jsonl":
+            path = session.export_to_jsonl(parsed.messages[0] if parsed.messages else None)
+        else:
+            path = await session.export_to_html(parsed.messages[0] if parsed.messages else None)
         print(f"Exported to: {path}")
         return 0
 
@@ -232,14 +235,10 @@ async def _run(argv: list[str]) -> int:
             provider = parsed.provider or settings.get_default_provider() or "openai"
             model = registry.resolve(provider, parsed.model, allow_dynamic=True)
     if not model:
-        avail = registry.get_available()
-        if avail:
-            default_provider = settings.get_default_provider()
-            default_model = settings.get_default_model()
-            model = next((m for m in avail if m.provider == default_provider and m.id == default_model), None) or avail[0]
-        else:
-            allm = registry.all()
-            model = allm[0] if allm else None
+        model = registry.select_default(
+            settings.get_default_provider(),
+            settings.get_default_model(),
+        )
 
     tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls"]
     if parsed.no_tools:

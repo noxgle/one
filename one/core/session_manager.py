@@ -9,7 +9,7 @@ from typing import Any
 
 from one.config import get_agent_dir
 
-CURRENT_SESSION_VERSION = 3
+CURRENT_SESSION_VERSION = 4
 
 
 def _now_iso() -> str:
@@ -89,7 +89,8 @@ class SessionManager:
 
     def _migrate_if_needed(self) -> None:
         header = self._entries[0]
-        version = int(header.get("version", 1))
+        original_version = int(header.get("version", 1))
+        version = original_version
         if version < 2:
             prev = None
             for e in self._entries[1:]:
@@ -105,6 +106,25 @@ class SessionManager:
                     if m.get("role") == "hookMessage":
                         m["role"] = "custom"
             header["version"] = 3
+            version = 3
+        if version < 4:
+            # v4: normalize timestamps to ISO "Z" format and backfill missing
+            # ids/parentIds so partially-corrupted legacy files stay loadable.
+            for e in self._entries[1:]:
+                e["id"] = e.get("id") or _id()
+                e["parentId"] = e.get("parentId")
+                ts = e.get("timestamp")
+                if ts is None:
+                    e["timestamp"] = _now_iso()
+                elif isinstance(ts, (int, float)):
+                    e["timestamp"] = datetime.fromtimestamp(ts / 1000).isoformat() + "Z"
+            header.setdefault("timestamp", _now_iso())
+            header["version"] = 4
+            version = 4
+
+        if header.get("version") != original_version:
+            # Version was upgraded: persist the migration so it runs once.
+            self._rewrite()
 
     def _reindex(self) -> None:
         self._by_id = {}
@@ -268,6 +288,12 @@ class SessionManager:
                 return e.get("name") or None
         return None
 
+    def get_last_compaction(self) -> dict[str, Any] | None:
+        for e in reversed(self._entries[1:]):
+            if e.get("type") == "compaction":
+                return e
+        return None
+
     def get_entry(self, entry_id: str) -> dict[str, Any] | None:
         return self._by_id.get(entry_id)
 
@@ -301,6 +327,16 @@ class SessionManager:
             pid = cur.get("parentId")
             cur = self._by_id.get(pid) if pid else None
         return out
+
+    _MESSAGE_ENTRY_TYPES = {"message", "custom_message", "branch_summary"}
+
+    def get_message_entry_ids(self, from_id: str | None = None) -> list[str]:
+        """Entry ids of message-producing entries in branch order (root -> leaf).
+
+        Every such entry appends exactly one message to `build_session_context`,
+        so this list is index-aligned with `AgentSession.messages`.
+        """
+        return [e["id"] for e in self.get_branch(from_id) if e.get("type") in self._MESSAGE_ENTRY_TYPES]
 
     def get_tree(self) -> list[dict[str, Any]]:
         nodes = {e["id"]: {"entry": e, "children": []} for e in self._entries[1:]}

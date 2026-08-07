@@ -33,7 +33,7 @@
 
 - [ ] Uzupełnić RPC parity (komendy, eventy, streaming, extension UI)
 - [ ] Zaimplementować pełny runtime extensions/skills/packages
-- [ ] Dopracować session/compaction parity (branching, migracje, eksport)
+- [x] Dopracować session/compaction parity (branching, migracje, eksport)
 - [x] Zaimplementować pełne TUI (`textual`) z obsługą theme i streamingu (v2 practical)
   - [x] Layout v2: main stream + sidebar + input
   - [x] Built-in theme switch (`default`, `light`, `hacker`, `solarized`, `fallout`)
@@ -88,8 +88,9 @@
 - [ ] Dodać package manager flow (npm/git) zgodny z `pi`
 
 ### 7. Sessions/Compaction
-- [ ] Ujednolicić fidelity `.jsonl` i migracje
-- [ ] Ujednolicić branching + branch summary + compaction behavior
+- [x] Ujednolicić fidelity `.jsonl` i migracje (persist upgrades, v4, id backfill)
+- [x] Ujednolicić branching + branch summary + compaction behavior (rolling 2-level summary, auto-compaction, `firstKeptEntryId` fix)
+- [ ] Ujednolicić interactive: `/branches`, `/export`, `/session` (zostały `/tree`, `/navigate`, `/fork`)
 
 ### 8. Test parity
 - [ ] Golden testy `build_session_context` na danych z TS

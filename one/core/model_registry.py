@@ -22,12 +22,33 @@ BUILTIN_MODELS: list[ModelInfo] = [
         "local",
         reasoning=False,
         context_window=32_768,
-        base_url="http://127.0.0.1:8080",
+        # No hardcoded base URL: default to the provider registry, which reads
+        # LLAMA_CPP_BASE_URL / --llama-cpp-url. A models.json `url` still wins.
+        base_url=None,
         tool_parser=[{"type": "raw-function-call"}, {"type": "json"}],
     ),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp"}
+
+
+def _is_placeholder_key(key: str | None) -> bool:
+    """True when a key is missing or is a template placeholder (e.g. from /login defaults).
+
+    Placeholder keys must not count as "configured auth", otherwise providers
+    like openai become "available" and get selected before working local models.
+    """
+    if not key:
+        return True
+    low = key.strip().lower()
+    if (
+        low.startswith("your_")
+        or low in {"changeme", "sk-xxx", "none", "null", "placeholder", "enter", "insert", "xxx"}
+        or ("your" in low and "here" in low)
+        or (low.startswith("<") and low.endswith(">"))
+    ):
+        return True
+    return False
 
 
 class ModelRegistry:
@@ -102,16 +123,37 @@ class ModelRegistry:
     def has_configured_auth(self, model: ModelInfo) -> bool:
         if model.provider in NO_AUTH_PROVIDERS:
             return True
-        return bool(self._auth.get_api_key(model.provider))
+        return not _is_placeholder_key(self._auth.get_api_key(model.provider))
 
     def get_available(self) -> list[ModelInfo]:
         return [m for m in self._models if self.has_configured_auth(m)]
+
+    def select_default(self, default_provider: str | None, default_model: str | None) -> ModelInfo | None:
+        """Pick the model to use when none was requested explicitly.
+
+        Prefer an exact provider+model match, then the default provider's first
+        registered model, then the first available model. Never silently jumps
+        to a different provider just because the default model id is stale.
+        """
+        avail = self.get_available()
+        if not avail:
+            allm = self.all()
+            return allm[0] if allm else None
+        if default_provider and default_model:
+            found = next((m for m in avail if m.provider == default_provider and m.id == default_model), None)
+            if found:
+                return found
+        if default_provider:
+            found = next((m for m in avail if m.provider == default_provider), None)
+            if found:
+                return found
+        return avail[0]
 
     def get_api_key_and_headers(self, model: ModelInfo) -> dict[str, Any]:
         if model.provider in NO_AUTH_PROVIDERS:
             return {"ok": True, "apiKey": "", "headers": {}}
         key = self._auth.get_api_key(model.provider)
-        if not key:
+        if _is_placeholder_key(key):
             env_var = self._auth.env_var_for_provider(model.provider)
             hint = f" (set {env_var} or use /login)" if env_var else " (use /login)"
             return {"ok": False, "error": f"No API key found for {model.provider}{hint}"}

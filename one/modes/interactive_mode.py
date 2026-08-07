@@ -173,7 +173,7 @@ class InteractiveMode:
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort\n"
                     "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle | /theme [name]\n"
-                    "/steer <text> | /follow <text> | /compact [instructions] | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/bash <command>"
                 )
@@ -268,10 +268,17 @@ class InteractiveMode:
             if line.startswith("/model "):
                 val = line[len("/model ") :].strip()
                 if "/" not in val:
-                    print("Usage: /model <provider>/<model-id>")
-                    continue
-                provider, model_id = val.split("/", 1)
-                model = session.model_registry.resolve(provider, model_id, allow_dynamic=True)
+                    # Provider-only: auto-pick the provider's first registered model.
+                    provider = val
+                    models = session.model_registry.models_for_provider(provider)
+                    if not models:
+                        print(f"Provider not found or has no models: {provider}")
+                        continue
+                    model = models[0]
+                    provider, model_id = model.provider, model.id
+                else:
+                    provider, model_id = val.split("/", 1)
+                    model = session.model_registry.resolve(provider, model_id, allow_dynamic=True)
                 if not model:
                     print(f"Model not found: {provider}/{model_id}")
                     continue
@@ -327,6 +334,55 @@ class InteractiveMode:
                 instructions = line[len("/compact") :].strip() or None
                 result = await session.compact(instructions)
                 print(json.dumps(result, ensure_ascii=False, indent=2))
+                continue
+            if line.strip() == "/tree":
+                tree = session.session_manager.get_tree()
+                leaf_id = session.session_manager.get_leaf_id()
+                rendered: list[str] = []
+
+                def render_tree(nodes: list[dict[str, Any]], depth: int = 0) -> None:
+                    for node in nodes:
+                        e = node["entry"]
+                        label = e.get("type")
+                        if e.get("type") == "message":
+                            role = str((e.get("message") or {}).get("role", "?"))
+                            label = f"message:{role}"
+                        marker = "*" if e.get("id") == leaf_id else " "
+                        rendered.append(f"{'  ' * depth}{marker} {label} {e.get('id')}")
+                        render_tree(node.get("children", []), depth + 1)
+
+                render_tree(tree)
+                print("\n".join(rendered) if rendered else "(empty session)")
+                continue
+            if line.startswith("/navigate"):
+                parts = line.split()
+                if len(parts) < 2:
+                    print("Usage: /navigate <entryId> [--summary <text>]")
+                    continue
+                entry_id = parts[1]
+                summarize = "--summary" in parts
+                custom = None
+                if summarize:
+                    idx = parts.index("--summary")
+                    custom = " ".join(parts[idx + 1 :]) or None
+                try:
+                    result = await session.navigate_tree(
+                        entry_id,
+                        {"summarize": summarize, "customInstructions": custom},
+                    )
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
+                except ValueError as e:
+                    print(str(e))
+                continue
+            if line.startswith("/fork "):
+                entry_id = line[len("/fork ") :].strip()
+                try:
+                    result = await self.runtime_host.fork(entry_id)
+                    session = self.runtime_host.session
+                    session.subscribe(on_event)
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
+                except ValueError as e:
+                    print(str(e))
                 continue
             if line.startswith("/login"):
                 rest = line[len("/login") :].strip()

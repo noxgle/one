@@ -702,11 +702,18 @@ class AgentSession:
             "_streamedMessage": streamed_msg,
         }
 
-    def _flatten_messages_for_provider(self) -> list[dict[str, Any]]:
-        msgs = [
-            {"role": "system", "content": self._build_runtime_system_prompt()},
-        ]
-        for m in self.messages:
+    @staticmethod
+    def _approx_message_tokens(message: dict[str, Any]) -> int:
+        content = message.get("content", "")
+        if isinstance(content, list):
+            text = "".join(x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") == "text")
+        else:
+            text = str(content)
+        return max(1, len(text) // 4)
+
+    def _flatten_conversation(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for m in messages:
             role = m.get("role")
             if role in {"custom", "toolResult", "bashExecution"}:
                 role = "user"
@@ -717,8 +724,14 @@ class AgentSession:
                 text = "".join(x.get("text", "") for x in content if x.get("type") == "text")
             else:
                 text = str(content)
-            msgs.append({"role": role, "content": text})
-        return msgs
+            out.append({"role": role, "content": text})
+        return out
+
+    def _flatten_messages_for_provider(self) -> list[dict[str, Any]]:
+        return [
+            {"role": "system", "content": self._build_runtime_system_prompt()},
+            *self._flatten_conversation(self.messages),
+        ]
 
     async def prompt(
         self,
@@ -980,6 +993,14 @@ class AgentSession:
             self._abort_requested = False
             return
 
+        # Auto-compaction: shrink the context between turns when it grows past
+        # the configured threshold. Runs before draining queued messages so they
+        # get a freshly compacted context. Emits the standard compaction events.
+        if self.auto_compaction_enabled and not self._is_compacting:
+            usage = self.get_context_usage()
+            if usage and usage["percent"] >= self.settings_manager.get_compaction_threshold_percent():
+                await self.compact(reason="auto")
+
         if self._steering:
             msg = self._steering.pop(0)
             self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
@@ -1018,28 +1039,125 @@ class AgentSession:
         self._emit({"type": "queue_update", **snapshot})
         return snapshot
 
-    async def compact(self, custom_instructions: str | None = None) -> dict[str, Any]:
+    async def compact(self, custom_instructions: str | None = None, reason: str = "manual") -> dict[str, Any]:
         self._is_compacting = True
-        self._emit({"type": "compaction_start", "reason": "manual"})
+        self._emit({"type": "compaction_start", "reason": reason})
         if not self.messages:
             self._is_compacting = False
-            result = {"aborted": False, "summary": "", "tokensBefore": 0}
-            self._emit({"type": "compaction_end", "reason": "manual", "result": result, "aborted": False, "willRetry": False})
+            result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": 0, "skipped": True}
+            self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
             return result
 
-        keep_start = max(0, len(self.messages) - 20)
-        old_count = len(self.messages)
-        summary_text = custom_instructions or f"Compacted previous {keep_start} messages."
+        total = len(self.messages)
+        min_kept = max(1, self.settings_manager.get_compaction_min_kept_messages())
+        budget = self.settings_manager.get_compaction_recent_tokens()
 
-        entries = self.session_manager.get_branch()
-        first_keep_id = entries[keep_start]["id"] if entries and keep_start < len(entries) else entries[0]["id"] if entries else "root"
-        self.session_manager.append_compaction(summary_text, first_keep_id, tokens_before=old_count)
+        # Raw window: keep the most recent messages that fit within the token
+        # budget, but always keep at least `min_kept` messages (never drop the last one).
+        max_keep_start = max(0, total - min_kept)
+        keep_start = 0
+        acc = 0
+        for i in range(total - 1, -1, -1):
+            acc += self._approx_message_tokens(self.messages[i])
+            if acc > budget and (total - i) >= min_kept:
+                keep_start = min(i + 1, max_keep_start)
+                break
 
+        if keep_start == 0:
+            # Nothing to drop: there is no meaningful compaction to perform.
+            self._is_compacting = False
+            result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total, "skipped": True}
+            self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
+            return result
+
+        dropped = self.messages[:keep_start]
+        tokens_before = sum(self._approx_message_tokens(m) for m in dropped)
+
+        if custom_instructions:
+            summary_text = custom_instructions.strip() or f"Compacted previous {len(dropped)} messages."
+        elif self.settings_manager.get_compaction_summarize_with_model():
+            summary_text = await self._summarize_context(dropped)
+            if not summary_text:
+                summary_text = f"Compacted previous {len(dropped)} messages."
+        else:
+            summary_text = f"Compacted previous {len(dropped)} messages."
+
+        # Map the first kept message back to its session-tree entry id. Message
+        # indexes in self.messages are aligned with message-producing entries
+        # except for the synthetic compaction summary (at most one, at index 0).
+        entry_ids = self.session_manager.get_message_entry_ids()
+        offset = len(entry_ids) - total
+        first_kept_id = "root"
+        idx = keep_start + offset
+        if 0 <= idx < len(entry_ids):
+            first_kept_id = entry_ids[idx]
+        elif entry_ids:
+            first_kept_id = entry_ids[0]
+
+        self.session_manager.append_compaction(summary_text, first_kept_id, tokens_before=tokens_before)
         self.messages = self.messages[keep_start:]
+        # Keep the summary in the live context (rolling two-tier schema):
+        # new_summary + last ~recentTokens raw messages.
+        self.messages.insert(
+            0,
+            {
+                "role": "custom",
+                "customType": "compaction_summary",
+                "content": summary_text,
+                "tokensBefore": tokens_before,
+                "timestamp": int(time.time() * 1000),
+            },
+        )
         self._is_compacting = False
-        result = {"aborted": False, "summary": summary_text, "tokensBefore": old_count, "kept": len(self.messages)}
-        self._emit({"type": "compaction_end", "reason": "manual", "result": result, "aborted": False, "willRetry": False})
+        result = {
+            "aborted": False,
+            "summary": summary_text,
+            "tokensBefore": tokens_before,
+            "kept": len(self.messages),
+            "skipped": False,
+        }
+        self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
         return result
+
+    async def _summarize_context(self, dropped: list[dict[str, Any]]) -> str | None:
+        """Rolling summary: previous summary + context since last compaction -> new summary."""
+        if not self.model:
+            return None
+        prev = self.session_manager.get_last_compaction()
+        prev_summary = str((prev or {}).get("summary") or "").strip()
+
+        # The previous compaction summary already lives as a synthetic message in
+        # `dropped`; the model input gets it once via prev_summary.
+        history = [m for m in dropped if not (m.get("role") == "custom" and m.get("customType") == "compaction_summary")]
+        context = "\n".join(
+            f"{m.get('role', '?')}: {m.get('content', '')}"
+            for m in self._flatten_conversation(history)
+            if str(m.get("content", "")).strip()
+        )
+        max_input_tokens = self.settings_manager.get_compaction_max_summary_input_tokens()
+        max_chars = max_input_tokens * 4
+        if len(context) > max_chars:
+            head = int(max_chars * 0.7)
+            context = context[:head] + "\n\n...[truncated]...\n\n" + context[-(max_chars - head):]
+
+        prompt_text = (
+            "Summarize the conversation history below into one compact paragraph. "
+            "Preserve decisions, file paths, tool outcomes, unresolved tasks and the user's goals. "
+            "Do not invent new information.\n\n"
+            f"Previous summary:\n{prev_summary or '(none)'}\n\n"
+            "History since last compaction:\n"
+            f"{context}"
+        )
+        msgs = [
+            {"role": "system", "content": "You are a conversation summarizer."},
+            {"role": "user", "content": prompt_text},
+        ]
+        try:
+            res = await self._invoke_provider(msgs, allow_live_stream=False)
+            text = self._assistant_text(res).strip()
+            return text or None
+        except Exception:
+            return None
 
     def abort_compaction(self) -> None:
         self._is_compacting = False
@@ -1070,7 +1188,7 @@ class AgentSession:
         return
 
     async def wait_for_idle(self) -> None:
-        while self._is_streaming:
+        while self._is_streaming or self._is_compacting:
             await asyncio.sleep(0.02)
 
     async def abort(self) -> None:
@@ -1144,7 +1262,7 @@ class AgentSession:
     def get_context_usage(self) -> dict[str, Any] | None:
         if not self.model or not self.model.context_window:
             return None
-        approx_tokens = sum(max(1, len(str(m.get("content", ""))) // 4) for m in self.messages)
+        approx_tokens = sum(self._approx_message_tokens(m) for m in self.messages)
         percent = (approx_tokens / self.model.context_window) * 100
         return {"tokens": approx_tokens, "contextWindow": self.model.context_window, "percent": percent}
 
@@ -1188,15 +1306,72 @@ class AgentSession:
         }
 
     async def export_to_html(self, output_path: str | None = None) -> str:
+        import html as html_mod
         from pathlib import Path
 
         p = Path(output_path or f"session-{self.session_id}.html").resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
-        html = ["<html><body><pre>"]
+
+        header = self.session_manager.get_header()
+        created = header.get("timestamp", "")
+        model_label = f"{self.model.provider}/{self.model.id}" if self.model else "—"
+        name = self.session_name
+        title = f"session {name or self.session_id}"
+
+        css = """
+        body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 900px; margin: 0 auto; padding: 24px; color: #1c1e21; background: #fff; }
+        h1 { font-size: 18px; }
+        .meta { color: #667; font-size: 13px; margin-bottom: 24px; }
+        .meta div { margin: 2px 0; }
+        .msg { border: 1px solid #e4e6e8; border-radius: 6px; margin: 12px 0; padding: 10px 14px; }
+        .msg-head { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #889; margin-bottom: 6px; }
+        .msg pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 13.5px; line-height: 1.45; }
+        .msg-user { background: #f0f7ff; border-color: #bcd8f5; }
+        .msg-assistant { background: #f6f8fa; }
+        .msg-toolResult { background: #fbf6ee; border-color: #e8dcc2; }
+        .msg-toolResult .msg-head.ok { color: #1a7f37; }
+        .msg-toolResult .msg-head.err { color: #b42318; }
+        .msg-system, .msg-custom { background: #f4f4f6; border-style: dashed; }
+        """
+        out = [
+            "<!doctype html><html><head><meta charset='utf-8'>",
+            f"<title>{html_mod.escape(title)}</title><style>{css}</style></head><body>",
+            f"<h1>{html_mod.escape(title)}</h1>",
+            "<div class='meta'>",
+            f"<div>session id: {html_mod.escape(str(self.session_id))}</div>",
+            f"<div>cwd: {html_mod.escape(self.session_manager.cwd)}</div>",
+            f"<div>model: {html_mod.escape(model_label)}</div>",
+            f"<div>created: {html_mod.escape(str(created))}</div>",
+            f"<div>messages: {len(self.messages)}</div>",
+            "</div>",
+        ]
+
         for m in self.messages:
-            html.append(f"[{m.get('role')}] {m.get('content')}\n")
-        html.append("</pre></body></html>")
-        p.write_text("".join(html), encoding="utf-8")
+            role = str(m.get("role", "?")).replace("_", " ")
+            custom_type = m.get("customType")
+            label = f"{role}:{custom_type}" if custom_type else role
+            cls = f"msg msg-{role}" if role in {"user", "assistant", "toolResult", "system", "custom"} else "msg"
+            content = m.get("content", "")
+            if isinstance(content, list):
+                text = "".join(x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") == "text")
+            else:
+                text = str(content)
+            badge = ""
+            if role == "toolresult":
+                try:
+                    payload = json.loads(text)
+                    badge = "ok" if payload.get("ok") else "err"
+                    text = json.dumps(payload, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+            head_cls = f" msg-head {badge}" if badge else ""
+            out.append(
+                f"<div class='{cls}'><div class='msg-head{head_cls}'>{html_mod.escape(label)}</div>"
+                f"<pre>{html_mod.escape(text)}</pre></div>"
+            )
+
+        out.append("</body></html>")
+        p.write_text("".join(out), encoding="utf-8")
         return str(p)
 
     def export_to_jsonl(self, output_path: str | None = None) -> str:

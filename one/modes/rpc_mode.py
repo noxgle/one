@@ -160,6 +160,20 @@ async def run_rpc_mode(runtime_host: Any) -> None:
             elif ctype == "set_session_name":
                 session.set_session_name((cmd.get("name") or "").strip())
                 output(success(cid, ctype))
+            elif ctype == "get_tree":
+                output(success(cid, ctype, {"tree": session.session_manager.get_tree()}))
+            elif ctype == "get_branch":
+                output(success(cid, ctype, {"branch": session.session_manager.get_branch()}))
+            elif ctype == "navigate":
+                result = await session.navigate_tree(
+                    cmd.get("entryId", ""),
+                    {
+                        "summarize": bool(cmd.get("summarize", False)),
+                        "customInstructions": cmd.get("customInstructions"),
+                        "label": cmd.get("label"),
+                    },
+                )
+                output(success(cid, ctype, result))
             elif ctype == "get_messages":
                 output(success(cid, ctype, {"messages": session.messages}))
             elif ctype == "get_context_usage":
