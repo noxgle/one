@@ -47,6 +47,7 @@ class ParsedArgs:
     list_models: str | bool | None = None
     offline: bool = False
     verbose: bool = False
+    cooperation: bool = False
     messages: list[str] = field(default_factory=list)
     file_args: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -95,6 +96,12 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--list-models", nargs="?", const=True)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--cooperation",
+        action="store_true",
+        help="Cooperation mode: ask the user before running mutating tools (bash/write/edit); "
+        "rejections require a reason that is fed back to the model.",
+    )
 
     ns = parser.parse_args(argv)
     messages: list[str] = ns.messages or []
@@ -167,6 +174,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         list_models=ns.list_models,
         offline=ns.offline,
         verbose=ns.verbose,
+        cooperation=ns.cooperation,
         messages=plain,
         file_args=file_args,
         errors=errors,
@@ -211,6 +219,7 @@ Options:
   --list-models [search]
   --offline
   --verbose
+  --cooperation
   --help, -h
   --version, -v
 

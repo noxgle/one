@@ -31,7 +31,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "transport": "http",
     "thinkingBudgets": {},
     "shellCommandPrefix": None,
-    "tools": {"maxSteps": 6, "timeoutSec": 30},
+    "tools": {"maxSteps": 6, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit"]},
     "packages": [],
 }
 
@@ -164,6 +164,12 @@ class SettingsManager:
 
     def get_tool_timeout_sec(self) -> int:
         return int(self.get_tool_settings().get("timeoutSec", 30))
+
+    def get_tool_approval(self) -> bool:
+        return bool(self.get_tool_settings().get("approval", False))
+
+    def get_tool_approval_tools(self) -> list[str]:
+        return list(self.get_tool_settings().get("approvalTools", ["bash", "write", "edit"]))
 
     def get_packages(self) -> list[str]:
         return list(self.merged().get("packages", []))

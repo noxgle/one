@@ -7,7 +7,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
@@ -38,6 +38,7 @@ class AgentSession:
         thinking_level: str,
         scoped_models: list[dict[str, Any]] | None = None,
         tools: list[str] | None = None,
+        approval_callback: Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]] | None = None,
     ) -> None:
         self.session_manager = session_manager
         self.settings_manager = settings_manager
@@ -59,6 +60,8 @@ class AgentSession:
         self._abort_requested = False
         self._extension_ui_pending: dict[str, dict[str, Any]] = {}
         self._extension_ui_history: list[dict[str, Any]] = []
+        self.approval_callback = approval_callback
+        self._approval_tools = set(settings_manager.get_tool_approval_tools())
 
         if not self.messages:
             if self.model:
@@ -476,6 +479,37 @@ class AgentSession:
         return result
 
     async def _run_tool_call(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
+        if (
+            self.approval_callback is not None
+            and tool_name != "finish"
+            and tool_name in self._approval_tools
+        ):
+            # Cooperation mode: ask the user before executing a mutating tool.
+            decision = self.approval_callback(tool_name, args)
+            if inspect.isawaitable(decision):
+                decision = await decision
+            approved, reason = decision
+            if not approved:
+                reason = (reason or "").strip() or "No reason given"
+                payload: dict[str, Any] = {
+                    "ok": False,
+                    "tool": tool_name,
+                    "args": args,
+                    "error": f"User rejected the command: {reason}",
+                    "rejected": True,
+                    "reason": reason,
+                }
+                message_payload = self._build_tool_result_message_payload(payload)
+                msg = {
+                    "role": "toolResult",
+                    "content": json.dumps(message_payload, ensure_ascii=False),
+                    "timestamp": int(time.time() * 1000),
+                }
+                self.messages.append(msg)
+                self.session_manager.append_message(msg)
+                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": args, "reason": reason})
+                self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": payload})
+                return payload
         self._emit({"type": "tool_call_start", "tool": tool_name, "args": args})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)

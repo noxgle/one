@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import atexit
 import json
+import os
+import select
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from one.core.types import ModelInfo
 from one.config import get_agent_dir
@@ -14,6 +17,260 @@ except Exception:  # pragma: no cover
     readline = None
 
 
+def _read_input_line(prompt: str, on_ctrl_a: Callable[[], None]) -> str:
+    """Read one input line; Ctrl+A fires on_ctrl_a instantly (no Enter).
+
+    Three paths, tried in order:
+
+    1. GNU readline callback interface — full readline editing and an instant
+       Ctrl+A hook. Only exists on builds compiled with HAVE_RL_CALLBACK
+       (typical distro Python).
+    2. A minimal raw-mode (termios) line editor — used on builds that lack the
+       callback API (e.g. conda-forge Python), where readline cannot give us
+       per-keystroke control. Still gives instant Ctrl+A, backspace, arrows,
+       Home/End, Ctrl+U/K/L and history.
+    3. Non-tty stdin (pipes, tests): plain input(); the caller then receives a
+       raw "\\x01" line and handles the toggle itself.
+    """
+    if (
+        readline is not None
+        and sys.stdin.isatty()
+        and hasattr(readline, "callback_handler_install")
+    ):
+        result: dict[str, str] = {}
+
+        def _handler(line: str) -> None:
+            result["line"] = line
+
+        try:
+            readline.callback_handler_install(prompt, _handler)
+            while "line" not in result:
+                r, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if not r:
+                    continue
+                readline.callback_read_char()
+                buf = readline.get_line_buffer()
+                if "\x01" in buf:
+                    readline.replace_line(buf.replace("\x01", ""))
+                    on_ctrl_a()
+                    readline.redisplay()
+        finally:
+            try:
+                readline.callback_handler_remove()
+            except Exception:
+                pass
+        return result.get("line", "")
+    if sys.stdin.isatty():
+        try:
+            return _raw_readline(prompt, on_ctrl_a)
+        except Exception:
+            # Raw mode failed to set up (non-posix, weird tty) — fall back to
+            # the readline-backed input().
+            return input(prompt)
+    return input(prompt)
+
+
+def _raw_readline(prompt: str, on_ctrl_a: Callable[[], None]) -> str:
+    """Minimal line editor for terminals without the readline callback API.
+
+    Reads one char at a time in raw mode so Ctrl+A (\\x01) fires on_ctrl_a the
+    moment the key is pressed. Implements a useful editing subset: printable
+    (UTF-8) chars, Backspace, Delete, left/right arrows, Home/End, Ctrl+U
+    (clear), Ctrl+K (kill to end), Ctrl+W (kill word), Ctrl+L (clear screen)
+    and up/down arrow history. History is seeded from and persisted through the
+    readline module (the same interactive.history file).
+    """
+    fd = sys.stdin.fileno()
+    old_attr = None
+    try:
+        import termios
+        import tty
+
+        old_attr = termios.tcgetattr(fd)
+        # TCSANOW (not the default TCSAFLUSH) so input typed ahead of the
+        # prompt is preserved instead of being discarded.
+        tty.setraw(fd, termios.TCSANOW)
+    except Exception:
+        raise
+
+    prefix, _, prompt_body = prompt.rpartition("\n")
+
+    history: list[str] = []
+    if readline is not None:
+        try:
+            history = [
+                readline.get_history_item(i)
+                for i in range(1, readline.get_current_history_length() + 1)
+            ]
+        except Exception:
+            history = []
+
+    buf: list[str] = []
+    cursor = 0
+    hist_pos = len(history)  # len(history) == editing live input
+    hist_draft = ""
+
+    def emit(text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    def redraw() -> None:
+        emit("\r" + prompt_body + "".join(buf))
+        emit("\x1b[K")  # clear to end of line
+        pos = len(prompt_body) + len("".join(buf[:cursor]))
+        emit(f"\r\x1b[{pos + 1}G")  # absolute column (1-based)
+
+    def commit_history(line: str) -> None:
+        if readline is not None and line.strip():
+            try:
+                readline.add_history(line)
+            except Exception:
+                pass
+
+    try:
+        emit(prefix + prompt_body)
+        while True:
+            b0 = os.read(fd, 1)
+            if not b0:
+                break  # EOF on the fd itself
+            code = b0[0]
+            if code == 0x01:  # Ctrl+A — toggle cooperation instantly
+                on_ctrl_a()
+                redraw()
+                continue
+            if code == 0x03:  # Ctrl+C
+                raise KeyboardInterrupt
+            if code == 0x04:  # Ctrl+D
+                if not buf:
+                    raise EOFError
+                if cursor < len(buf):
+                    del buf[cursor]
+                    redraw()
+                continue
+            if code in (0x0D, 0x0A):  # Enter
+                break
+            if code in (0x7F, 0x08):  # Backspace
+                if cursor > 0:
+                    del buf[cursor - 1]
+                    cursor -= 1
+                    redraw()
+                continue
+            if code == 0x15:  # Ctrl+U — clear the whole line
+                buf = []
+                cursor = 0
+                redraw()
+                continue
+            if code == 0x0B:  # Ctrl+K — kill to end of line
+                del buf[cursor:]
+                redraw()
+                continue
+            if code == 0x0C:  # Ctrl+L — clear screen
+                emit("\x1b[2J\x1b[H")
+                redraw()
+                continue
+            if code == 0x02:  # Ctrl+B — cursor left
+                cursor = max(0, cursor - 1)
+                redraw()
+                continue
+            if code == 0x06:  # Ctrl+F — cursor right
+                cursor = min(len(buf), cursor + 1)
+                redraw()
+                continue
+            if code == 0x05:  # Ctrl+E — end of line
+                cursor = len(buf)
+                redraw()
+                continue
+            if code == 0x17:  # Ctrl+W — kill word before cursor
+                start = cursor
+                while start > 0 and buf[start - 1] == " ":
+                    start -= 1
+                while start > 0 and buf[start - 1] != " ":
+                    start -= 1
+                del buf[start:cursor]
+                cursor = start
+                redraw()
+                continue
+            if code == 0x1B:  # Escape sequences: arrows / Home / End / Delete
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if not r:
+                    continue  # bare Esc
+                nxt = os.read(fd, 1)
+                if nxt == b"[":
+                    r, _, _ = select.select([fd], [], [], 0.05)
+                    if not r:
+                        continue
+                    third = os.read(fd, 1)
+                    if third == b"A":  # Up — previous history entry
+                        if hist_pos > 0:
+                            if hist_pos == len(history):
+                                hist_draft = "".join(buf)
+                            hist_pos -= 1
+                            buf = list(history[hist_pos])
+                            cursor = len(buf)
+                            redraw()
+                    elif third == b"B":  # Down — next history entry
+                        if hist_pos < len(history):
+                            hist_pos += 1
+                            if hist_pos == len(history):
+                                buf = list(hist_draft)
+                            else:
+                                buf = list(history[hist_pos])
+                            cursor = len(buf)
+                            redraw()
+                    elif third == b"C":  # Right
+                        cursor = min(len(buf), cursor + 1)
+                        redraw()
+                    elif third == b"D":  # Left
+                        cursor = max(0, cursor - 1)
+                        redraw()
+                    elif third == b"H":  # Home
+                        cursor = 0
+                        redraw()
+                    elif third == b"F":  # End
+                        cursor = len(buf)
+                        redraw()
+                    elif third == b"3":  # Delete key (ESC [ 3 ~)
+                        r, _, _ = select.select([fd], [], [], 0.05)
+                        if r:
+                            os.read(fd, 1)  # consume "~"
+                        if cursor < len(buf):
+                            del buf[cursor]
+                            redraw()
+                continue
+            if code >= 0x20:  # Printable (possibly part of a UTF-8 char)
+                if code >= 0x80:
+                    n = 2 if code & 0xE0 == 0xC0 else 3 if code & 0xF0 == 0xE0 else 4
+                    raw = b0
+                    for _ in range(n - 1):
+                        r, _, _ = select.select([fd], [], [], 0.05)
+                        if not r:
+                            break
+                        raw += os.read(fd, 1)
+                    try:
+                        text = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    text = chr(code)
+                buf.insert(cursor, text)
+                cursor += 1
+                redraw()
+    finally:
+        try:
+            import termios
+
+            if old_attr is not None:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+        except Exception:
+            pass
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    line = "".join(buf)
+    commit_history(line)
+    return line
+
+
 class InteractiveMode:
     _THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"]
 
@@ -21,6 +278,12 @@ class InteractiveMode:
         self.runtime_host = runtime_host
         self.options = options or {}
         self._history_initialized = False
+
+    # Max history entries kept in memory and written back to disk. Without a
+    # cap, a large interactive.history file is re-read and re-written by every
+    # session (and each test), growing unboundedly and exhausting memory.
+    _HISTORY_MAX_LINES = 2000
+    _HISTORY_MAX_FILE_BYTES = 5 * 1024 * 1024
 
     def _setup_readline(self) -> None:
         if self._history_initialized:
@@ -31,13 +294,21 @@ class InteractiveMode:
         try:
             history_path = Path(get_agent_dir()) / "interactive.history"
             history_path.parent.mkdir(parents=True, exist_ok=True)
-            if history_path.exists():
+            readline.set_history_length(self._HISTORY_MAX_LINES)
+            if (
+                history_path.exists()
+                and history_path.stat().st_size <= self._HISTORY_MAX_FILE_BYTES
+            ):
                 readline.read_history_file(str(history_path))
             readline.parse_and_bind("set editing-mode emacs")
             readline.parse_and_bind("tab: complete")
             readline.parse_and_bind('"\\C-l": clear-screen')
+            # Let Ctrl+A reach Python so the main loop can toggle cooperation
+            # mode. Without this, readline consumes it as beginning-of-line.
+            readline.parse_and_bind('"\\C-a": self-insert')
             def _save_history() -> None:
                 try:
+                    # set_history_length caps this to the last _HISTORY_MAX_LINES.
                     readline.write_history_file(str(history_path))
                 except Exception:
                     return
@@ -50,9 +321,24 @@ class InteractiveMode:
     async def run(self) -> None:
         self._setup_readline()
         session = self.runtime_host.session
+        if bool(self.options.get("cooperation")) or getattr(session.settings_manager, "get_tool_approval", lambda: False)():
+            session.approval_callback = self._prompt_approval
+            print("[Cooperation] tool approval enabled (mutating tools ask before running)", flush=True)
         assistant_streamed = False
         retry_state = "idle"
         printed_banner = False
+        cooperation_state = "on" if session.approval_callback is not None else "off"
+
+        def _toggle_cooperation() -> None:
+            nonlocal cooperation_state
+            if session.approval_callback is None:
+                session.approval_callback = self._prompt_approval
+                cooperation_state = "on"
+                print("[Cooperation] enabled (Ctrl+A toggles)", flush=True)
+            else:
+                session.approval_callback = None
+                cooperation_state = "off"
+                print("[Cooperation] disabled (Ctrl+A toggles)", flush=True)
 
         def on_event(event: dict) -> None:
             nonlocal assistant_streamed, retry_state
@@ -87,6 +373,8 @@ class InteractiveMode:
                 print(f"[Błąd] {err}", flush=True)
             if et == "tool_call_start":
                 print(f"[Tool] {event.get('tool')} {json.dumps(event.get('args', {}), ensure_ascii=False)}", flush=True)
+            if et == "tool_approval_rejected":
+                print(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", flush=True)
             if et == "tool_call_end":
                 ok = bool(event.get("ok"))
                 status = "OK" if ok else "ERR"
@@ -137,11 +425,12 @@ class InteractiveMode:
             queues = session.get_pending_queues()
             cwd_label = session.session_manager.cwd
             print(
-                f"[{model_label} | thinking:{session.thinking_level}{usage_text} | tokens:{tokens_total} | retry:{retry_state} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
+                f"[{model_label} | thinking:{session.thinking_level}{usage_text} | tokens:{tokens_total} | retry:{retry_state} | coop:{cooperation_state} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
             )
             print("[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /theme [name] | /abort | /exit]")
+            print("Ctrl+A toggles cooperation mode (ask before running commands).")
             try:
-                line = input("\n> ")
+                line = _read_input_line("\n> ", _toggle_cooperation)
             except EOFError:
                 print("")
                 break
@@ -152,6 +441,10 @@ class InteractiveMode:
                     continue
                 print("")
                 break
+            if line == "\x01":
+                # Fallback path (non-tty stdin): Ctrl+A arrives as a raw byte.
+                _toggle_cooperation()
+                continue
             if not line.strip():
                 continue
             aliases = {
@@ -175,7 +468,8 @@ class InteractiveMode:
                     "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
-                    "/bash <command>"
+                    "/cooperation [on|off] | /bash <command>\n"
+                    "Ctrl+A toggles cooperation mode"
                 )
                 continue
             if line.strip() == "/stats":
@@ -554,10 +848,55 @@ class InteractiveMode:
                     continue
                 print("Usage: /extui <list|request|respond|cancel|clear> ...")
                 continue
+            if line.strip() == "/cooperation":
+                enabled = session.approval_callback is not None
+                print(
+                    json.dumps(
+                        {"enabled": enabled, "tools": sorted(session._approval_tools)},
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                continue
+            if line.startswith("/cooperation "):
+                mode = line[len("/cooperation ") :].strip().lower()
+                if mode in {"on", "enable", "yes", "1", "true"}:
+                    session.approval_callback = self._prompt_approval
+                    cooperation_state = "on"
+                    print("[Cooperation] enabled", flush=True)
+                elif mode in {"off", "disable", "no", "0", "false"}:
+                    session.approval_callback = None
+                    cooperation_state = "off"
+                    print("[Cooperation] disabled", flush=True)
+                else:
+                    print("Usage: /cooperation [on|off]")
+                continue
             if line.startswith("/"):
                 print(f"Unknown command: {line.strip()}. Use /help.")
                 continue
             await session.prompt(line)
+
+    async def _prompt_approval(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        """Cooperation mode: ask the user before running a mutating tool.
+
+        Accept (Enter / 'y') -> (True, ""). Reject ('n') -> a required reason
+        is prompted -> (False, reason). Ctrl+C / EOF -> (False, "aborted by user").
+        """
+        print(f"[Approve] {tool_name} {json.dumps(args, ensure_ascii=False)}", flush=True)
+        try:
+            while True:
+                answer = input("Run? [Y]/n: ").strip().lower()
+                if answer in {"", "y", "yes"}:
+                    return True, ""
+                if answer in {"n", "no"}:
+                    reason = ""
+                    while not reason.strip():
+                        reason = input("Reason (required): ").strip()
+                    return False, reason
+                print("Please answer 'y' (run) or 'n' (reject).")
+        except (KeyboardInterrupt, EOFError):
+            print("\n[Approval aborted by user]", flush=True)
+            return False, "aborted by user"
 
     async def init(self) -> None:
         return

@@ -154,6 +154,7 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+c", "abort", "Abort"),
             ("ctrl+l", "clear_stream", "Clear"),
             ("ctrl+q", "quit", "Quit"),
+            ("ctrl+a", "toggle_cooperation", "Toggle approval"),
             ("f1", "help", "Help"),
         ]
 
@@ -172,6 +173,8 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._approval_queue: asyncio.Queue | None = None
+            self._approval_pending: dict[str, Any] | None = None
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
@@ -469,10 +472,10 @@ if TEXTUAL_AVAILABLE:
                 stream_widget = self.query_one("#stream")
                 stream_widget.update("")
                 self._stream_lines = []
-                self._assistant_has_live_delta = False
-                self._assistant_live_start_idx = -1
-                self._assistant_live_buffer = ""
-                return
+            self._assistant_has_live_delta = False
+            self._assistant_live_start_idx = -1
+            self._assistant_live_buffer = ""
+            return
             if cmd == "/abort":
                 await session.abort()
                 self._write("[abort requested]", "warn")
@@ -559,6 +562,9 @@ if TEXTUAL_AVAILABLE:
         async def on_input_submitted(self, event: Input.Submitted) -> None:
             text = event.value.strip()
             self.query_one("#input", Input).value = ""
+            if self._approval_pending is not None:
+                await self._handle_approval_answer(text)
+                return
             if not text:
                 return
             if text.startswith("/"):
@@ -577,9 +583,83 @@ if TEXTUAL_AVAILABLE:
 
             asyncio.create_task(_run_prompt())
 
+        async def _handle_approval_answer(self, text: str) -> None:
+            """Route the input widget answer back to the pending approval prompt."""
+            queue = self._approval_queue
+            if queue is None:
+                self._approval_pending = None
+                return
+            pending = self._approval_pending or {}
+            low = text.lower()
+            if pending.get("stage") == "reason":
+                if not text:
+                    self._write("[Approve] powód jest wymagany — wpisz powód lub 'y' aby zatwierdzić", "warn")
+                    return
+                queue.put_nowait(("no", text))
+                return
+            if not text or low in {"y", "yes"}:
+                queue.put_nowait(("yes", ""))
+                return
+            if low.startswith("n"):
+                reason = text[1:].strip()
+                if reason:
+                    queue.put_nowait(("no", reason))
+                    return
+                pending["stage"] = "reason"
+                try:
+                    self.query_one("#input", Input).placeholder = "Powód odrzucenia:"
+                except Exception:
+                    pass
+                self._write("[Approve] podaj powód odrzucenia", "warn")
+                return
+            # Any other non-empty text is treated as the rejection reason.
+            queue.put_nowait(("no", text))
+
+        async def _approval_prompt(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+            """Cooperation mode callback: ask the user via the input widget."""
+            self._approval_pending = {"tool": tool_name, "args": args, "stage": "answer"}
+            self._approval_queue = asyncio.Queue()
+            self._write(f"[Approve] {tool_name} {json.dumps(args, ensure_ascii=False)}", "warn")
+            try:
+                input_widget = self.query_one("#input", Input)
+                input_widget.placeholder = "Akceptuj (Enter) / n + powód"
+                input_widget.focus()
+            except Exception:
+                pass
+            self._refresh_sidebar()
+            try:
+                verdict, reason = await self._approval_queue.get()
+            except asyncio.CancelledError:
+                verdict, reason = "no", "aborted by user"
+            finally:
+                self._approval_pending = None
+                self._approval_queue = None
+                try:
+                    self.query_one("#input", Input).placeholder = "Wpisz polecenie lub /help"
+                except Exception:
+                    pass
+                self._refresh_sidebar()
+            if verdict == "yes":
+                return True, ""
+            return False, reason
+
         async def action_abort(self) -> None:
             await self.session.abort()
             self._write("[abort requested]", "warn")
+            self._refresh_sidebar()
+
+        def action_toggle_cooperation(self) -> None:
+            """Ctrl+A: toggle ask-before-running (cooperation) mode.
+
+            Affects future tool calls only; a pending approval prompt keeps
+            waiting for its answer.
+            """
+            if self.session.approval_callback is None:
+                self.session.approval_callback = self._approval_prompt
+                self._write("[Cooperation] enabled (Ctrl+A toggles)", "info")
+            else:
+                self.session.approval_callback = None
+                self._write("[Cooperation] disabled (Ctrl+A toggles)", "info")
             self._refresh_sidebar()
 
         def action_clear_stream(self) -> None:
@@ -635,6 +715,8 @@ if TEXTUAL_AVAILABLE:
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
                 self._write_tool_block(f"tool start: {tool_name} {args_text}")
+            elif et == "tool_approval_rejected":
+                self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
             elif et == "tool_call_end":
                 status = "ok" if event.get("ok") else "err"
                 if not event.get("ok"):
@@ -673,4 +755,6 @@ class TuiMode:
             raise RuntimeError("TUI mode requires 'textual'. Install dependencies: pip install -e .")
         session = self.runtime_host.session
         app = _OneTextualApp(session, self.options)
+        if bool(self.options.get("cooperation")) or getattr(session.settings_manager, "get_tool_approval", lambda: False)():
+            session.approval_callback = app._approval_prompt
         await app.run_async()

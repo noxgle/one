@@ -303,11 +303,18 @@ async def _run(argv: list[str]) -> int:
         return 0
 
     if parsed.mode == "tui":
-        tui = TuiMode(host, {"verbose": parsed.verbose, "theme": settings.get_theme()})
+        tui = TuiMode(
+            host,
+            {
+                "verbose": parsed.verbose,
+                "theme": settings.get_theme(),
+                "cooperation": parsed.cooperation,
+            },
+        )
         await tui.run()
         return 0
 
-    interactive = InteractiveMode(host, {"verbose": parsed.verbose})
+    interactive = InteractiveMode(host, {"verbose": parsed.verbose, "cooperation": parsed.cooperation})
     await interactive.run()
     return 0
 

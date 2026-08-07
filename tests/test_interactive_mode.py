@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 import uuid
 
@@ -8,6 +9,17 @@ import pytest
 
 from one.core.types import ModelInfo
 from one.modes.interactive_mode import InteractiveMode
+
+
+@pytest.fixture(autouse=True)
+def _isolated_agent_dir(tmp_path: Path, monkeypatch):
+    """Keep readline history writes out of the real ~/.config/one agent dir.
+
+    Without this, every InteractiveMode instance reads/writes the real
+    interactive.history file, which grows unboundedly across test runs.
+    """
+    monkeypatch.setenv("ONE_CODING_AGENT_DIR", str(tmp_path / "agent"))
+    return tmp_path
 
 
 @dataclass
@@ -115,6 +127,7 @@ class _DummySession:
         self.prompt_calls: list[str] = []
         self._extui_pending: dict[str, dict[str, Any]] = {}
         self._extui_history: list[dict[str, Any]] = []
+        self.approval_callback: Any = None
 
     def subscribe(self, listener: Any) -> None:
         self._listeners.append(listener)
@@ -435,6 +448,26 @@ async def test_interactive_login_status_lists_providers(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert '"providers": [' in out
     assert '"provider": "openai"' in out
+
+
+@pytest.mark.asyncio
+async def test_interactive_ctrl_a_toggles_cooperation(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    commands = ["\x01", "\x01", "\x01", "/exit"]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+    await mode.run()
+    out = capsys.readouterr().out
+    # First Ctrl+A enables, second disables, third enables again.
+    assert "[Cooperation] enabled (Ctrl+A toggles)" in out
+    assert "[Cooperation] disabled (Ctrl+A toggles)" in out
+    assert out.index("[Cooperation] enabled (Ctrl+A toggles)") < out.index("[Cooperation] disabled (Ctrl+A toggles)")
+    # Status line reflects the current state.
+    assert "coop:on" in out
+    # Ctrl+A must never be forwarded to session.prompt.
+    assert session.prompt_calls == []
+    # Final state: enabled.
+    assert session.approval_callback is not None
 
 
 @pytest.mark.asyncio
