@@ -334,11 +334,11 @@ class InteractiveMode:
             if session.approval_callback is None:
                 session.approval_callback = self._prompt_approval
                 cooperation_state = "on"
-                print("[Cooperation] enabled (Ctrl+A toggles)", flush=True)
+                print("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", flush=True)
             else:
                 session.approval_callback = None
                 cooperation_state = "off"
-                print("[Cooperation] disabled (Ctrl+A toggles)", flush=True)
+                print("[Cooperation] disabled: all tools run freely", flush=True)
 
         def on_event(event: dict) -> None:
             nonlocal assistant_streamed, retry_state
@@ -428,7 +428,7 @@ class InteractiveMode:
                 f"[{model_label} | thinking:{session.thinking_level}{usage_text} | tokens:{tokens_total} | retry:{retry_state} | coop:{cooperation_state} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
             )
             print("[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /theme [name] | /abort | /exit]")
-            print("Ctrl+A toggles cooperation mode (ask before running commands).")
+            print("Ctrl+A toggles cooperation mode (ask before running mutating tools: bash/write/edit).")
             try:
                 line = _read_input_line("\n> ", _toggle_cooperation)
             except EOFError:
@@ -469,7 +469,7 @@ class InteractiveMode:
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /bash <command>\n"
-                    "Ctrl+A toggles cooperation mode"
+                    "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
                 )
                 continue
             if line.strip() == "/stats":
@@ -863,11 +863,11 @@ class InteractiveMode:
                 if mode in {"on", "enable", "yes", "1", "true"}:
                     session.approval_callback = self._prompt_approval
                     cooperation_state = "on"
-                    print("[Cooperation] enabled", flush=True)
+                    print("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", flush=True)
                 elif mode in {"off", "disable", "no", "0", "false"}:
                     session.approval_callback = None
                     cooperation_state = "off"
-                    print("[Cooperation] disabled", flush=True)
+                    print("[Cooperation] disabled: all tools run freely", flush=True)
                 else:
                     print("Usage: /cooperation [on|off]")
                 continue

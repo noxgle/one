@@ -459,9 +459,9 @@ async def test_interactive_ctrl_a_toggles_cooperation(monkeypatch, capsys):
     await mode.run()
     out = capsys.readouterr().out
     # First Ctrl+A enables, second disables, third enables again.
-    assert "[Cooperation] enabled (Ctrl+A toggles)" in out
-    assert "[Cooperation] disabled (Ctrl+A toggles)" in out
-    assert out.index("[Cooperation] enabled (Ctrl+A toggles)") < out.index("[Cooperation] disabled (Ctrl+A toggles)")
+    assert "[Cooperation] enabled: mutating tools" in out
+    assert "[Cooperation] disabled: all tools run freely" in out
+    assert out.index("[Cooperation] enabled: mutating tools") < out.index("[Cooperation] disabled: all tools run freely")
     # Status line reflects the current state.
     assert "coop:on" in out
     # Ctrl+A must never be forwarded to session.prompt.

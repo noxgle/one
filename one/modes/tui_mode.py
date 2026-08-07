@@ -656,10 +656,10 @@ if TEXTUAL_AVAILABLE:
             """
             if self.session.approval_callback is None:
                 self.session.approval_callback = self._approval_prompt
-                self._write("[Cooperation] enabled (Ctrl+A toggles)", "info")
+                self._write("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", "info")
             else:
                 self.session.approval_callback = None
-                self._write("[Cooperation] disabled (Ctrl+A toggles)", "info")
+                self._write("[Cooperation] disabled: all tools run freely", "info")
             self._refresh_sidebar()
 
         def action_clear_stream(self) -> None:
