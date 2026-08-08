@@ -11,6 +11,8 @@ from typing import Any
 
 from rich.markup import escape as rich_escape
 
+from one.core.types import ModelInfo
+
 try:
     from textual import events
     from textual.app import App, ComposeResult
@@ -188,10 +190,11 @@ if TEXTUAL_AVAILABLE:
             ("f1", "help", "Help"),
         ]
 
-        def __init__(self, session: Any, options: dict[str, Any] | None = None) -> None:
+        def __init__(self, session: Any, options: dict[str, Any] | None = None, runtime_host: Any | None = None) -> None:
             super().__init__()
             self.session = session
             self.options = options or {}
+            self.runtime_host = runtime_host
             self._theme = resolve_tui_theme(self.options.get("theme") or getattr(session.settings_manager, "get_theme", lambda: "default")())
             self._off_listener = None
             self._assistant_stream = ""
@@ -210,6 +213,7 @@ if TEXTUAL_AVAILABLE:
             self._approval_queue: asyncio.Queue | None = None
             self._approval_pending: dict[str, Any] | None = None
             self._extension_ui_pending_request: dict[str, Any] | None = None
+            self._login_pending: dict[str, Any] | None = None
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
@@ -225,6 +229,22 @@ if TEXTUAL_AVAILABLE:
             # Drive the "waiting for the model" spinner while a turn is in
             # flight but no assistant text is currently streaming.
             self.set_interval(0.15, self._tick_waiting)
+            self._bind_session()
+            self._write("one TUI v2 ready. /help", "info")
+            self._refresh_sidebar()
+
+        def _bind_session(self) -> None:
+            """(Re)subscribe to session events.
+
+            Used on mount and after /fork, which swaps the underlying session
+            for a fresh one — the old listener must be detached first.
+            """
+            if callable(self._off_listener):
+                try:
+                    self._off_listener()
+                except Exception:
+                    pass
+                self._off_listener = None
 
             def _listener(event: dict[str, Any]) -> None:
                 try:
@@ -233,8 +253,6 @@ if TEXTUAL_AVAILABLE:
                     self.call_from_thread(self.post_message, SessionEvent(event))
 
             self._off_listener = self.session.subscribe(_listener)
-            self._write("one TUI v2 ready. /help", "info")
-            self._refresh_sidebar()
 
         def on_unmount(self) -> None:
             if callable(self._off_listener):
@@ -242,6 +260,7 @@ if TEXTUAL_AVAILABLE:
                     self._off_listener()
                 except Exception:
                     pass
+                self._off_listener = None
 
         def _render_stream(self) -> None:
             stream_widget = self.query_one("#stream")
@@ -550,14 +569,33 @@ if TEXTUAL_AVAILABLE:
 
         async def _handle_command(self, cmd: str) -> None:
             session = self.session
+            cmd = {
+                "/q": "/exit",
+                "/h": "/help",
+                "/s": "/status",
+                "/st": "/status",
+                "/m": "/model",
+                "/t": "/thinking",
+                "/c": "/clear",
+                "/qq": "/queue clear",
+                "/mc": "/model-cycle",
+                "/tc": "/thinking-cycle",
+            }.get(cmd.strip(), cmd)
             if cmd in {"/exit", "/quit"}:
                 self.exit()
                 return
             if cmd == "/help":
+                self._write("/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort", "info")
                 self._write(
-                    "Commands: /help /status /model [provider/model] /thinking [level] /queue [clear] /theme [name] /abort /clear /exit",
+                    "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle | /theme [name]",
                     "info",
                 )
+                self._write(
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>",
+                    "info",
+                )
+                self._write("/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info")
+                self._write("/cooperation [on|off] | /bash <command>", "info")
                 return
             if cmd == "/clear":
                 stream_widget = self.query_one("#stream")
@@ -578,18 +616,62 @@ if TEXTUAL_AVAILABLE:
                 s = build_sidebar_snapshot(session, self._retry_state, self._last_tool_error, self._last_provider_error)
                 self._write(json.dumps(s, ensure_ascii=False), "info")
                 return
+            if cmd == "/stats":
+                self._write(json.dumps(session.get_session_stats(), ensure_ascii=False), "info")
+                return
+            if cmd == "/state":
+                self._write(
+                    json.dumps(
+                        {
+                            "model": {"provider": session.model.provider, "id": session.model.id} if session.model else None,
+                            "thinkingLevel": session.thinking_level,
+                            "isStreaming": session.is_streaming,
+                            "pendingMessageCount": session.pending_message_count,
+                            "pendingQueues": session.get_pending_queues(),
+                            "activeTools": session.active_tools,
+                            "sessionId": session.session_id,
+                            "sessionFile": session.session_file,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "info",
+                )
+                return
+            if cmd == "/tools":
+                self._write(json.dumps({"tools": session.active_tools}, ensure_ascii=False), "info")
+                return
             if cmd == "/model":
                 current = f"{session.model.provider}/{session.model.id}" if session.model else "none"
-                self._write(f"Current model: {current}", "info")
-                self._write("Usage: /model <provider>/<model-id>", "info")
+                providers = session.model_registry.providers()
+                self._write(
+                    json.dumps({"current": current, "providers": providers, "usage": "/model <provider>/<model-id>"}, ensure_ascii=False),
+                    "info",
+                )
+                return
+            if cmd == "/model-cycle":
+                result = await session.cycle_model()
+                if not result:
+                    self._write("No available models to cycle.", "error")
+                    return
+                session.settings_manager.set_default_provider(result.model.provider)
+                session.settings_manager.set_default_model(result.model.id)
+                self._write(f"Model cycled to {result.model.provider}/{result.model.id}", "info")
+                self._refresh_sidebar()
                 return
             if cmd.startswith("/model "):
                 val = cmd[len("/model ") :].strip()
                 if "/" not in val:
-                    self._write("Usage: /model <provider>/<model-id>", "error")
-                    return
-                provider, model_id = val.split("/", 1)
-                model = session.model_registry.resolve(provider, model_id, allow_dynamic=True)
+                    # Provider-only: auto-pick the provider's first registered model.
+                    provider = val
+                    models = session.model_registry.models_for_provider(provider)
+                    if not models:
+                        self._write(f"Provider not found or has no models: {provider}", "error")
+                        return
+                    model = models[0]
+                    provider, model_id = model.provider, model.id
+                else:
+                    provider, model_id = val.split("/", 1)
+                    model = session.model_registry.resolve(provider, model_id, allow_dynamic=True)
                 if not model:
                     self._write(f"Model not found: {provider}/{model_id}", "error")
                     return
@@ -610,6 +692,11 @@ if TEXTUAL_AVAILABLE:
                 level = cmd[len("/thinking ") :].strip()
                 session.set_thinking_level(level)
                 self._write(f"Thinking level set to {level}", "info")
+                self._refresh_sidebar()
+                return
+            if cmd == "/thinking-cycle":
+                level = session.cycle_thinking_level()
+                self._write(f"Thinking level cycled to {level}", "info")
                 self._refresh_sidebar()
                 return
             if cmd == "/queue":
@@ -650,6 +737,240 @@ if TEXTUAL_AVAILABLE:
                 self._write(f"Theme set to {name}", "info")
                 self._refresh_sidebar()
                 return
+            if cmd.startswith("/steer "):
+                await session.steer(cmd[len("/steer ") :].strip())
+                self._write("Queued steering message.", "info")
+                self._refresh_sidebar()
+                return
+            if cmd.startswith("/follow "):
+                await session.follow_up(cmd[len("/follow ") :].strip())
+                self._write("Queued follow-up message.", "info")
+                self._refresh_sidebar()
+                return
+            if cmd.startswith("/compact"):
+                instructions = cmd[len("/compact") :].strip() or None
+                result = await session.compact(instructions)
+                self._write(json.dumps(result, ensure_ascii=False), "info")
+                self._refresh_sidebar()
+                return
+            if cmd.strip() == "/tree":
+                tree = session.session_manager.get_tree()
+                leaf_id = session.session_manager.get_leaf_id()
+                rendered: list[str] = []
+
+                def render_tree(nodes: list[dict[str, Any]], depth: int = 0) -> None:
+                    for node in nodes:
+                        e = node["entry"]
+                        label = e.get("type")
+                        if e.get("type") == "message":
+                            role = str((e.get("message") or {}).get("role", "?"))
+                            label = f"message:{role}"
+                        marker = "*" if e.get("id") == leaf_id else " "
+                        rendered.append(f"{'  ' * depth}{marker} {label} {e.get('id')}")
+                        render_tree(node.get("children", []), depth + 1)
+
+                render_tree(tree)
+                self._write("\n".join(rendered) if rendered else "(empty session)", "info")
+                return
+            if cmd.startswith("/navigate"):
+                parts = cmd.split()
+                if len(parts) < 2:
+                    self._write("Usage: /navigate <entryId> [--summary <text>]", "error")
+                    return
+                entry_id = parts[1]
+                summarize = "--summary" in parts
+                custom = None
+                if summarize:
+                    idx = parts.index("--summary")
+                    custom = " ".join(parts[idx + 1 :]) or None
+                try:
+                    result = await session.navigate_tree(
+                        entry_id,
+                        {"summarize": summarize, "customInstructions": custom},
+                    )
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                except ValueError as e:
+                    self._write(str(e), "error")
+                self._refresh_sidebar()
+                return
+            if cmd.startswith("/fork "):
+                entry_id = cmd[len("/fork ") :].strip()
+                if not entry_id:
+                    self._write("Usage: /fork <entryId>", "error")
+                    return
+                if self.runtime_host is None:
+                    self._write("Runtime host unavailable: /fork is not supported in this context.", "error")
+                    return
+                try:
+                    result = await self.runtime_host.fork(entry_id)
+                    self.session = self.runtime_host.session
+                    self._bind_session()
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                except ValueError as e:
+                    self._write(str(e), "error")
+                self._refresh_sidebar()
+                return
+            if cmd.startswith("/login"):
+                rest = cmd[len("/login") :].strip()
+                parts = rest.split() if rest else []
+                if parts and parts[0] == "status":
+                    if len(parts) == 2:
+                        self._write(json.dumps(session.model_registry.get_provider_auth_status(parts[1]), ensure_ascii=False), "info")
+                    else:
+                        providers = session.model_registry.providers()
+                        statuses = [session.model_registry.get_provider_auth_status(p) for p in providers]
+                        self._write(json.dumps({"providers": statuses}, ensure_ascii=False), "info")
+                    return
+                provider = parts[0] if len(parts) >= 1 else ""
+                if not provider:
+                    self._write("Provider is required. Usage: /login <provider> [apiKey] [model]", "error")
+                    return
+                requires_api_key = session.model_registry.requires_api_key(provider)
+                api_key = parts[1] if len(parts) >= 2 else ""
+                if requires_api_key and not api_key:
+                    env_var = session.model_registry.get_provider_auth_status(provider).get("envVar")
+                    hint = f" or set {env_var}" if env_var else ""
+                    self._write(f"API key is required for {provider}{hint}. Type the key below.", "warn")
+                    self._login_pending = {"provider": provider, "envVar": env_var}
+                    try:
+                        input_widget = self.query_one("#input", Input)
+                        input_widget.placeholder = f"API key for {provider}:"
+                        input_widget.focus()
+                    except Exception:
+                        pass
+                    return
+                model_input = parts[2] if len(parts) >= 3 else ""
+                await self._complete_login(provider, api_key, model_input)
+                return
+            if cmd.startswith("/logout "):
+                provider = cmd[len("/logout ") :].strip()
+                if not provider:
+                    self._write("Usage: /logout <provider>", "error")
+                    return
+                session.model_registry.remove_stored_api_key(provider)
+                self._write(f"Removed stored key for {provider}.", "info")
+                return
+            if cmd.startswith("/retry "):
+                mode = cmd[len("/retry ") :].strip().lower()
+                if mode not in {"on", "off"}:
+                    self._write("Usage: /retry <on|off>", "error")
+                    return
+                session.set_auto_retry_enabled(mode == "on")
+                self._write(f"Auto-retry set to {mode}.", "info")
+                self._refresh_sidebar()
+                return
+            if cmd.startswith("/config"):
+                rest = cmd[len("/config") :].strip()
+                if not rest:
+                    self._write(json.dumps(session.settings_manager.get_global_settings(), ensure_ascii=False), "info")
+                    return
+                parts = rest.split(maxsplit=1)
+                if len(parts) == 1:
+                    key = parts[0]
+                    cur = session.settings_manager.merged()
+                    for p in key.split("."):
+                        if isinstance(cur, dict):
+                            cur = cur.get(p)
+                        else:
+                            cur = None
+                    self._write(json.dumps({"key": key, "value": cur}, ensure_ascii=False), "info")
+                    return
+                key, raw = parts
+                val: Any = raw
+                try:
+                    val = json.loads(raw)
+                except Exception:
+                    pass
+                session.settings_manager.set_config_value(key, val)
+                self._write(f"Updated {key}.", "info")
+                return
+            if cmd.strip() in {"/extui", "/ext-ui"} or cmd.startswith("/extui ") or cmd.startswith("/ext-ui "):
+                rest = cmd.split(" ", 1)[1].strip() if " " in cmd else ""
+                parts = rest.split(maxsplit=3) if rest else []
+                sub = parts[0].lower() if parts else ""
+                if sub == "list":
+                    self._write(json.dumps(session.get_extension_ui_state(), ensure_ascii=False), "info")
+                    return
+                if sub == "clear":
+                    session.clear_extension_ui_history()
+                    self._write("Extension UI history cleared.", "info")
+                    return
+                if sub == "request":
+                    if len(parts) < 3:
+                        self._write("Usage: /extui request <extension> <widget|overlay> [jsonPayload]", "error")
+                        return
+                    extension = parts[1]
+                    ui_type = parts[2]
+                    payload: dict[str, Any] = {}
+                    if len(parts) >= 4 and parts[3].strip():
+                        try:
+                            parsed = json.loads(parts[3])
+                            payload = parsed if isinstance(parsed, dict) else {"value": parsed}
+                        except Exception:
+                            self._write("Invalid JSON payload for /extui request", "error")
+                            return
+                    try:
+                        req = session.request_extension_ui(extension=extension, ui_type=ui_type, payload=payload)
+                    except ValueError as e:
+                        self._write(str(e), "error")
+                        return
+                    self._write(json.dumps(req, ensure_ascii=False), "info")
+                    return
+                if sub in {"respond", "cancel"}:
+                    if len(parts) < 2:
+                        self._write(f"Usage: /extui {sub} <requestId> [jsonPayload]", "error")
+                        return
+                    request_id = parts[1]
+                    payload: dict[str, Any] = {}
+                    if sub == "respond" and len(parts) >= 3 and parts[2].strip():
+                        raw_payload = rest.split(maxsplit=2)[2]
+                        try:
+                            parsed = json.loads(raw_payload)
+                            payload = parsed if isinstance(parsed, dict) else {"value": parsed}
+                        except Exception:
+                            self._write("Invalid JSON payload for /extui respond", "error")
+                            return
+                    try:
+                        resp = session.respond_extension_ui(request_id=request_id, payload=payload, cancelled=sub == "cancel")
+                    except ValueError as e:
+                        self._write(str(e), "error")
+                        return
+                    self._write(json.dumps(resp, ensure_ascii=False), "info")
+                    return
+                self._write("Usage: /extui <list|request|respond|cancel|clear>", "error")
+                return
+            if cmd.strip() == "/cooperation":
+                enabled = session.approval_callback is not None
+                self._write(json.dumps({"enabled": enabled, "tools": sorted(session._approval_tools)}, ensure_ascii=False), "info")
+                return
+            if cmd.startswith("/cooperation "):
+                mode = cmd[len("/cooperation ") :].strip().lower()
+                if mode in {"on", "enable", "yes", "1", "true"}:
+                    session.approval_callback = self._approval_prompt
+                    self._write("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", "info")
+                elif mode in {"off", "disable", "no", "0", "false"}:
+                    session.approval_callback = None
+                    self._write("[Cooperation] disabled: all tools run freely", "info")
+                else:
+                    self._write("Usage: /cooperation [on|off]", "error")
+                    return
+                self._refresh_sidebar()
+                return
+            if cmd.startswith("/bash "):
+                command = cmd[len("/bash ") :].strip()
+                if not command:
+                    self._write("Usage: /bash <command>", "error")
+                    return
+                try:
+                    result = await session.execute_bash(command)
+                    output = (result.get("output") or "").rstrip()
+                    if output:
+                        self._write_tool_block(output)
+                    else:
+                        self._write(f"[bash] exitCode={result.get('exitCode')}", "info")
+                except Exception as e:
+                    self._write(str(e), "error")
+                return
 
             self._write(f"Unknown command: {cmd}. Use /help.", "error")
 
@@ -661,6 +982,9 @@ if TEXTUAL_AVAILABLE:
                 return
             if self._extension_ui_pending_request is not None:
                 await self._handle_extension_ui_answer(text)
+                return
+            if self._login_pending is not None:
+                await self._handle_login_answer(text)
                 return
             if not text:
                 return
@@ -741,6 +1065,54 @@ if TEXTUAL_AVAILABLE:
                 return
             # The extension_ui_response event renders the result line.
 
+        async def _handle_login_answer(self, text: str) -> None:
+            """Route the input widget answer back to the pending /login api-key prompt."""
+            pending = self._login_pending
+            if pending is None:
+                return
+            self._login_pending = None
+            try:
+                input_widget = self.query_one("#input", Input)
+                input_widget.placeholder = "Wpisz polecenie lub /help"
+            except Exception:
+                pass
+            api_key = text.strip()
+            if not api_key:
+                env_var = pending.get("envVar")
+                hint = f" or set {env_var}" if env_var else ""
+                self._write(f"API key is required for {pending.get('provider')}{hint}.", "error")
+                return
+            await self._complete_login(pending.get("provider"), api_key, "")
+
+        async def _complete_login(self, provider: str, api_key: str, model_input: str) -> None:
+            """Persist provider apiKey + defaults and optionally switch the model."""
+            session = self.session
+            selected_model = None
+            if model_input:
+                selected_model = session.model_registry.resolve(provider, model_input, allow_dynamic=True)
+                if not selected_model:
+                    self._write(f"Model not found for {provider}: {model_input}", "error")
+                    return
+            if api_key:
+                session.model_registry.set_stored_api_key(provider, api_key)
+            session.settings_manager.set_default_provider(provider)
+            if selected_model:
+                session.settings_manager.set_default_model(selected_model.id)
+                await session.set_model(
+                    ModelInfo(
+                        provider=selected_model.provider,
+                        id=selected_model.id,
+                        reasoning=selected_model.reasoning,
+                        context_window=selected_model.context_window,
+                    )
+                )
+            self._write(
+                (f"Stored key for {provider}." if api_key else f"Configured provider {provider}.")
+                + (f" Default model set to {selected_model.id}." if selected_model else ""),
+                "info",
+            )
+            self._refresh_sidebar()
+
         async def _approval_prompt(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
             """Cooperation mode callback: ask the user via the input widget."""
             self._approval_pending = {"tool": tool_name, "args": args, "stage": "answer"}
@@ -797,7 +1169,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer = ""
 
         def action_help(self) -> None:
-            self._write("/help /status /model /thinking /queue /theme /abort /clear /exit", "info")
+            self._write("/help /stats /state /status /tools /model /model-cycle /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /login /logout /retry /config /extui /cooperation /bash /abort /clear /exit", "info")
 
         async def on_session_event(self, message: SessionEvent) -> None:
             event = message.payload
@@ -915,7 +1287,7 @@ class TuiMode:
         if not TEXTUAL_AVAILABLE:
             raise RuntimeError("TUI mode requires 'textual'. Install dependencies: pip install -e .")
         session = self.runtime_host.session
-        app = _OneTextualApp(session, self.options)
+        app = _OneTextualApp(session, self.options, self.runtime_host)
         if bool(self.options.get("cooperation")) or getattr(session.settings_manager, "get_tool_approval", lambda: False)():
             session.approval_callback = app._approval_prompt
         await app.run_async()

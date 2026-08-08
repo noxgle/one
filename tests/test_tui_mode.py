@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -132,7 +133,7 @@ class _FakeLoader:
         return "You are a coding agent."
 
 
-def _mk_app_session(tmp_path: Path):
+def _mk_app_session(tmp_path: Path, runtime_key: str | None = None):
     from one.core.agent_session import AgentSession
     from one.core.auth_storage import AuthStorage
     from one.core.model_registry import ModelRegistry
@@ -140,6 +141,8 @@ def _mk_app_session(tmp_path: Path):
     from one.core.settings_manager import SettingsManager
 
     auth = AuthStorage.in_memory()
+    if runtime_key:
+        auth.set_runtime_api_key("openai", runtime_key)
     registry = ModelRegistry.create(auth)
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
@@ -221,3 +224,337 @@ async def test_extension_ui_external_response_clears_pending(tmp_path: Path):
         assert app._extension_ui_pending_request is None
         stream = "\n".join(app._stream_lines)
         assert f"[ExtUI] response {req['id']} cancelled=False" in stream
+
+
+# ---------------------------------------------------------------------------
+# Headless TUI command-parity tests (/help commands vs interactive mode).
+# ---------------------------------------------------------------------------
+
+
+async def _submit(app, pilot, text: str) -> None:
+    from textual.widgets import Input
+
+    input_widget = app.query_one("#input", Input)
+    input_widget.value = text
+    await input_widget.action_submit()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_tui_command_help_lists_all_commands(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/help")
+        stream = "\n".join(app._stream_lines)
+        for token in [
+            "/stats",
+            "/state",
+            "/tools",
+            "/model-cycle",
+            "/thinking-cycle",
+            "/steer <text>",
+            "/follow <text>",
+            "/compact [instructions]",
+            "/tree",
+            "/navigate <id> [--summary <text>]",
+            "/fork <id>",
+            "/login [status|provider [apiKey] [model]]",
+            "/logout <provider>",
+            "/retry <on|off>",
+            "/config [key] [value]",
+            "/extui <list|request|respond|cancel|clear>",
+            "/cooperation [on|off]",
+            "/bash <command>",
+        ]:
+            assert token in stream, token
+
+
+@pytest.mark.asyncio
+async def test_tui_command_stats_state_tools(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/stats")
+        await _submit(app, pilot, "/state")
+        await _submit(app, pilot, "/tools")
+        stream = "\n".join(app._stream_lines)
+        assert '"userMessages"' in stream
+        assert '"thinkingLevel": "medium"' in stream
+        assert '"sessionId"' in stream
+        assert '"pendingQueues"' in stream
+        assert '"tools"' in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_command_model_cycle_and_thinking_cycle(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="dummy")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/model-cycle")
+        await _submit(app, pilot, "/thinking-cycle")
+        stream = "\n".join(app._stream_lines)
+        assert "Model cycled to" in stream
+        assert "Thinking level cycled to high" in stream
+        assert session.thinking_level == "high"
+
+
+@pytest.mark.asyncio
+async def test_tui_command_model_provider_only_and_alias(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Provider-only auto-picks the first registered model.
+        await _submit(app, pilot, "/model openai")
+        stream = "\n".join(app._stream_lines)
+        assert "Model set to openai/" in stream
+        # /tc alias for /thinking-cycle.
+        await _submit(app, pilot, "/tc")
+        stream = "\n".join(app._stream_lines)
+        assert "Thinking level cycled to high" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_command_steer_follow_compact_tree(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/steer abc")
+        await _submit(app, pilot, "/follow def")
+        await _submit(app, pilot, "/compact now")
+        await _submit(app, pilot, "/tree")
+        stream = "\n".join(app._stream_lines)
+        assert "Queued steering message." in stream
+        assert "Queued follow-up message." in stream
+        assert '"skipped": true' in stream
+        # The tree renders session entries with a '*' marker on the leaf.
+        assert "model_change" in stream
+        assert "* thinking_level_change" in stream
+        assert session.get_pending_queues()["steering"] == ["abc"]
+        assert session.get_pending_queues()["followUp"] == ["def"]
+
+
+class _FakeRuntimeHost:
+    def __init__(self, session: Any) -> None:
+        self.session = session
+
+    async def fork(self, entry_id: str) -> dict:
+        return {"cancelled": False, "entryId": entry_id}
+
+
+@pytest.mark.asyncio
+async def test_tui_command_fork_rebinds_session(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    new_session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session, runtime_host=_FakeRuntimeHost(new_session))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/fork abc")
+        stream = "\n".join(app._stream_lines)
+        assert '"cancelled": false' in stream
+        assert app.session is new_session
+        assert callable(app._off_listener)
+        # Events from the new session must now be delivered to the app.
+        new_session.request_extension_ui(extension="post-fork", ui_type="widget", payload={})
+        await pilot.pause()
+        assert app._extension_ui_pending_request is not None
+        assert app._extension_ui_pending_request["extension"] == "post-fork"
+
+
+@pytest.mark.asyncio
+async def test_tui_command_fork_without_runtime_host(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/fork abc")
+        stream = "\n".join(app._stream_lines)
+        assert "Runtime host unavailable" in stream
+        assert app.session is session
+
+
+@pytest.mark.asyncio
+async def test_tui_command_login_inline_stores_key(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/login openai sk-test gpt-4.1")
+        stream = "\n".join(app._stream_lines)
+        assert "Stored key for openai." in stream
+        assert "Default model set to gpt-4.1." in stream
+        keys = session.model_registry._auth._data.get("apiKeys", {})
+        assert keys.get("openai") == "sk-test"
+        assert session.settings_manager.merged().get("defaultProvider") == "openai"
+        assert session.settings_manager.merged().get("defaultModel") == "gpt-4.1"
+        assert session.model.id == "gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_tui_command_login_pending_flow_via_input(tmp_path: Path):
+    from textual.widgets import Input
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/login anthropic")
+        assert app._login_pending is not None
+        assert app._login_pending["provider"] == "anthropic"
+        stream = "\n".join(app._stream_lines)
+        assert "API key is required for anthropic" in stream
+        input_widget = app.query_one("#input", Input)
+        assert input_widget.placeholder == "API key for anthropic:"
+
+        input_widget.value = "sk-ant-test"
+        await input_widget.action_submit()
+        await pilot.pause()
+
+        assert app._login_pending is None
+        keys = session.model_registry._auth._data.get("apiKeys", {})
+        assert keys.get("anthropic") == "sk-ant-test"
+        stream = "\n".join(app._stream_lines)
+        assert "Stored key for anthropic." in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_command_login_pending_cancel_on_empty(tmp_path: Path):
+    from textual.widgets import Input
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/login gemini")
+        assert app._login_pending is not None
+        input_widget = app.query_one("#input", Input)
+        input_widget.value = ""
+        await input_widget.action_submit()
+        await pilot.pause()
+        assert app._login_pending is None
+        stream = "\n".join(app._stream_lines)
+        assert "API key is required for gemini" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_command_logout_and_cooperation(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/login openai sk-test")
+        await _submit(app, pilot, "/logout openai")
+        stream = "\n".join(app._stream_lines)
+        assert "Removed stored key for openai." in stream
+        keys = session.model_registry._auth._data.get("apiKeys", {})
+        assert "openai" not in keys
+
+        await _submit(app, pilot, "/cooperation")
+        stream = "\n".join(app._stream_lines)
+        assert '"enabled": false' in stream
+        await _submit(app, pilot, "/cooperation on")
+        assert session.approval_callback is not None
+        await _submit(app, pilot, "/cooperation")
+        stream = "\n".join(app._stream_lines)
+        assert '"enabled": true' in stream
+        await _submit(app, pilot, "/cooperation off")
+        assert session.approval_callback is None
+
+
+@pytest.mark.asyncio
+async def test_tui_command_bash_echo(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/bash echo hi")
+        stream = "\n".join(app._stream_lines)
+        assert "hi" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_command_retry_and_config(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/retry off")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to off." in stream
+        assert session.settings_manager.get_retry_enabled() is False
+
+        await _submit(app, pilot, "/config tools.maxSteps 9")
+        stream = "\n".join(app._stream_lines)
+        assert "Updated tools.maxSteps." in stream
+        await _submit(app, pilot, "/config tools.maxSteps")
+        stream = "\n".join(app._stream_lines)
+        assert '"value": 9' in stream
+        assert session.settings_manager.merged()["tools"]["maxSteps"] == 9
+
+
+@pytest.mark.asyncio
+async def test_tui_command_extui_request_and_cancel(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, '/extui request test-ext widget {"q":1}')
+        await pilot.pause()
+        assert app._extension_ui_pending_request is not None
+        req_id = app._extension_ui_pending_request["id"]
+        stream = "\n".join(app._stream_lines)
+        assert "[ExtUI] test-ext (widget)" in stream
+        # Drop the pending state so the cancel command is not eaten by the
+        # input router (the /extui cancel path mirrors interactive parity).
+        app._extension_ui_pending_request = None
+        await _submit(app, pilot, f"/extui cancel {req_id}")
+        assert session._extension_ui_history[-1]["cancelled"] is True
+        await _submit(app, pilot, "/extui list")
+        stream = "\n".join(app._stream_lines)
+        assert '"pending": []' in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_command_navigate_unknown_id_error(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/navigate nope-123")
+        stream = "\n".join(app._stream_lines)
+        assert "not found" in stream
