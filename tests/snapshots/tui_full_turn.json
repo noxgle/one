@@ -1,0 +1,16 @@
+[
+  "one TUI v2 ready. /help",
+  "",
+  "> check the file",
+  "",
+  "",
+  "tool start: read {\"path\": ",
+  "\"a.txt\"}",
+  "",
+  "",
+  "tool ok: read",
+  "",
+  "",
+  "DONE",
+  ""
+]

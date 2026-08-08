@@ -563,6 +563,10 @@ if TEXTUAL_AVAILABLE:
                 stream_widget = self.query_one("#stream")
                 stream_widget.update("")
                 self._stream_lines = []
+                self._assistant_has_live_delta = False
+                self._assistant_live_start_idx = -1
+                self._assistant_live_buffer = ""
+                return
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
