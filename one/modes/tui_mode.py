@@ -256,10 +256,18 @@ if TEXTUAL_AVAILABLE:
                 pass
 
         def _remove_thinking_line(self) -> None:
-            """Drop the animated 'waiting' line from the stream, if present."""
+            """Drop the animated 'waiting' line from the stream, if present.
+
+            Also removes the blank separator lines that wrapped the spinner, so
+            removing it does not leave extra vertical gaps between blocks.
+            """
             for i in range(len(self._stream_lines) - 1, -1, -1):
                 if self._stream_lines[i].startswith(_THINKING_MARK):
                     self._stream_lines.pop(i)
+                    if i < len(self._stream_lines) and self._stream_lines[i] == "":
+                        self._stream_lines.pop(i)
+                    if i > 0 and self._stream_lines[i - 1] == "":
+                        self._stream_lines.pop(i - 1)
                     break
             self._thinking_active = False
 
@@ -506,7 +514,7 @@ if TEXTUAL_AVAILABLE:
                 f"Provider: {s['lastProviderError']}\n"
                 "\n"
                 f"[b {self._theme.info}]Keys[/]\n"
-                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nF1 help\n"
+                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\n"
                 "Pretty chat view: Static blocks with theme backgrounds\n"
             )
             self.query_one("#sidebar", Static).update(sidebar)
