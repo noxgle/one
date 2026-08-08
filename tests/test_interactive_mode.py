@@ -470,6 +470,48 @@ async def test_interactive_ctrl_a_toggles_cooperation(monkeypatch, capsys):
     assert session.approval_callback is not None
 
 
+class _EventSession(_DummySession):
+    """_DummySession whose prompt() emits a fixed assistant event sequence."""
+
+    def __init__(self, streamed: bool) -> None:
+        super().__init__()
+        answer = {"type": "message_end", "message": {"role": "assistant", "content": "Odpowiedz: hello"}}
+        if streamed:
+            self._events = [
+                {"type": "message_start", "message": {"role": "assistant"}},
+                {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Odpowiedz: "}},
+                {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "hello"}},
+                answer,
+                {"type": "turn_end", "ok": True},
+            ]
+        else:
+            self._events = [
+                {"type": "message_start", "message": {"role": "assistant"}},
+                answer,
+                {"type": "turn_end", "ok": True},
+            ]
+
+    async def prompt(self, text: str) -> None:
+        self.prompt_calls.append(text)
+        for event in self._events:
+            for listener in self._listeners:
+                listener(event)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [True, False])
+async def test_interactive_blank_line_before_answer(monkeypatch, capsys, streamed):
+    session = _EventSession(streamed=streamed)
+    mode = InteractiveMode(_DummyHost(session))
+    commands = ["pytanie", "/exit"]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+    await mode.run()
+    out = capsys.readouterr().out
+    # A blank line separates the answer (streamed or not) from the log above it,
+    # and another blank line separates the turn from the next status block.
+    assert "\n\nOdpowiedz: hello\n\n[" in out
+
+
 @pytest.mark.asyncio
 async def test_interactive_extui_hooks(monkeypatch, capsys):
     session = _DummySession()

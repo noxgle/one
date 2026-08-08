@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from one.cli.args import parse_args
-from one.modes.tui_mode import BUILTIN_TUI_THEMES, build_sidebar_snapshot, resolve_tui_theme
+from one.modes.tui_mode import (
+    BUILTIN_TUI_THEMES,
+    _THINKING_FRAMES,
+    advance_thinking_frame,
+    build_sidebar_snapshot,
+    evaluate_waiting,
+    resolve_tui_theme,
+)
 
 
 class _DummyModel:
@@ -75,3 +82,34 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     assert snapshot["cost"] == 0.0123
     assert snapshot["lastToolError"] == "bash: timeout"
     assert snapshot["lastProviderError"] == "400 Bad Request"
+
+
+def test_thinking_frames_are_single_width() -> None:
+    assert len(_THINKING_FRAMES) >= 2
+    # Each braille frame must occupy exactly one terminal cell.
+    for frame in _THINKING_FRAMES:
+        assert len(frame) == 1
+
+
+def test_evaluate_waiting_rule() -> None:
+    now = 100.0
+    # No active turn -> never waiting.
+    assert evaluate_waiting(False, now - 10.0, now) is False
+    # Active turn, deltas streaming recently -> not waiting.
+    assert evaluate_waiting(True, now - 0.2, now) is False
+    # Active turn, no deltas for a while -> waiting (first token / between
+    # tool calls / tool execution / retry delay).
+    assert evaluate_waiting(True, now - 2.0, now) is True
+    # Custom idle threshold.
+    assert evaluate_waiting(True, now - 0.5, now, idle_threshold=0.4) is True
+
+
+def test_advance_thinking_frame_wraps() -> None:
+    n = len(_THINKING_FRAMES)
+    assert advance_thinking_frame(0) == 1
+    assert advance_thinking_frame(n - 1) == 0
+    # A few steps keep cycling.
+    frame = 0
+    for _ in range(3 * n):
+        frame = advance_thinking_frame(frame)
+    assert frame == 0

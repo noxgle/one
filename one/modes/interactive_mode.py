@@ -350,6 +350,9 @@ class InteractiveMode:
             if event.get("type") == "message_update":
                 ae = event.get("assistantMessageEvent", {})
                 if ae.get("type") == "text_delta":
+                    if not assistant_streamed:
+                        # Blank line separates the answer from the tool log.
+                        print("", flush=True)
                     assistant_streamed = True
                     print(ae.get("delta", ""), end="", flush=True)
             if event.get("type") == "message_end":
@@ -363,10 +366,12 @@ class InteractiveMode:
                     text = str(content)
                 text = text.strip()
                 if not assistant_streamed and text:
+                    print("", flush=True)
                     print(text, end="", flush=True)
                 if text:
                     print("", flush=True)
                 elif not assistant_streamed:
+                    print("", flush=True)
                     print("[Brak treści odpowiedzi modelu]", flush=True)
             if et == "turn_end" and event.get("ok") is False:
                 err = (event.get("error") or "Unknown error").strip()
@@ -411,6 +416,9 @@ class InteractiveMode:
 
         session.subscribe(on_event)
         while True:
+            if printed_banner:
+                # Blank line between turns keeps the output readable.
+                print("", flush=True)
             if not printed_banner:
                 print("Interactive mode. Type /exit to quit. Use /help for commands.")
                 print("Shortcuts: Ctrl+C abort/exit | Ctrl+L clear | Ctrl+R history search | Up/Down history")

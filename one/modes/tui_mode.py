@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 import textwrap
 from typing import Any
@@ -57,6 +58,34 @@ def build_sidebar_snapshot(
         "lastToolError": last_tool_error,
         "lastProviderError": last_provider_error,
     }
+
+
+# Braille spinner frames shown in the chat stream while the model is working.
+_THINKING_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# Sentinel prefix marking the animated "waiting" line inside _stream_lines so
+# it can be located and removed reliably (even after list trimming). The
+# __MK__: prefix is stripped at render time, so it never shows in the UI.
+_THINKING_MARK = "__MK__:"
+
+
+def evaluate_waiting(
+    turn_active: bool,
+    last_delta_ts: float,
+    now: float,
+    idle_threshold: float = 0.9,
+) -> bool:
+    """True when a turn is in flight but no assistant text has streamed recently.
+
+    Covers: waiting for the first token, thinking between tool calls, tool
+    execution and auto-retry delays. While text deltas arrive the indicator
+    stays hidden (the text itself is the feedback).
+    """
+    return turn_active and (now - last_delta_ts) >= idle_threshold
+
+
+def advance_thinking_frame(frame: int) -> int:
+    """Advance the spinner frame index, wrapping around."""
+    return (frame + 1) % len(_THINKING_FRAMES)
 
 
 @dataclass(frozen=True)
@@ -173,6 +202,10 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._turn_active = False
+            self._last_delta_ts = 0.0
+            self._thinking_frame = 0
+            self._thinking_active = False
             self._approval_queue: asyncio.Queue | None = None
             self._approval_pending: dict[str, Any] | None = None
 
@@ -187,6 +220,9 @@ if TEXTUAL_AVAILABLE:
         def on_mount(self) -> None:
             self.query_one("#input", Input).focus()
             self._apply_theme(self._theme.name)
+            # Drive the "waiting for the model" spinner while a turn is in
+            # flight but no assistant text is currently streaming.
+            self.set_interval(0.15, self._tick_waiting)
 
             def _listener(event: dict[str, Any]) -> None:
                 try:
@@ -218,6 +254,47 @@ if TEXTUAL_AVAILABLE:
                 self.query_one("#stream_container", VerticalScroll).scroll_end(animate=False)
             except Exception:
                 pass
+
+        def _remove_thinking_line(self) -> None:
+            """Drop the animated 'waiting' line from the stream, if present."""
+            for i in range(len(self._stream_lines) - 1, -1, -1):
+                if self._stream_lines[i].startswith(_THINKING_MARK):
+                    self._stream_lines.pop(i)
+                    break
+            self._thinking_active = False
+
+        def _tick_waiting(self) -> None:
+            """Animate the in-stream spinner while the model is working."""
+            now = time.monotonic()
+            if not evaluate_waiting(self._turn_active, self._last_delta_ts, now):
+                if self._thinking_active:
+                    self._remove_thinking_line()
+                    self._render_stream()
+                return
+            self._thinking_frame = advance_thinking_frame(self._thinking_frame)
+            frame = _THINKING_FRAMES[self._thinking_frame]
+            line = f"{_THINKING_MARK}[{self._theme.info}]{frame} Ctrl+C abort[/]"
+            if self._thinking_active:
+                # Rewrite the existing spinner line in place.
+                for i in range(len(self._stream_lines) - 1, -1, -1):
+                    if self._stream_lines[i].startswith(_THINKING_MARK):
+                        self._stream_lines[i] = line
+                        break
+                else:
+                    # The line was trimmed away; re-append it.
+                    self._stream_lines.append("")
+                    self._stream_lines.append(line)
+                    self._stream_lines.append("")
+                    if len(self._stream_lines) > 500:
+                        self._stream_lines = self._stream_lines[-500:]
+            else:
+                self._stream_lines.append("")
+                self._stream_lines.append(line)
+                self._stream_lines.append("")
+                if len(self._stream_lines) > 500:
+                    self._stream_lines = self._stream_lines[-500:]
+                self._thinking_active = True
+            self._render_stream()
 
         def _write(self, text: str, kind: str = "normal") -> None:
             self._stream_lines.append(text)
@@ -273,6 +350,7 @@ if TEXTUAL_AVAILABLE:
         def _append_assistant_delta(self, delta: str) -> None:
             if not delta:
                 return
+            self._remove_thinking_line()
             if not self._assistant_has_live_delta:
                 self._stream_lines.append("")
                 self._assistant_live_start_idx = len(self._stream_lines)
@@ -289,6 +367,7 @@ if TEXTUAL_AVAILABLE:
             self._render_stream()
 
         def _write_chat_block(self, role: str, text: str) -> None:
+            self._remove_thinking_line()
             self._stream_lines.append("")
             rendered_text = text
             if role == "user":
@@ -300,6 +379,7 @@ if TEXTUAL_AVAILABLE:
             self._render_stream()
 
         def _write_tool_block(self, text: str) -> None:
+            self._remove_thinking_line()
             self._stream_lines.append("")
             self._stream_lines.extend(self._format_chat_panel("tool", text, pad_y=0))
             self._stream_lines.append("")
@@ -475,7 +555,6 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
-            return
             if cmd == "/abort":
                 await session.abort()
                 self._write("[abort requested]", "warn")
@@ -572,6 +651,8 @@ if TEXTUAL_AVAILABLE:
                 return
 
             self._write_chat_block("user", text)
+            self._turn_active = True
+            self._last_delta_ts = 0.0
 
             async def _run_prompt() -> None:
                 try:
@@ -687,6 +768,7 @@ if TEXTUAL_AVAILABLE:
                 ae = event.get("assistantMessageEvent", {})
                 if ae.get("type") == "text_delta":
                     delta = str(ae.get("delta", ""))
+                    self._last_delta_ts = time.monotonic()
                     self._assistant_stream += delta
                     self._append_assistant_delta(delta)
             elif et == "message_end":
@@ -741,6 +823,9 @@ if TEXTUAL_AVAILABLE:
                 )
             elif et in {"auto_retry_end", "turn_end"}:
                 self._retry_state = "idle"
+                self._turn_active = False
+                self._remove_thinking_line()
+                self._render_stream()
 
             self._refresh_sidebar()
 
