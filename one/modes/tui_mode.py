@@ -16,6 +16,7 @@ from one.core.types import ModelInfo
 try:
     from textual import events
     from textual.app import App, ComposeResult
+    from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.message import Message
     from textual.widgets import Input, Static
@@ -128,12 +129,65 @@ def resolve_tui_theme(name: str | None) -> TuiPalette:
     return BUILTIN_TUI_THEMES.get(name.strip().lower(), BUILTIN_TUI_THEMES["default"])
 
 
+def _paste_from_system_clipboard() -> str | None:
+    """Read text from the system clipboard (mirror of the copy tool chain).
+
+    Returns the clipboard text, or `None` if no backend is available.
+    """
+    system_commands: list[list[str]] = [
+        ["wl-paste", "--no-newline"],
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["xsel", "--clipboard", "--output"],
+        ["pbpaste"],
+        ["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+    ]
+    for cmd in system_commands:
+        if shutil.which(cmd[0]) is None:
+            continue
+        try:
+            out = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if out.returncode == 0 and out.stdout:
+                return out.stdout
+        except Exception:
+            continue
+    try:
+        import pyperclip  # type: ignore
+
+        return pyperclip.paste() or None
+    except Exception:
+        pass
+    return None
+
+
 if TEXTUAL_AVAILABLE:
 
     class SessionEvent(Message):
         def __init__(self, payload: dict[str, Any]) -> None:
             self.payload = payload
             super().__init__()
+
+    class _CommandInput(Input):
+        """Input whose ctrl+v pastes from the system clipboard.
+
+        Textual's default `action_paste` reads `app.clipboard`, an in-memory
+        value that only ever holds text copied inside the app — system
+        clipboard content (e.g. copied from a browser) never made it in.
+        """
+
+        def action_paste(self) -> None:
+            text = _paste_from_system_clipboard()
+            if not text:
+                text = self.app.clipboard
+            if not text:
+                return
+            start, end = self.selection
+            self.replace(text, start, end)
 
     class _OneTextualApp(App[None]):
         CSS = """
@@ -186,7 +240,8 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+c", "abort", "Abort"),
             ("ctrl+l", "clear_stream", "Clear"),
             ("ctrl+q", "quit", "Quit"),
-            ("ctrl+a", "toggle_cooperation", "Toggle approval"),
+            # priority=True so it wins over the focused Input's ctrl+a (home).
+            Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
             ("f1", "help", "Help"),
         ]
 
@@ -220,7 +275,7 @@ if TEXTUAL_AVAILABLE:
                 with Vertical(id="main"):
                     with VerticalScroll(id="stream_container"):
                         yield Static("", id="stream")
-                    yield Input(placeholder="Wpisz polecenie lub /help", id="input")
+                    yield _CommandInput(placeholder="Wpisz polecenie lub /help", id="input")
                 yield Static(id="sidebar")
 
         def on_mount(self) -> None:
@@ -542,12 +597,10 @@ if TEXTUAL_AVAILABLE:
             self.query_one("#sidebar", Static).update(sidebar)
 
         def _try_auto_copy_selected_stream_text(self) -> None:
+            # Textual 8 keeps arbitrary text selections in `screen.selections`
+            # (not on the widget); `Static` has no `selected_text` attribute.
             try:
-                stream_widget = self.query_one("#stream")
-            except Exception:
-                return
-            try:
-                text = str(getattr(stream_widget, "selected_text", "") or "").strip()
+                text = str(self.screen.get_selected_text() or "").strip()
             except Exception:
                 return
             if not text:
@@ -564,7 +617,8 @@ if TEXTUAL_AVAILABLE:
                 self._toast("no clipboard backend. Install wl-clipboard/xclip/xsel or pyperclip.", severity="warning")
 
         def on_mouse_up(self, event: events.MouseUp) -> None:
-            # Static chat view may not expose text selection APIs in all terminals.
+            # After a drag the screen retains the selection; after a plain
+            # click it is cleared, so this only fires for real selections.
             self.call_after_refresh(self._try_auto_copy_selected_stream_text)
 
         async def _handle_command(self, cmd: str) -> None:

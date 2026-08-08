@@ -558,3 +558,90 @@ async def test_tui_command_navigate_unknown_id_error(tmp_path: Path):
         await _submit(app, pilot, "/navigate nope-123")
         stream = "\n".join(app._stream_lines)
         assert "not found" in stream
+
+
+# ---------------------------------------------------------------------------
+# Clipboard: copy (mouse selection), paste (ctrl+v) and the ctrl+a binding.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_a_toggles_cooperation(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Focus is on the Input widget, which binds ctrl+a to "home" by
+        # default; the app's priority binding must win.
+        input_widget = app.query_one("#input")
+        assert input_widget.has_focus
+        await pilot.press("ctrl+a")
+        assert session.approval_callback is not None
+        await pilot.press("ctrl+a")
+        assert session.approval_callback is None
+
+
+@pytest.mark.asyncio
+async def test_tui_copy_selected_stream_text(tmp_path: Path):
+    from textual.geometry import Offset
+    from textual.selection import Selection
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._write("hello world", "info")
+        await pilot.pause()
+
+        received: list[str] = []
+
+        def fake_copy(text: str) -> tuple[str, str]:
+            received.append(text)
+            return ("copied", "fake")
+
+        app._copy_to_clipboard = fake_copy  # type: ignore[method-assign]
+        stream_widget = app.query_one("#stream")
+        # Selection offsets are (x, y): line 1 ("hello world"), columns 0..5.
+        app.screen.selections = {stream_widget: Selection(Offset(0, 1), Offset(5, 1))}
+        app._try_auto_copy_selected_stream_text()
+
+        assert received == ["hello"]
+        assert app._last_auto_copied == "hello"
+        # Dedup: the same selection must not copy twice.
+        app._try_auto_copy_selected_stream_text()
+        assert received == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_from_system_clipboard(tmp_path: Path, monkeypatch):
+    from one.modes import tui_mode
+
+    session = _mk_app_session(tmp_path)
+    app = tui_mode._OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: "pasted-text")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input")
+        input_widget.action_paste()
+        await pilot.pause()
+        assert input_widget.value == "pasted-text"
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_fallback_app_clipboard(tmp_path: Path, monkeypatch):
+    from one.modes import tui_mode
+
+    session = _mk_app_session(tmp_path)
+    app = tui_mode._OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._clipboard = "in-app-text"
+        input_widget = app.query_one("#input")
+        input_widget.action_paste()
+        await pilot.pause()
+        assert input_widget.value == "in-app-text"
