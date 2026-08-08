@@ -218,6 +218,72 @@ async def run_rpc_mode(runtime_host: Any) -> None:
             elif ctype == "clear_extension_ui":
                 session.clear_extension_ui_history()
                 output(success(cid, ctype))
+            elif ctype == "get_theme":
+                output(success(cid, ctype, {"theme": session.settings_manager.get_theme()}))
+            elif ctype == "set_theme":
+                session.settings_manager.set_theme(cmd.get("theme", ""))
+                output(success(cid, ctype, {"theme": session.settings_manager.get_theme()}))
+            elif ctype == "get_settings":
+                output(success(cid, ctype, session.settings_manager.get_global_settings()))
+            elif ctype == "set_config_value":
+                try:
+                    session.settings_manager.set_config_value(cmd.get("key", ""), cmd.get("value"))
+                except ValueError as e:
+                    output(error(cid, ctype, str(e)))
+                else:
+                    output(success(cid, ctype))
+            elif ctype == "get_retry_settings":
+                output(success(cid, ctype, session.settings_manager.get_retry_settings()))
+            elif ctype == "get_tool_approval":
+                output(
+                    success(
+                        cid,
+                        ctype,
+                        {
+                            "enabled": session.settings_manager.get_tool_approval(),
+                            "tools": session.settings_manager.get_tool_approval_tools(),
+                        },
+                    )
+                )
+            elif ctype == "login":
+                provider = (cmd.get("provider") or "").strip()
+                api_key = cmd.get("apiKey") or ""
+                if not provider:
+                    output(error(cid, ctype, "provider is required"))
+                elif not api_key:
+                    output(error(cid, ctype, "apiKey is required"))
+                else:
+                    session.model_registry.set_stored_api_key(provider, api_key)
+                    output(
+                        success(
+                            cid,
+                            ctype,
+                            {"provider": provider, "status": session.model_registry.get_provider_auth_status(provider)},
+                        )
+                    )
+            elif ctype == "logout":
+                provider = (cmd.get("provider") or "").strip()
+                if not provider:
+                    output(error(cid, ctype, "provider is required"))
+                else:
+                    session.model_registry.remove_stored_api_key(provider)
+                    output(
+                        success(
+                            cid,
+                            ctype,
+                            {"provider": provider, "status": session.model_registry.get_provider_auth_status(provider)},
+                        )
+                    )
+            elif ctype == "get_extensions":
+                output(success(cid, ctype, session.resource_loader.get_extensions()))
+            elif ctype == "get_skills":
+                output(success(cid, ctype, session.resource_loader.get_skills()))
+            elif ctype == "get_prompts":
+                output(success(cid, ctype, session.resource_loader.get_prompts()))
+            elif ctype == "get_themes":
+                output(success(cid, ctype, session.resource_loader.get_themes()))
+            elif ctype == "get_agents_files":
+                output(success(cid, ctype, session.resource_loader.get_agents_files()))
             else:
                 output(error(cid, ctype or "unknown", f"Unknown command: {ctype}"))
         except EOFError:
