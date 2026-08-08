@@ -36,6 +36,8 @@ parity 1:1 z `pi` nie jest już celem (patrz „Poza zakresem").
 ## P1 — Integracje i operacje
 
 - [ ] Intake zadań: zadanie z pliku/spec, `@file`, parametryzacja
+- [ ] Provider lokalnego Ollamy: adapter OpenAI-compatible (domyślnie `http://localhost:11434/v1`,
+      env `OLLAMA_BASE_URL`), obsługa lokalnych modeli; wzorzec jak `llama.cpp` (bez klucza API)
 - [ ] Limity budżetu: tokens/czas/kroki z konfiguracją
 - [ ] Raport końca zadania (log/notyfikacja) + utrzymanie RPC (`wait_for_idle`, steer w headless)
 - [ ] Podpięcie extension widgets/overlays do warstwy TUI
