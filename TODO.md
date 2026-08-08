@@ -42,6 +42,9 @@ parity 1:1 z `pi` nie jest już celem (patrz „Poza zakresem").
       + przebindowanie eventów; alias `/new`/`/ns`
 - [ ] TUI: autouzupełnianie komend slash w polu input wg listy komend z `/help`
       (sugestie na `Tab`/strzałki, uzupełnianie prefiksu `/`)
+- [ ] Klient MCP: podłączanie zewnętrznych serwerów MCP jako źródła narzędzi
+      (stdio, oficjalny SDK lub własny protokół); konfiguracja serwerów w settings.json,
+      narzędzia MCP rejestrowane jak narzędzia sesji (tools/index.py)
 - [ ] Limity budżetu: tokens/czas/kroki z konfiguracją
 - [ ] Raport końca zadania (log/notyfikacja) + utrzymanie RPC (`wait_for_idle`, steer w headless)
 - [ ] Podpięcie extension widgets/overlays do warstwy TUI
