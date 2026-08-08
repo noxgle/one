@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from one.cli.args import parse_args
 from one.modes.tui_mode import (
     BUILTIN_TUI_THEMES,
@@ -80,6 +84,7 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     assert snapshot["tokenOutput"] == 50
     assert snapshot["tokenTotal"] == 165
     assert snapshot["cost"] == 0.0123
+    assert snapshot["coop"] == "off"
     assert snapshot["lastToolError"] == "bash: timeout"
     assert snapshot["lastProviderError"] == "400 Bad Request"
 
@@ -113,3 +118,106 @@ def test_advance_thinking_frame_wraps() -> None:
     for _ in range(3 * n):
         frame = advance_thinking_frame(frame)
     assert frame == 0
+
+
+# ---------------------------------------------------------------------------
+# Headless TUI app tests (extension UI flow).
+# ---------------------------------------------------------------------------
+
+
+class _FakeLoader:
+    cwd = "/tmp/project"
+
+    def get_system_prompt(self, selected_tools: list[str] | None = None) -> str:  # noqa: ARG002
+        return "You are a coding agent."
+
+
+def _mk_app_session(tmp_path: Path):
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session_manager = SessionManager.in_memory(str(tmp_path))
+    return AgentSession(session_manager, settings, registry, _FakeLoader(), model, "medium")
+
+
+@pytest.mark.asyncio
+async def test_extension_ui_request_renders_and_answer_routes(tmp_path: Path):
+    from textual.widgets import Input
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        req = session.request_extension_ui(extension="test-ext", ui_type="widget", payload={"q": 1}, title="Wizard")
+        await pilot.pause()
+
+        assert app._extension_ui_pending_request is not None
+        stream = "\n".join(app._stream_lines)
+        assert "test-ext (widget)" in stream
+        assert "Wizard" in stream
+        assert '"q": 1' in stream
+
+        input_widget = app.query_one("#input", Input)
+        input_widget.value = '{"answer": 42}'
+        await input_widget.action_submit()
+        await pilot.pause()
+
+        assert app._extension_ui_pending_request is None
+        assert session._extension_ui_history[-1]["payload"] == {"answer": 42}
+        assert session._extension_ui_history[-1]["requestId"] == req["id"]
+        stream = "\n".join(app._stream_lines)
+        assert f"[ExtUI] response {req['id']} cancelled=False" in stream
+
+
+@pytest.mark.asyncio
+async def test_extension_ui_cancel_via_empty_input(tmp_path: Path):
+    from textual.widgets import Input
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        req = session.request_extension_ui(extension="x", ui_type="overlay", payload={})
+        await pilot.pause()
+        assert app._extension_ui_pending_request is not None
+
+        input_widget = app.query_one("#input", Input)
+        input_widget.value = ""
+        await input_widget.action_submit()
+        await pilot.pause()
+
+        assert app._extension_ui_pending_request is None
+        assert session._extension_ui_history[-1]["cancelled"] is True
+        assert session._extension_ui_history[-1]["requestId"] == req["id"]
+
+
+@pytest.mark.asyncio
+async def test_extension_ui_external_response_clears_pending(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        req = session.request_extension_ui(extension="x", ui_type="widget", payload={})
+        await pilot.pause()
+        assert app._extension_ui_pending_request is not None
+
+        session.respond_extension_ui(request_id=req["id"], payload={"ok": True})
+        await pilot.pause()
+
+        assert app._extension_ui_pending_request is None
+        stream = "\n".join(app._stream_lines)
+        assert f"[ExtUI] response {req['id']} cancelled=False" in stream

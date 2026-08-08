@@ -45,6 +45,7 @@ def build_sidebar_snapshot(
         "streaming": bool(getattr(session, "is_streaming", False)),
         "compacting": bool(getattr(session, "is_compacting", False)),
         "retry": retry_state,
+        "coop": "on" if getattr(session, "approval_callback", None) is not None else "off",
         "contextPercent": float(usage.get("percent") or 0.0),
         "queueSteer": steer_count,
         "queueFollow": follow_count,
@@ -208,6 +209,7 @@ if TEXTUAL_AVAILABLE:
             self._thinking_active = False
             self._approval_queue: asyncio.Queue | None = None
             self._approval_pending: dict[str, Any] | None = None
+            self._extension_ui_pending_request: dict[str, Any] | None = None
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
@@ -495,6 +497,7 @@ if TEXTUAL_AVAILABLE:
                 f"Thinking: {s['thinking']}\n"
                 f"Ctx: {s['contextPercent']:.1f}%\n"
                 f"Retry: {s['retry']}\n"
+                f"Coop: {s['coop']} (Ctrl+A)\n"
                 f"CWD: {s['cwd']}\n"
                 "\n"
                 f"[b {self._theme.info}]Queue[/]\n"
@@ -514,7 +517,7 @@ if TEXTUAL_AVAILABLE:
                 f"Provider: {s['lastProviderError']}\n"
                 "\n"
                 f"[b {self._theme.info}]Keys[/]\n"
-                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\n"
+                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\n"
                 "Pretty chat view: Static blocks with theme backgrounds\n"
             )
             self.query_one("#sidebar", Static).update(sidebar)
@@ -652,6 +655,9 @@ if TEXTUAL_AVAILABLE:
             if self._approval_pending is not None:
                 await self._handle_approval_answer(text)
                 return
+            if self._extension_ui_pending_request is not None:
+                await self._handle_extension_ui_answer(text)
+                return
             if not text:
                 return
             if text.startswith("/"):
@@ -703,6 +709,33 @@ if TEXTUAL_AVAILABLE:
                 return
             # Any other non-empty text is treated as the rejection reason.
             queue.put_nowait(("no", text))
+
+        async def _handle_extension_ui_answer(self, text: str) -> None:
+            """Route the input widget answer back to the pending extension UI request."""
+            req = self._extension_ui_pending_request
+            if req is None:
+                return
+            request_id = str(req.get("id") or "")
+            self._extension_ui_pending_request = None
+            try:
+                input_widget = self.query_one("#input", Input)
+                input_widget.placeholder = "Wpisz polecenie lub /help"
+            except Exception:
+                pass
+            try:
+                if not text:
+                    self.session.respond_extension_ui(request_id=request_id, cancelled=True)
+                else:
+                    try:
+                        parsed = json.loads(text)
+                        payload = parsed if isinstance(parsed, dict) else {"answer": text}
+                    except Exception:
+                        payload = {"answer": text}
+                    self.session.respond_extension_ui(request_id=request_id, payload=payload)
+            except Exception as e:
+                self._write(f"[ExtUI] error responding to {request_id}: {e}", "error")
+                return
+            # The extension_ui_response event renders the result line.
 
         async def _approval_prompt(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
             """Cooperation mode callback: ask the user via the input widget."""
@@ -807,6 +840,37 @@ if TEXTUAL_AVAILABLE:
                 self._write_tool_block(f"tool start: {tool_name} {args_text}")
             elif et == "tool_approval_rejected":
                 self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
+            elif et == "extension_ui_request":
+                ext = str(event.get("extension") or "unknown")
+                ui_type = str(event.get("uiType") or "widget")
+                title = str(event.get("title") or "")
+                req_id = str(event.get("id") or "")
+                heading = f"[ExtUI] {ext} ({ui_type})" + (f" - {title}" if title else "")
+                self._write_tool_block(heading)
+                self._write(json.dumps(event.get("payload") or {}, ensure_ascii=False, indent=2), "info")
+                self._extension_ui_pending_request = dict(event)
+                try:
+                    input_widget = self.query_one("#input", Input)
+                    input_widget.placeholder = "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
+                    input_widget.focus()
+                except Exception:
+                    pass
+            elif et == "extension_ui_response":
+                rid = str(event.get("requestId") or "")
+                cancelled = bool(event.get("cancelled"))
+                resp_payload = event.get("payload") or {}
+                self._write(
+                    f"[ExtUI] response {rid} cancelled={cancelled} "
+                    + json.dumps(resp_payload, ensure_ascii=False),
+                    "info",
+                )
+                if self._extension_ui_pending_request is not None and str(self._extension_ui_pending_request.get("id") or "") == rid:
+                    self._extension_ui_pending_request = None
+                    try:
+                        input_widget = self.query_one("#input", Input)
+                        input_widget.placeholder = "Wpisz polecenie lub /help"
+                    except Exception:
+                        pass
             elif et == "tool_call_end":
                 status = "ok" if event.get("ok") else "err"
                 if not event.get("ok"):
