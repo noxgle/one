@@ -28,6 +28,7 @@ Python 3.12+ re-implementation of the `pi` coding agent (CLI + JSON-RPC + Textua
 - `one/providers/` — adapters `openai_compatible` / `anthropic` / `gemini`; `registry.py` wires them (llama.cpp = OpenAI-compatible).
 - `one/tools/` — 7 tools (read, bash, edit, write, grep, find, ls). New tools must be registered in `tools/index.py` (`all_tools`, plus `coding_tools`/`read_only_tools` groups).
 - `one/resources/resource_loader.py` — discovers extensions/skills/prompts/themes/AGENTS files.
+- `one/resources/extension_runtime.py` — opencode-style extension hooks contract: a `.py` extension exports `register(ctx) -> hooks` (`tool.execute.before/after`, `chat.message`, `experimental.session.compacting`, `dispose`; any throw in `before` = deny via `tool_approval_rejected`). Auto-bound by `bind_extensions()` in `agent_session_runtime.py`; load/bind/hook errors → `extension_load_error` events, never crash the session. Full contract: `docs/EXTENSIONS.md`.
 
 ## Testing quirks
 
