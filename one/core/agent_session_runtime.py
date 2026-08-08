@@ -86,6 +86,7 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         scoped_models=bootstrap.get("scopedModels") or [],
         tools=tool_names,
     )
+    await session.bind_extensions()
 
     return AgentSessionRuntime(
         session=session,

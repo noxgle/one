@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 import time
 import uuid
@@ -15,6 +16,7 @@ from one.core.settings_manager import SettingsManager
 from one.core.types import ModelInfo
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
+from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, find_worktree
 from one.tools.index import all_tools
 
 
@@ -60,6 +62,7 @@ class AgentSession:
         self._abort_requested = False
         self._extension_ui_pending: dict[str, dict[str, Any]] = {}
         self._extension_ui_history: list[dict[str, Any]] = []
+        self._extension_runtime: ExtensionRuntime | None = None
         self.approval_callback = approval_callback
         self._approval_tools = set(settings_manager.get_tool_approval_tools())
 
@@ -510,6 +513,30 @@ class AgentSession:
                 self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": args, "reason": reason})
                 self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": payload})
                 return payload
+        # Extension hooks: tool.execute.before (opencode contract). A raising
+        # hook denies the call using the same contract as a user rejection.
+        if self._extension_runtime is not None and self._extension_runtime.has_hooks("tool.execute.before"):
+            args, denied = await self._invoke_extension_before_tool(tool_name, args)
+            if denied:
+                payload: dict[str, Any] = {
+                    "ok": False,
+                    "tool": tool_name,
+                    "args": args,
+                    "error": denied,
+                    "rejected": True,
+                    "reason": denied,
+                }
+                message_payload = self._build_tool_result_message_payload(payload)
+                msg = {
+                    "role": "toolResult",
+                    "content": json.dumps(message_payload, ensure_ascii=False),
+                    "timestamp": int(time.time() * 1000),
+                }
+                self.messages.append(msg)
+                self.session_manager.append_message(msg)
+                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": args, "reason": denied})
+                self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": payload})
+                return payload
         self._emit({"type": "tool_call_start", "tool": tool_name, "args": args})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)
@@ -551,6 +578,12 @@ class AgentSession:
         }
         self.messages.append(msg)
         self.session_manager.append_message(msg)
+        await self._invoke_extension_after_tool(
+            tool_name,
+            bool(payload.get("ok")),
+            str(payload.get("result") or payload.get("error") or ""),
+            metadata={"exitCode": payload.get("exitCode"), "errorType": payload.get("errorType")},
+        )
         self._emit({"type": "tool_call_end", "tool": tool_name, "ok": payload.get("ok", False), "result": payload})
         return payload
 
@@ -815,6 +848,8 @@ class AgentSession:
         self.session_manager.append_message(user_msg)
         self._emit({"type": "message_start", "message": user_msg})
         self._emit({"type": "message_end", "message": user_msg})
+        if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
+            await self._invoke_extension_chat_message(user_msg)
 
         retry_cfg = self.settings_manager.get_retry_settings()
         attempt = 0
@@ -1134,6 +1169,13 @@ class AgentSession:
         dropped = self.messages[:keep_start]
         tokens_before = sum(self._approx_message_tokens(m) for m in dropped)
 
+        # Extension hooks: experimental.session.compacting (opencode contract).
+        context_items: list[dict[str, Any]] = []
+        if self._extension_runtime is not None and self._extension_runtime.has_hooks("experimental.session.compacting"):
+            context_items, prompt_override = await self._invoke_extension_compacting()
+            if prompt_override and not custom_instructions:
+                custom_instructions = prompt_override
+
         if custom_instructions:
             summary_text = custom_instructions.strip() or f"Compacted previous {len(dropped)} messages."
         elif self.settings_manager.get_compaction_summarize_with_model():
@@ -1142,6 +1184,12 @@ class AgentSession:
                 summary_text = f"Compacted previous {len(dropped)} messages."
         else:
             summary_text = f"Compacted previous {len(dropped)} messages."
+
+        if context_items:
+            extra = [str(c.get("content", "")).strip() for c in context_items if c.get("content")]
+            if extra:
+                joined = "\n".join(e for e in extra if e)
+                summary_text = f"{summary_text}\n{joined}".strip() if summary_text else joined
 
         # Map the first kept message back to its session-tree entry id. Message
         # indexes in self.messages are aligned with message-producing entries
@@ -1438,14 +1486,85 @@ class AgentSession:
     def export_to_jsonl(self, output_path: str | None = None) -> str:
         return self.session_manager.export_to_jsonl(output_path)
 
+    def _ensure_extension_runtime(self) -> ExtensionRuntime:
+        if self._extension_runtime is None:
+            self._extension_runtime = ExtensionRuntime()
+        return self._extension_runtime
+
+    def _extension_context(self) -> ExtensionContext:
+        cwd = getattr(self.resource_loader, "cwd", None) or os.getcwd()
+        return ExtensionContext(
+            directory=str(cwd),
+            worktree=find_worktree(str(cwd)),
+            session_id=self.session_id,
+            model=f"{self.model.provider}/{self.model.id}" if self.model else None,
+            settings=self.settings_manager.get_global_settings(),
+        )
+
+    def _emit_extension_error(self, path: str, hook: str, error: Exception) -> None:
+        self._emit(
+            {
+                "type": "extension_load_error",
+                "path": path,
+                "stage": "hook",
+                "hook": hook,
+                "error": str(error).strip() or error.__class__.__name__,
+                "errorType": error.__class__.__name__,
+            }
+        )
+
+    async def _invoke_extension_before_tool(self, tool_name: str, args: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+        assert self._extension_runtime is not None
+        return await self._extension_runtime.call_before_tool(tool_name, args, self._emit_extension_error)
+
+    async def _invoke_extension_after_tool(
+        self,
+        tool_name: str,
+        ok: bool,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self._extension_runtime is None or not self._extension_runtime.has_hooks("tool.execute.after"):
+            return
+        await self._extension_runtime.call_after_tool(tool_name, ok, text, metadata, self._emit_extension_error)
+
+    async def _invoke_extension_chat_message(self, message: dict[str, Any]) -> None:
+        assert self._extension_runtime is not None
+        await self._extension_runtime.call_chat_message(message, self._emit_extension_error)
+
+    async def _invoke_extension_compacting(self) -> tuple[list[dict[str, Any]], str | None]:
+        assert self._extension_runtime is not None
+        return await self._extension_runtime.call_compacting(self._emit_extension_error)
+
     async def bind_extensions(self, bindings: dict[str, Any] | None = None) -> None:
-        return
+        """Load discovered extensions into the session (opencode-style hooks).
+
+        Each discovered ``.py`` extension must export ``register(ctx) -> hooks``.
+        ``bindings`` is accepted for API parity with the reference
+        implementation; the extensions discovered by the ResourceLoader are
+        what actually gets bound. Load/bind errors are emitted as
+        ``extension_load_error`` events.
+        """
+        runtime = self._ensure_extension_runtime()
+        extensions: list[dict[str, Any]] = []
+        getter: Any = getattr(self.resource_loader, "get_extensions", None)
+        if callable(getter):
+            try:
+                data = getter()
+                if isinstance(data, dict):
+                    extensions = list(data.get("extensions", []))
+            except Exception:
+                extensions = []
+        errors = await runtime.bind(extensions, self._extension_context())
+        for err in errors:
+            self._emit({"type": "extension_load_error", **err})
 
     async def reload(self) -> None:
         await self.resource_loader.reload()
 
     async def dispose(self) -> None:
-        return
+        if self._extension_runtime is not None:
+            await self._extension_runtime.call_dispose(self._emit_extension_error)
 
     def request_extension_ui(
         self,
