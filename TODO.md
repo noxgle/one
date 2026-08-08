@@ -56,6 +56,8 @@ parity 1:1 z `pi` nie jest już celem (patrz „Poza zakresem").
 - [ ] Snapshot tests dla RPC
 - [ ] Testy auth precedence + provider fallback
 - [ ] Cross-platform smoke (Linux/macOS path & shell semantics)
+- [ ] Providerzy OpenAI-compatible: xAI (Grok), DeepSeek, Mistral, Groq —
+      wpisy w registry.py + env keys + builtin modele (adapter OpenAI-compatible)
 
 ## Poza zakresem
 
