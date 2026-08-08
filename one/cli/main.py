@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 
 from one.config import APP_NAME, ENV_AGENT_DIR, VERSION, get_agent_dir, get_models_path
@@ -68,19 +69,28 @@ async def _run(argv: list[str]) -> int:
             return 0
         if cmd == "install":
             if len(args) != 1:
-                print("Usage: one install <package>")
+                print("Usage: one install <path-to-extension>")
                 return 2
-            package = args[0].strip()
-            if not package:
-                print("Package name cannot be empty")
-                return 2
-            packages = settings.get_packages()
-            if package in packages:
-                print(f"Package already installed: {package}")
+            source = Path(args[0].strip()).expanduser()
+            if not source.exists():
+                print(f"Source not found: {source}")
+                return 1
+            extensions_dir = Path(agent_dir) / "extensions"
+            extensions_dir.mkdir(parents=True, exist_ok=True)
+            name = source.name
+            target = extensions_dir / name
+            if target.exists():
+                print(f"Package already installed: {name}")
                 return 0
-            packages.append(package)
-            settings.set_packages(packages)
-            print(f"Installed package reference: {package}")
+            if source.is_dir():
+                shutil.copytree(source, target)
+            else:
+                shutil.copy2(source, target)
+            packages = settings.get_packages()
+            if name not in packages:
+                packages.append(name)
+                settings.set_packages(packages)
+            print(f"Installed package: {name} -> {target}")
             return 0
         if cmd == "remove":
             if len(args) != 1:
@@ -96,21 +106,46 @@ async def _run(argv: list[str]) -> int:
                 return 1
             packages = [p for p in current if p != package]
             settings.set_packages(packages)
-            print(f"Removed package reference: {package}")
+            ext = Path(agent_dir) / "extensions" / package
+            if ext.is_dir():
+                shutil.rmtree(ext)
+                print(f"Removed package: {package}")
+            elif ext.exists():
+                ext.unlink()
+                print(f"Removed package: {package}")
+            else:
+                print(f"Removed package reference: {package}")
             return 0
         if cmd == "update":
             if len(args) > 1:
                 print("Usage: one update [package]")
                 return 2
-            installed = settings.get_packages()
-            if not args:
-                print(f"Updated package reference(s): all ({len(installed)} installed)")
+            extensions_dir = Path(agent_dir) / "extensions"
+            on_disk = {p.name for p in extensions_dir.iterdir()} if extensions_dir.is_dir() else set()
+            installed = set(settings.get_packages())
+            if args:
+                target = args[0].strip()
+                if target not in installed:
+                    print(f"Package not installed: {target}")
+                    return 1
+                if target not in on_disk:
+                    print(f"Package files missing on disk: {target}")
+                    return 1
+                print(f"Package up to date: {target}")
                 return 0
-            target = args[0].strip()
-            if target not in installed:
-                print(f"Package not installed: {target}")
-                return 1
-            print(f"Updated package reference(s): {target}")
+            # No argument: sync the manifest with what is actually on disk.
+            pruned = sorted(installed - on_disk)
+            added = sorted(on_disk - installed)
+            settings.set_packages(sorted(on_disk))
+            if added and pruned:
+                print(f"Added package reference(s): {', '.join(added)}")
+                print(f"Pruned missing package reference(s): {', '.join(pruned)}")
+            elif added:
+                print(f"Added package reference(s): {', '.join(added)}")
+            elif pruned:
+                print(f"Pruned missing package reference(s): {', '.join(pruned)}")
+            else:
+                print(f"Packages up to date: {len(on_disk)} installed")
             return 0
         if cmd == "config":
             if not args:

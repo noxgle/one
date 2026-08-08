@@ -199,32 +199,65 @@ def test_cli_package_and_config_commands(tmp_path: Path):
             check=False,
         )
 
-    run_cmd(["install", "pkg-a"])
-    # idempotent install
-    out_install_again = run_cmd(["install", "pkg-a"]).stdout
-    assert "already installed" in out_install_again.lower()
+    # A local extension directory and a single-file extension.
+    ext_dir = tmp_path / "my-ext"
+    ext_dir.mkdir()
+    (ext_dir / "register.py").write_text("def register(ctx):\n    return {}\n", encoding="utf-8")
+    ext_file = tmp_path / "single_ext.py"
+    ext_file.write_text("def register(ctx):\n    return {}\n", encoding="utf-8")
+
+    run_cmd(["install", str(ext_dir)])
     out = run_cmd(["list"]).stdout
-    assert "pkg-a" in out
+    assert "my-ext" in out
+    # Files are actually copied into the agent extensions dir.
+    agent_ext = tmp_path / ".one" / "agent" / "extensions" / "my-ext"
+    assert (agent_ext / "register.py").exists()
+
+    # idempotent install
+    out_install_again = run_cmd(["install", str(ext_dir)]).stdout
+    assert "already installed" in out_install_again.lower()
+
+    # single-file package
+    run_cmd(["install", str(ext_file)])
+    assert (tmp_path / ".one" / "agent" / "extensions" / "single_ext.py").exists()
+
+    # missing source -> not found
+    missing = run_cmd_no_check(["install", str(tmp_path / "nope.py")])
+    assert missing.returncode == 1
+    assert "not found" in missing.stdout.lower()
 
     run_cmd(["config", "tools.maxSteps", "9"])
     cfg = run_cmd(["config", "tools.maxSteps"]).stdout
     assert "9" in cfg
 
-    missing = run_cmd_no_check(["config", "not.exists"])
-    assert missing.returncode == 1
-    assert "not found" in missing.stdout.lower()
+    missing_cfg = run_cmd_no_check(["config", "not.exists"])
+    assert missing_cfg.returncode == 1
+    assert "not found" in missing_cfg.stdout.lower()
 
-    run_cmd(["remove", "pkg-a"])
+    # update with an explicit package: up-to-date check
+    up_to_date = run_cmd(["update", "my-ext"]).stdout
+    assert "up to date" in up_to_date.lower()
+
+    run_cmd(["remove", "my-ext"])
     out2 = run_cmd(["list"]).stdout
-    assert "pkg-a" not in out2
+    assert "my-ext" not in out2
+    # Files on disk are removed too.
+    assert not agent_ext.exists()
 
-    remove_missing = run_cmd_no_check(["remove", "pkg-a"])
+    remove_missing = run_cmd_no_check(["remove", "my-ext"])
     assert remove_missing.returncode == 1
     assert "not installed" in remove_missing.stdout.lower()
 
-    update_missing = run_cmd_no_check(["update", "pkg-a"])
+    update_missing = run_cmd_no_check(["update", "my-ext"])
     assert update_missing.returncode == 1
     assert "not installed" in update_missing.stdout.lower()
+
+    # update without args syncs the manifest with the extensions dir.
+    (tmp_path / ".one" / "agent" / "extensions" / "dropped.py").write_text("x = 1\n", encoding="utf-8")
+    synced = run_cmd(["update"]).stdout
+    assert "dropped.py" in synced
+    out3 = run_cmd(["list"]).stdout
+    assert "dropped.py" in out3
 
 
 def test_cli_flag_validation_errors(tmp_path: Path):
