@@ -2,7 +2,7 @@
 
 ## Project
 
-Python 3.12+ re-implementation of the `pi` coding agent (CLI + JSON-RPC + Textual TUI). The original TypeScript `pi` is the parity reference — `TODO.md` (in Polish) lists the remaining gaps. Package name: `one`, source in `one/`.
+Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (shell/file/code) headless or via CLI/TUI/RPC, with an **optional cooperation mode** — approval gates for mutating tools (`--cooperation`), mid-task steering/abort, and (on the roadmap) agent-initiated questions. The project started as a re-implementation of the `pi` coding agent but is now independent — `pi` parity is explicitly out of scope; the roadmap lives in `TODO.md` (in Polish). Package name: `one`, source in `one/`.
 
 ## Commands
 

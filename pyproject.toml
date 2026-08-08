@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "one"
 version = "0.1.0"
-description = "one coding agent (Python), based on pi coding-agent"
+description = "one - autonomous terminal agent (CLI + TUI + JSON-RPC); optional human cooperation mode"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "picon" }]

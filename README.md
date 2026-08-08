@@ -1,6 +1,19 @@
 # one
 
-Python implementation of the `one` coding agent, based on `pi` coding-agent, focused on CLI and JSON-RPC.
+Autonomous terminal agent written in Python: it executes assigned tasks on its own
+(shell / files / code) — plan, run tools, verify, report — and can optionally work
+in a **cooperation mode** where a human approves mutating tools, steers or aborts
+mid-task, and answers agent questions.
+
+The project started as a re-implementation of the `pi` coding agent and is now an
+independent project with its own roadmap — see `TODO.md`.
+
+## Modes
+
+- `--mode text|json` / `-p` — one-shot task execution (prints the stream, JSON for automation)
+- interactive — REPL with slash commands, cooperation toggle (Ctrl+A), steer/abort
+- `--mode tui` — Textual TUI with live streaming, themes, sidebar
+- `--mode rpc` — JSON-RPC over stdin/stdout for external orchestration (sessions, events, extension UI)
 
 ## Quick start
 
@@ -35,6 +48,13 @@ TUI highlights:
 - scrollable main stream with scrollbar
 - simplified main stream view (`> ...` for user messages)
 - tool lifecycle visible in stream (`tool start`, `tool ok/err`)
+
+## Cooperation mode
+
+By default `one` works autonomously. With `--cooperation` (or `/cooperation`, Ctrl+A
+in the TUI/interactive mode) it asks before running mutating tools (`bash`, `write`,
+`edit`); rejections require a reason that is fed back to the model. Mid-task steering
+(`/steer`, `/follow`) and abort (Ctrl+C) work in every interactive mode.
 
 ## Global install (run `one` from any directory)
 

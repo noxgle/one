@@ -1,98 +1,54 @@
-# TODO — Luki `one` względem oryginalnego `pi`
+# TODO — Roadmapa autonomicznego agenta `one`
 
-## Status (na teraz)
+Celem projektu jest **autonomiczny agent terminalowy** wykonujący zlecone zadania
+(shell / pliki / kod) z **opcjonalnym trybem kooperacji** z człowiekiem (bramki
+zatwierdzania narzędzi, sterowanie w trakcie, docelowo pytania agenta).
 
-### P0 — Największe braki funkcjonalne
+Projekt powstał jako re-implementacja agenta `pi` i rozwija się samodzielnie —
+parity 1:1 z `pi` nie jest już celem (patrz „Poza zakresem").
 
-- [x] Zaimplementować pełny interactive TUI parity z `pi` (praktyczna parity P0)
-  - [x] status line (model/thinking/context/cwd/queue/tokens/retry-state)
-  - [x] podstawowe komendy slash (`/help`, `/stats`, `/state`, `/model`, `/thinking`, `/steer`, `/follow`, `/compact`, `/login`, `/config`, `/bash`, `/queue`, `/tools`, `/clear`, `/abort`, `/retry`)
-  - [x] podstawowa obsługa skrótów/sterowania (`Ctrl+C` -> abort podczas streamingu)
-  - [x] parity skrótów klawiszowych i układu TUI na poziomie P0 (aliasy slash, readline/history, stabilny status/footer)
-- [ ] Zaimplementować pełny i stabilny tool-calling flow (jak w `pi`)
-  - [x] pętla model -> tool -> model
-  - [x] eventy `tool_call_start/end`, `tool_call_error`, `turn_start/end`, `auto_retry_start/end`
-  - [x] limity bezpieczeństwa (`tools.maxSteps`, `tools.timeoutSec`)
-  - [x] abort semantics (przerwanie promptu także podczas requestu do providera)
-  - [x] ograniczenie payloadu `toolResult` do kontekstu modelu (cap znaków + head/tail fallback)
-  - [x] reason-aware `turn_end` (`completed/abort/error/tool_step_limit`)
-  - [x] kolejki `steer/follow_up` zachowane przy abort/retry
-  - [x] domknięcie parity edge-case'ów i semantyki retry/abort/queue (P0 practical)
-- [ ] Dodać pełne wsparcie providerów + auth/login parity
-  - [x] auth precedence `runtime -> file -> env`
-  - [x] wsparcie `openai`, `anthropic`, `gemini`, `openrouter`, `ollama-cloud`
-  - [x] `/login` flow practical: walidacja provider/model + ustawianie default provider/model
-  - [x] `/login status` + `/logout <provider>` + no-auth provider flow (`llama.cpp`)
-  - [ ] pełny `/login` parity (subskrypcja/OAuth flow jak w `pi`)
-- [x] Uzupełnić CLI parity (komendy pakietowe/config) (P0 practical)
-  - [x] komendy `install/remove/update/list/config`
-  - [x] idempotencja i walidacja usage + spójne exit codes dla error path
-  - [x] semantyka flag `--mode/--print/--session/--fork` + usage errors/exit codes (P0 practical)
+## Fundament (zrealizowane)
 
-## P1 — Integracje i protokoły
+- [x] Tryby interfejsu: print (one-shot), interactive, TUI (Textual), RPC (JSON-RPC)
+- [x] Sesje `.jsonl` z branchingiem/forkiem (drzewo sesji, `parentSession` — baza pod subagentów) + compaction
+- [x] Pętla model -> tool -> model z eventami `turn_*`, `tool_*`, `retry_*` i live streamingiem
+- [x] Auto-retry, abort (także w trakcie requestu), kolejki steer/follow_up
+- [x] Limity bezpieczeństwa (`tools.maxSteps`, `tools.timeoutSec`), cap payloadu `toolResult`
+- [x] Kooperacja: bramki zatwierdzania `bash`/`write`/`edit` (`--cooperation`, `/cooperation`, Ctrl+A)
+- [x] Providerzy: `openai`, `anthropic`, `gemini`, `openrouter`, `ollama-cloud`, `llama.cpp` (lokalny, bez klucza)
+- [x] Rozszerzenia/skille/prompty/themes (loader + runtime hooków opencode-style)
+- [x] RPC: sesje, model, komendy, streaming eventów, extension UI, `wait_for_idle`
 
-- [ ] Uzupełnić RPC parity (komendy, eventy, streaming, extension UI)
-- [ ] Zaimplementować pełny runtime extensions/skills/packages
-- [x] Dopracować session/compaction parity (branching, migracje, eksport)
-- [x] Zaimplementować pełne TUI (`textual`) z obsługą theme i streamingu (v2 practical)
-  - [x] Layout v2: main stream + sidebar + input
-  - [x] Built-in theme switch (`default`, `light`, `hacker`, `solarized`, `fallout`)
-  - [x] Render eventów runtime (`turn_*`, `tool_*`, `retry_*`) w widoku TUI
-  - [x] Live text streaming w TUI (delta events)
-  - [ ] Podpiąć extension widgets/overlays do warstwy TUI
-  - [ ] Snapshot/regression testy renderingu TUI
+## P0 — Autonomia
+
+- [ ] Headless tryb zadania (`one run "zadanie"`): pełna pętla do `finish`, kontrakt wyniku
+      (summary + exit code 0/1), limity kroków, auto-retry, resume po przerwaniu
+- [ ] Subagenci — delegowanie podzadań: tworzenie subagentów (osobne sesje z `parentSession`,
+      izolowany kontekst, równoległe wykonanie, scalanie wyników); nowy tool (np.
+      `spawn_subagent`/`delegate`) zarejestrowany w `tools/index.py`; limity równoległości
+      i głębokości zagnieżdżenia
+- [ ] Eskalacja agent→człowiek: agent pauzuje zadanie i pyta (niejednoznaczność, brak dostępu,
+      decyzja polityczna); odpowiedź wraca do kontekstu; kanały: interactive, TUI, RPC,
+      headless (file/pipe)
+- [ ] Polityka kooperacji w trybie autonomicznym: bramki `--cooperation` opt-in per run;
+      domyślnie agent działa bez pytań
+
+## P1 — Integracje i operacje
+
+- [ ] Intake zadań: zadanie z pliku/spec, `@file`, parametryzacja
+- [ ] Limity budżetu: tokens/czas/kroki z konfiguracją
+- [ ] Raport końca zadania (log/notyfikacja) + utrzymanie RPC (`wait_for_idle`, steer w headless)
+- [ ] Podpięcie extension widgets/overlays do warstwy TUI
+- [ ] Snapshot/regression testy renderingu TUI
 
 ## P2 — Jakość i zgodność
 
-- [ ] Dodać golden compatibility tests 1:1 z TS
-- [ ] Dodać snapshot tests dla RPC
-- [ ] Dodać testy auth precedence + provider fallback
-
----
-
-## Szczegóły braków
-
-### 1. Interactive TUI
-- [x] Header/status context usage
-- [x] Footer/status token usage + retry state (praktyczna parity)
-- [x] Komendy i skróty klawiszowe jak w `pi` (P0 practical: aliasy, `Ctrl+C/Ctrl+D/Ctrl+L/Ctrl+R`, queue/model/thinking control)
-- [x] UI hooks dla extension widgets/overlays (P0 practical: eventy + interactive `/extui` + RPC commands)
-- [x] TUI v2 (Textual): scrollable stream, theme switch, prosty rendering czatu, tool blocks
-
-### 2. Tool-calling
-- [x] Ujednolicony kontrakt wywołań narzędzi (baseline)
-- [x] Obsługa błędów/retry/tool-result event parity (praktyczna)
-- [x] Snapshoty regresyjne dla `turn_*`, `tool_*`, `retry_*` + edge-case abort/retry/queue
-- [x] Live streaming deltas z providerów do runtime/event bus
-- [ ] Dodać pełny flow 1:1 bez uproszczeń względem `pi` (poza zakresem P0 practical)
-
-### 3. Providers/Auth
-- [x] Rozszerzona lista providerów (w tym `ollama-cloud`)
-- [x] Adapter `ollama-cloud` bez pól nieobsługiwanych (`reasoning_effort`, wymuszone `temperature`)
-- [x] Lepsza diagnostyka błędów provider API (status + body)
-- [x] Streaming response support: OpenAI-compatible, Anthropic, Gemini
-- [x] Dodać `/login` practical flow (provider/key/model + defaults)
-- [ ] Dodać pełny `/login` parity subskrypcji/OAuth
-- [x] Utrzymany precedence: runtime override -> plik auth -> env
-
-### 4. CLI parity
-- [x] Dodane i utwardzone komendy: `install/remove/update/list/config`
-- [x] Ujednolicić semantykę flag i zachowanie trybów (P0 practical)
-
-### 5. RPC parity
-- [ ] Dodać brakujące komendy sesji/modelu/compaction/bash
-- [ ] Ujednolicić event streaming i payloady z `pi`
-
-### 6. Extensions/Skills/Packages
-- [ ] Dodać pełne uruchamianie rozszerzeń (nie tylko discovery)
-- [ ] Dodać package manager flow (npm/git) zgodny z `pi`
-
-### 7. Sessions/Compaction
-- [x] Ujednolicić fidelity `.jsonl` i migracje (persist upgrades, v4, id backfill)
-- [x] Ujednolicić branching + branch summary + compaction behavior (rolling 2-level summary, auto-compaction, `firstKeptEntryId` fix)
-- [ ] Ujednolicić interactive: `/branches`, `/export`, `/session` (zostały `/tree`, `/navigate`, `/fork`)
-
-### 8. Test parity
-- [ ] Golden testy `build_session_context` na danych z TS
-- [ ] Snapshoty odpowiedzi/eventów RPC
+- [ ] Testy integracyjne headless (end-to-end: zadanie -> wynik -> exit code)
+- [ ] Snapshot tests dla RPC
+- [ ] Testy auth precedence + provider fallback
 - [ ] Cross-platform smoke (Linux/macOS path & shell semantics)
+
+## Poza zakresem
+
+- Parity 1:1 z `pi` (np. `/login` OAuth/subskrypcja, event payloady 1:1, golden tests z TS)
+- Package manager npm/git jak w `pi` (rozszerzenia działają wg własnego kontraktu)
