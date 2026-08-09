@@ -19,7 +19,7 @@ try:
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.message import Message
-    from textual.widgets import Input, Static
+    from textual.widgets import Static, TextArea
 
     TEXTUAL_AVAILABLE = True
 except Exception:  # pragma: no cover
@@ -172,22 +172,66 @@ if TEXTUAL_AVAILABLE:
             self.payload = payload
             super().__init__()
 
-    class _CommandInput(Input):
-        """Input whose ctrl+v pastes from the system clipboard.
+    class InputSubmitted(Message):
+        """Posted by the command input when the user submits.
+
+        Module-level so Textual derives the handler name ``on_input_submitted``
+        (a nested class would derive ``on__command_text_area_submitted``).
+        """
+
+        def __init__(self, value: str) -> None:
+            self.value = value
+            super().__init__()
+
+    class _CommandTextArea(TextArea):
+        """Multi-line command input whose ctrl+v pastes from the system clipboard.
 
         Textual's default `action_paste` reads `app.clipboard`, an in-memory
         value that only ever holds text copied inside the app — system
         clipboard content (e.g. copied from a browser) never made it in.
+
+        Enter submits (like the previous single-line Input); Shift+Enter
+        inserts a newline; arrow keys move the cursor across lines. Pasting
+        very large text is capped to avoid UI/layout blowups.
         """
 
+        _PASTE_MAX_CHARS = 10240
+
+        BINDINGS = [
+            ("ctrl+j", "submit", "Submit"),
+            ("shift+enter", "newline", "New line"),
+        ]
+
+        async def _on_key(self, event: events.Key) -> None:
+            # TextArea._on_key swallows Enter (inserts "\n") before widget
+            # BINDINGS are ever consulted, so Enter-to-submit must be handled
+            # here, ahead of the superclass. Shift+Enter stays a newline.
+            if event.key == "enter":
+                event.stop()
+                event.prevent_default()
+                self.post_message(InputSubmitted(self.text))
+                return
+            await super()._on_key(event)
+
+        async def action_submit(self) -> None:
+            self.post_message(InputSubmitted(self.text))
+
+        def action_newline(self) -> None:
+            self.insert("\n")
+
         def action_paste(self) -> None:
+            if self.read_only:
+                return
             text = _paste_from_system_clipboard()
             if not text:
                 text = self.app.clipboard
             if not text:
                 return
-            start, end = self.selection
-            self.replace(text, start, end)
+            if len(text) > self._PASTE_MAX_CHARS:
+                text = text[: self._PASTE_MAX_CHARS]
+            if result := self._replace_via_keyboard(text, *self.selection):
+                self.move_cursor(result.end_location)
+
 
     class _OneTextualApp(App[None]):
         CSS = """
@@ -226,6 +270,9 @@ if TEXTUAL_AVAILABLE:
             border: round #456ca8;
             background: #152441;
             color: #e7f0ff;
+            height: auto;
+            min-height: 3;
+            max-height: 40%;
         }
 
         #sidebar {
@@ -240,7 +287,7 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+c", "abort", "Abort"),
             ("ctrl+l", "clear_stream", "Clear"),
             ("ctrl+q", "quit", "Quit"),
-            # priority=True so it wins over the focused Input's ctrl+a (home).
+            # priority=True so it wins over the focused TextArea's ctrl+a (home).
             Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
             ("f1", "help", "Help"),
         ]
@@ -275,11 +322,11 @@ if TEXTUAL_AVAILABLE:
                 with Vertical(id="main"):
                     with VerticalScroll(id="stream_container"):
                         yield Static("", id="stream")
-                    yield _CommandInput(placeholder="Wpisz polecenie lub /help", id="input")
+                    yield _CommandTextArea(placeholder="Wpisz polecenie lub /help", id="input", soft_wrap=True)
                 yield Static(id="sidebar")
 
         def on_mount(self) -> None:
-            self.query_one("#input", Input).focus()
+            self.query_one("#input", TextArea).focus()
             self._apply_theme(self._theme.name)
             # Drive the "waiting for the model" spinner while a turn is in
             # flight but no assistant text is currently streaming.
@@ -489,7 +536,7 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 pass
             try:
-                input_widget = self.query_one("#input", Input)
+                input_widget = self.query_one("#input", TextArea)
                 input_widget.styles.background = theme.input_bg
                 input_widget.styles.border = ("round", theme.input_border)
                 input_widget.styles.color = theme.input_fg
@@ -564,6 +611,14 @@ if TEXTUAL_AVAILABLE:
                 last_tool_error=self._last_tool_error,
                 last_provider_error=self._last_provider_error,
             )
+            if s["compacting"]:
+                status = "compacting…"
+            elif self._retry_state != "idle":
+                status = "retrying…"
+            elif s["streaming"]:
+                status = "working…"
+            else:
+                status = "idle"
             sidebar = (
                 f"[b {self._theme.info}]Info[/]\n"
                 f"Model: {s['model']}\n"
@@ -571,28 +626,17 @@ if TEXTUAL_AVAILABLE:
                 f"Thinking: {s['thinking']}\n"
                 f"Ctx: {s['contextPercent']:.1f}%\n"
                 f"Retry: {s['retry']}\n"
+                f"Status: {status}\n"
                 f"Coop: {s['coop']} (Ctrl+A)\n"
                 f"CWD: {s['cwd']}\n"
-                "\n"
-                f"[b {self._theme.info}]Queue[/]\n"
-                f"Steer: {s['queueSteer']}\n"
-                f"Follow: {s['queueFollow']}\n"
-                f"Total: {s['queueTotal']}\n"
-                "\n"
-                f"[b {self._theme.info}]Tokens[/]\n"
-                f"In: {s['tokenInput']}\n"
-                f"Out: {s['tokenOutput']}\n"
-                f"Cache: r{s['tokenCacheRead']}/w{s['tokenCacheWrite']}\n"
-                f"Total: {s['tokenTotal']}\n"
-                f"Cost: {s['cost']:.6f}\n"
+                f"Session: {s['sessionId']}\n"
                 "\n"
                 f"[b {self._theme.info}]Errors[/]\n"
                 f"Tool: {s['lastToolError']}\n"
                 f"Provider: {s['lastProviderError']}\n"
                 "\n"
                 f"[b {self._theme.info}]Keys[/]\n"
-                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\n"
-                "Pretty chat view: Static blocks with theme backgrounds\n"
+                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+V paste\n"
             )
             self.query_one("#sidebar", Static).update(sidebar)
 
@@ -887,7 +931,7 @@ if TEXTUAL_AVAILABLE:
                     self._write(f"API key is required for {provider}{hint}. Type the key below.", "warn")
                     self._login_pending = {"provider": provider, "envVar": env_var}
                     try:
-                        input_widget = self.query_one("#input", Input)
+                        input_widget = self.query_one("#input", TextArea)
                         input_widget.placeholder = f"API key for {provider}:"
                         input_widget.focus()
                     except Exception:
@@ -1028,9 +1072,9 @@ if TEXTUAL_AVAILABLE:
 
             self._write(f"Unknown command: {cmd}. Use /help.", "error")
 
-        async def on_input_submitted(self, event: Input.Submitted) -> None:
+        async def on_input_submitted(self, event: InputSubmitted) -> None:
             text = event.value.strip()
-            self.query_one("#input", Input).value = ""
+            self.query_one("#input", TextArea).text = ""
             if self._approval_pending is not None:
                 await self._handle_approval_answer(text)
                 return
@@ -1084,7 +1128,7 @@ if TEXTUAL_AVAILABLE:
                     return
                 pending["stage"] = "reason"
                 try:
-                    self.query_one("#input", Input).placeholder = "Powód odrzucenia:"
+                    self.query_one("#input", TextArea).placeholder = "Powód odrzucenia:"
                 except Exception:
                     pass
                 self._write("[Approve] podaj powód odrzucenia", "warn")
@@ -1100,7 +1144,7 @@ if TEXTUAL_AVAILABLE:
             request_id = str(req.get("id") or "")
             self._extension_ui_pending_request = None
             try:
-                input_widget = self.query_one("#input", Input)
+                input_widget = self.query_one("#input", TextArea)
                 input_widget.placeholder = "Wpisz polecenie lub /help"
             except Exception:
                 pass
@@ -1126,7 +1170,7 @@ if TEXTUAL_AVAILABLE:
                 return
             self._login_pending = None
             try:
-                input_widget = self.query_one("#input", Input)
+                input_widget = self.query_one("#input", TextArea)
                 input_widget.placeholder = "Wpisz polecenie lub /help"
             except Exception:
                 pass
@@ -1173,7 +1217,7 @@ if TEXTUAL_AVAILABLE:
             self._approval_queue = asyncio.Queue()
             self._write(f"[Approve] {tool_name} {json.dumps(args, ensure_ascii=False)}", "warn")
             try:
-                input_widget = self.query_one("#input", Input)
+                input_widget = self.query_one("#input", TextArea)
                 input_widget.placeholder = "Akceptuj (Enter) / n + powód"
                 input_widget.focus()
             except Exception:
@@ -1187,7 +1231,7 @@ if TEXTUAL_AVAILABLE:
                 self._approval_pending = None
                 self._approval_queue = None
                 try:
-                    self.query_one("#input", Input).placeholder = "Wpisz polecenie lub /help"
+                    self.query_one("#input", TextArea).placeholder = "Wpisz polecenie lub /help"
                 except Exception:
                     pass
                 self._refresh_sidebar()
@@ -1280,7 +1324,7 @@ if TEXTUAL_AVAILABLE:
                 self._write(json.dumps(event.get("payload") or {}, ensure_ascii=False, indent=2), "info")
                 self._extension_ui_pending_request = dict(event)
                 try:
-                    input_widget = self.query_one("#input", Input)
+                    input_widget = self.query_one("#input", TextArea)
                     input_widget.placeholder = "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
                     input_widget.focus()
                 except Exception:
@@ -1297,7 +1341,7 @@ if TEXTUAL_AVAILABLE:
                 if self._extension_ui_pending_request is not None and str(self._extension_ui_pending_request.get("id") or "") == rid:
                     self._extension_ui_pending_request = None
                     try:
-                        input_widget = self.query_one("#input", Input)
+                        input_widget = self.query_one("#input", TextArea)
                         input_widget.placeholder = "Wpisz polecenie lub /help"
                     except Exception:
                         pass

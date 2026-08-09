@@ -73,7 +73,7 @@ async def _wait_idle(pilot, session: AgentSession, timeout_iters: int = 300) -> 
 
 @pytest.mark.asyncio
 async def test_tui_full_turn_snapshot(tmp_path: Path):
-    from textual.widgets import Input
+    from textual.widgets import TextArea
 
     from one.modes.tui_mode import _OneTextualApp
 
@@ -83,8 +83,8 @@ async def test_tui_full_turn_snapshot(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        input_widget = app.query_one("#input", Input)
-        input_widget.value = "check the file"
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.text = "check the file"
         await input_widget.action_submit()
         await _wait_idle(pilot, session)
 
@@ -94,7 +94,7 @@ async def test_tui_full_turn_snapshot(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_clear_resets_stream(tmp_path: Path):
-    from textual.widgets import Input
+    from textual.widgets import TextArea
 
     from one.modes.tui_mode import _OneTextualApp
 
@@ -102,8 +102,8 @@ async def test_tui_clear_resets_stream(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        input_widget = app.query_one("#input", Input)
-        input_widget.value = "/clear"
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.text = "/clear"
         await input_widget.action_submit()
         await pilot.pause()
 

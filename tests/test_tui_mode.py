@@ -153,7 +153,7 @@ def _mk_app_session(tmp_path: Path, runtime_key: str | None = None):
 
 @pytest.mark.asyncio
 async def test_extension_ui_request_renders_and_answer_routes(tmp_path: Path):
-    from textual.widgets import Input
+    from textual.widgets import TextArea
 
     from one.modes.tui_mode import _OneTextualApp
 
@@ -170,8 +170,8 @@ async def test_extension_ui_request_renders_and_answer_routes(tmp_path: Path):
         assert "Wizard" in stream
         assert '"q": 1' in stream
 
-        input_widget = app.query_one("#input", Input)
-        input_widget.value = '{"answer": 42}'
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.text = '{"answer": 42}'
         await input_widget.action_submit()
         await pilot.pause()
 
@@ -184,7 +184,7 @@ async def test_extension_ui_request_renders_and_answer_routes(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_extension_ui_cancel_via_empty_input(tmp_path: Path):
-    from textual.widgets import Input
+    from textual.widgets import TextArea
 
     from one.modes.tui_mode import _OneTextualApp
 
@@ -196,8 +196,8 @@ async def test_extension_ui_cancel_via_empty_input(tmp_path: Path):
         await pilot.pause()
         assert app._extension_ui_pending_request is not None
 
-        input_widget = app.query_one("#input", Input)
-        input_widget.value = ""
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.text = ""
         await input_widget.action_submit()
         await pilot.pause()
 
@@ -232,10 +232,10 @@ async def test_extension_ui_external_response_clears_pending(tmp_path: Path):
 
 
 async def _submit(app, pilot, text: str) -> None:
-    from textual.widgets import Input
+    from textual.widgets import TextArea
 
-    input_widget = app.query_one("#input", Input)
-    input_widget.value = text
+    input_widget = app.query_one("#input", TextArea)
+    input_widget.text = text
     await input_widget.action_submit()
     await pilot.pause()
 
@@ -413,7 +413,7 @@ async def test_tui_command_login_inline_stores_key(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_command_login_pending_flow_via_input(tmp_path: Path):
-    from textual.widgets import Input
+    from textual.widgets import TextArea
 
     from one.modes.tui_mode import _OneTextualApp
 
@@ -426,10 +426,10 @@ async def test_tui_command_login_pending_flow_via_input(tmp_path: Path):
         assert app._login_pending["provider"] == "anthropic"
         stream = "\n".join(app._stream_lines)
         assert "API key is required for anthropic" in stream
-        input_widget = app.query_one("#input", Input)
+        input_widget = app.query_one("#input", TextArea)
         assert input_widget.placeholder == "API key for anthropic:"
 
-        input_widget.value = "sk-ant-test"
+        input_widget.text = "sk-ant-test"
         await input_widget.action_submit()
         await pilot.pause()
 
@@ -442,7 +442,7 @@ async def test_tui_command_login_pending_flow_via_input(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_command_login_pending_cancel_on_empty(tmp_path: Path):
-    from textual.widgets import Input
+    from textual.widgets import TextArea
 
     from one.modes.tui_mode import _OneTextualApp
 
@@ -452,8 +452,8 @@ async def test_tui_command_login_pending_cancel_on_empty(tmp_path: Path):
         await pilot.pause()
         await _submit(app, pilot, "/login gemini")
         assert app._login_pending is not None
-        input_widget = app.query_one("#input", Input)
-        input_widget.value = ""
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.text = ""
         await input_widget.action_submit()
         await pilot.pause()
         assert app._login_pending is None
@@ -628,7 +628,7 @@ async def test_tui_paste_from_system_clipboard(tmp_path: Path, monkeypatch):
         input_widget = app.query_one("#input")
         input_widget.action_paste()
         await pilot.pause()
-        assert input_widget.value == "pasted-text"
+        assert input_widget.text == "pasted-text"
 
 
 @pytest.mark.asyncio
@@ -644,4 +644,55 @@ async def test_tui_paste_fallback_app_clipboard(tmp_path: Path, monkeypatch):
         input_widget = app.query_one("#input")
         input_widget.action_paste()
         await pilot.pause()
-        assert input_widget.value == "in-app-text"
+        assert input_widget.text == "in-app-text"
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_multiline_preserved(tmp_path: Path, monkeypatch):
+    """Multi-line paste stays multi-line: the input field is now a TextArea."""
+    from one.modes import tui_mode
+
+    session = _mk_app_session(tmp_path)
+    app = tui_mode._OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: "line1\nline2\nline3")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input")
+        input_widget.action_paste()
+        await pilot.pause()
+        assert input_widget.text == "line1\nline2\nline3"
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_long_text_truncated(tmp_path: Path, monkeypatch):
+    """Huge single-line pastes are capped so the UI does not blow up."""
+    from one.modes import tui_mode
+
+    session = _mk_app_session(tmp_path)
+    app = tui_mode._OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: "x" * 50_000)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input")
+        input_widget.action_paste()
+        await pilot.pause()
+        assert len(input_widget.text) == tui_mode._CommandTextArea._PASTE_MAX_CHARS
+        assert input_widget.text == "x" * tui_mode._CommandTextArea._PASTE_MAX_CHARS
+
+
+@pytest.mark.asyncio
+async def test_tui_shift_enter_inserts_newline(tmp_path: Path):
+    """Shift+Enter inserts a newline; Enter submits (see _submit tests)."""
+    from one.modes import tui_mode
+
+    session = _mk_app_session(tmp_path)
+    app = tui_mode._OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input")
+        input_widget.focus()
+        await pilot.press("a", "b")
+        await pilot.press("shift+enter")
+        await pilot.press("c")
+        await pilot.pause()
+        assert input_widget.text == "ab\nc"

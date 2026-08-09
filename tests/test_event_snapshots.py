@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from one.providers.base import ChatResult
 from one.core.agent_session import AgentSession
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
@@ -230,3 +231,41 @@ async def test_event_snapshot_abort_during_retry_keeps_queue(tmp_path: Path):
     assert {"type": "auto_retry_end", "attempt": 1, "willRetry": False, "aborted": True} in compact
     assert {"type": "turn_end", "attempt": 1, "ok": True, "reason": "abort", "aborted": True} in compact
     assert agent.get_pending_queues() == {"steering": ["queued-steer"], "followUp": ["queued-follow"]}
+
+
+@pytest.mark.asyncio
+async def test_abort_cancels_in_flight_provider_call(tmp_path: Path):
+    """abort() must cancel the in-flight provider request, not just set a flag."""
+    agent = _mk_agent(tmp_path)
+    cancelled = asyncio.Event()
+
+    class _CancelAwareProvider:
+        async def chat(
+            self,
+            api_key: str,
+            model: str,
+            messages: list[dict[str, Any]],
+            thinking_level: str,
+            headers: dict[str, str] | None = None,
+        ) -> Any:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
+
+    agent.providers = {"openai": _CancelAwareProvider()}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    task = asyncio.create_task(agent.prompt("go"))
+    await asyncio.sleep(0.01)
+    await agent.abort()
+    await task
+
+    assert cancelled.is_set()
+    assert not agent.is_streaming
+    compact = _compact(events)
+    assert {"type": "turn_end", "attempt": 1, "ok": True, "reason": "abort", "aborted": True} in compact
+    assert {"type": "agent_end"} in compact

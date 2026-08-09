@@ -20,6 +20,10 @@ from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, 
 from one.tools.index import all_tools
 
 
+class _AbortSignal(Exception):
+    """Internal: abort() cancelled the in-flight provider request."""
+
+
 @dataclass
 class ModelCycleResult:
     model: ModelInfo
@@ -60,6 +64,7 @@ class AgentSession:
         self._follow_up: list[str] = []
         self._active_tools = tools or list(all_tools.keys())
         self._abort_requested = False
+        self._active_chat_tasks: set[asyncio.Task] = set()
         self._extension_ui_pending: dict[str, dict[str, Any]] = {}
         self._extension_ui_history: list[dict[str, Any]] = []
         self._extension_runtime: ExtensionRuntime | None = None
@@ -771,7 +776,16 @@ class AgentSession:
         if allow_live_stream and "on_delta" in sig.parameters:
             chat_kwargs["on_delta"] = _on_delta
 
-        res = await provider.chat(**chat_kwargs)
+        task = asyncio.create_task(provider.chat(**chat_kwargs))
+        self._active_chat_tasks.add(task)
+        try:
+            res = await task
+        except asyncio.CancelledError:
+            if self._abort_requested:
+                raise _AbortSignal() from None
+            raise
+        finally:
+            self._active_chat_tasks.discard(task)
 
         return {
             "role": "assistant",
@@ -864,7 +878,12 @@ class AgentSession:
                     if self._abort_requested:
                         final_assistant = self._abort_assistant_message()
                         break
-                    assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
+                    try:
+                        assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
+                    except _AbortSignal:
+                        self._abort_requested = True
+                        final_assistant = self._abort_assistant_message()
+                        break
                     if self._abort_requested:
                         final_assistant = self._abort_assistant_message()
                         break
@@ -872,20 +891,25 @@ class AgentSession:
                     tool_call = self._try_parse_tool_call(assistant_text)
                     if tool_call is None and self._should_tool_nudge(assistant_text, step=step, tool_results=tool_results):
                         self._emit({"type": "tool_call_nudge_start"})
-                        nudged = await self._invoke_provider(
-                            self._flatten_messages_for_provider()
-                            + [
-                                {
-                                    "role": "user",
-                                    "content": (
-                                        "Decide now: if tools are required, respond ONLY with JSON "
-                                        '{"tool":"<name>","args":{...}} and no extra text. '
-                                        "If tools are not required, respond with FINAL_ANSWER:<text>."
-                                    ),
-                                }
-                            ],
-                            allow_live_stream=False,
-                        )
+                        try:
+                            nudged = await self._invoke_provider(
+                                self._flatten_messages_for_provider()
+                                + [
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "Decide now: if tools are required, respond ONLY with JSON "
+                                            '{"tool":"<name>","args":{...}} and no extra text. '
+                                            "If tools are not required, respond with FINAL_ANSWER:<text>."
+                                        ),
+                                    }
+                                ],
+                                allow_live_stream=False,
+                            )
+                        except _AbortSignal:
+                            self._abort_requested = True
+                            final_assistant = self._abort_assistant_message()
+                            break
                         nudged_text = self._assistant_text(nudged)
                         nudged_tool_call = self._try_parse_tool_call(nudged_text)
                         if nudged_tool_call:
@@ -1302,6 +1326,9 @@ class AgentSession:
 
     async def abort(self) -> None:
         self._abort_requested = True
+        for task in list(self._active_chat_tasks):
+            if not task.done():
+                task.cancel()
 
     async def navigate_tree(self, target_id: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
         options = options or {}
