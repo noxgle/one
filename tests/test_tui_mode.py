@@ -9,6 +9,7 @@ from one.cli.args import parse_args
 from one.modes.tui_mode import (
     BUILTIN_TUI_THEMES,
     _THINKING_FRAMES,
+    _THINKING_MARK,
     advance_thinking_frame,
     build_sidebar_snapshot,
     evaluate_waiting,
@@ -149,6 +150,11 @@ def _mk_app_session(tmp_path: Path, runtime_key: str | None = None):
     settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
     session_manager = SessionManager.in_memory(str(tmp_path))
     return AgentSession(session_manager, settings, registry, _FakeLoader(), model, "medium")
+
+
+class _ErrorProvider:
+    async def chat(self, api_key, model, messages, thinking_level, headers=None):
+        raise RuntimeError("All connection attempts failed")
 
 
 @pytest.mark.asyncio
@@ -696,3 +702,50 @@ async def test_tui_shift_enter_inserts_newline(tmp_path: Path):
         await pilot.press("c")
         await pilot.pause()
         assert input_widget.text == "ab\nc"
+
+
+@pytest.mark.asyncio
+async def test_tui_error_turn_resets_spinner(tmp_path: Path):
+    """A turn ending with an error must not leave the 'Ctrl+C abort' spinner running forever."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _ErrorProvider()}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "check server")
+        # Wait until the error turn fully settles.
+        for _ in range(100):
+            await pilot.pause()
+            if not app._turn_active and not session.is_streaming:
+                break
+        stream = "\n".join(app._stream_lines)
+        assert "All connection attempts failed" in stream
+        assert app._turn_active is False
+        assert not any(line.startswith(_THINKING_MARK) for line in app._stream_lines)
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_c_after_finished_error_turn(tmp_path: Path):
+    """Ctrl+C after a finished (error) turn must acknowledge and keep the spinner dead."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _ErrorProvider()}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "check server")
+        for _ in range(100):
+            await pilot.pause()
+            if not app._turn_active:
+                break
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "[abort requested]" in stream
+        assert app._turn_active is False
+        assert not any(line.startswith(_THINKING_MARK) for line in app._stream_lines)

@@ -65,6 +65,8 @@ class AgentSession:
         self._active_tools = tools or list(all_tools.keys())
         self._abort_requested = False
         self._active_chat_tasks: set[asyncio.Task] = set()
+        self._active_bash_tasks: set[asyncio.Task] = set()
+        self._active_tool_tasks: set[asyncio.Task] = set()
         self._extension_ui_pending: dict[str, dict[str, Any]] = {}
         self._extension_ui_history: list[dict[str, Any]] = []
         self._extension_runtime: ExtensionRuntime | None = None
@@ -478,10 +480,15 @@ class AgentSession:
             raise RuntimeError(f"Unsupported tool: {tool_name}")
 
         if inspect.isawaitable(result):
-            if timeout_sec and timeout_sec > 0:
-                result = await asyncio.wait_for(result, timeout=timeout_sec)
-            else:
-                result = await result
+            task = asyncio.create_task(result)
+            self._active_tool_tasks.add(task)
+            try:
+                if timeout_sec and timeout_sec > 0:
+                    result = await asyncio.wait_for(task, timeout=timeout_sec)
+                else:
+                    result = await task
+            finally:
+                self._active_tool_tasks.discard(task)
         if not isinstance(result, dict):
             raise RuntimeError(f"Invalid result from tool: {tool_name}")
         return result
@@ -563,6 +570,15 @@ class AgentSession:
                 "truncated": result.get("truncated"),
                 "fullOutputPath": result.get("fullOutputPath"),
                 "rawResult": result,
+            }
+        except asyncio.CancelledError:
+            payload = {
+                "ok": False,
+                "tool": tool_name,
+                "args": args,
+                "error": "aborted",
+                "errorType": "CancelledError",
+                "aborted": True,
             }
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
@@ -1298,27 +1314,38 @@ class AgentSession:
     async def execute_bash(self, command: str) -> dict[str, Any]:
         from one.tools.bash import bash_tool
 
-        result = await bash_tool(
-            self.session_manager.cwd,
-            command,
-            command_prefix=self.settings_manager.get_shell_command_prefix(),
-        )
-        msg = {
-            "role": "bashExecution",
-            "command": command,
-            "output": result.get("output", ""),
-            "exitCode": result.get("exitCode"),
-            "cancelled": result.get("cancelled", False),
-            "truncated": result.get("truncated", False),
-            "fullOutputPath": result.get("fullOutputPath"),
-            "timestamp": int(time.time() * 1000),
-        }
-        self.messages.append(msg)
-        self.session_manager.append_message(msg)
-        return result
+        async def _run() -> dict[str, Any]:
+            result = await bash_tool(
+                self.session_manager.cwd,
+                command,
+                timeout=self.settings_manager.get_tool_timeout_sec(),
+                command_prefix=self.settings_manager.get_shell_command_prefix(),
+            )
+            msg = {
+                "role": "bashExecution",
+                "command": command,
+                "output": result.get("output", ""),
+                "exitCode": result.get("exitCode"),
+                "cancelled": result.get("cancelled", False),
+                "truncated": result.get("truncated", False),
+                "fullOutputPath": result.get("fullOutputPath"),
+                "timestamp": int(time.time() * 1000),
+            }
+            self.messages.append(msg)
+            self.session_manager.append_message(msg)
+            return result
+
+        task = asyncio.create_task(_run())
+        self._active_bash_tasks.add(task)
+        try:
+            return await task
+        finally:
+            self._active_bash_tasks.discard(task)
 
     def abort_bash(self) -> None:
-        return
+        for task in list(self._active_bash_tasks):
+            if not task.done():
+                task.cancel()
 
     async def wait_for_idle(self) -> None:
         while self._is_streaming or self._is_compacting:
@@ -1326,6 +1353,10 @@ class AgentSession:
 
     async def abort(self) -> None:
         self._abort_requested = True
+        self.abort_bash()
+        for task in list(self._active_tool_tasks):
+            if not task.done():
+                task.cancel()
         for task in list(self._active_chat_tasks):
             if not task.done():
                 task.cancel()

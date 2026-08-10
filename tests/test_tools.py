@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -112,3 +114,150 @@ def test_bash_tool_nonzero_exit_raises(tmp_path: Path):
     msg = str(exc.value)
     assert "bad" in msg or "timed out" in msg.lower()
     assert "Command exited with code" in msg
+
+
+# ---------------------------------------------------------------------------
+# Helpers for agent-based tests
+# ---------------------------------------------------------------------------
+
+
+class _Loader:
+    """Minimal resource_loader stub used by _mk_agent."""
+
+    def get_system_prompt(self, selected_tools=None) -> str:
+        return "test"
+
+
+def _mk_agent(tmp_path: Path, settings_override: dict[str, Any] | None = None) -> Any:
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory(settings_override or {"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    return AgentSession(session, settings, registry, _Loader(), model, "medium")
+
+
+def test_bash_tool_stdin_not_tty(tmp_path: Path):
+    """Child processes must not inherit the app's terminal (avoids `top`-style hangs)."""
+    import asyncio
+
+    from one.tools.bash import bash_tool
+
+    result = asyncio.run(bash_tool(str(tmp_path), "test -t 0; echo exit=$?"))
+    assert "exit=1" in result["output"] or result["exitCode"] == 1
+
+
+def test_bash_tool_cancel_kills_child(tmp_path: Path):
+    import asyncio
+
+    from one.tools.bash import bash_tool
+
+    async def scenario():
+        task = asyncio.create_task(bash_tool(str(tmp_path), "sleep 1000"))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        proc = await asyncio.create_subprocess_shell(
+            "pgrep -f '[s]leep 1000' || true",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        return out.decode(errors="ignore").strip()
+
+    leftover = asyncio.run(scenario())
+    assert leftover == ""
+
+
+@pytest.mark.asyncio
+async def test_execute_bash_default_timeout(tmp_path: Path):
+    """execute_bash applies the configured tool timeout (default 30s) instead of hanging forever."""
+    agent = _mk_agent(tmp_path, settings_override={"tools": {"maxSteps": 4, "timeoutSec": 2}})
+    result = await agent.execute_bash("sleep 30")
+    assert result["exitCode"] != 0
+    assert "timed out" in result["output"].lower()
+    # The sleep process must be gone.
+    proc = await asyncio.create_subprocess_shell(
+        "pgrep -f '[s]leep 30' || true",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    assert out.decode(errors="ignore").strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_abort_kills_active_bash(tmp_path: Path):
+    """abort() must cancel an in-flight /bash command (Ctrl+C in TUI)."""
+    agent = _mk_agent(tmp_path)
+    task = asyncio.create_task(agent.execute_bash("sleep 1000"))
+    await asyncio.sleep(0.2)
+    await agent.abort()
+    try:
+        await asyncio.wait_for(task, timeout=5)
+    except asyncio.CancelledError:
+        pass
+    proc = await asyncio.create_subprocess_shell(
+        "pgrep -f '[s]leep 1000' || true",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    assert out.decode(errors="ignore").strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_abort_kills_bash_running_via_tool_loop(tmp_path: Path):
+    """abort() must kill a bash subprocess launched through the agent's tool loop (Ctrl+C in TUI)."""
+    agent = _mk_agent(tmp_path, settings_override={"retry": {"enabled": False}})
+
+    class _ToolCallProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, api_key, model, messages, thinking_level, headers=None):
+            from one.providers.base import ChatResult
+
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(
+                    text='{"tool":"bash","args":{"command":"sleep 1000"}}',
+                    raw={},
+                    usage={},
+                    stop_reason="tool_call",
+                )
+            return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
+
+    agent.providers = {"openai": _ToolCallProvider()}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    task = asyncio.create_task(agent.prompt("run sleep"))
+    await asyncio.sleep(0.3)  # let the bash subprocess start
+    await agent.abort()
+    await task
+
+    # The sleep subprocess must have been killed.
+    proc = await asyncio.create_subprocess_shell(
+        "pgrep -f '[s]leep 1000' || true",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    assert out.decode(errors="ignore").strip() == ""
+
+    turn_end = [e for e in events if e.get("type") == "turn_end"]
+    assert turn_end
+    assert turn_end[-1]["aborted"] is True
+    assert turn_end[-1]["reason"] == "abort"

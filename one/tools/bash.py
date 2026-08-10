@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import tempfile
 
 from .common import truncate_tail
@@ -11,8 +13,10 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
     proc = await asyncio.create_subprocess_shell(
         final_command,
         cwd=cwd,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
 
     output = b""
@@ -23,7 +27,13 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
         else:
             out, _ = await proc.communicate()
         output += out or b""
+    except asyncio.CancelledError:
+        _kill_process_group(proc.pid)
+        proc.kill()
+        await asyncio.sleep(0.1)
+        raise
     except asyncio.TimeoutError:
+        _kill_process_group(proc.pid)
         proc.kill()
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=1)
@@ -43,7 +53,7 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
             full_path = f.name
         shown += f"\n\n[Output truncated. Full output: {full_path}]"
 
-    if proc.returncode not in (0, None):
+    if proc.returncode is not None and proc.returncode > 0:
         raise RuntimeError(shown + f"\n\nCommand exited with code {proc.returncode}")
 
     return {
@@ -55,3 +65,13 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
         "content": [{"type": "text", "text": shown}],
         "details": {"truncation": trunc if trunc["truncated"] else None, "fullOutputPath": full_path},
     }
+
+
+def _kill_process_group(pid: int | None) -> None:
+    """Kill the process group rooted at *pid* to reap shell children."""
+    if pid is None:
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass

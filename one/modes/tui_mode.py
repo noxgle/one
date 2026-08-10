@@ -708,6 +708,9 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer = ""
             if cmd == "/abort":
                 await session.abort()
+                self._turn_active = False
+                self._remove_thinking_line()
+                self._render_stream()
                 self._write("[abort requested]", "warn")
                 return
             if cmd == "/status":
@@ -1066,6 +1069,8 @@ if TEXTUAL_AVAILABLE:
                         self._write_tool_block(output)
                     else:
                         self._write(f"[bash] exitCode={result.get('exitCode')}", "info")
+                except asyncio.CancelledError:
+                    self._write("[bash] przerwano", "warn")
                 except Exception as e:
                     self._write(str(e), "error")
                 return
@@ -1100,6 +1105,11 @@ if TEXTUAL_AVAILABLE:
                 except Exception as e:
                     self._last_provider_error = str(e).strip() or e.__class__.__name__
                     self._write(f"[error] {self._last_provider_error}", "error")
+                    self._refresh_sidebar()
+                finally:
+                    self._turn_active = False
+                    self._remove_thinking_line()
+                    self._render_stream()
                     self._refresh_sidebar()
 
             asyncio.create_task(_run_prompt())
@@ -1241,6 +1251,9 @@ if TEXTUAL_AVAILABLE:
 
         async def action_abort(self) -> None:
             await self.session.abort()
+            self._turn_active = False
+            self._remove_thinking_line()
+            self._render_stream()
             self._write("[abort requested]", "warn")
             self._refresh_sidebar()
 
@@ -1354,10 +1367,20 @@ if TEXTUAL_AVAILABLE:
                     self._last_tool_error = f"{tool_name}: {err}"
                 tool_name = str(event.get("tool") or "tool")
                 self._write_tool_block(f"tool {status}: {tool_name}")
-            elif et == "turn_end" and event.get("ok") is False:
-                err = str(event.get("error") or "Unknown error").strip()
-                self._last_provider_error = err
-                self._write(f"[error] {err}", "error")
+            elif et == "turn_end":
+                self._retry_state = "idle"
+                self._turn_active = False
+                self._remove_thinking_line()
+                self._render_stream()
+                if event.get("ok") is False:
+                    err = str(event.get("error") or "Unknown error").strip()
+                    self._last_provider_error = err
+                    self._write(f"[error] {err}", "error")
+            elif et == "auto_retry_end":
+                self._retry_state = "idle"
+                self._turn_active = False
+                self._remove_thinking_line()
+                self._render_stream()
             elif et == "auto_retry_start":
                 self._retry_state = f"retry-{event.get('attempt')}"
                 retry_err = str(event.get("errorMessage") or "").strip()
@@ -1367,11 +1390,6 @@ if TEXTUAL_AVAILABLE:
                     f"[retry] attempt {event.get('attempt')}/{event.get('maxAttempts')} in {event.get('delayMs')}ms",
                     "warn",
                 )
-            elif et in {"auto_retry_end", "turn_end"}:
-                self._retry_state = "idle"
-                self._turn_active = False
-                self._remove_thinking_line()
-                self._render_stream()
 
             self._refresh_sidebar()
 
