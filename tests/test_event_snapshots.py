@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -269,3 +270,31 @@ async def test_abort_cancels_in_flight_provider_call(tmp_path: Path):
     compact = _compact(events)
     assert {"type": "turn_end", "attempt": 1, "ok": True, "reason": "abort", "aborted": True} in compact
     assert {"type": "agent_end"} in compact
+
+
+@pytest.mark.asyncio
+async def test_event_snapshot_abort_during_retry_backoff_is_instant(tmp_path: Path):
+    """abort() during a long retry backoff must return immediately, not wait out the delay."""
+    agent = _mk_agent(
+        tmp_path,
+        settings_override={"retry": {"enabled": True, "maxRetries": 2, "baseDelayMs": 60000, "maxDelayMs": 60000}},
+    )
+    agent.providers = {"openai": _FlakyProvider()}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    started = time.monotonic()
+    task = asyncio.create_task(agent.prompt("go"))
+    await asyncio.sleep(0.01)
+    await agent.abort()
+    await task
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0  # 60s backoff was interrupted
+    compact = _compact(events)
+    assert {"type": "turn_end", "attempt": 1, "ok": False, "reason": "error", "willRetry": True} in compact
+    assert {"type": "auto_retry_start", "attempt": 1} in compact
+    assert {"type": "auto_retry_end", "attempt": 1, "willRetry": False, "aborted": True} in compact
+    assert {"type": "turn_end", "attempt": 1, "ok": True, "reason": "abort", "aborted": True} in compact
+    # retry never happened
+    assert not any(e.get("attempt") == 2 for e in compact)

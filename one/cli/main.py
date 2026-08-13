@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 from one.config import APP_NAME, ENV_AGENT_DIR, VERSION, get_agent_dir, get_models_path
 from one.core.agent_session_runtime import AgentSessionRuntimeHost, create_agent_session_runtime
@@ -12,11 +13,53 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
-from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode
+from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode, run_run_mode
+from one.mcp import McpManager
 from one.resources.resource_loader import DefaultResourceLoader
 from one.tools.index import all_tools
 
 from .args import parse_args, print_help
+
+
+def _parse_params(raw: list[str]) -> tuple[dict[str, str], list[str]]:
+    """Parse --param name=value pairs into a dict; returns (params, errors)."""
+    params: dict[str, str] = {}
+    errors: list[str] = []
+    for p in raw:
+        if "=" not in p:
+            errors.append(f"Invalid --param (expected name=value): {p}")
+            continue
+        name, value = p.split("=", 1)
+        name = name.strip()
+        if not name:
+            errors.append(f"Invalid --param (empty name): {p}")
+            continue
+        params[name] = value
+    return params, errors
+
+
+def _expand_file_tokens(tokens: list[str], params: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Expand @file tokens: replace each with the file content, applying
+    {{name}} parameter substitution. Returns (expanded, errors)."""
+    out: list[str] = []
+    errors: list[str] = []
+    for tok in tokens:
+        if not tok.startswith("@"):
+            out.append(tok)
+            continue
+        path = Path(tok[1:]).expanduser()
+        if not path.is_file():
+            errors.append(f"File not found: {tok}")
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as e:
+            errors.append(f"Cannot read {tok}: {e}")
+            continue
+        for name, value in params.items():
+            content = content.replace("{{" + name + "}}", value)
+        out.append(content)
+    return out, errors
 
 
 async def _run(argv: list[str]) -> int:
@@ -26,6 +69,27 @@ async def _run(argv: list[str]) -> int:
         for err in parsed.errors:
             print(err)
         return 2
+
+    params, param_errors = _parse_params(parsed.params)
+    if param_errors:
+        for err in param_errors:
+            print(err)
+        return 2
+
+    expanded_messages, file_errors = _expand_file_tokens(parsed.messages, params)
+    if file_errors:
+        for err in file_errors:
+            print(err)
+        return 2
+    parsed.messages = expanded_messages
+
+    if parsed.run_task and parsed.run_task.startswith("@"):
+        expanded_task, task_errors = _expand_file_tokens([parsed.run_task], params)
+        if task_errors:
+            for err in task_errors:
+                print(err)
+            return 2
+        parsed.run_task = expanded_task[0]
 
     if parsed.version:
         print(VERSION)
@@ -39,6 +103,8 @@ async def _run(argv: list[str]) -> int:
         os.environ[f"{APP_NAME.upper()}_OFFLINE"] = "1"
     if parsed.llama_cpp_url:
         os.environ["LLAMA_CPP_BASE_URL"] = parsed.llama_cpp_url
+    if parsed.ollama_url:
+        os.environ["OLLAMA_BASE_URL"] = parsed.ollama_url
 
     cwd = str(Path.cwd())
     fallback_agent_dir_path = Path(cwd) / ".one" / "agent"
@@ -58,6 +124,10 @@ async def _run(argv: list[str]) -> int:
     agent_dir = str(agent_dir_path)
 
     settings = SettingsManager.create(cwd, agent_dir)
+    if parsed.no_subagents:
+        settings.set_subagents_enabled(False, persist=False)
+    if parsed.no_bash_output:
+        settings.set_bash_show_output(False, persist=False)
     auth = AuthStorage.create()
     registry = ModelRegistry.create(auth, get_models_path())
 
@@ -147,6 +217,11 @@ async def _run(argv: list[str]) -> int:
             else:
                 print(f"Packages up to date: {len(on_disk)} installed")
             return 0
+        if cmd == "run":
+            # run_task already correctly set by parse_args (flags extracted).
+            # fall through to the normal runtime setup below.
+            pass
+
         if cmd == "config":
             if not args:
                 print(json.dumps(settings.get_global_settings(), ensure_ascii=False, indent=2))
@@ -227,6 +302,13 @@ async def _run(argv: list[str]) -> int:
     )
     await loader.reload()
 
+    mcp_manager = None
+    if not parsed.no_mcp:
+        mcp_manager = McpManager.create(settings)
+        await mcp_manager.start()
+        for err in mcp_manager.errors():
+            print(f"[mcp] {err}")
+
     configured_session_dir = parsed.session_dir or settings.get_session_dir()
     if configured_session_dir:
         try:
@@ -244,8 +326,12 @@ async def _run(argv: list[str]) -> int:
         session_manager = SessionManager.in_memory(cwd)
     elif parsed.session:
         session_manager = SessionManager.open(parsed.session, session_dir)
-    elif parsed.continue_session:
-        session_manager = SessionManager.continue_recent(cwd, session_dir)
+    elif parsed.continue_session or parsed.resume:
+        try:
+            session_manager = SessionManager.continue_recent(cwd, session_dir)
+        except Exception:
+            print("No session to continue/resume.")
+            return 1
     elif parsed.fork:
         source = parsed.fork
         if "/" not in source and "\\" not in source and not source.endswith(".jsonl"):
@@ -275,11 +361,14 @@ async def _run(argv: list[str]) -> int:
             settings.get_default_model(),
         )
 
-    tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls", "finish"]
+    tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls", "finish", "spawn_subagent", "ask_user"]
     if parsed.no_tools:
         tool_names = parsed.tools or []
     elif parsed.tools:
         tool_names = parsed.tools
+
+    if not settings.get_subagents_enabled():
+        tool_names = [t for t in tool_names if t != "spawn_subagent"]
 
     bad_tools = [t for t in tool_names if t not in all_tools]
     if bad_tools:
@@ -310,6 +399,7 @@ async def _run(argv: list[str]) -> int:
         "thinkingLevel": parsed.thinking or settings.get_default_thinking_level(),
         "scopedModels": scoped_models,
         "tools": [all_tools[t] for t in tool_names],
+        "mcpManager": mcp_manager,
     }
 
     runtime = await create_agent_session_runtime(
@@ -322,36 +412,74 @@ async def _run(argv: list[str]) -> int:
     )
     host = AgentSessionRuntimeHost(bootstrap, runtime)
 
-    if parsed.print_mode or parsed.mode in {"text", "json"}:
-        code = await run_print_mode(
-            host,
-            {
-                "mode": parsed.mode or "text",
-                "messages": parsed.messages,
-                "initialMessage": None,
-            },
-        )
-        return code
+    try:
+        if parsed.command == "run":
+            if parsed.cooperation:
+                host.session.approval_callback = _headless_approval_prompt
+            return await run_run_mode(
+                host,
+                {
+                    "task": parsed.run_task,
+                    "resume": parsed.resume,
+                    "json": parsed.json_output,
+                    "answer_file": parsed.answer_file,
+                    "steer_file": parsed.steer_file,
+                    "agentDir": agent_dir,
+                },
+            )
 
-    if parsed.mode == "rpc":
-        await run_rpc_mode(host)
+        if parsed.print_mode or parsed.mode in {"text", "json"}:
+            code = await run_print_mode(
+                host,
+                {
+                    "mode": parsed.mode or "text",
+                    "messages": parsed.messages,
+                    "initialMessage": None,
+                },
+            )
+            return code
+
+        if parsed.mode == "rpc":
+            await run_rpc_mode(host)
+            return 0
+
+        if parsed.mode == "tui":
+            tui = TuiMode(
+                host,
+                {
+                    "verbose": parsed.verbose,
+                    "theme": settings.get_theme(),
+                    "cooperation": parsed.cooperation,
+                },
+            )
+            await tui.run()
+            return 0
+
+        interactive = InteractiveMode(host, {"verbose": parsed.verbose, "cooperation": parsed.cooperation})
+        await interactive.run()
         return 0
+    finally:
+        if mcp_manager is not None:
+            await mcp_manager.close()
 
-    if parsed.mode == "tui":
-        tui = TuiMode(
-            host,
-            {
-                "verbose": parsed.verbose,
-                "theme": settings.get_theme(),
-                "cooperation": parsed.cooperation,
-            },
-        )
-        await tui.run()
-        return 0
 
-    interactive = InteractiveMode(host, {"verbose": parsed.verbose, "cooperation": parsed.cooperation})
-    await interactive.run()
-    return 0
+async def _headless_approval_prompt(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+    """Cooperation gate for headless runs: ask on stdin, default deny on EOF."""
+    import sys
+
+    print(f"\n[cooperation] Approve {tool_name}? args={json.dumps(args, ensure_ascii=False)[:300]}")
+    print("[cooperation] y = approve, n = reject (optionally add a reason, e.g. 'n: reason')")
+    sys.stdout.flush()
+    try:
+        line = (await asyncio.to_thread(sys.stdin.readline)).strip()
+    except Exception:
+        line = ""
+    if not line:
+        return (False, "No answer (EOF) - rejected")
+    if line.lower().startswith("y"):
+        return (True, "")
+    reason = line[2:].strip() if line.lower().startswith("n") else line
+    return (False, reason or "Rejected by user")
 
 
 def run() -> None:

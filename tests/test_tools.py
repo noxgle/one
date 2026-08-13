@@ -261,3 +261,103 @@ async def test_abort_kills_bash_running_via_tool_loop(tmp_path: Path):
     assert turn_end
     assert turn_end[-1]["aborted"] is True
     assert turn_end[-1]["reason"] == "abort"
+
+
+def test_bash_tool_fullscreen_flagged_and_hinted(tmp_path: Path):
+    """Curses full-screen output must be replaced by a TTY hint, raw output kept in a log file."""
+    import asyncio
+
+    from one.tools.bash import bash_tool
+
+    cmd = (
+        "python3 -c "
+        "'import sys;sys.stdout.write(chr(27)+\"[?1049h\"+\"hi\"+chr(27)+\"[?1049l\");'"
+    )
+    result = asyncio.run(bash_tool(str(tmp_path), cmd))
+    shown = result["content"][0]["text"]
+    assert result["fullscreen"] is True
+    assert result["details"]["fullscreen"] is True
+    assert "TTY" in shown
+    assert "top -b -n 1" in shown
+    assert "\x1b" not in shown
+    assert "\x1b[?1049h" in result["output"]  # raw kept
+    assert result["fullOutputPath"] is not None
+    raw = Path(result["fullOutputPath"]).read_text(encoding="utf-8")
+    assert "\x1b[?1049h" in raw and "hi" in raw
+    # raw log should be outside the repo, in the temp dir of the OS
+    assert "one-bash-" in result["fullOutputPath"]
+
+
+def test_bash_tool_short_colored_output_not_fullscreen(tmp_path: Path):
+    """Short colored output (SGR only) must NOT be flagged as full-screen."""
+    import asyncio
+
+    from one.tools.bash import bash_tool
+
+    cmd = "python3 -c 'import sys;sys.stdout.write(chr(27)+\"[31mred\"+chr(27)+\"[0m\");'"
+    result = asyncio.run(bash_tool(str(tmp_path), cmd))
+    assert result["fullscreen"] is False
+    assert result["content"][0]["text"] == "red"
+    assert "\x1b" not in result["content"][0]["text"]
+    assert "\x1b[31m" in result["output"]
+    assert result["fullOutputPath"] is None
+
+
+def test_bash_tool_cursor_control_flagged_fullscreen(tmp_path: Path):
+    """Cursor-control sequences (clear screen / home) indicate a full-screen app."""
+    import asyncio
+
+    from one.tools.bash import bash_tool
+
+    cmd = "python3 -c 'import sys;sys.stdout.write(chr(27)+\"[2J\"+chr(27)+\"[H\"+\"hello\");'"
+    result = asyncio.run(bash_tool(str(tmp_path), cmd))
+    assert result["fullscreen"] is True
+    shown = result["content"][0]["text"]
+    assert "TTY" in shown
+    assert "\x1b" not in shown
+    assert "\x1b[2J" in result["output"]
+    assert result["fullOutputPath"] is not None
+
+
+def test_bash_tool_batch_mode_not_flagged(tmp_path: Path):
+    import asyncio
+
+    from one.tools.bash import bash_tool
+
+    cmd = "command -v top >/dev/null 2>&1 && top -b -n 1 | head -5 || echo no-top"
+    result = asyncio.run(bash_tool(str(tmp_path), cmd))
+    assert result["fullscreen"] is False
+    assert result["content"][0]["text"].strip() != ""
+    assert "\x1b" not in result["content"][0]["text"]
+
+
+def test_sanitize_display_text_fullscreen_dump_sanitized():
+    """htop-style raw dump: no control chars survive, box drawing preserved."""
+    from one.tools.common import sanitize_display_text
+
+    dump = "\x1b[?1049h\x1b[H\x1b[2J" + "PID\x1b[12;34H USER\x1b[1;1H" + "\u2502\u2500\u251c" + "\x9e\x1b[?25l" + "done"
+    clean = sanitize_display_text(dump)
+    assert "\x1b" not in clean
+    assert not any(ord(c) < 0x20 and c not in "\t\n" for c in clean)
+    assert not any(0x7F <= ord(c) <= 0x9F for c in clean)
+    assert "PID" in clean and "done" in clean
+    assert "\u2502" in clean and "\u2500" in clean
+    assert "\ufffd" in clean  # the C1 byte was replaced
+
+
+def test_sanitize_display_text_plain_and_safe_controls_passthrough():
+    from one.tools.common import sanitize_display_text
+
+    assert sanitize_display_text("hello world") == "hello world"
+    assert sanitize_display_text("a\tb\nc") == "a\tb\nc"
+
+
+def test_sanitize_display_text_normalizes_carriage_returns_and_stray_esc():
+    from one.tools.common import sanitize_display_text
+
+    assert sanitize_display_text("a\r\nb\rc") == "a\nb\nc"
+    assert "\r" not in sanitize_display_text("x\ry")
+    # stray ESC is stripped by strip_ansi (called first), so no ESC survives
+    assert "\x1b" not in sanitize_display_text("pre\x1bpost")
+    # strip_ansi removes it, so sanitize_display_text sees "prepost" — clean
+    assert sanitize_display_text("pre\x1bpost") == "prepost"

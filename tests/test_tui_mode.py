@@ -71,8 +71,6 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     snapshot = build_sidebar_snapshot(
         _DummySession(),
         retry_state="retry-1",
-        last_tool_error="bash: timeout",
-        last_provider_error="400 Bad Request",
     )
 
     assert snapshot["model"] == "openrouter/google/gemma-4-31b-it:free"
@@ -87,8 +85,8 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     assert snapshot["tokenTotal"] == 165
     assert snapshot["cost"] == 0.0123
     assert snapshot["coop"] == "off"
-    assert snapshot["lastToolError"] == "bash: timeout"
-    assert snapshot["lastProviderError"] == "400 Bad Request"
+    assert snapshot["subagents"] is True
+    assert snapshot["bashOutput"] is True
 
 
 def test_thinking_frames_are_single_width() -> None:
@@ -232,6 +230,51 @@ async def test_extension_ui_external_response_clears_pending(tmp_path: Path):
         assert f"[ExtUI] response {req['id']} cancelled=False" in stream
 
 
+@pytest.mark.asyncio
+async def test_extension_ui_answer_error_preserves_pending_state(tmp_path: Path):
+    """Regression: _handle_extension_ui_answer must NOT clear pending state/panel/placeholder
+    when respond_extension_ui raises — user must be able to retry."""
+    from textual.widgets import Static, TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Create a widget extension request.
+        req = session.request_extension_ui(extension="err-ext", ui_type="widget", payload={"q": 1}, title="ErrorTest")
+        await pilot.pause()
+
+        pending_id = app._extension_ui_pending_request["id"]
+
+        # Monkeypatch respond_extension_ui to raise.
+        session.respond_extension_ui = lambda **kw: (_ for _ in ()).throw(ValueError("gone"))  # type: ignore[method-assign]
+
+        # Submit a nonempty answer through the normal input flow.
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.text = '{"answer": 42}'
+        await input_widget.action_submit()
+        await pilot.pause()
+
+        # (a) pending request still exists with same id
+        assert app._extension_ui_pending_request is not None
+        assert app._extension_ui_pending_request["id"] == pending_id
+
+        # (b) widget panel remains visible
+        panel = app.query_one("#ext_panel", Static)
+        assert panel.has_class("visible")
+
+        # (c) input placeholder remains extension-answer placeholder
+        assert input_widget.placeholder == "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
+
+        # (d) stream includes error message
+        stream = "\n".join(app._stream_lines)
+        assert "[ExtUI] error responding" in stream
+        assert "gone" in stream
+
+
 # ---------------------------------------------------------------------------
 # Headless TUI command-parity tests (/help commands vs interactive mode).
 # ---------------------------------------------------------------------------
@@ -356,23 +399,31 @@ async def test_tui_command_steer_follow_compact_tree(tmp_path: Path):
 
 
 class _FakeRuntimeHost:
-    def __init__(self, session: Any) -> None:
+    def __init__(self, session: Any, new_session: Any | None = None) -> None:
         self.session = session
+        self._new_session = new_session
 
     async def fork(self, entry_id: str) -> dict:
+        if self._new_session is not None:
+            self.session = self._new_session
         return {"cancelled": False, "entryId": entry_id}
+
+    async def new_session(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._new_session is not None:
+            self.session = self._new_session
+        return {"cancelled": False}
 
 
 @pytest.mark.asyncio
 async def test_tui_command_fork_rebinds_session(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
-    session = _mk_app_session(tmp_path)
+    old_session = _mk_app_session(tmp_path)
     new_session = _mk_app_session(tmp_path)
-    app = _OneTextualApp(session, runtime_host=_FakeRuntimeHost(new_session))
+    app = _OneTextualApp(old_session, runtime_host=_FakeRuntimeHost(old_session, new_session=new_session))
     async with app.run_test() as pilot:
         await pilot.pause()
-        await _submit(app, pilot, "/fork abc")
+        await _submit(app, pilot, "/fork entry-1")
         stream = "\n".join(app._stream_lines)
         assert '"cancelled": false' in stream
         assert app.session is new_session
@@ -382,6 +433,94 @@ async def test_tui_command_fork_rebinds_session(tmp_path: Path):
         await pilot.pause()
         assert app._extension_ui_pending_request is not None
         assert app._extension_ui_pending_request["extension"] == "post-fork"
+
+
+@pytest.mark.asyncio
+async def test_tui_command_new_rebinds_session(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    old_session = _mk_app_session(tmp_path)
+    new_session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(old_session, runtime_host=_FakeRuntimeHost(old_session, new_session=new_session))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/new")
+        stream = "\n".join(app._stream_lines)
+        assert "New session started." in stream
+        assert app.session is new_session
+        assert callable(app._off_listener)
+
+
+@pytest.mark.asyncio
+async def test_tui_new_clears_extension_ui_state(tmp_path: Path):
+    """P1-8: /new must clear pending extension request, hide panels, and reset placeholder."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    old_session = _mk_app_session(tmp_path)
+    new_session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(old_session, runtime_host=_FakeRuntimeHost(old_session, new_session=new_session))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Create a widget extension request on the old session.
+        old_session.request_extension_ui(extension="stale-ext", ui_type="widget", payload={"x": 1}, title="Stale")
+        await pilot.pause()
+
+        panel = app.query_one("#ext_panel", Static)
+        assert panel.has_class("visible")
+        assert app._extension_ui_pending_request is not None
+        assert app._extension_ui_pending_request["extension"] == "stale-ext"
+        from textual.widgets import TextArea
+        input_widget = app.query_one("#input", TextArea)
+        assert input_widget.placeholder == "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
+
+        # Submit /new.
+        await _submit(app, pilot, "/new")
+        await pilot.pause()
+
+        # After /new: panel hidden, pending cleared, default placeholder, session swapped.
+        assert not panel.has_class("visible")
+        assert app._extension_ui_pending_request is None
+        assert input_widget.placeholder == "Wpisz polecenie lub /help"
+        assert app.session is new_session
+
+
+@pytest.mark.asyncio
+async def test_tui_fork_clears_extension_ui_state(tmp_path: Path):
+    """P1-8: /fork must clear pending extension request, hide panels, and reset placeholder."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    old_session = _mk_app_session(tmp_path)
+    new_session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(old_session, runtime_host=_FakeRuntimeHost(old_session, new_session=new_session))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Trigger an overlay request in the old session.
+        old_session.request_extension_ui(extension="fork-ext", ui_type="overlay", payload={"key": "val"}, title="Fork")
+        await pilot.pause()
+
+        overlay = app.query_one("#ext_overlay", Static)
+        assert overlay.has_class("visible")
+        assert app._extension_ui_pending_request is not None
+        assert app._extension_ui_pending_request["extension"] == "fork-ext"
+        from textual.widgets import TextArea
+        input_widget = app.query_one("#input", TextArea)
+        assert input_widget.placeholder == "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
+
+        # Execute /fork.
+        await _submit(app, pilot, "/fork entry-1")
+        await pilot.pause()
+
+        # After /fork: overlay hidden, pending cleared, default placeholder, session swapped.
+        assert not overlay.has_class("visible")
+        assert app._extension_ui_pending_request is None
+        assert input_widget.placeholder == "Wpisz polecenie lub /help"
+        assert app.session is new_session
 
 
 @pytest.mark.asyncio
@@ -749,3 +888,150 @@ async def test_tui_ctrl_c_after_finished_error_turn(tmp_path: Path):
         assert "[abort requested]" in stream
         assert app._turn_active is False
         assert not any(line.startswith(_THINKING_MARK) for line in app._stream_lines)
+
+
+@pytest.mark.asyncio
+async def test_tui_slash_completion_tab_cycles(tmp_path: Path):
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.focus()
+        input_widget.text = "/mo"
+        input_widget.move_cursor((0, 3))  # cursor at end after setting text
+        await pilot.press("tab")
+        assert input_widget.text == "/model"
+        await pilot.press("tab")
+        assert input_widget.text == "/model-cycle"
+        await pilot.press("tab")
+        assert input_widget.text == "/model"
+        stream = "\n".join(app._stream_lines)
+        assert "[completion] /model /model-cycle" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_slash_completion_single_match(tmp_path: Path):
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.focus()
+        input_widget.text = "/ne"
+        input_widget.move_cursor((0, 3))  # cursor at end after setting text
+        await pilot.press("tab")
+        assert input_widget.text == "/new"
+        stream = "\n".join(app._stream_lines)
+        assert "[completion]" not in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_slash_completion_resets_after_edit(tmp_path: Path):
+    """Completing one command must not lock stale matches for a later different prefix."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.focus()
+        input_widget.text = "/mo"
+        input_widget.move_cursor((0, 3))
+        await pilot.press("tab")
+        assert input_widget.text == "/model"
+        # Type a different command: the completion cycle must reset.
+        input_widget.text = "/ne"
+        input_widget.move_cursor((0, 3))
+        await pilot.press("tab")
+        assert input_widget.text == "/new"
+
+
+# ---------------------------------------------------------------------------
+# Extension widget/overlay panel rendering (P1-8).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extension_widget_panel_renders_and_hides(tmp_path: Path):
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app.query_one("#ext_panel", Static)
+        assert not panel.has_class("visible")
+
+        req = session.request_extension_ui(extension="ext", ui_type="widget", payload={"mode": "quick"}, title="Panel")
+        await pilot.pause()
+
+        assert panel.has_class("visible")
+        content = str(panel.content)
+        assert "Panel" in content
+        assert '"mode": "quick"' in content
+
+        session.respond_extension_ui(request_id=req["id"], payload={"ok": True})
+        await pilot.pause()
+        assert not panel.has_class("visible")
+
+
+@pytest.mark.asyncio
+async def test_extension_overlay_panel_renders_and_hides(tmp_path: Path):
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        overlay = app.query_one("#ext_overlay", Static)
+        assert not overlay.has_class("visible")
+
+        req = session.request_extension_ui(extension="ext", ui_type="overlay", payload={"mode": "modal"}, title="Overlay")
+        await pilot.pause()
+
+        assert overlay.has_class("visible")
+        content = str(overlay.content)
+        assert "Overlay" in content
+        assert '"mode": "modal"' in content
+
+        session.respond_extension_ui(request_id=req["id"], payload={"ok": True})
+        await pilot.pause()
+        assert not overlay.has_class("visible")
+
+
+@pytest.mark.asyncio
+async def test_extension_panels_hide_on_new_session(tmp_path: Path):
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session.request_extension_ui(extension="ext", ui_type="widget", payload={"x": 1}, title="P")
+        await pilot.pause()
+        panel = app.query_one("#ext_panel", Static)
+        assert panel.has_class("visible")
+
+        # Simulate the /new reset path: pending cleared + panels hidden.
+        app._extension_ui_pending_request = None
+        app._hide_extension_panels()
+        await pilot.pause()
+        assert not panel.has_class("visible")

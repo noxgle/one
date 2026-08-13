@@ -7,7 +7,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable
 
 from one.core.model_registry import ModelRegistry
@@ -17,7 +17,12 @@ from one.core.types import ModelInfo
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
 from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, find_worktree
+from one.mcp import McpManager
 from one.tools.index import all_tools
+
+# Fallback context window used when a model has no known context_window
+# (dynamic models resolved at runtime). Keeps the ctx gauge/compaction working.
+FALLBACK_CONTEXT_WINDOW = 128_000
 
 
 class _AbortSignal(Exception):
@@ -45,6 +50,7 @@ class AgentSession:
         scoped_models: list[dict[str, Any]] | None = None,
         tools: list[str] | None = None,
         approval_callback: Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]] | None = None,
+        mcp_manager: McpManager | None = None,
     ) -> None:
         self.session_manager = session_manager
         self.settings_manager = settings_manager
@@ -63,12 +69,18 @@ class AgentSession:
         self._steering: list[str] = []
         self._follow_up: list[str] = []
         self._active_tools = tools or list(all_tools.keys())
+        self._mcp_manager = mcp_manager
+        if mcp_manager is not None:
+            mcp_names = [t.name for t in mcp_manager.tools()]
+            self._active_tools = list(dict.fromkeys(self._active_tools + mcp_names))
         self._abort_requested = False
+        self._session_started_at = time.monotonic()
         self._active_chat_tasks: set[asyncio.Task] = set()
         self._active_bash_tasks: set[asyncio.Task] = set()
         self._active_tool_tasks: set[asyncio.Task] = set()
         self._extension_ui_pending: dict[str, dict[str, Any]] = {}
         self._extension_ui_history: list[dict[str, Any]] = []
+        self._pending_questions: dict[str, dict[str, Any]] = {}
         self._extension_runtime: ExtensionRuntime | None = None
         self.approval_callback = approval_callback
         self._approval_tools = set(settings_manager.get_tool_approval_tools())
@@ -87,12 +99,22 @@ class AgentSession:
     def _build_runtime_system_prompt(self) -> str:
         getter = getattr(self.resource_loader, "get_system_prompt", None)
         if not callable(getter):
-            return "You are an expert coding assistant."
-        try:
-            return getter(selected_tools=self._active_tools)
-        except TypeError:
-            # Backward compatibility with older loaders/mocks.
-            return getter()
+            prompt = "You are an expert coding assistant."
+        else:
+            try:
+                prompt = getter(selected_tools=self._active_tools)
+            except TypeError:
+                # Backward compatibility with older loaders/mocks.
+                prompt = getter()
+
+        mcp_tools = self._mcp_manager.tools() if self._mcp_manager is not None else []
+        if mcp_tools:
+            lines = ["\n# MCP Tools", "Call these like any other tool (JSON: {\"name\": ..., \"args\": {...}})."]
+            for t in mcp_tools:
+                schema = json.dumps(t.input_schema, ensure_ascii=False) if t.input_schema else "{}"
+                lines.append(f"- {t.name} (server: {t.server}): {t.description} args={schema}")
+            prompt = f"{prompt}\n" + "\n".join(lines)
+        return prompt
 
     def _try_parse_tool_call(self, text: str) -> dict[str, Any] | None:
         def normalize_tool_args(tool: str, raw_args: Any) -> dict[str, Any] | None:
@@ -452,6 +474,8 @@ class AgentSession:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
         tool = all_tools.get(tool_name)
         if not tool:
+            if self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
+                return await self._mcp_manager.call_tool(tool_name, args)
             raise RuntimeError(f"Unknown tool: {tool_name}")
 
         cwd = self.session_manager.cwd
@@ -476,6 +500,10 @@ class AgentSession:
             result = fn(cwd, args.get("command", ""), args.get("timeout"), self.settings_manager.get_shell_command_prefix())
         elif tool_name == "finish":
             result = fn(args.get("summary", ""), bool(args.get("goal_success", True)))
+        elif tool_name == "spawn_subagent":
+            result = await self._spawn_subagent(args)
+        elif tool_name == "ask_user":
+            result = await self._ask_user(args)
         else:
             raise RuntimeError(f"Unsupported tool: {tool_name}")
 
@@ -572,7 +600,7 @@ class AgentSession:
                 "rawResult": result,
             }
         except asyncio.CancelledError:
-            payload = {
+            payload: dict[str, Any] = {
                 "ok": False,
                 "tool": tool_name,
                 "args": args,
@@ -581,15 +609,25 @@ class AgentSession:
                 "aborted": True,
             }
         except Exception as e:
-            error_text = str(e).strip() or e.__class__.__name__
-            payload = {
-                "ok": False,
-                "tool": tool_name,
-                "args": args,
-                "error": error_text,
-                "errorType": e.__class__.__name__,
-            }
-            self._emit({"type": "tool_call_error", "tool": tool_name, "args": args, "error": error_text})
+            if isinstance(e, _AbortSignal):
+                payload = {
+                    "ok": False,
+                    "tool": tool_name,
+                    "args": args,
+                    "error": "aborted",
+                    "errorType": "_AbortSignal",
+                    "aborted": True,
+                }
+            else:
+                error_text = str(e).strip() or e.__class__.__name__
+                payload = {
+                    "ok": False,
+                    "tool": tool_name,
+                    "args": args,
+                    "error": error_text,
+                    "errorType": e.__class__.__name__,
+                }
+                self._emit({"type": "tool_call_error", "tool": tool_name, "args": args, "error": error_text})
 
         message_payload = self._build_tool_result_message_payload(payload)
         msg = {
@@ -605,8 +643,190 @@ class AgentSession:
             str(payload.get("result") or payload.get("error") or ""),
             metadata={"exitCode": payload.get("exitCode"), "errorType": payload.get("errorType")},
         )
-        self._emit({"type": "tool_call_end", "tool": tool_name, "ok": payload.get("ok", False), "result": payload})
+        tool_call_end: dict[str, Any] = {"type": "tool_call_end", "tool": tool_name, "ok": payload.get("ok", False), "result": payload}
+        if payload.get("aborted"):
+            tool_call_end["aborted"] = True
+        self._emit(tool_call_end)
         return payload
+
+    def _subagent_depth(self) -> int:
+        """Depth of this session in the subagent tree (0 = top-level)."""
+        try:
+            return int(self.session_manager.get_header().get("subagentDepth") or 0)
+        except Exception:
+            return 0
+
+    async def _spawn_subagent(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not self.settings_manager.get_subagents_enabled():
+            raise RuntimeError("Subagents disabled (enable with /subagents on or 'one config subagents.enabled true')")
+        task = str(args.get("task") or "").strip()
+        tasks = args.get("tasks")
+        if isinstance(tasks, list):
+            tasks = [str(t).strip() for t in tasks if str(t).strip()]
+        if task and tasks:
+            raise RuntimeError("Provide either 'task' or 'tasks', not both")
+        if not task and not tasks:
+            raise RuntimeError("spawn_subagent requires 'task' or 'tasks'")
+
+        model_spec = str(args.get("model") or "").strip() or None
+        tool_names = args.get("tools")
+        if tool_names is not None:
+            if not isinstance(tool_names, list) or not all(isinstance(t, str) for t in tool_names):
+                raise RuntimeError("'tools' must be a list of tool names")
+            bad = [t for t in tool_names if t not in all_tools]
+            if bad:
+                raise RuntimeError(f"Unknown tools: {', '.join(bad)}")
+
+        max_concurrent = self.settings_manager.get_subagents_max_concurrent()
+        max_depth = self.settings_manager.get_subagents_max_depth()
+        depth = self._subagent_depth()
+        if depth >= max_depth:
+            raise RuntimeError(f"Subagent depth limit reached ({max_depth})")
+        if tasks and len(tasks) > max_concurrent:
+            raise RuntimeError(f"Too many parallel subagents: {len(tasks)} > maxConcurrent {max_concurrent}")
+
+        sub_model = self.model
+        if model_spec:
+            if "/" in model_spec:
+                p, m = model_spec.split("/", 1)
+                sub_model = self.model_registry.resolve(p, m, allow_dynamic=True)
+            else:
+                sub_model = self.model_registry.resolve(self.model.provider, model_spec, allow_dynamic=True)
+            if not sub_model:
+                raise RuntimeError(f"Unknown model: {model_spec}")
+
+        sub_tools = tool_names or self._active_tools
+        if task:
+            return await self._run_subagent(task, sub_model, sub_tools, depth)
+        results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth) for t in tasks))
+        combined = "\n".join(f"- {r['summary']}" for r in results)
+        return {
+            "results": list(results),
+            "output": combined,
+            "content": [{"type": "text", "text": combined}],
+        }
+
+    async def _run_subagent(self, task: str, sub_model: Any, sub_tools: list[str], depth: int) -> dict[str, Any]:
+        # Use the parent's session_dir so subagent files go to the same directory.
+        # Use __init__ directly to bypass SessionManager.create()'s "session_dir or
+        # get_default_session_dir()" fallback (empty string would be treated as falsy).
+        persist = not self.session_manager.session_file is None
+        manager = SessionManager(
+            self.session_manager.cwd,
+            self.session_manager.session_dir,
+            None,  # new session file
+            persist,
+        )
+        header = manager.get_header()
+        if self.session_manager.session_file:
+            header["parentSession"] = self.session_manager.session_file
+        header["subagentDepth"] = depth + 1
+        manager._rewrite()  # noqa: SLF001
+        sub = AgentSession(
+            session_manager=manager,
+            settings_manager=self.settings_manager,
+            model_registry=self.model_registry,
+            resource_loader=self.resource_loader,
+            model=sub_model,
+            thinking_level=self.thinking_level,
+            scoped_models=self.scoped_models,
+            tools=sub_tools,
+        )
+        sub.providers = self.providers
+
+        def _sub_answer(event: dict[str, Any]) -> None:
+            if event.get("type") == "ask_user":
+                try:
+                    sub.answer_question(event["id"], "(no answer channel in subagent; proceed with best judgment)")
+                except ValueError:
+                    pass
+        sub.subscribe(_sub_answer)
+
+        sub_id = sub.session_id
+        ok = False
+        self._emit({"type": "subagent_start", "sessionId": sub_id, "task": task})
+        try:
+            await sub.prompt(task)
+            result = sub.get_last_finish_result()
+            summary = result["summary"] or sub.get_last_assistant_text() or "(no output)"
+            ok = bool(result["finished"] and result["goalSuccess"])
+            return {
+                "sessionId": sub_id,
+                "summary": summary,
+                "goalSuccess": bool(result["goalSuccess"]),
+                "finished": bool(result["finished"]),
+                "ok": ok,
+                "output": summary,
+                "content": [{"type": "text", "text": summary}],
+            }
+        except Exception as e:
+            return {
+                "sessionId": sub_id,
+                "summary": f"Subagent error: {e}",
+                "goalSuccess": False,
+                "finished": False,
+                "ok": False,
+                "output": f"Subagent error: {e}",
+                "content": [{"type": "text", "text": f"Subagent error: {e}"}],
+            }
+        finally:
+            try:
+                await sub.dispose()
+            except Exception:
+                pass
+            self._emit({"type": "subagent_end", "sessionId": sub_id, "ok": ok})
+
+    def _ask_user_timeout_sec(self, args: dict[str, Any]) -> int:
+        try:
+            return max(0, int(args.get("timeoutSec") or self.settings_manager.get_ask_user_timeout_sec() or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    async def _ask_user(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Escalation tool: pause the session and ask the human a question.
+
+        Emits an `ask_user` event; the UI channel answers via `answer_question`.
+        Returns the answer as the tool result so it lands in the model context.
+        """
+        question = str(args.get("question") or "").strip()
+        if not question:
+            raise RuntimeError("ask_user requires a non-empty 'question'")
+        qid = uuid.uuid4().hex[:12]
+        entry: dict[str, Any] = {"question": question, "event": asyncio.Event(), "answer": None}
+        self._pending_questions[qid] = entry
+        self._emit({"type": "ask_user", "id": qid, "question": question})
+        timeout = self._ask_user_timeout_sec(args)
+        # Check abort before waiting (in case abort was called already).
+        if self._abort_requested:
+            self._pending_questions.pop(qid, None)
+            raise _AbortSignal()
+        try:
+            if timeout > 0:
+                await asyncio.wait_for(entry["event"].wait(), timeout=timeout)
+            else:
+                await entry["event"].wait()
+        except asyncio.TimeoutError:
+            self._pending_questions.pop(qid, None)
+            raise RuntimeError(f"No answer received within timeout ({timeout}s)") from None
+        # Check abort after receiving answer.
+        if self._abort_requested:
+            self._pending_questions.pop(qid, None)
+            raise _AbortSignal()
+        answer = entry["answer"] or ""
+        self._pending_questions.pop(qid, None)
+        return {"output": answer, "content": [{"type": "text", "text": answer}]}
+
+    def answer_question(self, question_id: str, answer: str) -> None:
+        """Answer a pending ask_user question (called by UI channels)."""
+        entry = self._pending_questions.get(question_id)
+        if entry is None:
+            raise ValueError(f"No pending question with id {question_id}")
+        entry["answer"] = str(answer)
+        entry["event"].set()
+        self._emit({"type": "ask_user_answered", "id": question_id, "answer": str(answer)})
+
+    def get_pending_questions(self) -> list[dict[str, Any]]:
+        return [{"id": qid, "question": e["question"]} for qid, e in self._pending_questions.items()]
 
     def subscribe(self, listener: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         self._listeners.append(listener)
@@ -682,6 +902,8 @@ class AgentSession:
         self.session_manager.append_session_info(name)
 
     async def set_model(self, model: ModelInfo) -> None:
+        if not model.context_window:
+            model = replace(model, context_window=FALLBACK_CONTEXT_WINDOW)
         self.model = model
         self.session_manager.append_model_change(model.provider, model.id)
 
@@ -894,6 +1116,20 @@ class AgentSession:
                     if self._abort_requested:
                         final_assistant = self._abort_assistant_message()
                         break
+                    budget_hit = self._budget_exceeded()
+                    if budget_hit is not None:
+                        kind, message = budget_hit
+                        self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
+                        final_assistant = {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": message}],
+                            "provider": self.model.provider if self.model else None,
+                            "model": self.model.id if self.model else None,
+                            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                            "stopReason": "budget_exceeded",
+                            "timestamp": int(time.time() * 1000),
+                        }
+                        break
                     try:
                         assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
                     except _AbortSignal:
@@ -903,6 +1139,7 @@ class AgentSession:
                     if self._abort_requested:
                         final_assistant = self._abort_assistant_message()
                         break
+                    self.messages.append(assistant)
                     assistant_text = self._assistant_text(assistant)
                     tool_call = self._try_parse_tool_call(assistant_text)
                     if tool_call is None and self._should_tool_nudge(assistant_text, step=step, tool_results=tool_results):
@@ -958,12 +1195,16 @@ class AgentSession:
                             )
 
                     if tool_call:
-                        tool_payload = await self._run_tool_call(tool_call["tool"], tool_call["args"], timeout_sec=tool_timeout_sec)
+                        sub_timeout = None if tool_call["tool"] in ("spawn_subagent", "ask_user") else tool_timeout_sec
+                        tool_payload = await self._run_tool_call(tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout)
                         tool_results.append(tool_payload)
                         if tool_call["tool"] == "finish" and tool_payload.get("ok"):
                             # Terminal tool: end the turn with the summary as the
                             # final assistant message; no further provider calls.
                             final_assistant = self._finish_assistant_message(tool_payload)
+                            break
+                        if self._abort_requested:
+                            final_assistant = self._abort_assistant_message()
                             break
                         continue
 
@@ -996,7 +1237,8 @@ class AgentSession:
                         ]
                         final_assistant["stopReason"] = final_assistant.get("stopReason") or "empty_response"
 
-                self.messages.append(final_assistant)
+                if final_assistant not in self.messages:
+                    self.messages.append(final_assistant)
                 self.session_manager.append_message(final_assistant)
                 streamed_started = bool(final_assistant.pop("_streamedStart", False))
                 streamed_msg = final_assistant.pop("_streamedMessage", None)
@@ -1097,7 +1339,12 @@ class AgentSession:
                     self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
                     self._retrying = False
                     break
-                await asyncio.sleep(delay_ms / 1000)
+                # Interruptible backoff: abort() during the delay must not
+                # block the session for up to maxDelayMs.
+                for _ in range(max(1, delay_ms // 25)):
+                    if self._abort_requested:
+                        break
+                    await asyncio.sleep(0.025)
                 if self._abort_requested:
                     abort_msg = self._abort_assistant_message()
                     self.messages.append(abort_msg)
@@ -1360,6 +1607,9 @@ class AgentSession:
         for task in list(self._active_chat_tasks):
             if not task.done():
                 task.cancel()
+        # Wake up any pending ask_user questions so they can detect _abort_requested.
+        for entry in self._pending_questions.values():
+            entry["event"].set()
 
     async def navigate_tree(self, target_id: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
         options = options or {}
@@ -1426,12 +1676,55 @@ class AgentSession:
                 return text.strip()
         return None
 
+    def get_last_finish_result(self) -> dict[str, Any]:
+        """Result of the last `finish` tool call, if any.
+
+        Returns {"finished": bool, "goalSuccess": bool, "summary": str}.
+        """
+        for m in reversed(self.messages):
+            if m.get("role") == "assistant" and "goalSuccess" in m:
+                return {
+                    "finished": True,
+                    "goalSuccess": bool(m.get("goalSuccess")),
+                    "summary": self._assistant_text(m).strip(),
+                }
+        return {"finished": False, "goalSuccess": False, "summary": ""}
+
+    def get_last_user_text(self) -> str | None:
+        """Last non-empty user message text (used by `one run --resume`)."""
+        for m in reversed(self.messages):
+            if m.get("role") != "user":
+                continue
+            content = m.get("content", "")
+            if isinstance(content, list):
+                text = "".join(x.get("text", "") for x in content if x.get("type") == "text")
+            else:
+                text = str(content)
+            if text.strip():
+                return text.strip()
+        return None
+
     def get_context_usage(self) -> dict[str, Any] | None:
         if not self.model or not self.model.context_window:
             return None
         approx_tokens = sum(self._approx_message_tokens(m) for m in self.messages)
         percent = (approx_tokens / self.model.context_window) * 100
         return {"tokens": approx_tokens, "contextWindow": self.model.context_window, "percent": percent}
+
+    def _budget_exceeded(self) -> tuple[str, str] | None:
+        """Return (kind, message) when a configured budget limit is exceeded."""
+        max_tokens = self.settings_manager.get_budget_max_tokens()
+        max_time = self.settings_manager.get_budget_max_time_sec()
+        if max_tokens > 0:
+            stats = self.get_session_stats()
+            total = int((stats.get("tokens") or {}).get("total") or 0)
+            if total >= max_tokens:
+                return ("token_budget", f"Osiągnięto limit tokenów ({total}/{max_tokens}).")
+        if max_time > 0:
+            elapsed = int(time.monotonic() - self._session_started_at)
+            if elapsed >= max_time:
+                return ("time_budget", f"Osiągnięto limit czasu ({elapsed}s/{max_time}s).")
+        return None
 
     def get_session_stats(self) -> dict[str, Any]:
         user_messages = sum(1 for m in self.messages if m.get("role") == "user")

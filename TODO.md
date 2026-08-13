@@ -21,43 +21,43 @@ parity 1:1 z `pi` nie jest już celem (patrz „Poza zakresem").
 
 ## P0 — Autonomia
 
-- [ ] Headless tryb zadania (`one run "zadanie"`): pełna pętla do `finish`, kontrakt wyniku
-      (summary + exit code 0/1), limity kroków, auto-retry, resume po przerwaniu
-- [ ] Subagenci — delegowanie podzadań: tworzenie subagentów (osobne sesje z `parentSession`,
-      izolowany kontekst, równoległe wykonanie, scalanie wyników); nowy tool (np.
-      `spawn_subagent`/`delegate`) zarejestrowany w `tools/index.py`; limity równoległości
-      i głębokości zagnieżdżenia
-- [ ] Eskalacja agent→człowiek: agent pauzuje zadanie i pyta (niejednoznaczność, brak dostępu,
-      decyzja polityczna); odpowiedź wraca do kontekstu; kanały: interactive, TUI, RPC,
-      headless (file/pipe)
-- [ ] Polityka kooperacji w trybie autonomicznym: bramki `--cooperation` opt-in per run;
+- [x] Headless tryb zadania (`one run "zadanie"`): pełna pętla do `finish`, kontrakt wyniku
+      (summary + exit code 0/1), limity kroków, auto-retry, resume po przerwaniu;
+      `--json`/`--answer-file`/`--steer-file`, raport `reports.jsonl` w agent dir
+- [x] Subagenci — delegowanie podzadań: tool `spawn_subagent` (osobne sesje z `parentSession`,
+      izolowany kontekst, równoległe wykonanie, scalanie wyników) zarejestrowany
+      w `tools/index.py`; limity równoległości (`subagents.maxConcurrent`) i głębokości
+      zagnieżdżenia (`subagents.maxDepth`)
+- [x] Eskalacja agent→człowiek: tool `ask_user` — agent pauzuje zadanie i pyta; odpowiedź
+      wraca do kontekstu; kanały: interactive, TUI, RPC (`answer_question`), headless
+      (`--answer-file`/canned fallback), timeout + abort
+- [x] Polityka kooperacji w trybie autonomicznym: bramki `--cooperation` opt-in per run;
       domyślnie agent działa bez pytań
 
 ## P1 — Integracje i operacje
 
-- [ ] Intake zadań: zadanie z pliku/spec, `@file`, parametryzacja
-- [ ] Provider lokalnego Ollamy: adapter OpenAI-compatible (domyślnie `http://localhost:11434/v1`,
+- [x] Intake zadań: zadanie z pliku/spec, `@file`, parametryzacja
+- [x] Provider lokalnego Ollamy: adapter OpenAI-compatible (domyślnie `http://localhost:11434/v1`,
       env `OLLAMA_BASE_URL`), obsługa lokalnych modeli; wzorzec jak `llama.cpp` (bez klucza API)
-- [ ] `/newsession` w TUI i interactive: tworzenie nowej sesji (RPC `new_session` już istnieje)
-      + przebindowanie eventów; alias `/new`/`/ns`
-- [ ] TUI: autouzupełnianie komend slash w polu input wg listy komend z `/help`
-      (sugestie na `Tab`/strzałki, uzupełnianie prefiksu `/`)
-- [ ] Klient MCP: podłączanie zewnętrznych serwerów MCP jako źródła narzędzi
-      (stdio, oficjalny SDK lub własny protokół); konfiguracja serwerów w settings.json,
-      narzędzia MCP rejestrowane jak narzędzia sesji (tools/index.py)
-- [ ] Limity budżetu: tokens/czas/kroki z konfiguracją
-- [ ] Raport końca zadania (log/notyfikacja) + utrzymanie RPC (`wait_for_idle`, steer w headless)
-- [ ] Podpięcie extension widgets/overlays do warstwy TUI
-- [ ] Snapshot/regression testy renderingu TUI
+- [x] `/new` w TUI i interactive: tworzenie nowej sesji (RPC `new_session` już istnieje)
+      + przebindowanie eventów; alias `/ns`
+- [x] TUI: autouzupełnianie komend slash w polu input wg listy komend z `/help`
+      (sugestie na `Tab` z cyklem, uzupełnianie prefiksu `/`)
+- [x] Klient MCP: podłączanie zewnętrznych serwerów MCP jako źródła narzędzi
+      (stdio, własny protokół JSON-RPC, bez nowych zależności); konfiguracja serwerów
+      w settings.json (`mcpServers`), narzędzia MCP dostępne jak narzędzia sesji
+- [x] Limity budżetu: tokens/czas z konfiguracją (`budget.maxTokens`/`budget.maxTimeSec`); kroki: `tools.maxSteps`
+- [x] Raport końca zadania (log `reports.jsonl` w agent dir) + utrzymanie RPC (`wait_for_idle` istnieje; steer w headless przez `--steer-file`)
+- [x] Podpięcie extension widgets/overlays do warstwy TUI (dedykowany panel dla widgetów, panel-overlay dla overlay; odpowiedzi przez istniejący input, reset przy /new i /fork)
+- [x] Snapshot/regression testy renderingu TUI (3 deterministyczne pełnoekranowe snapshoty SVG: baza, widget, overlay; goldeny w tests/snapshots/tui)
 
 ## P2 — Jakość i zgodność
 
-- [ ] Testy integracyjne headless (end-to-end: zadanie -> wynik -> exit code)
-- [ ] Snapshot tests dla RPC
-- [ ] Testy auth precedence + provider fallback
-- [ ] Cross-platform smoke (Linux/macOS path & shell semantics)
-- [ ] Providerzy OpenAI-compatible: xAI (Grok), DeepSeek, Mistral, Groq —
-      wpisy w registry.py + env keys + builtin modele (adapter OpenAI-compatible)
+- [x] Testy integracyjne headless (E2E subprocess: CLI -> lokalny OpenAI-compatible HTTP -> finish -> wynik/exit code 0/1 + reports.jsonl)
+- [x] Snapshot tests dla RPC (deterministyczne JSONL: sukces i błąd, goldeny w tests/snapshots/rpc)
+- [x] Testy auth precedence + provider fallback (runtime > auth file > env, placeholder keys, fallback wyboru modelu)
+- [x] Cross-platform smoke (portable ścieżki/sanitizacja + POSIX smoke cwd/quoting/pipeline/prefix/exit code; testy shellowe skip na Windows)
+- [x] Providerzy OpenAI-compatible: xAI (Grok), DeepSeek, Mistral, Groq — registry, env keys, builtin modele i testy
 
 ## Poza zakresem
 

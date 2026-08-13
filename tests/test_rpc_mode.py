@@ -124,7 +124,7 @@ async def test_rpc_get_state_snapshot(tmp_path: Path, monkeypatch: pytest.Monkey
     assert data["autoCompactionEnabled"] is True
     assert data["messageCount"] == 0
     assert data["pendingMessageCount"] == 0
-    assert data["activeTools"] == ["read", "bash", "edit", "write", "grep", "find", "ls", "finish"]
+    assert data["activeTools"] == ["read", "bash", "edit", "write", "grep", "find", "ls", "finish", "ask_user", "spawn_subagent"]
     assert data["autoRetryEnabled"] == session.auto_retry_enabled
 
 
@@ -284,3 +284,26 @@ async def test_rpc_unknown_command_and_parse_error(tmp_path: Path, monkeypatch: 
     assert unknown["id"] == "9"
     assert unknown["success"] is False
     assert "Unknown command" in unknown["error"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_answer_question_unknown_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+    responses = await _run_rpc(
+        monkeypatch,
+        capsys,
+        session,
+        [json.dumps({"type": "answer_question", "id": "1", "questionId": "nope", "answer": "x"})],
+    )
+    r = _resp(responses, "answer_question", "1")
+    assert r["success"] is False
+    assert "No pending question" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_get_pending_questions_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+    responses = await _run_rpc(monkeypatch, capsys, session, [json.dumps({"type": "get_pending_questions", "id": "1"})])
+    r = _resp(responses, "get_pending_questions", "1")
+    assert r["success"] is True
+    assert r["data"]["questions"] == []

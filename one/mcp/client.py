@@ -1,0 +1,219 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class McpServerConfig:
+    name: str
+    command: str
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class McpTool:
+    name: str
+    description: str
+    input_schema: dict[str, Any] | None
+    server: str
+
+
+class McpClient:
+    """One stdio MCP server connection (JSON-RPC 2.0, newline-delimited JSON)."""
+
+    PROTOCOL_VERSION = "2024-11-05"
+
+    def __init__(self, config: McpServerConfig) -> None:
+        self.config = config
+        self._proc: asyncio.subprocess.Process | None = None
+        self._next_id = 0
+        self._stderr_tail: list[str] = []
+
+    async def start(self) -> None:
+        env = os.environ.copy()
+        env.update(self.config.env)
+        self._proc = await asyncio.create_subprocess_exec(
+            self.config.command,
+            *self.config.args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        # Drain stderr in the background (bounded tail kept for diagnostics).
+        asyncio.create_task(self._drain_stderr())
+        await self._request("initialize", {
+            "protocolVersion": self.PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "one", "version": "0.1"},
+        })
+        await self._notify("notifications/initialized")
+
+    async def _drain_stderr(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    self._stderr_tail.append(text)
+                    if len(self._stderr_tail) > 20:
+                        self._stderr_tail.pop(0)
+        except Exception:
+            pass
+
+    async def _write(self, obj: dict[str, Any]) -> None:
+        if self._proc is None or self._proc.stdin is None:
+            raise RuntimeError(f"MCP server '{self.config.name}' is not running")
+        self._proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
+        await self._proc.stdin.drain()
+
+    async def _read(self, timeout: float) -> dict[str, Any]:
+        if self._proc is None or self._proc.stdout is None:
+            raise RuntimeError(f"MCP server '{self.config.name}' is not running")
+        line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=timeout)
+        if not line:
+            raise RuntimeError(f"MCP server '{self.config.name}' closed stdout")
+        try:
+            return json.loads(line.decode("utf-8", errors="replace"))
+        except Exception as e:
+            raise RuntimeError(f"MCP server '{self.config.name}' sent invalid JSON: {e}") from e
+
+    async def _request(self, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+        self._next_id += 1
+        req_id = self._next_id
+        await self._write({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+        while True:
+            msg = await self._read(timeout)
+            if msg.get("id") != req_id:
+                continue  # ignore unrelated notifications/other responses
+            if "error" in msg:
+                err = msg["error"]
+                raise RuntimeError(f"MCP server '{self.config.name}' error {err.get('code')}: {err.get('message')}")
+            return msg.get("result") or {}
+
+    async def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params:
+            msg["params"] = params
+        await self._write(msg)
+
+    async def list_tools(self, timeout: float = 15.0) -> list[dict[str, Any]]:
+        result = await self._request("tools/list", {}, timeout=timeout)
+        return result.get("tools") or []
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], timeout: float = 120.0) -> dict[str, Any]:
+        return await self._request("tools/call", {"name": name, "arguments": arguments}, timeout=timeout)
+
+    async def close(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def stderr_tail(self) -> list[str]:
+        return list(self._stderr_tail)
+
+
+class McpManager:
+    """Owns all configured MCP servers; exposes their tools to the session."""
+
+    def __init__(self, servers: list[McpServerConfig]) -> None:
+        self._servers = servers
+        self._clients: list[McpClient] = []
+        self._tools: list[McpTool] = []
+        self._errors: list[str] = []
+
+    @classmethod
+    def create(cls, settings_manager: Any) -> "McpManager":
+        servers: list[McpServerConfig] = []
+        raw = settings_manager.get_mcp_servers() or {}
+        for name, cfg in raw.items():
+            if not isinstance(cfg, dict):
+                continue
+            command = cfg.get("command")
+            if not command:
+                continue
+            servers.append(
+                McpServerConfig(
+                    name=str(name),
+                    command=str(command),
+                    args=[str(a) for a in (cfg.get("args") or [])],
+                    env={str(k): str(v) for k, v in (cfg.get("env") or {}).items()},
+                )
+            )
+        return cls(servers)
+
+    async def start(self) -> None:
+        for config in self._servers:
+            client = McpClient(config)
+            try:
+                await client.start()
+                raw_tools = await client.list_tools()
+                for t in raw_tools:
+                    self._tools.append(
+                        McpTool(
+                            name=str(t.get("name") or ""),
+                            description=str(t.get("description") or ""),
+                            input_schema=t.get("inputSchema"),
+                            server=config.name,
+                        )
+                    )
+                self._clients.append(client)
+            except Exception as e:
+                self._errors.append(f"MCP server '{config.name}': {e}")
+                await client.close()
+
+    def tools(self) -> list[McpTool]:
+        return list(self._tools)
+
+    def has_tool(self, name: str) -> bool:
+        return any(t.name == name for t in self._tools)
+
+    def errors(self) -> list[str]:
+        return list(self._errors)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        tool = next((t for t in self._tools if t.name == name), None)
+        if tool is None:
+            raise RuntimeError(f"Unknown MCP tool: {name}")
+        client = next((c for c in self._clients if c.config.name == tool.server), None)
+        if client is None:
+            raise RuntimeError(f"MCP server '{tool.server}' is not running")
+        result = await client.call_tool(name, arguments)
+        # Normalize MCP result into the session tool-result contract.
+        content = result.get("content") or []
+        texts = [str(c.get("text", "")) for c in content if isinstance(c, dict) and c.get("type") == "text"]
+        output = "\n".join(texts)
+        if result.get("isError"):
+            raise RuntimeError(output or f"MCP tool '{name}' failed")
+        return {
+            "ok": True,
+            "tool": name,
+            "args": arguments,
+            "output": output,
+            "content": [{"type": "text", "text": output}],
+            "isError": False,
+        }
+
+    async def close(self) -> None:
+        for client in self._clients:
+            await client.close()
+        self._clients = []

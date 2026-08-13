@@ -27,9 +27,24 @@ BUILTIN_MODELS: list[ModelInfo] = [
         base_url=None,
         tool_parser=[{"type": "raw-function-call"}, {"type": "json"}],
     ),
+    ModelInfo(
+        "ollama",
+        "llama3.1",
+        reasoning=False,
+        context_window=32_768,
+        # No hardcoded base URL: default to the provider registry, which reads
+        # OLLAMA_BASE_URL / --ollama-url. A models.json `url` still wins.
+        base_url=None,
+        tool_parser=[{"type": "raw-function-call"}, {"type": "json"}],
+    ),
+    ModelInfo("xai", "grok-4", reasoning=True, context_window=256_000),
+    ModelInfo("deepseek", "deepseek-chat", reasoning=False, context_window=128_000),
+    ModelInfo("deepseek", "deepseek-reasoner", reasoning=True, context_window=128_000),
+    ModelInfo("mistral", "mistral-large-latest", reasoning=True, context_window=128_000),
+    ModelInfo("groq", "llama-3.3-70b-versatile", reasoning=False, context_window=128_000),
 ]
 
-NO_AUTH_PROVIDERS: set[str] = {"llama.cpp"}
+NO_AUTH_PROVIDERS: set[str] = {"llama.cpp", "ollama"}
 
 
 def _is_placeholder_key(key: str | None) -> bool:

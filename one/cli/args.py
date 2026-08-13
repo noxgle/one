@@ -18,6 +18,7 @@ class ParsedArgs:
     model: str | None = None
     api_key: str | None = None
     llama_cpp_url: str | None = None
+    ollama_url: str | None = None
     system_prompt: str | None = None
     append_system_prompt: str | None = None
     thinking: str | None = None
@@ -39,6 +40,7 @@ class ParsedArgs:
     export: str | None = None
     export_format: str = "html"
     no_skills: bool = False
+    no_mcp: bool = False
     skills: list[str] = field(default_factory=list)
     prompt_templates: list[str] = field(default_factory=list)
     no_prompt_templates: bool = False
@@ -48,6 +50,13 @@ class ParsedArgs:
     offline: bool = False
     verbose: bool = False
     cooperation: bool = False
+    no_subagents: bool = False
+    no_bash_output: bool = False
+    run_task: str | None = None
+    json_output: bool = False
+    answer_file: str | None = None
+    steer_file: str | None = None
+    params: list[str] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     file_args: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -56,10 +65,36 @@ class ParsedArgs:
 def parse_args(argv: list[str]) -> ParsedArgs:
     command = None
     command_args: list[str] = []
-    if argv and not argv[0].startswith("-") and argv[0] in {"install", "remove", "update", "list", "config"}:
+    run_task: str | None = None
+    if argv and not argv[0].startswith("-") and argv[0] in {"install", "remove", "update", "list", "config", "run"}:
         command = argv[0]
         command_args = argv[1:]
-        argv = []
+        if command == "run":
+            # Flags may appear before/after the task text; re-inject them so
+            # argparse sees them, keep the rest as the task. Value-taking
+            # flags (--answer-file) must keep their value next to them.
+            _VALUE_FLAGS = {"--answer-file", "--steer-file", "--param"}
+            flags: list[str] = []
+            rest: list[str] = []
+            i = 0
+            while i < len(command_args):
+                a = command_args[i]
+                if a in _VALUE_FLAGS:
+                    flags.append(a)
+                    if i + 1 < len(command_args):
+                        flags.append(command_args[i + 1])
+                        i += 2
+                        continue
+                if a.startswith("-"):
+                    flags.append(a)
+                else:
+                    rest.append(a)
+                i += 1
+            argv = flags
+            run_task = " ".join(rest)
+        else:
+            argv = []
+
 
     parser = argparse.ArgumentParser(prog=APP_NAME, add_help=False)
     parser.add_argument("messages", nargs="*")
@@ -69,6 +104,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--model")
     parser.add_argument("--api-key")
     parser.add_argument("--llama-cpp-url")
+    parser.add_argument("--ollama-url")
     parser.add_argument("--system-prompt")
     parser.add_argument("--append-system-prompt")
     parser.add_argument("--thinking")
@@ -89,6 +125,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--export-format", choices=["html", "jsonl"], default="html")
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--no-skills", "-ns", action="store_true")
+    parser.add_argument("--no-mcp", action="store_true", dest="no_mcp", help="Do not start MCP servers from settings.json.")
     parser.add_argument("--prompt-template", action="append", default=[])
     parser.add_argument("--no-prompt-templates", "-np", action="store_true")
     parser.add_argument("--theme", action="append", default=[])
@@ -102,6 +139,12 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         help="Cooperation mode: ask the user before running mutating tools (bash/write/edit); "
         "rejections require a reason that is fed back to the model.",
     )
+    parser.add_argument("--no-subagents", action="store_true", help="Disable subagents: the spawn_subagent tool is not registered.")
+    parser.add_argument("--no-bash-output", action="store_true", help="Do not print bash command output; show only the exit code.")
+    parser.add_argument("--json", action="store_true", dest="json_output", help="Print the run result as JSON (summary, goalSuccess, finished).")
+    parser.add_argument("--answer-file", dest="answer_file", help="Headless answer channel for ask_user: questions are written to this file and answers are read back (polled).")
+    parser.add_argument("--steer-file", dest="steer_file", help="Headless steering channel: write a message to this file while the run is active; it is read and cleared.")
+    parser.add_argument("--param", "-P", action="append", default=[], help="Template parameter name=value (repeatable); {{name}} in @file content is replaced.")
 
     ns = parser.parse_args(argv)
     messages: list[str] = ns.messages or []
@@ -138,6 +181,9 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     if ns.fork and (ns.session or ns.continue_session or ns.resume):
         errors.append("--fork cannot be combined with --session/--continue/--resume")
 
+    if command == "run" and not run_task and not ns.resume:
+        errors.append("Usage: one run <task>")
+
     return ParsedArgs(
         command=command,
         command_args=command_args,
@@ -145,6 +191,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         model=ns.model,
         api_key=ns.api_key,
         llama_cpp_url=ns.llama_cpp_url,
+        ollama_url=ns.ollama_url,
         system_prompt=ns.system_prompt,
         append_system_prompt=ns.append_system_prompt,
         thinking=thinking,
@@ -166,6 +213,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         export=ns.export,
         export_format=ns.export_format,
         no_skills=ns.no_skills,
+        no_mcp=ns.no_mcp,
         skills=list(ns.skill),
         prompt_templates=list(ns.prompt_template),
         no_prompt_templates=ns.no_prompt_templates,
@@ -175,6 +223,13 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         offline=ns.offline,
         verbose=ns.verbose,
         cooperation=ns.cooperation,
+        no_subagents=ns.no_subagents,
+        no_bash_output=ns.no_bash_output,
+        run_task=run_task,
+        json_output=ns.json_output,
+        answer_file=ns.answer_file,
+        steer_file=ns.steer_file,
+        params=list(ns.param),
         messages=plain,
         file_args=file_args,
         errors=errors,
@@ -193,6 +248,7 @@ Options:
   --model <pattern>
   --api-key <key>
   --llama-cpp-url <url>
+  --ollama-url <url>
   --system-prompt <text>
   --append-system-prompt <text>
   --mode <text|json|rpc|tui>
@@ -204,10 +260,11 @@ Options:
   --session-dir <dir>
   --no-session
   --models <patterns>
-  --tools <read,bash,edit,write,grep,find,ls,finish>
+  --tools <read,bash,edit,write,grep,find,ls,finish,spawn_subagent,ask_user>
   --no-tools
   --extension, -e <path>
   --no-extensions
+  --no-mcp
   --skill <path>
   --no-skills
   --prompt-template <path>
@@ -220,6 +277,12 @@ Options:
   --offline
   --verbose
   --cooperation
+  --no-subagents
+  --no-bash-output
+  --json
+   --answer-file <file>
+   --steer-file <file>
+   --param <name=value>
   --help, -h
   --version, -v
 
@@ -229,5 +292,6 @@ Commands:
   update [package]
   list
   config [key] [value]
+  run <task>
 """
     )

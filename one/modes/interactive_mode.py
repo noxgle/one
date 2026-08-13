@@ -384,6 +384,21 @@ class InteractiveMode:
                 ok = bool(event.get("ok"))
                 status = "OK" if ok else "ERR"
                 print(f"[Tool:{status}] {event.get('tool')}", flush=True)
+                if ok and event.get("tool") == "bash" and getattr(session.settings_manager, "get_bash_show_output", lambda: True)():
+                    payload = event.get("result") or {}
+                    out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
+                    if out:
+                        print(out, flush=True)
+            if et == "ask_user":
+                print(f"\n[Agent pyta] {event.get('question')}", flush=True)
+                try:
+                    answer = input("Odpowiedź: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    answer = "(no answer)"
+                try:
+                    session.answer_question(str(event.get("id") or ""), answer)
+                except ValueError:
+                    pass
             if et == "tool_call_parse_failed":
                 print("[Tool] Parse failed for tool-call candidate, continuing with assistant output.", flush=True)
             if et == "tool_call_nudge_start":
@@ -466,17 +481,18 @@ class InteractiveMode:
                 "/qq": "/queue clear",
                 "/mc": "/model-cycle",
                 "/tc": "/thinking-cycle",
+                "/ns": "/new",
             }
             line = aliases.get(line.strip(), line)
             if line.strip() in {"/exit", "/quit"}:
                 break
             if line.strip() == "/help":
                 print(
-                    "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort\n"
+                    "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort | /new\n"
                     "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
-                    "/cooperation [on|off] | /bash <command>\n"
+                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /bash <command>\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
                 )
                 continue
@@ -686,6 +702,12 @@ class InteractiveMode:
                 except ValueError as e:
                     print(str(e))
                 continue
+            if line.strip() == "/new":
+                result = await self.runtime_host.new_session({})
+                session = self.runtime_host.session
+                session.subscribe(on_event)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                continue
             if line.startswith("/login"):
                 rest = line[len("/login") :].strip()
                 parts = rest.split() if rest else []
@@ -778,6 +800,32 @@ class InteractiveMode:
                 session.settings_manager.set_config_value(key, val)
                 print(f"Updated {key}.")
                 continue
+            if line.strip() == "/subagents":
+                state = session.settings_manager.get_subagents_enabled()
+                print(f"Subagents: {'on' if state else 'off'}")
+                print("Usage: /subagents <on|off>")
+                continue
+            if line.startswith("/subagents "):
+                mode = line[len("/subagents ") :].strip().lower()
+                if mode not in {"on", "off"}:
+                    print("Usage: /subagents <on|off>")
+                    continue
+                session.settings_manager.set_subagents_enabled(mode == "on")
+                print(f"Subagents set to {mode}.")
+                continue
+            if line.strip() == "/bash-show":
+                state = session.settings_manager.get_bash_show_output()
+                print(f"Bash output: {'on' if state else 'off'}")
+                print("Usage: /bash-show <on|off>")
+                continue
+            if line.startswith("/bash-show "):
+                mode = line[len("/bash-show ") :].strip().lower()
+                if mode not in {"on", "off"}:
+                    print("Usage: /bash-show <on|off>")
+                    continue
+                session.settings_manager.set_bash_show_output(mode == "on")
+                print(f"Bash output set to {mode}.")
+                continue
             if line.startswith("/bash "):
                 command = line[len("/bash ") :].strip()
                 if not command:
@@ -785,7 +833,11 @@ class InteractiveMode:
                     continue
                 try:
                     result = await session.execute_bash(command)
-                    print((result.get("output") or "").rstrip())
+                    output = (result.get("output") or "").rstrip()
+                    if getattr(session.settings_manager, "get_bash_show_output", lambda: True)() and output:
+                        print(output)
+                    else:
+                        print(f"[bash] exitCode={result.get('exitCode')}")
                 except Exception as e:
                     print(str(e))
                 continue

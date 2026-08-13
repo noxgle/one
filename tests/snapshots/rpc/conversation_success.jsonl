@@ -1,0 +1,13 @@
+{"command": "prompt", "id": "p1", "success": true, "type": "response"}
+{"type": "agent_start"}
+{"message": {"content": "check the repo", "role": "user"}, "type": "message_start"}
+{"message": {"content": "check the repo", "role": "user"}, "type": "message_end"}
+{"attempt": 1, "type": "turn_start"}
+{"args": {"path": "a.txt"}, "tool": "read", "type": "tool_call_start"}
+{"ok": true, "result": {"args": {"path": "a.txt"}, "content": [{"text": "hello world\n", "type": "text"}], "details": {"truncation": null}, "exitCode": null, "fullOutputPath": null, "ok": true, "outputText": "hello world\n", "rawResult": {"content": [{"text": "hello world\n", "type": "text"}], "details": {"truncation": null}}, "result": "hello world\n", "tool": "read", "truncated": null}, "tool": "read", "type": "tool_call_end"}
+{"message": {"content": [{"text": "DONE", "type": "text"}], "model": "gpt-4.1", "provider": "openai", "role": "assistant", "stopReason": "stop", "usage": {"cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}, "input": 0, "output": 0}}, "type": "message_start"}
+{"assistantMessageEvent": {"delta": "DONE", "type": "text_delta"}, "type": "message_update"}
+{"message": {"content": [{"text": "DONE", "type": "text"}], "model": "gpt-4.1", "provider": "openai", "role": "assistant", "stopReason": "stop", "usage": {"cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}, "input": 0, "output": 0}}, "type": "message_end"}
+{"aborted": false, "attempt": 1, "ok": true, "reason": "stop", "toolResults": [{"args": {"path": "a.txt"}, "content": [{"text": "hello world\n", "type": "text"}], "details": {"truncation": null}, "exitCode": null, "fullOutputPath": null, "ok": true, "outputText": "hello world\n", "rawResult": {"content": [{"text": "hello world\n", "type": "text"}], "details": {"truncation": null}}, "result": "hello world\n", "tool": "read", "truncated": null}], "type": "turn_end"}
+{"type": "agent_end"}
+{"command": "wait_for_idle", "id": "w1", "success": true, "type": "response"}

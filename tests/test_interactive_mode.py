@@ -59,6 +59,18 @@ class _DummySettings:
     def set_theme(self, theme: str) -> None:
         self.theme = theme
 
+    def get_subagents_enabled(self) -> bool:
+        return bool(self._global.get("subagents", {}).get("enabled", True))
+
+    def set_subagents_enabled(self, enabled: bool) -> None:
+        self._global.setdefault("subagents", {})["enabled"] = bool(enabled)
+
+    def get_bash_show_output(self) -> bool:
+        return bool(self._global.get("bash", {}).get("showOutput", True))
+
+    def set_bash_show_output(self, enabled: bool) -> None:
+        self._global.setdefault("bash", {})["showOutput"] = bool(enabled)
+
 
 class _DummyModelRegistry:
     def __init__(self) -> None:
@@ -246,6 +258,9 @@ class _DummyHost:
     def __init__(self, session: _DummySession) -> None:
         self.session = session
 
+    async def new_session(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"cancelled": False}
+
 
 def _mk_input(commands: list[str]):
     it = iter(commands)
@@ -285,7 +300,13 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
         "/config tools.maxSteps 9",
         "/config tools.maxSteps",
         "/bash echo hi",
+        "/subagents off",
+        "/subagents",
+        "/bash-show off",
+        "/bash-show",
         "/abort",
+        "/new",
+        "/ns",
         "/exit",
     ]
     monkeypatch.setattr("builtins.input", _mk_input(commands))
@@ -306,7 +327,12 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert "Auto-retry set to off." in out
     assert "Updated tools.maxSteps." in out
     assert "ran:echo hi" in out
+    assert "Subagents set to off." in out
+    assert "Bash output set to off." in out
+    assert session.settings_manager.get_subagents_enabled() is False
+    assert session.settings_manager.get_bash_show_output() is False
     assert "Abort requested." in out
+    assert '"cancelled": false' in out
 
     assert session.model.id == "gpt-4.1"
     assert session.settings_manager.default_provider == "openai"

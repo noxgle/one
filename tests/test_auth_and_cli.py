@@ -357,3 +357,97 @@ def test_cli_accepts_llama_cpp_url_flag(tmp_path: Path):
     )
     assert res.returncode == 0
     assert "llama.cpp/local" in res.stdout
+
+
+def test_cli_run_requires_task(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    res = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "run"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert res.returncode == 2
+    assert "Usage: one run" in res.stdout
+
+
+def test_cli_run_accepts_flags(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    # --json flag BEFORE task must be accepted by argparse (reaches run dispatch,
+    # output is JSON with goalSuccess/finished fields).
+    res = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "run", "--json", "task"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert res.returncode == 1
+    data = json.loads(res.stdout)
+    assert "goalSuccess" in data
+    assert "finished" in data
+    assert "summary" in data
+
+    # --badflag must produce argparse error (returncode 2)
+    res_bad = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "run", "--badflag", "task"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert res_bad.returncode == 2
+
+
+def test_cli_run_resume_flag_parses(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    # --resume flag is accepted by argparse; run dispatches (returns 1 on
+    # connection failure since no model server is running).
+    res = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "run", "--resume", "task"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert res.returncode == 1
+    # Must not be a usage/argparse error.
+    assert "Usage:" not in res.stdout
+
+
+def test_cli_run_resume_without_task_is_valid(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    # `one run --resume` without a task must not be a usage error: it resumes
+    # the last user message. With no prior session it reports that cleanly.
+    res = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "run", "--resume"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert res.returncode == 1
+    assert "No previous user message to resume." in res.stdout

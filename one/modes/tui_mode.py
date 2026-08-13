@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -12,6 +13,7 @@ from typing import Any
 from rich.markup import escape as rich_escape
 
 from one.core.types import ModelInfo
+from one.tools.common import sanitize_display_text
 
 try:
     from textual import events
@@ -20,6 +22,7 @@ try:
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.message import Message
     from textual.widgets import Static, TextArea
+    from textual.widgets.text_area import Edit
 
     TEXTUAL_AVAILABLE = True
 except Exception:  # pragma: no cover
@@ -29,8 +32,6 @@ except Exception:  # pragma: no cover
 def build_sidebar_snapshot(
     session: Any,
     retry_state: str,
-    last_tool_error: str,
-    last_provider_error: str,
 ) -> dict[str, Any]:
     usage = session.get_context_usage() or {}
     queues = session.get_pending_queues() or {"steering": [], "followUp": []}
@@ -59,8 +60,8 @@ def build_sidebar_snapshot(
         "tokenCacheWrite": int(tokens.get("cacheWrite") or 0),
         "tokenTotal": int(tokens.get("total") or 0),
         "cost": float(stats.get("cost") or 0.0),
-        "lastToolError": last_tool_error,
-        "lastProviderError": last_provider_error,
+        "subagents": bool(getattr(getattr(session, "settings_manager", None), "get_subagents_enabled", lambda: True)()),
+        "bashOutput": bool(getattr(getattr(session, "settings_manager", None), "get_bash_show_output", lambda: True)()),
     }
 
 
@@ -165,6 +166,16 @@ def _paste_from_system_clipboard() -> str | None:
     return None
 
 
+_SLASH_COMMANDS: tuple[str, ...] = (
+    "/exit", "/quit", "/help", "/stats", "/state", "/status", "/queue", "/tools",
+    "/clear", "/abort", "/model", "/model-cycle", "/thinking", "/thinking-cycle",
+    "/theme", "/steer", "/follow", "/compact", "/tree", "/navigate", "/fork",
+    "/new", "/login", "/logout", "/retry", "/config", "/extui", "/cooperation",
+    "/subagents", "/bash-show",
+    "/bash",
+)
+
+
 if TEXTUAL_AVAILABLE:
 
     class SessionEvent(Message):
@@ -197,6 +208,13 @@ if TEXTUAL_AVAILABLE:
 
         _PASTE_MAX_CHARS = 10240
 
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._completion_prefix = ""
+            self._completion_matches: list[str] = []
+            self._completion_index = -1
+            self._completion_locked = False  # locked after first completion
+
         BINDINGS = [
             ("ctrl+j", "submit", "Submit"),
             ("shift+enter", "newline", "New line"),
@@ -211,6 +229,17 @@ if TEXTUAL_AVAILABLE:
                 event.prevent_default()
                 self.post_message(InputSubmitted(self.text))
                 return
+            if event.key == "tab":
+                if self._complete_slash_command():
+                    event.stop()
+                    event.prevent_default()
+                    return
+            else:
+                # Any edit/navigation invalidates the current completion cycle.
+                self._completion_prefix = ""
+                self._completion_matches = []
+                self._completion_index = -1
+                self._completion_locked = False
             await super()._on_key(event)
 
         async def action_submit(self) -> None:
@@ -218,6 +247,63 @@ if TEXTUAL_AVAILABLE:
 
         def action_newline(self) -> None:
             self.insert("\n")
+
+        @property
+        def text(self) -> str:
+            return super().text
+
+        @text.setter
+        def text(self, value: str) -> None:
+            # Reset completion state whenever the text changes so that a
+            # newly-typed prefix gets a fresh match set (fixes stale Tab
+            # completion after completing a different command).
+            super(_CommandTextArea, self.__class__).text.fset(self, value)  # type: ignore[attr-defined]
+            self._completion_prefix = ""
+            self._completion_matches = []
+            self._completion_index = -1
+            self._completion_locked = False
+
+        def _complete_slash_command(self) -> bool:
+            """Tab-complete the slash command under the cursor.
+
+            Cycles through matches on repeated Tab presses; writes a hint
+            line with the available matches when more than one exists.
+            Returns True when a completion was applied.
+            """
+            row, col = self.selection.end
+            line = str(self.get_line(row))
+            before = line[:col]
+            start = max(before.rfind(" "), before.rfind("\t")) + 1
+            word = before[start:]
+            if not word.startswith("/"):
+                return False
+            after = line[col:]
+            m = re.match(r"\S*", after)
+            end = col + (len(m.group(0)) if m else 0)
+            prefix = word[1:]
+            if not self._completion_locked:
+                # First press for this word — find the initial match set.
+                self._completion_matches = [
+                    c for c in _SLASH_COMMANDS if c.startswith("/" + prefix)
+                ]
+                self._completion_index = -1
+                self._completion_prefix = prefix
+                # Lock the match set so that subsequent Tab presses cycle
+                # through the same list even when the word under the cursor
+                # changes after a completion (e.g. "/mo" → "/model").
+                self._completion_locked = True
+            matches = self._completion_matches
+            if not matches:
+                return False
+            self._completion_index = (self._completion_index + 1) % len(matches)
+            completed = matches[self._completion_index]
+            self.edit(Edit(completed, (row, start), (row, end), True))
+            self.move_cursor((row, start + len(completed)))
+            if len(matches) > 1 and self._completion_index == 0:
+                write = getattr(self.app, "_write", None)
+                if write:
+                    write("[completion] " + " ".join(matches), "info")
+            return True
 
         def action_paste(self) -> None:
             if self.read_only:
@@ -281,6 +367,36 @@ if TEXTUAL_AVAILABLE:
             background: #101a30;
             padding: 0 1;
         }
+
+        #ext_panel {
+            display: none;
+            border: round #7a5cff;
+            background: #150f33;
+            color: #e8e2ff;
+            height: auto;
+            max-height: 40%;
+            margin: 1 0 0 0;
+            padding: 0 2;
+            overflow-y: auto;
+        }
+
+        #ext_overlay {
+            display: none;
+            position: absolute;
+            offset: 5% 15%;
+            width: 90%;
+            height: 70%;
+            border: heavy #7a5cff;
+            background: #0d0a20;
+            color: #ece6ff;
+            padding: 1 2;
+            overflow-y: auto;
+            layer: above;
+        }
+
+        #ext_panel.visible, #ext_overlay.visible {
+            display: block;
+        }
         """
 
         BINDINGS = [
@@ -289,6 +405,7 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+q", "quit", "Quit"),
             # priority=True so it wins over the focused TextArea's ctrl+a (home).
             Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
+            ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             ("f1", "help", "Help"),
         ]
 
@@ -302,8 +419,6 @@ if TEXTUAL_AVAILABLE:
             self._assistant_stream = ""
             self._stream_lines: list[str] = []
             self._retry_state = "idle"
-            self._last_tool_error = "-"
-            self._last_provider_error = "-"
             self._last_auto_copied = ""
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
@@ -316,12 +431,15 @@ if TEXTUAL_AVAILABLE:
             self._approval_pending: dict[str, Any] | None = None
             self._extension_ui_pending_request: dict[str, Any] | None = None
             self._login_pending: dict[str, Any] | None = None
+            self._ask_user_pending: dict[str, Any] | None = None
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
                 with Vertical(id="main"):
                     with VerticalScroll(id="stream_container"):
                         yield Static("", id="stream")
+                    yield Static("", id="ext_panel")
+                    yield Static("", id="ext_overlay")
                     yield _CommandTextArea(placeholder="Wpisz polecenie lub /help", id="input", soft_wrap=True)
                 yield Static(id="sidebar")
 
@@ -428,7 +546,7 @@ if TEXTUAL_AVAILABLE:
             self._render_stream()
 
         def _write(self, text: str, kind: str = "normal") -> None:
-            self._stream_lines.append(text)
+            self._stream_lines.append(sanitize_display_text(text))
             if len(self._stream_lines) > 500:
                 self._stream_lines = self._stream_lines[-500:]
             self._render_stream()
@@ -452,7 +570,7 @@ if TEXTUAL_AVAILABLE:
             pad_y: int = 0,
             pad_x: int = 2,
         ) -> list[str]:
-            content = (text or "").strip() or "[empty]"
+            content = sanitize_display_text(text).strip() or "[empty]"
             raw_lines = content.splitlines() or [content]
             wrapped: list[str] = []
             target_width = width or self._chat_panel_width()
@@ -549,6 +667,21 @@ if TEXTUAL_AVAILABLE:
                 sidebar_widget.styles.color = theme.screen_fg
             except Exception:
                 pass
+            try:
+                stream_text = self.query_one("#stream", Static)
+                stream_text.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
+                ext_panel = self.query_one("#ext_panel", Static)
+                ext_panel.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
+                ext_overlay = self.query_one("#ext_overlay", Static)
+                ext_overlay.styles.color = theme.screen_fg
+            except Exception:
+                pass
             return True
 
         def _toast(self, message: str, severity: str = "information", timeout: float = 1.8) -> None:
@@ -608,8 +741,6 @@ if TEXTUAL_AVAILABLE:
             s = build_sidebar_snapshot(
                 self.session,
                 retry_state=self._retry_state,
-                last_tool_error=self._last_tool_error,
-                last_provider_error=self._last_provider_error,
             )
             if s["compacting"]:
                 status = "compacting…"
@@ -628,16 +759,15 @@ if TEXTUAL_AVAILABLE:
                 f"Retry: {s['retry']}\n"
                 f"Status: {status}\n"
                 f"Coop: {s['coop']} (Ctrl+A)\n"
+                f"Subagents: {'on' if s['subagents'] else 'off'} (Ctrl+S)\n"
+                f"Bash: {'on' if s['bashOutput'] else 'off'}\n"
                 f"CWD: {s['cwd']}\n"
                 f"Session: {s['sessionId']}\n"
-                "\n"
-                f"[b {self._theme.info}]Errors[/]\n"
-                f"Tool: {s['lastToolError']}\n"
-                f"Provider: {s['lastProviderError']}\n"
                 "\n"
                 f"[b {self._theme.info}]Keys[/]\n"
                 "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+V paste\n"
             )
+            sidebar = sanitize_display_text(sidebar)
             self.query_one("#sidebar", Static).update(sidebar)
 
         def _try_auto_copy_selected_stream_text(self) -> None:
@@ -678,6 +808,7 @@ if TEXTUAL_AVAILABLE:
                 "/qq": "/queue clear",
                 "/mc": "/model-cycle",
                 "/tc": "/thinking-cycle",
+                "/ns": "/new",
             }.get(cmd.strip(), cmd)
             if cmd in {"/exit", "/quit"}:
                 self.exit()
@@ -689,11 +820,11 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write(
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>",
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|provider [apiKey] [model]] | /logout <provider>",
                     "info",
                 )
                 self._write("/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info")
-                self._write("/cooperation [on|off] | /bash <command>", "info")
+                self._write("/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /bash <command>", "info")
                 return
             if cmd == "/clear":
                 stream_widget = self.query_one("#stream")
@@ -714,7 +845,7 @@ if TEXTUAL_AVAILABLE:
                 self._write("[abort requested]", "warn")
                 return
             if cmd == "/status":
-                s = build_sidebar_snapshot(session, self._retry_state, self._last_tool_error, self._last_provider_error)
+                s = build_sidebar_snapshot(session, self._retry_state)
                 self._write(json.dumps(s, ensure_ascii=False), "info")
                 return
             if cmd == "/stats":
@@ -906,9 +1037,28 @@ if TEXTUAL_AVAILABLE:
                     result = await self.runtime_host.fork(entry_id)
                     self.session = self.runtime_host.session
                     self._bind_session()
+                    self._clear_extension_ui_state()
                     self._write(json.dumps(result, ensure_ascii=False), "info")
                 except ValueError as e:
                     self._write(str(e), "error")
+                self._refresh_sidebar()
+                return
+            if cmd == "/new":
+                if self.runtime_host is None:
+                    self._write("Runtime host unavailable: /new is not supported in this context.", "error")
+                    return
+                result = await self.runtime_host.new_session({})
+                self.session = self.runtime_host.session
+                self._bind_session()
+                # Fresh session: drop stale stream content from the old one.
+                stream_widget = self.query_one("#stream")
+                stream_widget.update("")
+                self._stream_lines = []
+                self._assistant_has_live_delta = False
+                self._assistant_live_start_idx = -1
+                self._assistant_live_buffer = ""
+                self._clear_extension_ui_state()
+                self._write("New session started.", "info")
                 self._refresh_sidebar()
                 return
             if cmd.startswith("/login"):
@@ -958,6 +1108,34 @@ if TEXTUAL_AVAILABLE:
                     return
                 session.set_auto_retry_enabled(mode == "on")
                 self._write(f"Auto-retry set to {mode}.", "info")
+                self._refresh_sidebar()
+                return
+            if cmd == "/subagents":
+                state = session.settings_manager.get_subagents_enabled()
+                self._write(f"Subagents: {'on' if state else 'off'}", "info")
+                self._write("Usage: /subagents <on|off>", "info")
+                return
+            if cmd.startswith("/subagents "):
+                mode = cmd[len("/subagents ") :].strip().lower()
+                if mode not in {"on", "off"}:
+                    self._write("Usage: /subagents <on|off>", "error")
+                    return
+                session.settings_manager.set_subagents_enabled(mode == "on")
+                self._write(f"Subagents set to {mode}.", "info")
+                self._refresh_sidebar()
+                return
+            if cmd == "/bash-show":
+                state = getattr(session.settings_manager, "get_bash_show_output", lambda: True)()
+                self._write(f"Bash output: {'on' if state else 'off'}", "info")
+                self._write("Usage: /bash-show <on|off>", "info")
+                return
+            if cmd.startswith("/bash-show "):
+                mode = cmd[len("/bash-show ") :].strip().lower()
+                if mode not in {"on", "off"}:
+                    self._write("Usage: /bash-show <on|off>", "error")
+                    return
+                session.settings_manager.set_bash_show_output(mode == "on")
+                self._write(f"Bash output set to {mode}.", "info")
                 self._refresh_sidebar()
                 return
             if cmd.startswith("/config"):
@@ -1065,7 +1243,7 @@ if TEXTUAL_AVAILABLE:
                 try:
                     result = await session.execute_bash(command)
                     output = (result.get("output") or "").rstrip()
-                    if output:
+                    if getattr(session.settings_manager, "get_bash_show_output", lambda: True)() and output:
                         self._write_tool_block(output)
                     else:
                         self._write(f"[bash] exitCode={result.get('exitCode')}", "info")
@@ -1083,16 +1261,21 @@ if TEXTUAL_AVAILABLE:
             if self._approval_pending is not None:
                 await self._handle_approval_answer(text)
                 return
+            # Slash commands always take priority over pending prompts so that
+            # /new, /fork, /abort etc. work even when extension UI is waiting.
+            if text.startswith("/"):
+                await self._handle_command(text)
+                return
             if self._extension_ui_pending_request is not None:
                 await self._handle_extension_ui_answer(text)
                 return
             if self._login_pending is not None:
                 await self._handle_login_answer(text)
                 return
-            if not text:
+            if self._ask_user_pending is not None:
+                await self._handle_ask_user_answer(text)
                 return
-            if text.startswith("/"):
-                await self._handle_command(text)
+            if not text:
                 return
 
             self._write_chat_block("user", text)
@@ -1103,8 +1286,7 @@ if TEXTUAL_AVAILABLE:
                 try:
                     await self.session.prompt(text)
                 except Exception as e:
-                    self._last_provider_error = str(e).strip() or e.__class__.__name__
-                    self._write(f"[error] {self._last_provider_error}", "error")
+                    self._write(f"[error] {e}", "error")
                     self._refresh_sidebar()
                 finally:
                     self._turn_active = False
@@ -1152,12 +1334,6 @@ if TEXTUAL_AVAILABLE:
             if req is None:
                 return
             request_id = str(req.get("id") or "")
-            self._extension_ui_pending_request = None
-            try:
-                input_widget = self.query_one("#input", TextArea)
-                input_widget.placeholder = "Wpisz polecenie lub /help"
-            except Exception:
-                pass
             try:
                 if not text:
                     self.session.respond_extension_ui(request_id=request_id, cancelled=True)
@@ -1168,10 +1344,12 @@ if TEXTUAL_AVAILABLE:
                     except Exception:
                         payload = {"answer": text}
                     self.session.respond_extension_ui(request_id=request_id, payload=payload)
+                # Success — clear pending state (panel, placeholder, request ref).
+                # The extension_ui_response event also drives _clear_extension_ui_state;
+                # that call is safe (idempotent) so both paths may fire.
+                self._clear_extension_ui_state()
             except Exception as e:
                 self._write(f"[ExtUI] error responding to {request_id}: {e}", "error")
-                return
-            # The extension_ui_response event renders the result line.
 
         async def _handle_login_answer(self, text: str) -> None:
             """Route the input widget answer back to the pending /login api-key prompt."""
@@ -1191,6 +1369,23 @@ if TEXTUAL_AVAILABLE:
                 self._write(f"API key is required for {pending.get('provider')}{hint}.", "error")
                 return
             await self._complete_login(pending.get("provider"), api_key, "")
+
+        async def _handle_ask_user_answer(self, text: str) -> None:
+            """Route the input widget answer back to the pending ask_user question."""
+            pending = self._ask_user_pending
+            if pending is None:
+                return
+            self._ask_user_pending = None
+            try:
+                input_widget = self.query_one("#input", TextArea)
+                input_widget.placeholder = "Wpisz polecenie lub /help"
+            except Exception:
+                pass
+            answer = text.strip() or "(no answer)"
+            try:
+                self.session.answer_question(str(pending.get("id") or ""), answer)
+            except ValueError as e:
+                self._write(f"[AskUser] {e}", "error")
 
         async def _complete_login(self, provider: str, api_key: str, model_input: str) -> None:
             """Persist provider apiKey + defaults and optionally switch the model."""
@@ -1271,6 +1466,12 @@ if TEXTUAL_AVAILABLE:
                 self._write("[Cooperation] disabled: all tools run freely", "info")
             self._refresh_sidebar()
 
+        def action_toggle_subagents(self) -> None:
+            enabled = getattr(getattr(self.session, "settings_manager", None), "get_subagents_enabled", lambda: True)()
+            self.session.settings_manager.set_subagents_enabled(not enabled)
+            self._write(f"Subagents {'enabled' if not enabled else 'disabled'}.", "info")
+            self._refresh_sidebar()
+
         def action_clear_stream(self) -> None:
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
@@ -1280,7 +1481,42 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer = ""
 
         def action_help(self) -> None:
-            self._write("/help /stats /state /status /tools /model /model-cycle /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /login /logout /retry /config /extui /cooperation /bash /abort /clear /exit", "info")
+            self._write("/help /stats /state /status /tools /model /model-cycle /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /bash /abort /clear /exit", "info")
+
+        def _show_extension_panel(self, req: dict[str, Any]) -> None:
+            """Render an extension widget/overlay payload as a TUI component."""
+            ui_type = str(req.get("uiType") or "widget")
+            title = str(req.get("title") or "")
+            payload = req.get("payload") or {}
+            lines = [f"[b]{title or req.get('extension', 'extension')}[/b]"]
+            lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
+            rendered = "\n".join(lines)
+            try:
+                if ui_type == "overlay":
+                    overlay = self.query_one("#ext_overlay", Static)
+                    overlay.update(rendered)
+                    overlay.add_class("visible")
+                else:
+                    panel = self.query_one("#ext_panel", Static)
+                    panel.update(rendered)
+                    panel.add_class("visible")
+            except Exception:
+                pass
+
+        def _hide_extension_panels(self) -> None:
+            for widget_id in ("#ext_panel", "#ext_overlay"):
+                try:
+                    self.query_one(widget_id, Static).remove_class("visible")
+                except Exception:
+                    pass
+
+        def _clear_extension_ui_state(self) -> None:
+            self._extension_ui_pending_request = None
+            self._hide_extension_panels()
+            try:
+                self.query_one("#input", TextArea).placeholder = "Wpisz polecenie lub /help"
+            except Exception:
+                pass
 
         async def on_session_event(self, message: SessionEvent) -> None:
             event = message.payload
@@ -1327,6 +1563,17 @@ if TEXTUAL_AVAILABLE:
                 self._write_tool_block(f"tool start: {tool_name} {args_text}")
             elif et == "tool_approval_rejected":
                 self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
+            elif et == "ask_user":
+                self._ask_user_pending = {"id": str(event.get("id") or "")}
+                self._write_tool_block(f"agent pyta: {event.get('question')}")
+                try:
+                    input_widget = self.query_one("#input", TextArea)
+                    input_widget.placeholder = "Odpowiedź dla agenta:"
+                    input_widget.focus()
+                except Exception:
+                    pass
+            elif et == "ask_user_answered":
+                self._write(f"[AskUser] odpowiedź: {event.get('answer')}", "info")
             elif et == "extension_ui_request":
                 ext = str(event.get("extension") or "unknown")
                 ui_type = str(event.get("uiType") or "widget")
@@ -1342,6 +1589,7 @@ if TEXTUAL_AVAILABLE:
                     input_widget.focus()
                 except Exception:
                     pass
+                self._show_extension_panel(dict(event))
             elif et == "extension_ui_response":
                 rid = str(event.get("requestId") or "")
                 cancelled = bool(event.get("cancelled"))
@@ -1352,21 +1600,16 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 if self._extension_ui_pending_request is not None and str(self._extension_ui_pending_request.get("id") or "") == rid:
-                    self._extension_ui_pending_request = None
-                    try:
-                        input_widget = self.query_one("#input", TextArea)
-                        input_widget.placeholder = "Wpisz polecenie lub /help"
-                    except Exception:
-                        pass
+                    self._clear_extension_ui_state()
             elif et == "tool_call_end":
                 status = "ok" if event.get("ok") else "err"
-                if not event.get("ok"):
-                    payload = event.get("result") or {}
-                    tool_name = str(event.get("tool") or payload.get("tool") or "unknown")
-                    err = str(payload.get("error") or "unknown tool error").strip()
-                    self._last_tool_error = f"{tool_name}: {err}"
                 tool_name = str(event.get("tool") or "tool")
                 self._write_tool_block(f"tool {status}: {tool_name}")
+                if event.get("ok") and tool_name == "bash" and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)():
+                    payload = event.get("result") or {}
+                    out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
+                    if out:
+                        self._write_tool_block(out)
             elif et == "turn_end":
                 self._retry_state = "idle"
                 self._turn_active = False
@@ -1374,7 +1617,6 @@ if TEXTUAL_AVAILABLE:
                 self._render_stream()
                 if event.get("ok") is False:
                     err = str(event.get("error") or "Unknown error").strip()
-                    self._last_provider_error = err
                     self._write(f"[error] {err}", "error")
             elif et == "auto_retry_end":
                 self._retry_state = "idle"
@@ -1383,9 +1625,6 @@ if TEXTUAL_AVAILABLE:
                 self._render_stream()
             elif et == "auto_retry_start":
                 self._retry_state = f"retry-{event.get('attempt')}"
-                retry_err = str(event.get("errorMessage") or "").strip()
-                if retry_err:
-                    self._last_provider_error = retry_err
                 self._write(
                     f"[retry] attempt {event.get('attempt')}/{event.get('maxAttempts')} in {event.get('delayMs')}ms",
                     "warn",

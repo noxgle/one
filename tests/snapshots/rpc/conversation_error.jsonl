@@ -1,0 +1,23 @@
+{"command": "prompt", "id": "p2", "success": true, "type": "response"}
+{"type": "agent_start"}
+{"message": {"content": "do something", "role": "user"}, "type": "message_start"}
+{"message": {"content": "do something", "role": "user"}, "type": "message_end"}
+{"attempt": 1, "type": "turn_start"}
+{"attempt": 1, "error": "boom", "ok": false, "reason": "error", "type": "turn_end", "willRetry": true}
+{"attempt": 1, "delayMs": 1500, "errorMessage": "boom", "maxAttempts": 3, "type": "auto_retry_start"}
+{"aborted": false, "attempt": 1, "type": "auto_retry_end", "willRetry": true}
+{"attempt": 2, "type": "turn_start"}
+{"attempt": 2, "error": "boom", "ok": false, "reason": "error", "type": "turn_end", "willRetry": true}
+{"attempt": 2, "delayMs": 3000, "errorMessage": "boom", "maxAttempts": 3, "type": "auto_retry_start"}
+{"aborted": false, "attempt": 2, "type": "auto_retry_end", "willRetry": true}
+{"attempt": 3, "type": "turn_start"}
+{"attempt": 3, "error": "boom", "ok": false, "reason": "error", "type": "turn_end", "willRetry": true}
+{"attempt": 3, "delayMs": 6000, "errorMessage": "boom", "maxAttempts": 3, "type": "auto_retry_start"}
+{"aborted": false, "attempt": 3, "type": "auto_retry_end", "willRetry": true}
+{"attempt": 4, "type": "turn_start"}
+{"attempt": 4, "error": "boom", "ok": false, "reason": "error", "type": "turn_end", "willRetry": false}
+{"message": {"content": [{"text": "boom", "type": "text"}], "model": "gpt-4.1", "provider": "openai", "role": "assistant", "stopReason": "error", "usage": {"cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}, "input": 0, "output": 0}}, "type": "message_start"}
+{"assistantMessageEvent": {"delta": "boom", "type": "text_delta"}, "type": "message_update"}
+{"message": {"content": [{"text": "boom", "type": "text"}], "model": "gpt-4.1", "provider": "openai", "role": "assistant", "stopReason": "error", "usage": {"cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}, "input": 0, "output": 0}}, "type": "message_end"}
+{"type": "agent_end"}
+{"command": "wait_for_idle", "id": "w2", "success": true, "type": "response"}

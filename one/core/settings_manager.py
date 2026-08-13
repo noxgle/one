@@ -32,7 +32,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "thinkingBudgets": {},
     "shellCommandPrefix": None,
     "tools": {"maxSteps": 6, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit"]},
+    "bash": {"showOutput": True},
+    "subagents": {"enabled": True, "maxConcurrent": 2, "maxDepth": 3},
+    "askUser": {"timeoutSec": 0},
     "packages": [],
+    "budget": {"maxTokens": 0, "maxTimeSec": 0},
 }
 
 
@@ -171,8 +175,53 @@ class SettingsManager:
     def get_tool_approval_tools(self) -> list[str]:
         return list(self.get_tool_settings().get("approvalTools", ["bash", "write", "edit"]))
 
+    def get_subagents_max_concurrent(self) -> int:
+        return int(self.merged().get("subagents", {}).get("maxConcurrent", 2))
+
+    def get_subagents_max_depth(self) -> int:
+        return int(self.merged().get("subagents", {}).get("maxDepth", 3))
+
+    def get_subagents_enabled(self) -> bool:
+        return bool(self.merged().get("subagents", {}).get("enabled", True))
+
+    def set_subagents_enabled(self, enabled: bool, persist: bool = True) -> None:
+        subagents = dict(self._global.get("subagents", {}))
+        subagents["enabled"] = bool(enabled)
+        self._global["subagents"] = subagents
+        if persist:
+            self._save_global()
+
+    def get_ask_user_timeout_sec(self) -> int:
+        try:
+            return max(0, int((self.merged().get("askUser") or {}).get("timeoutSec", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def get_bash_show_output(self) -> bool:
+        return bool(self.merged().get("bash", {}).get("showOutput", True))
+
+    def set_bash_show_output(self, enabled: bool, persist: bool = True) -> None:
+        bash = dict(self._global.get("bash", {}))
+        bash["showOutput"] = bool(enabled)
+        self._global["bash"] = bash
+        if persist:
+            self._save_global()
+
+    def get_budget_settings(self) -> dict[str, Any]:
+        return self.merged().get("budget", {}) or {}
+
+    def get_budget_max_tokens(self) -> int:
+        return int(self.get_budget_settings().get("maxTokens") or 0)
+
+    def get_budget_max_time_sec(self) -> int:
+        return int(self.get_budget_settings().get("maxTimeSec") or 0)
+
     def get_packages(self) -> list[str]:
         return list(self.merged().get("packages", []))
+
+    def get_mcp_servers(self) -> dict[str, Any]:
+        """MCP server config: {name: {command, args, env}} from settings.json."""
+        return self.merged().get("mcpServers", {}) or {}
 
     def set_retry_enabled(self, enabled: bool) -> None:
         retry = self._global.get("retry", {})

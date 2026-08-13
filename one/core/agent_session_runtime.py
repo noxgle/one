@@ -74,7 +74,7 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
     if tools:
         tool_names = [t.name if hasattr(t, "name") else str(t) for t in tools]
     else:
-        tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls", "finish"]
+        tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls", "finish", "spawn_subagent", "ask_user"]
 
     session = AgentSession(
         session_manager=session_manager,
@@ -85,6 +85,7 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         thinking_level=thinking_level,
         scoped_models=bootstrap.get("scopedModels") or [],
         tools=tool_names,
+        mcp_manager=bootstrap.get("mcpManager"),
     )
     await session.bind_extensions()
 

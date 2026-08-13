@@ -56,6 +56,44 @@ in the TUI/interactive mode) it asks before running mutating tools (`bash`, `wri
 `edit`); rejections require a reason that is fed back to the model. Mid-task steering
 (`/steer`, `/follow`) and abort (Ctrl+C) work in every interactive mode.
 
+## Slash commands
+
+Available in the TUI and interactive mode (type `/help` in the app):
+
+| Command | Description |
+| --- | --- |
+| `/help` | List all commands |
+| `/stats` | Session statistics (tokens, cost) |
+| `/state`, `/status` | Current session state |
+| `/queue [clear [all|steering|follow]]` | Show or clear the steering/follow-up queues |
+| `/tools` | List active tools |
+| `/clear` | Clear the stream |
+| `/abort` | Abort the current turn |
+| `/model [provider/model]` | Show or switch the model |
+| `/model-cycle` | Cycle to the next available model |
+| `/thinking [level]` | Show or set the thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
+| `/thinking-cycle` | Cycle the thinking level |
+| `/theme [name]` | Show or switch the TUI theme |
+| `/steer <text>` | Send a steering message to the agent |
+| `/follow <text>` | Send a follow-up message |
+| `/compact [instructions]` | Compact the session context |
+| `/tree` | Show the session tree |
+| `/navigate <id> [--summary <text>]` | Navigate to a session entry |
+| `/fork <id>` | Fork the session at an entry |
+| `/new` | Start a new session |
+| `/login [status|provider [apiKey] [model]]` | Show or configure provider credentials |
+| `/logout <provider>` | Remove stored credentials for a provider |
+| `/retry <on|off>` | Enable/disable auto-retry |
+| `/config [key] [value]` | Show or set a config value (e.g. `tools.maxSteps`) |
+| `/extui <list|request|respond|cancel|clear>` | Extension UI control |
+| `/cooperation [on|off]` | Toggle cooperation mode (approval gates) |
+| `/subagents [on|off]` | Enable/disable subagents (Ctrl+S in TUI) |
+| `/bash-show [on|off]` | Show/hide bash command output (only the exit code when off) |
+| `/bash <command>` | Run a shell command directly |
+| `/exit`, `/quit` | Quit the app |
+
+CLI flags: `--no-subagents` disables subagents, `--no-bash-output` hides bash output (exit code only).
+
 ## Global install (run `one` from any directory)
 
 ```bash

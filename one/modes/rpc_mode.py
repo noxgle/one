@@ -245,6 +245,15 @@ async def run_rpc_mode(runtime_host: Any) -> None:
                         },
                     )
                 )
+            elif ctype == "answer_question":
+                try:
+                    session.answer_question(cmd.get("id", ""), cmd.get("answer", ""))
+                except ValueError as e:
+                    output(error(cid, ctype, str(e)))
+                else:
+                    output(success(cid, ctype))
+            elif ctype == "get_pending_questions":
+                output(success(cid, ctype, {"questions": session.get_pending_questions()}))
             elif ctype == "login":
                 provider = (cmd.get("provider") or "").strip()
                 api_key = cmd.get("apiKey") or ""
