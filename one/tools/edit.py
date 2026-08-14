@@ -29,20 +29,43 @@ def edit_tool(cwd: str, path: str, edits: list[dict[str, str]]) -> dict:
     new = old
 
     seen_spans: list[tuple[int, int]] = []
+    resolved: list[tuple[int, str, str]] = []  # (start_in_old, old_text, new_text)
     for e in edits:
-        old_text = e["oldText"]
-        new_text = e["newText"]
+        # Accept both documented keys (oldString/newString) and legacy keys (oldText/newText).
+        old_text: str | None = e.get("oldString") or e.get("oldText")
+        new_text: str | None = e.get("newString") or e.get("newText")
+        if old_text is None or new_text is None:
+            raise ValueError(
+                "Edit tool input is invalid. "
+                "Each edit needs 'oldString'/'newString' (or legacy 'oldText'/'newText')."
+            )
         idx = old.find(old_text)
         if idx < 0:
-            raise ValueError("oldText block not found")
+            raise ValueError("oldString block not found")
         if old.find(old_text, idx + 1) >= 0:
-            raise ValueError("oldText block is not unique")
+            raise ValueError("oldString block is not unique")
         span = (idx, idx + len(old_text))
         for a, b in seen_spans:
             if not (span[1] <= a or span[0] >= b):
                 raise ValueError("Overlapping or nested edits are not allowed")
         seen_spans.append(span)
-        new = new.replace(old_text, new_text)
+        resolved.append((idx, old_text, new_text))
+
+    # Apply all edits by splicing the original text at sorted spans.
+    # This avoids sequential str.replace corruption where an earlier replacement
+    # introduces text that matches a later oldText.
+    zipped: list[tuple[int, int, str]] = sorted(
+        [(idx, idx + len(ot), nt) for idx, ot, nt in resolved],
+        key=lambda t: t[0],
+    )
+    parts: list[str] = []
+    prev_end = 0
+    for start, end, new_text in zipped:
+        parts.append(old[prev_end:start])
+        parts.append(new_text)
+        prev_end = end
+    parts.append(old[prev_end:])
+    new = "".join(parts)
 
     p.write_text(new, encoding="utf-8")
     diff = "".join(

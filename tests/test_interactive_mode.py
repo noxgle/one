@@ -71,6 +71,12 @@ class _DummySettings:
     def set_bash_show_output(self, enabled: bool) -> None:
         self._global.setdefault("bash", {})["showOutput"] = bool(enabled)
 
+    def get_mcp_servers(self) -> dict[str, Any]:
+        return self._global.get("mcpServers", {}) or {}
+
+    def set_mcp_server_enabled(self, name: str, enabled: bool) -> None:
+        self._global.setdefault("mcpServers", {}).setdefault(name, {})["enabled"] = bool(enabled)
+
 
 class _DummyModelRegistry:
     def __init__(self) -> None:
@@ -252,6 +258,9 @@ class _DummySession:
 
     def clear_extension_ui_history(self) -> None:
         self._extui_history = []
+
+    def sync_mcp_tools(self) -> None:
+        pass
 
 
 class _DummyHost:
@@ -557,3 +566,165 @@ async def test_interactive_extui_hooks(monkeypatch, capsys):
     assert '"pending": [' in out
     assert "Extension UI request not found: bad-id" in out
     assert "Extension UI history cleared." in out
+
+
+@pytest.mark.asyncio
+async def test_interactive_bash_error_output_shown_when_enabled(capsys, monkeypatch):
+    import threading
+
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    input_called = threading.Event()
+    emitted = threading.Event()
+
+    def _input(_prompt: str = "") -> str:
+        input_called.set()
+        emitted.wait(5)
+        return "/exit"
+
+    def _emit() -> None:
+        input_called.wait(5)
+        for listener in session._listeners:
+            listener({
+                "type": "tool_call_end",
+                "tool": "bash",
+                "ok": False,
+                "result": {"error": "boom-err\n\nCommand exited with code 2"},
+            })
+        emitted.set()
+
+    t = threading.Thread(target=_emit, daemon=True)
+    t.start()
+    monkeypatch.setattr("builtins.input", _input)
+    await mode.run()
+    t.join()
+    out = capsys.readouterr().out
+    assert "[Tool:ERR] bash" in out
+    assert "boom-err" in out
+
+
+@pytest.mark.asyncio
+async def test_interactive_ls_output_shown_when_enabled(capsys, monkeypatch):
+    import threading
+
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    input_called = threading.Event()
+    emitted = threading.Event()
+
+    def _input(_prompt: str = "") -> str:
+        input_called.set()
+        emitted.wait(5)
+        return "/exit"
+
+    def _emit() -> None:
+        input_called.wait(5)
+        for listener in session._listeners:
+            listener({
+                "type": "tool_call_end",
+                "tool": "ls",
+                "ok": True,
+                "result": {"outputText": "file1.txt\nfile2.txt"},
+            })
+        emitted.set()
+
+    t = threading.Thread(target=_emit, daemon=True)
+    t.start()
+    monkeypatch.setattr("builtins.input", _input)
+    await mode.run()
+    t.join()
+    out = capsys.readouterr().out
+    assert "[Tool:OK] ls" in out
+    assert "file1.txt" in out
+    assert "file2.txt" in out
+
+
+# ---------------------------------------------------------------------------
+# MCP slash-command tests.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMcpManager:
+    """Fake MCP manager for interactive mode slash-command tests."""
+
+    def __init__(self) -> None:
+        self._status: list[dict] = [
+            {
+                "name": "demo",
+                "command": "true",
+                "enabled": True,
+                "running": True,
+                "tools": ["demo_tool"],
+                "error": None,
+            }
+        ]
+        self._enabled_flags: dict[str, bool] = {"demo": True}
+        self._enable_calls: list[tuple[str, str, list, dict]] = []
+
+    def server_status(self) -> list[dict]:
+        result = []
+        for s in self._status:
+            result.append(dict(s))
+        return result
+
+    def tools(self) -> list:
+        result = []
+        for s in self._status:
+            for tname in s["tools"]:
+                if s["running"]:
+                    result.append(type("Tool", (), {"name": tname, "server": s["name"]}))
+        return result
+
+    async def enable_server(
+        self,
+        name: str,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> list[str]:
+        self._enabled_flags[name] = True
+        self._enable_calls.append((name, command, args or [], env or {}))
+        s = None
+        for s in self._status:
+            if s["name"] == name:
+                break
+        if s and not s["running"]:
+            s["running"] = True
+            s["enabled"] = True
+            return list(s["tools"])
+        return []
+
+    async def disable_server(self, name: str) -> list[str]:
+        for s in self._status:
+            if s["name"] == name and s["running"]:
+                s["running"] = False
+                s["enabled"] = False
+                return list(s["tools"])
+        return []
+
+
+@pytest.mark.asyncio
+async def test_interactive_mcp_list(monkeypatch, capsys):
+    session = _DummySession()
+    session._mcp_manager = _FakeMcpManager()
+    mode = InteractiveMode(_DummyHost(session))
+    commands = ["/mcp list", "/exit"]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+    await mode.run()
+    out = capsys.readouterr().out
+    assert "demo: running [demo_tool]" in out
+
+
+@pytest.mark.asyncio
+async def test_interactive_mcp_disable(monkeypatch, capsys):
+    session = _DummySession()
+    session._mcp_manager = _FakeMcpManager()
+    mode = InteractiveMode(_DummyHost(session))
+    commands = ["/mcp disable demo", "/exit"]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+    await mode.run()
+    out = capsys.readouterr().out
+    assert "Server 'demo' disabled. Removed tools: demo_tool" in out
+    # Verify persistence.
+    servers = session.settings_manager.get_mcp_servers()
+    assert servers.get("demo", {}).get("enabled") is False

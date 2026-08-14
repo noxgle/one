@@ -68,7 +68,9 @@ class AgentSession:
         self._pending_bash_messages: list[dict[str, Any]] = []
         self._steering: list[str] = []
         self._follow_up: list[str] = []
-        self._active_tools = tools or list(all_tools.keys())
+        base = tools or list(all_tools.keys())
+        self._base_tools = list(base)
+        self._active_tools = list(base)
         self._mcp_manager = mcp_manager
         if mcp_manager is not None:
             mcp_names = [t.name for t in mcp_manager.tools()]
@@ -868,6 +870,13 @@ class AgentSession:
     @property
     def active_tools(self) -> list[str]:
         return list(self._active_tools)
+
+    def sync_mcp_tools(self) -> None:
+        """Recompute _active_tools from base tools + current MCP tool list."""
+        if self._mcp_manager is None:
+            return
+        mcp_names = [t.name for t in self._mcp_manager.tools()]
+        self._active_tools = list(dict.fromkeys(self._base_tools + mcp_names))
 
     @property
     def steering_mode(self) -> str:

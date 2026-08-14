@@ -13,6 +13,7 @@ class McpServerConfig:
     command: str
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    enabled: bool = True
 
 
 @dataclass
@@ -157,12 +158,15 @@ class McpManager:
                     command=str(command),
                     args=[str(a) for a in (cfg.get("args") or [])],
                     env={str(k): str(v) for k, v in (cfg.get("env") or {}).items()},
+                    enabled=bool(cfg.get("enabled", True)),
                 )
             )
         return cls(servers)
 
     async def start(self) -> None:
         for config in self._servers:
+            if not config.enabled:
+                continue
             client = McpClient(config)
             try:
                 await client.start()
@@ -217,3 +221,75 @@ class McpManager:
         for client in self._clients:
             await client.close()
         self._clients = []
+
+    async def enable_server(self, name: str, command: str, args: list[str] | None = None, env: dict[str, str] | None = None) -> list[str]:
+        """Start a previously disabled MCP server and return the list of added tool names."""
+        # If a client for this name is already running, nothing to do.
+        if any(c.config.name == name for c in self._clients):
+            return []
+        config = McpServerConfig(
+            name=name,
+            command=command,
+            args=args or [],
+            env=env or {},
+            enabled=True,
+        )
+        # Replace any existing config with the same name.
+        self._servers = [s for s in self._servers if s.name != name]
+        self._servers.append(config)
+        client = McpClient(config)
+        try:
+            await client.start()
+            raw_tools = await client.list_tools()
+            added: list[str] = []
+            for t in raw_tools:
+                mc = McpTool(
+                    name=str(t.get("name") or ""),
+                    description=str(t.get("description") or ""),
+                    input_schema=t.get("inputSchema"),
+                    server=name,
+                )
+                self._tools.append(mc)
+                added.append(mc.name)
+            self._clients.append(client)
+            # Remove any stale error for this server.
+            self._errors = [e for e in self._errors if name not in e]
+            return added
+        except Exception as e:
+            await client.close()
+            raise RuntimeError(f"MCP server '{name}': {e}")
+
+    async def disable_server(self, name: str) -> list[str]:
+        """Stop an MCP server and return the names of removed tools."""
+        # Remove tools for this server.
+        removed = [t.name for t in self._tools if t.server == name]
+        self._tools = [t for t in self._tools if t.server != name]
+        # Find and close the client.
+        for client in self._clients:
+            if client.config.name == name:
+                await client.close()
+                break
+        self._clients = [c for c in self._clients if c.config.name != name]
+        # Mark the config as disabled.
+        for config in self._servers:
+            if config.name == name:
+                config.enabled = False
+                break
+        return removed
+
+    def server_status(self) -> list[dict]:
+        """Return status info for every configured server."""
+        statuses: list[dict] = []
+        for config in self._servers:
+            running = any(c.config.name == config.name for c in self._clients)
+            tools = [t.name for t in self._tools if t.server == config.name]
+            error = next((e for e in self._errors if config.name in e), None)
+            statuses.append({
+                "name": config.name,
+                "command": config.command,
+                "enabled": config.enabled,
+                "running": running,
+                "tools": tools,
+                "error": error,
+            })
+        return statuses

@@ -384,9 +384,12 @@ class InteractiveMode:
                 ok = bool(event.get("ok"))
                 status = "OK" if ok else "ERR"
                 print(f"[Tool:{status}] {event.get('tool')}", flush=True)
-                if ok and event.get("tool") == "bash" and getattr(session.settings_manager, "get_bash_show_output", lambda: True)():
+                if event.get("tool") != "finish" and getattr(session.settings_manager, "get_bash_show_output", lambda: True)():
                     payload = event.get("result") or {}
-                    out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
+                    if ok:
+                        out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
+                    else:
+                        out = str(payload.get("error") or "").rstrip()
                     if out:
                         print(out, flush=True)
             if et == "ask_user":
@@ -492,7 +495,7 @@ class InteractiveMode:
                     "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
-                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /bash <command>\n"
+                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /mcp [list|enable|disable] | /bash <command>\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
                 )
                 continue
@@ -825,6 +828,99 @@ class InteractiveMode:
                     continue
                 session.settings_manager.set_bash_show_output(mode == "on")
                 print(f"Bash output set to {mode}.")
+                continue
+            if line.strip() == "/mcp":
+                manager = getattr(session, "_mcp_manager", None)
+                if manager is None:
+                    print("MCP not available (started with --no-mcp).")
+                    continue
+                statuses = manager.server_status()
+                if not statuses:
+                    print("No MCP servers configured. Add mcpServers to settings.json (see README).")
+                    continue
+                for s in statuses:
+                    if s["error"]:
+                        state = f"error: {s['error']}"
+                    elif not s.get("enabled", True):
+                        state = "disabled"
+                    elif s["running"]:
+                        state = "running"
+                    else:
+                        state = "configured (not started)"
+                    tools_list = ", ".join(s["tools"]) if s["tools"] else "(none)"
+                    print(f"- {s['name']}: {state} [{tools_list}]")
+                print("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>")
+                continue
+            if line.startswith("/mcp "):
+                rest = line[len("/mcp ") :].strip()
+                parts = rest.split(maxsplit=1)
+                sub = parts[0].lower() if parts else ""
+                if sub == "list":
+                    manager = getattr(session, "_mcp_manager", None)
+                    if manager is None:
+                        print("MCP not available (started with --no-mcp).")
+                        continue
+                    statuses = manager.server_status()
+                    if not statuses:
+                        print("No MCP servers configured. Add mcpServers to settings.json (see README).")
+                        continue
+                    for s in statuses:
+                        if s["error"]:
+                            state = f"error: {s['error']}"
+                        elif not s.get("enabled", True):
+                            state = "disabled"
+                        elif s["running"]:
+                            state = "running"
+                        else:
+                            state = "configured (not started)"
+                        tools_list = ", ".join(s["tools"]) if s["tools"] else "(none)"
+                        print(f"- {s['name']}: {state} [{tools_list}]")
+                    print("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>")
+                    continue
+                if sub == "enable":
+                    if not parts or len(parts) < 2:
+                        print("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>")
+                        continue
+                    server_name = parts[1]
+                    cfg = session.settings_manager.get_mcp_servers().get(server_name)
+                    if not cfg or not cfg.get("command"):
+                        print(f"No MCP config for '{server_name}'. Add mcpServers.<name> to settings.json (see README).")
+                        continue
+                    manager = getattr(session, "_mcp_manager", None)
+                    if manager is None:
+                        print("MCP not available (started with --no-mcp).")
+                        continue
+                    try:
+                        added = await manager.enable_server(server_name, str(cfg["command"]), cfg.get("args") or [], cfg.get("env") or {})
+                        session.settings_manager.set_mcp_server_enabled(server_name, True)
+                        session.sync_mcp_tools()
+                        if added:
+                            print(f"Server '{server_name}' enabled. Tools: {', '.join(added)}")
+                        else:
+                            print(f"Server '{server_name}' already running.")
+                    except RuntimeError as e:
+                        print(str(e))
+                elif sub == "disable":
+                    if len(parts) < 2:
+                        print("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>")
+                        continue
+                    server_name = parts[1]
+                    manager = getattr(session, "_mcp_manager", None)
+                    if manager is None:
+                        print("MCP not available (started with --no-mcp).")
+                        continue
+                    try:
+                        removed = await manager.disable_server(server_name)
+                        if removed:
+                            print(f"Server '{server_name}' disabled. Removed tools: {', '.join(removed)}")
+                            session.sync_mcp_tools()
+                            session.settings_manager.set_mcp_server_enabled(server_name, False)
+                        else:
+                            print(f"No running server named '{server_name}'.")
+                    except RuntimeError as e:
+                        print(str(e))
+                else:
+                    print("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>")
                 continue
             if line.startswith("/bash "):
                 command = line[len("/bash ") :].strip()

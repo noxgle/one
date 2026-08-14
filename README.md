@@ -88,11 +88,31 @@ Available in the TUI and interactive mode (type `/help` in the app):
 | `/extui <list|request|respond|cancel|clear>` | Extension UI control |
 | `/cooperation [on|off]` | Toggle cooperation mode (approval gates) |
 | `/subagents [on|off]` | Enable/disable subagents (Ctrl+S in TUI) |
-| `/bash-show [on|off]` | Show/hide bash command output (only the exit code when off) |
+| `/bash-show [on|off]` | Show/hide tool output in the main window (bash, ls, read, grep, find, edit, write; only tool status when off) |
+| `/mcp [list|enable <name>|disable <name>]` | List, enable, or disable MCP servers (tools are added/removed live) |
 | `/bash <command>` | Run a shell command directly |
 | `/exit`, `/quit` | Quit the app |
 
 CLI flags: `--no-subagents` disables subagents, `--no-bash-output` hides bash output (exit code only).
+
+## MCP servers
+
+`one` can connect to Model Context Protocol (MCP) servers over stdio and expose their tools to the agent. Configure servers in `settings.json` (in the agent dir, `~/.config/one/settings.json`):
+
+```json
+"mcpServers": {
+  "filesystem": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    "enabled": true
+  }
+}
+```
+
+- `enabled: false` keeps the config but skips the server at startup.
+- `--no-mcp` disables MCP entirely for a run.
+- Manage servers at runtime: `/mcp list`, `/mcp enable <name>`, `/mcp disable <name>` (TUI and interactive mode). Changes take effect immediately and persist to settings.json.
+- MCP tools are documented automatically in the agent's system prompt.
 
 ## Global install (run `one` from any directory)
 

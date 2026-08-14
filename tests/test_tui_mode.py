@@ -275,6 +275,65 @@ async def test_extension_ui_answer_error_preserves_pending_state(tmp_path: Path)
         assert "gone" in stream
 
 
+class _FakeMcpManager:
+    """Fake MCP manager for slash-command tests."""
+
+    def __init__(self) -> None:
+        self._status: list[dict] = [
+            {
+                "name": "demo",
+                "command": "true",
+                "enabled": True,
+                "running": True,
+                "tools": ["demo_tool"],
+                "error": None,
+            }
+        ]
+        self._enabled_flags: dict[str, bool] = {"demo": True}
+        self._enable_calls: list[tuple[str, str, list, dict]] = []
+
+    def server_status(self) -> list[dict]:
+        result = []
+        for s in self._status:
+            result.append(dict(s))
+        return result
+
+    def tools(self) -> list:
+        result = []
+        for s in self._status:
+            for tname in s["tools"]:
+                if s["running"]:
+                    result.append(type("Tool", (), {"name": tname, "server": s["name"]}))
+        return result
+
+    async def enable_server(
+        self,
+        name: str,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> list[str]:
+        self._enabled_flags[name] = True
+        self._enable_calls.append((name, command, args or [], env or {}))
+        s = None
+        for s in self._status:
+            if s["name"] == name:
+                break
+        if s and not s["running"]:
+            s["running"] = True
+            s["enabled"] = True
+            return list(s["tools"])
+        return []
+
+    async def disable_server(self, name: str) -> list[str]:
+        for s in self._status:
+            if s["name"] == name and s["running"]:
+                s["running"] = False
+                s["enabled"] = False
+                return list(s["tools"])
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Headless TUI command-parity tests (/help commands vs interactive mode).
 # ---------------------------------------------------------------------------
@@ -317,6 +376,7 @@ async def test_tui_command_help_lists_all_commands(tmp_path: Path):
             "/config [key] [value]",
             "/extui <list|request|respond|cancel|clear>",
             "/cooperation [on|off]",
+            "/mcp [list|enable|disable]",
             "/bash <command>",
         ]:
             assert token in stream, token
@@ -646,6 +706,88 @@ async def test_tui_command_bash_echo(tmp_path: Path):
         assert "hi" in stream
 
 
+# ---------------------------------------------------------------------------
+# MCP slash-command tests.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_command_mcp_list(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._mcp_manager = _FakeMcpManager()
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/mcp list")
+        stream = "\n".join(app._stream_lines)
+        assert "demo: running [demo_tool]" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_command_mcp_disable(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._mcp_manager = _FakeMcpManager()
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/mcp disable demo")
+        stream = "\n".join(app._stream_lines)
+        assert "Server 'demo' disabled. Removed tools: demo_tool" in stream
+        # Verify persistence: enabled flag stored in settings.
+        servers = session.settings_manager.get_mcp_servers()
+        assert servers.get("demo", {}).get("enabled") is False
+
+
+@pytest.mark.asyncio
+async def test_tui_command_mcp_enable(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    # Pre-configure the server so /mcp enable demo finds it.
+    session.settings_manager.set_config_value(
+        "mcpServers.demo", {"command": "true"}
+    )
+    # Start the fake manager with the server not running so enable actually starts it.
+    fake = _FakeMcpManager()
+    for s in fake._status:
+        if s["name"] == "demo":
+            s["running"] = False
+            s["enabled"] = False
+    session._mcp_manager = fake
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/mcp enable demo")
+        stream = "\n".join(app._stream_lines)
+        assert "Server 'demo' enabled. Tools: demo_tool" in stream
+        # Verify the fake manager was called with correct args.
+        calls = session._mcp_manager._enable_calls
+        assert len(calls) == 1
+        assert calls[0][0] == "demo"
+        assert calls[0][1] == "true"
+        # Verify persistence: enabled flag stored in settings.
+        servers = session.settings_manager.get_mcp_servers()
+        assert servers.get("demo", {}).get("enabled") is True
+
+
+@pytest.mark.asyncio
+async def test_tui_command_mcp_enable_no_config(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._mcp_manager = _FakeMcpManager()
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/mcp enable ghost")
+        stream = "\n".join(app._stream_lines)
+        assert "No MCP config for 'ghost'" in stream
+
+
 @pytest.mark.asyncio
 async def test_tui_command_retry_and_config(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
@@ -956,6 +1098,124 @@ async def test_tui_slash_completion_resets_after_edit(tmp_path: Path):
         input_widget.move_cursor((0, 3))
         await pilot.press("tab")
         assert input_widget.text == "/new"
+
+
+# ---------------------------------------------------------------------------
+# Bash error output display (P1-6 regression).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_bash_error_output_shown_when_enabled(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "bash",
+            "ok": False,
+            "result": {"error": "ls: cannot access '/nonexistent': No such file or directory\n\nCommand exited with code 2"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "tool err: bash" in stream
+        assert "No such file" in stream
+        assert "'/nonexistent'" in stream
+        assert "Command exited with code 2" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_bash_error_output_hidden_when_disabled(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.settings_manager.set_bash_show_output(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "bash",
+            "ok": False,
+            "result": {"error": "ls: cannot access '/nonexistent': No such file or directory\n\nCommand exited with code 2"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "tool err: bash" in stream
+        assert "No such file" not in stream
+        assert "'/nonexistent'" not in stream
+        assert "Command exited with code 2" not in stream
+
+
+# ---------------------------------------------------------------------------
+# Tool output display for non-bash tools (bash-show applies to all).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_ls_output_shown_when_enabled(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "ls",
+            "ok": True,
+            "result": {"outputText": "file1.txt\nfile2.txt"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "tool ok: ls" in stream
+        assert "file1.txt" in stream
+        assert "file2.txt" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_finish_output_not_duplicated(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "finish",
+            "ok": True,
+            "result": {"outputText": "THE-FINAL-SUMMARY"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "tool ok: finish" in stream
+        assert "THE-FINAL-SUMMARY" not in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_ls_output_hidden_when_disabled(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.settings_manager.set_bash_show_output(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "ls",
+            "ok": True,
+            "result": {"outputText": "file1.txt\nfile2.txt"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "tool ok: ls" in stream
+        assert "file1.txt" not in stream
+        assert "file2.txt" not in stream
 
 
 # ---------------------------------------------------------------------------

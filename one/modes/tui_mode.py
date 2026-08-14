@@ -171,7 +171,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/clear", "/abort", "/model", "/model-cycle", "/thinking", "/thinking-cycle",
     "/theme", "/steer", "/follow", "/compact", "/tree", "/navigate", "/fork",
     "/new", "/login", "/logout", "/retry", "/config", "/extui", "/cooperation",
-    "/subagents", "/bash-show",
+    "/subagents", "/bash-show", "/mcp",
     "/bash",
 )
 
@@ -824,7 +824,7 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write("/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info")
-                self._write("/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /bash <command>", "info")
+                self._write("/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /mcp [list|enable|disable] | /bash <command>", "info")
                 return
             if cmd == "/clear":
                 stream_widget = self.query_one("#stream")
@@ -1137,6 +1137,99 @@ if TEXTUAL_AVAILABLE:
                 session.settings_manager.set_bash_show_output(mode == "on")
                 self._write(f"Bash output set to {mode}.", "info")
                 self._refresh_sidebar()
+                return
+            if cmd == "/mcp":
+                manager = getattr(session, "_mcp_manager", None)
+                if manager is None:
+                    self._write("MCP not available (started with --no-mcp).", "info")
+                    return
+                statuses = manager.server_status()
+                if not statuses:
+                    self._write("No MCP servers configured. Add mcpServers to settings.json (see README).", "info")
+                    return
+                for s in statuses:
+                    if s["error"]:
+                        state = f"error: {s['error']}"
+                    elif not s.get("enabled", True):
+                        state = "disabled"
+                    elif s["running"]:
+                        state = "running"
+                    else:
+                        state = "configured (not started)"
+                    tools_list = ", ".join(s["tools"]) if s["tools"] else "(none)"
+                    self._write(f"- {s['name']}: {state} [{tools_list}]", "info")
+                self._write("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>", "info")
+                return
+            if cmd.startswith("/mcp "):
+                rest = cmd[len("/mcp ") :].strip()
+                parts = rest.split(maxsplit=1)
+                sub = parts[0].lower() if parts else ""
+                if sub == "list":
+                    manager = getattr(session, "_mcp_manager", None)
+                    if manager is None:
+                        self._write("MCP not available (started with --no-mcp).", "info")
+                        return
+                    statuses = manager.server_status()
+                    if not statuses:
+                        self._write("No MCP servers configured. Add mcpServers to settings.json (see README).", "info")
+                        return
+                    for s in statuses:
+                        if s["error"]:
+                            state = f"error: {s['error']}"
+                        elif not s.get("enabled", True):
+                            state = "disabled"
+                        elif s["running"]:
+                            state = "running"
+                        else:
+                            state = "configured (not started)"
+                        tools_list = ", ".join(s["tools"]) if s["tools"] else "(none)"
+                        self._write(f"- {s['name']}: {state} [{tools_list}]", "info")
+                    self._write("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>", "info")
+                    return
+                if sub == "enable":
+                    if not parts or len(parts) < 2:
+                        self._write("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>", "error")
+                        return
+                    server_name = parts[1]
+                    cfg = session.settings_manager.get_mcp_servers().get(server_name)
+                    if not cfg or not cfg.get("command"):
+                        self._write(f"No MCP config for '{server_name}'. Add mcpServers.<name> to settings.json (see README).", "error")
+                        return
+                    manager = getattr(session, "_mcp_manager", None)
+                    if manager is None:
+                        self._write("MCP not available (started with --no-mcp).", "error")
+                        return
+                    try:
+                        added = await manager.enable_server(server_name, str(cfg["command"]), cfg.get("args") or [], cfg.get("env") or {})
+                        session.settings_manager.set_mcp_server_enabled(server_name, True)
+                        session.sync_mcp_tools()
+                        if added:
+                            self._write(f"Server '{server_name}' enabled. Tools: {', '.join(added)}", "info")
+                        else:
+                            self._write(f"Server '{server_name}' already running.", "info")
+                    except RuntimeError as e:
+                        self._write(str(e), "error")
+                elif sub == "disable":
+                    if len(parts) < 2:
+                        self._write("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>", "error")
+                        return
+                    server_name = parts[1]
+                    manager = getattr(session, "_mcp_manager", None)
+                    if manager is None:
+                        self._write("MCP not available (started with --no-mcp).", "error")
+                        return
+                    try:
+                        removed = await manager.disable_server(server_name)
+                        if removed:
+                            self._write(f"Server '{server_name}' disabled. Removed tools: {', '.join(removed)}", "info")
+                            session.sync_mcp_tools()
+                            session.settings_manager.set_mcp_server_enabled(server_name, False)
+                        else:
+                            self._write(f"No running server named '{server_name}'.", "warn")
+                    except RuntimeError as e:
+                        self._write(str(e), "error")
+                else:
+                    self._write("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>", "error")
                 return
             if cmd.startswith("/config"):
                 rest = cmd[len("/config") :].strip()
@@ -1481,7 +1574,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer = ""
 
         def action_help(self) -> None:
-            self._write("/help /stats /state /status /tools /model /model-cycle /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /bash /abort /clear /exit", "info")
+            self._write("/help /stats /state /status /tools /model /model-cycle /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /mcp /bash /abort /clear /exit", "info")
 
         def _show_extension_panel(self, req: dict[str, Any]) -> None:
             """Render an extension widget/overlay payload as a TUI component."""
@@ -1605,9 +1698,12 @@ if TEXTUAL_AVAILABLE:
                 status = "ok" if event.get("ok") else "err"
                 tool_name = str(event.get("tool") or "tool")
                 self._write_tool_block(f"tool {status}: {tool_name}")
-                if event.get("ok") and tool_name == "bash" and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)():
+                if tool_name != "finish" and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)():
                     payload = event.get("result") or {}
-                    out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
+                    if event.get("ok"):
+                        out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
+                    else:
+                        out = str(payload.get("error") or "").rstrip()
                     if out:
                         self._write_tool_block(out)
             elif et == "turn_end":

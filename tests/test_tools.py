@@ -61,6 +61,47 @@ def test_edit_success_and_errors(tmp_path: Path):
         edit_tool(str(tmp_path), "a.txt", [{"oldText": "does-not-exist", "newText": "X"}])
 
 
+def test_edit_with_oldString_newString_keys(tmp_path: Path):
+    """The documented schema uses oldString/newString keys."""
+    write_tool(str(tmp_path), "a.txt", "hello world\n")
+    edit_tool(str(tmp_path), "a.txt", [{"oldString": "hello", "newString": "goodbye"}])
+    after = read_tool(str(tmp_path), "a.txt")
+    assert "goodbye" in after["content"][0]["text"]
+    assert "hello" not in after["content"][0]["text"]
+
+
+def test_edit_multi_collision_no_sequential_corruption(tmp_path: Path):
+    """When an earlier replacement creates text matching a later oldText, the later
+    edit must still match the ORIGINAL text, not the mutated intermediate result.
+
+    File: "foo\\nbar\\n"
+    Edit 1: foo -> bar X
+    Edit 2: bar -> Y
+
+    Correct result: "bar X\\nY\\n"  (bar on line 2 replaced in original)
+    Broken result:  "Y X\\nbar\\n"  (sequential replace hits the bar inside 'bar X')
+    """
+    write_tool(str(tmp_path), "a.txt", "foo\nbar\n")
+    edits = [
+        {"oldString": "foo", "newString": "bar X"},
+        {"oldString": "bar", "newString": "Y"},
+    ]
+    edit_tool(str(tmp_path), "a.txt", edits)
+    after = read_tool(str(tmp_path), "a.txt")
+    assert after["content"][0]["text"] == "bar X\nY\n", (
+        f"Expected 'bar X\\nY\\n', got {after['content'][0]['text']!r}"
+    )
+
+
+def test_edit_missing_keys_raises_value_error(tmp_path: Path):
+    """An edit dict without oldString/oldText or newString/newText must raise ValueError."""
+    write_tool(str(tmp_path), "a.txt", "hello\n")
+    with pytest.raises(ValueError) as excinfo:
+        edit_tool(str(tmp_path), "a.txt", [{"path": "a.txt", "content": "nope"}])
+    assert "oldString" in str(excinfo.value)
+    assert "oldText" in str(excinfo.value)
+
+
 def test_find_grep_ls_basic(tmp_path: Path):
     (tmp_path / "x.py").write_text("print('hello')\n", encoding="utf-8")
     (tmp_path / "y.txt").write_text("hello world\n", encoding="utf-8")

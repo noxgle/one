@@ -49,6 +49,8 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "find": "{pattern?, path?}",
     "ls": "{path?}",
     "finish": "{summary, goal_success}  # end the task; summary is shown to the user",
+    "spawn_subagent": "{task, tasks?, model?, tools?}  # delegate a subtask to an isolated subagent (returns summary)",
+    "ask_user": "{question, timeoutSec?}  # ask the human a question and wait for their answer",
 }
 
 # Injected via replace() (not str.format) because the text contains literal JSON braces.

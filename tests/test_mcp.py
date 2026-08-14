@@ -235,3 +235,116 @@ def test_cli_no_mcp_flag_parses():
     parsed = parse_args(["--no-mcp"])
     assert parsed.no_mcp is True
     assert parsed.errors == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_server_status(tmp_path: Path):
+    script = _write_fake_server(tmp_path)
+    manager = McpManager([McpServerConfig("fake", sys.executable, [str(script)])])
+    await manager.start()
+    statuses = manager.server_status()
+    assert len(statuses) == 1
+    assert statuses[0]["name"] == "fake"
+    assert statuses[0]["running"] is True
+    assert statuses[0]["tools"] == ["echo_tool"]
+    assert statuses[0]["enabled"] is True
+    assert statuses[0]["error"] is None
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_disabled_server_not_started(tmp_path: Path):
+    script = _write_fake_server(tmp_path)
+    manager = McpManager([McpServerConfig("fake", sys.executable, [str(script)], enabled=False)])
+    await manager.start()
+    statuses = manager.server_status()
+    assert len(statuses) == 1
+    assert statuses[0]["running"] is False
+    assert statuses[0]["tools"] == []
+    assert statuses[0]["enabled"] is False
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_disable_server(tmp_path: Path):
+    script = _write_fake_server(tmp_path)
+    manager = McpManager([McpServerConfig("fake", sys.executable, [str(script)])])
+    await manager.start()
+    assert manager.has_tool("echo_tool") is True
+    removed = await manager.disable_server("fake")
+    assert "echo_tool" in removed
+    assert manager.tools() == []
+    assert manager.has_tool("echo_tool") is False
+    statuses = manager.server_status()
+    assert statuses[0]["running"] is False
+    assert statuses[0]["enabled"] is False
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_enable_server(tmp_path: Path):
+    script = _write_fake_server(tmp_path)
+    manager = McpManager([McpServerConfig("fake", sys.executable, [str(script)], enabled=False)])
+    await manager.start()
+    assert manager.tools() == []
+    added = await manager.enable_server("fake", sys.executable, args=[str(script)])
+    assert "echo_tool" in added
+    assert manager.has_tool("echo_tool") is True
+    statuses = manager.server_status()
+    assert statuses[0]["running"] is True
+    assert statuses[0]["enabled"] is True
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_enable_already_running_returns_empty(tmp_path: Path):
+    script = _write_fake_server(tmp_path)
+    manager = McpManager([McpServerConfig("fake", sys.executable, [str(script)])])
+    await manager.start()
+    added = await manager.enable_server("fake", sys.executable, args=[str(script)])
+    assert added == []
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_disable_nonexistent_returns_empty(tmp_path: Path):
+    script = _write_fake_server(tmp_path)
+    manager = McpManager([McpServerConfig("fake", sys.executable, [str(script)])])
+    await manager.start()
+    removed = await manager.disable_server("nonexistent")
+    assert removed == []
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_server_status_with_error(tmp_path: Path):
+    manager = McpManager([McpServerConfig("ghost", "/nonexistent/binary-xyz")])
+    await manager.start()
+    statuses = manager.server_status()
+    assert len(statuses) == 1
+    assert statuses[0]["name"] == "ghost"
+    assert statuses[0]["running"] is False
+    assert statuses[0]["error"] is not None
+    assert "ghost" in statuses[0]["error"]
+    await manager.close()
+
+
+def test_settings_manager_set_mcp_server_enabled():
+    sm = SettingsManager.in_memory(initial={"mcpServers": {"srv": {"command": "npx"}}})
+    assert sm.get_mcp_servers() == {"srv": {"command": "npx"}}
+    sm.set_mcp_server_enabled("srv", False)
+    global_settings = sm.get_global_settings()
+    assert global_settings["mcpServers"]["srv"]["enabled"] is False
+    sm.set_mcp_server_enabled("srv", True)
+    global_settings = sm.get_global_settings()
+    assert global_settings["mcpServers"]["srv"]["enabled"] is True
+
+
+def test_mcp_manager_create_reads_enabled_from_settings():
+    sm = SettingsManager.in_memory(initial={"mcpServers": {"srv": {"command": "npx", "enabled": False}}})
+    manager = McpManager.create(sm)
+    assert len(manager._servers) == 1
+    assert manager._servers[0].enabled is False
+    sm2 = SettingsManager.in_memory(initial={"mcpServers": {"srv": {"command": "npx"}}})
+    manager2 = McpManager.create(sm2)
+    assert manager2._servers[0].enabled is True

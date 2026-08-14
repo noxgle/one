@@ -223,6 +223,15 @@ class SettingsManager:
         """MCP server config: {name: {command, args, env}} from settings.json."""
         return self.merged().get("mcpServers", {}) or {}
 
+    def set_mcp_server_enabled(self, name: str, enabled: bool) -> None:
+        """Persist the enabled flag for an MCP server config entry."""
+        mcp = dict(self._global.get("mcpServers", {}) or {})
+        entry = dict(mcp.get(name, {}) or {})
+        entry["enabled"] = bool(enabled)
+        mcp[name] = entry
+        self._global["mcpServers"] = mcp
+        self._save_global()
+
     def set_retry_enabled(self, enabled: bool) -> None:
         retry = self._global.get("retry", {})
         retry["enabled"] = enabled
