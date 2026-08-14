@@ -1183,7 +1183,7 @@ if TEXTUAL_AVAILABLE:
                         else:
                             state = "configured (not started)"
                         tools_list = ", ".join(s["tools"]) if s["tools"] else "(none)"
-                        self._write(f"- {s['name']}: {state} [{tools_list}]", "info")
+                        self._write(f"- {s['name']}: {state} ({s.get('transport', 'stdio')}) [{tools_list}]", "info")
                     self._write("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>", "info")
                     return
                 if sub == "enable":
@@ -1192,7 +1192,7 @@ if TEXTUAL_AVAILABLE:
                         return
                     server_name = parts[1]
                     cfg = session.settings_manager.get_mcp_servers().get(server_name)
-                    if not cfg or not cfg.get("command"):
+                    if not cfg or (not cfg.get("command") and not cfg.get("url")):
                         self._write(f"No MCP config for '{server_name}'. Add mcpServers.<name> to settings.json (see README).", "error")
                         return
                     manager = getattr(session, "_mcp_manager", None)
@@ -1200,7 +1200,13 @@ if TEXTUAL_AVAILABLE:
                         self._write("MCP not available (started with --no-mcp).", "error")
                         return
                     try:
-                        added = await manager.enable_server(server_name, str(cfg["command"]), cfg.get("args") or [], cfg.get("env") or {})
+                        added = await manager.enable_server(
+                            server_name,
+                            str(cfg.get("command", "")),
+                            cfg.get("args") or [],
+                            cfg.get("env") or {},
+                            url=cfg.get("url"),
+                        )
                         session.settings_manager.set_mcp_server_enabled(server_name, True)
                         session.sync_mcp_tools()
                         if added:

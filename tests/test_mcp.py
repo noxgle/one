@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import httpx
 
 from one.cli.args import parse_args
 from one.core.agent_session import AgentSession
@@ -13,7 +14,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
-from one.mcp import McpClient, McpManager, McpServerConfig, McpTool
+from one.mcp import McpClient, McpManager, McpServerConfig, McpTool, HttpMcpClient
 
 FAKE_SERVER_SRC = '''\
 import asyncio
@@ -348,3 +349,252 @@ def test_mcp_manager_create_reads_enabled_from_settings():
     sm2 = SettingsManager.in_memory(initial={"mcpServers": {"srv": {"command": "npx"}}})
     manager2 = McpManager.create(sm2)
     assert manager2._servers[0].enabled is True
+
+
+# ---------------------------------------------------------------------------
+# HTTP transport tests (httpx.MockTransport — no network).
+# ---------------------------------------------------------------------------
+
+
+def _make_http_handler() -> tuple:
+    """Returns (handler, calls). Emulates a streamable-HTTP MCP server."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        payload = json.loads(request.content)
+        method = payload.get("method", "")
+        rid = payload.get("id")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                headers={
+                    "Mcp-Session-Id": "sess-1",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": "fake-http", "version": "0.1"},
+                    },
+                },
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        if method == "tools/list":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "echo_tool",
+                                "description": "Echo",
+                                "inputSchema": {"type": "object"},
+                            }
+                        ]
+                    },
+                },
+            )
+        if method == "tools/call":
+            sse = (
+                "event: keepalive\n\n"
+                + "event: message\n"
+                + "data: "
+                + json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "result": {
+                            "content": [{"type": "text", "text": "pong"}]
+                        },
+                    }
+                )
+                + "\n\n"
+            )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=sse.encode(),
+            )
+        return httpx.Response(
+            400,
+            json={
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {"code": -32601, "message": "method not found"},
+            },
+        )
+
+    return handler, calls
+
+
+@pytest.mark.asyncio
+async def test_http_client_initialize_and_session_id():
+    handler, calls = _make_http_handler()
+    client = HttpMcpClient(
+        McpServerConfig("fake-http", "", url="http://x/mcp"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        await client.start()
+        assert len(calls) == 2  # initialize + notifications/initialized
+        init_req = calls[0]
+        assert "MCP-Protocol-Version" in init_req.headers
+        assert init_req.headers["MCP-Protocol-Version"] == "2025-06-18"
+        assert "text/event-stream" in init_req.headers["Accept"]
+        tools = await client.list_tools()
+        assert len(calls) == 3
+        tools_req = calls[2]
+        # The session ID from the initialize response should be echoed back.
+        assert tools_req.headers["Mcp-Session-Id"] == "sess-1"
+        assert len(tools) == 1
+        assert tools[0]["name"] == "echo_tool"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_http_client_call_tool_sse():
+    handler, _calls = _make_http_handler()
+    client = HttpMcpClient(
+        McpServerConfig("fake-http", "", url="http://x/mcp"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        await client.start()
+        result = await client.call_tool("echo_tool", {"text": "hi"})
+        assert result["content"][0]["text"] == "pong"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_http_client_error_status():
+    def error_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "internal"})
+
+    client = HttpMcpClient(
+        McpServerConfig("ghost", "", url="http://x/mcp"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(error_handler)),
+    )
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.start()
+        assert "HTTP 500" in str(exc_info.value)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_http_client_no_matching_response():
+    def bad_id_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        method = payload.get("method", "")
+        rid = payload.get("id")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": rid,  # matches initialize so start() succeeds
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": "fake-http", "version": "0.1"},
+                    },
+                },
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 9999,  # never matches tools/list
+                "result": {},
+            },
+        )
+
+    client = HttpMcpClient(
+        McpServerConfig("ghost", "", url="http://x/mcp"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(bad_id_handler)),
+    )
+    try:
+        await client.start()
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.list_tools()
+        assert "did not respond" in str(exc_info.value)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_http_client_notifications_initialized_202():
+    """start() should not raise even when the initialized notification returns 202."""
+    handler, _calls = _make_http_handler()
+    client = HttpMcpClient(
+        McpServerConfig("fake-http", "", url="http://x/mcp"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        await client.start()  # should succeed
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Manager-level HTTP tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_create_http_config():
+    sm = SettingsManager.in_memory(
+        initial={"mcpServers": {"ws": {"url": "http://127.0.0.1:8000/mcp", "enabled": True}}}
+    )
+    manager = McpManager.create(sm)
+    assert len(manager._servers) == 1
+    assert manager._servers[0].url == "http://127.0.0.1:8000/mcp"
+    assert manager._servers[0].command == ""
+    statuses = manager.server_status()
+    assert len(statuses) == 1
+    assert statuses[0]["transport"] == "http"
+    assert statuses[0]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_http_connection_error():
+    manager = McpManager(
+        [McpServerConfig("ghost", "", url="http://127.0.0.1:1/mcp")]
+    )
+    await manager.start()
+    statuses = manager.server_status()
+    assert len(statuses) == 1
+    assert statuses[0]["transport"] == "http"
+    assert statuses[0]["error"] is not None
+    assert manager.tools() == []
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_enable_server_http_url():
+    manager = McpManager(
+        [McpServerConfig("ws", "", url="http://127.0.0.1:1/mcp", enabled=False)]
+    )
+    await manager.start()
+    # enable_server with url should raise connection error.
+    with pytest.raises(RuntimeError):
+        await manager.enable_server("ws", "", url="http://127.0.0.1:1/mcp")
+    # disable_server with url should not crash.
+    removed = await manager.disable_server("ws")
+    assert removed == []
+    statuses = manager.server_status()
+    assert statuses[0]["transport"] == "http"
+    await manager.close()

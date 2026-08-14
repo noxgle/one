@@ -1,3 +1,3 @@
-from .client import McpClient, McpManager, McpServerConfig, McpTool
+from .client import HttpMcpClient, McpClient, McpManager, McpServerConfig, McpTool
 
-__all__ = ["McpClient", "McpManager", "McpServerConfig", "McpTool"]
+__all__ = ["HttpMcpClient", "McpClient", "McpManager", "McpServerConfig", "McpTool"]

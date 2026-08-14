@@ -656,6 +656,7 @@ class _FakeMcpManager:
                 "running": True,
                 "tools": ["demo_tool"],
                 "error": None,
+                "transport": "stdio",
             }
         ]
         self._enabled_flags: dict[str, bool] = {"demo": True}
@@ -681,6 +682,7 @@ class _FakeMcpManager:
         command: str,
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
+        url: str | None = None,
     ) -> list[str]:
         self._enabled_flags[name] = True
         self._enable_calls.append((name, command, args or [], env or {}))
@@ -712,7 +714,7 @@ async def test_interactive_mcp_list(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", _mk_input(commands))
     await mode.run()
     out = capsys.readouterr().out
-    assert "demo: running [demo_tool]" in out
+    assert "demo: running (stdio) [demo_tool]" in out
 
 
 @pytest.mark.asyncio

@@ -97,7 +97,9 @@ CLI flags: `--no-subagents` disables subagents, `--no-bash-output` hides bash ou
 
 ## MCP servers
 
-`one` can connect to Model Context Protocol (MCP) servers over stdio and expose their tools to the agent. Configure servers in `settings.json` (in the agent dir, `~/.config/one/settings.json`):
+`one` can connect to Model Context Protocol (MCP) servers and expose their tools to the agent. Configure servers in `settings.json` (in the agent dir, `~/.config/one/settings.json`):
+
+**stdio transport** (spawns the server per session):
 
 ```json
 "mcpServers": {
@@ -109,6 +111,19 @@ CLI flags: `--no-subagents` disables subagents, `--no-bash-output` hides bash ou
 }
 ```
 
+**streamable HTTP transport** (single long-lived HTTP connection):
+
+```json
+"mcpServers": {
+  "web-deepsearch": {
+    "url": "http://127.0.0.1:8000/mcp",
+    "enabled": true
+  }
+}
+```
+
+- `url` — streamable HTTP transport; the server must be reachable (e.g. `docker compose up -d` for `web-deepsearch`).
+- `command` — stdio transport; spawns the server as a child process per session.
 - `enabled: false` keeps the config but skips the server at startup.
 - `--no-mcp` disables MCP entirely for a run.
 - Manage servers at runtime: `/mcp list`, `/mcp enable <name>`, `/mcp disable <name>` (TUI and interactive mode). Changes take effect immediately and persist to settings.json.

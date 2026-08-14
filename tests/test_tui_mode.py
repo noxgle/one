@@ -287,6 +287,7 @@ class _FakeMcpManager:
                 "running": True,
                 "tools": ["demo_tool"],
                 "error": None,
+                "transport": "stdio",
             }
         ]
         self._enabled_flags: dict[str, bool] = {"demo": True}
@@ -312,6 +313,7 @@ class _FakeMcpManager:
         command: str,
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
+        url: str | None = None,
     ) -> list[str]:
         self._enabled_flags[name] = True
         self._enable_calls.append((name, command, args or [], env or {}))
@@ -722,7 +724,7 @@ async def test_tui_command_mcp_list(tmp_path: Path):
         await pilot.pause()
         await _submit(app, pilot, "/mcp list")
         stream = "\n".join(app._stream_lines)
-        assert "demo: running [demo_tool]" in stream
+        assert "demo: running (stdio) [demo_tool]" in stream
 
 
 @pytest.mark.asyncio

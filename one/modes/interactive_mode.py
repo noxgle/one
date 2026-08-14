@@ -848,7 +848,7 @@ class InteractiveMode:
                     else:
                         state = "configured (not started)"
                     tools_list = ", ".join(s["tools"]) if s["tools"] else "(none)"
-                    print(f"- {s['name']}: {state} [{tools_list}]")
+                    print(f"- {s['name']}: {state} ({s.get('transport', 'stdio')}) [{tools_list}]")
                 print("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>")
                 continue
             if line.startswith("/mcp "):
@@ -874,7 +874,7 @@ class InteractiveMode:
                         else:
                             state = "configured (not started)"
                         tools_list = ", ".join(s["tools"]) if s["tools"] else "(none)"
-                        print(f"- {s['name']}: {state} [{tools_list}]")
+                        print(f"- {s['name']}: {state} ({s.get('transport', 'stdio')}) [{tools_list}]")
                     print("Usage: /mcp list | /mcp enable <name> | /mcp disable <name>")
                     continue
                 if sub == "enable":
@@ -883,7 +883,7 @@ class InteractiveMode:
                         continue
                     server_name = parts[1]
                     cfg = session.settings_manager.get_mcp_servers().get(server_name)
-                    if not cfg or not cfg.get("command"):
+                    if not cfg or (not cfg.get("command") and not cfg.get("url")):
                         print(f"No MCP config for '{server_name}'. Add mcpServers.<name> to settings.json (see README).")
                         continue
                     manager = getattr(session, "_mcp_manager", None)
@@ -891,7 +891,13 @@ class InteractiveMode:
                         print("MCP not available (started with --no-mcp).")
                         continue
                     try:
-                        added = await manager.enable_server(server_name, str(cfg["command"]), cfg.get("args") or [], cfg.get("env") or {})
+                        added = await manager.enable_server(
+                            server_name,
+                            str(cfg.get("command", "")),
+                            cfg.get("args") or [],
+                            cfg.get("env") or {},
+                            url=cfg.get("url"),
+                        )
                         session.settings_manager.set_mcp_server_enabled(server_name, True)
                         session.sync_mcp_tools()
                         if added:
