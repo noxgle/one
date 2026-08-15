@@ -126,7 +126,7 @@ def test_build_sidebar_snapshot_mcp_manager_raises_is_safe() -> None:
 
 @pytest.mark.asyncio
 async def test_tui_sidebar_renders_mcp_off_without_manager(tmp_path: Path) -> None:
-    """Verify the sidebar shows 'MCP: off' when the session has no _mcp_manager."""
+    """Verify the sidebar shows MCP section with 'off' when no _mcp_manager."""
     from textual.widgets import Static
 
     from one.modes.tui_mode import _OneTextualApp
@@ -139,7 +139,38 @@ async def test_tui_sidebar_renders_mcp_off_without_manager(tmp_path: Path) -> No
         app._refresh_sidebar()
         await pilot.pause()
         sidebar = app.query_one("#sidebar", Static)
-        assert "MCP: off" in sidebar.content
+        assert "MCP" in sidebar.content
+        assert "off" in sidebar.content
+        assert sidebar.content.index("MCP") < sidebar.content.index("Keys")
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
+    """Verify enabled MCP clients are listed as bullets; disabled excluded."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    class _McpManagerWithServers:
+        def server_status(self) -> list[dict]:
+            return [
+                {"name": "demo", "enabled": True, "running": True, "tools": ["a", "b", "c"], "transport": "stdio", "error": None},
+                {"name": "web", "enabled": True, "running": False, "tools": ["x"], "transport": "http", "error": "boom"},
+                {"name": "old", "enabled": False, "running": False, "tools": [], "transport": "stdio", "error": None},
+            ]
+
+    session = _mk_app_session(tmp_path)
+    session._mcp_manager = _McpManagerWithServers()
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        assert "- demo" in sidebar.content
+        assert "- web" in sidebar.content
+        assert "- old" not in sidebar.content
+        assert sidebar.content.index("MCP") < sidebar.content.index("Keys")
 
 
 def test_thinking_frames_are_single_width() -> None:

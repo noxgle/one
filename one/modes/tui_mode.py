@@ -773,19 +773,11 @@ if TEXTUAL_AVAILABLE:
             else:
                 status = "idle"
             if not s["mcpEnabled"]:
-                mcp_text = "MCP: off"
+                mcp_lines = ["off"]
             elif not s["mcpServers"]:
-                mcp_text = "MCP: none"
+                mcp_lines = ["none"]
             else:
-                parts = [
-                    f"{sv['name']}({sv['toolCount']},{sv['transport']}){'!' if sv['error'] else ''}"
-                    for sv in s["mcpServers"]
-                ]
-                joined = "MCP: " + " ".join(parts)
-                if len(joined) <= 38:
-                    mcp_text = joined
-                else:
-                    mcp_text = "MCP:\n" + "\n".join(f"  {p}" for p in parts)
+                mcp_lines = [f"- {sv['name']}" for sv in s["mcpServers"]]
             sidebar = (
                 f"[b {self._theme.info}]Info[/]\n"
                 f"Model: {s['model']}\n"
@@ -797,9 +789,11 @@ if TEXTUAL_AVAILABLE:
                 f"Coop: {s['coop']} (Ctrl+A)\n"
                 f"Subagents: {'on' if s['subagents'] else 'off'} (Ctrl+S)\n"
                 f"Bash: {'on' if s['bashOutput'] else 'off'}\n"
-                f"{mcp_text}\n"
                 f"CWD: {s['cwd']}\n"
                 f"Session: {s['sessionId']}\n"
+                "\n"
+                f"[b {self._theme.info}]MCP[/]\n"
+                + "\n".join(mcp_lines) + "\n"
                 "\n"
                 f"[b {self._theme.info}]Keys[/]\n"
                 "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+V paste\n"
