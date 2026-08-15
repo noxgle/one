@@ -41,6 +41,24 @@ def build_sidebar_snapshot(
     steer_count = len(queues.get("steering", []))
     follow_count = len(queues.get("followUp", []))
 
+    mcp_manager = getattr(session, "_mcp_manager", None)
+    mcp_servers: list[dict[str, Any]] = []
+    if mcp_manager is not None:
+        try:
+            statuses = mcp_manager.server_status()
+        except Exception:
+            statuses = []
+        for s in statuses:
+            if not s.get("enabled"):
+                continue
+            mcp_servers.append({
+                "name": str(s.get("name") or ""),
+                "transport": str(s.get("transport") or ""),
+                "toolCount": len(s.get("tools") or []),
+                "running": bool(s.get("running")),
+                "error": s.get("error"),
+            })
+
     return {
         "model": f"{session.model.provider}/{session.model.id}" if session.model else "none",
         "thinking": getattr(session, "thinking_level", "medium"),
@@ -62,6 +80,8 @@ def build_sidebar_snapshot(
         "cost": float(stats.get("cost") or 0.0),
         "subagents": bool(getattr(getattr(session, "settings_manager", None), "get_subagents_enabled", lambda: True)()),
         "bashOutput": bool(getattr(getattr(session, "settings_manager", None), "get_bash_show_output", lambda: True)()),
+        "mcpEnabled": mcp_manager is not None,
+        "mcpServers": mcp_servers,
     }
 
 
@@ -363,9 +383,11 @@ if TEXTUAL_AVAILABLE:
 
         #sidebar {
             width: 42;
+            height: 1fr;
             border: round #2f466e;
             background: #101a30;
             padding: 0 1;
+            overflow-y: auto;
         }
 
         #ext_panel {
@@ -750,6 +772,20 @@ if TEXTUAL_AVAILABLE:
                 status = "working…"
             else:
                 status = "idle"
+            if not s["mcpEnabled"]:
+                mcp_text = "MCP: off"
+            elif not s["mcpServers"]:
+                mcp_text = "MCP: none"
+            else:
+                parts = [
+                    f"{sv['name']}({sv['toolCount']},{sv['transport']}){'!' if sv['error'] else ''}"
+                    for sv in s["mcpServers"]
+                ]
+                joined = "MCP: " + " ".join(parts)
+                if len(joined) <= 38:
+                    mcp_text = joined
+                else:
+                    mcp_text = "MCP:\n" + "\n".join(f"  {p}" for p in parts)
             sidebar = (
                 f"[b {self._theme.info}]Info[/]\n"
                 f"Model: {s['model']}\n"
@@ -761,6 +797,7 @@ if TEXTUAL_AVAILABLE:
                 f"Coop: {s['coop']} (Ctrl+A)\n"
                 f"Subagents: {'on' if s['subagents'] else 'off'} (Ctrl+S)\n"
                 f"Bash: {'on' if s['bashOutput'] else 'off'}\n"
+                f"{mcp_text}\n"
                 f"CWD: {s['cwd']}\n"
                 f"Session: {s['sessionId']}\n"
                 "\n"

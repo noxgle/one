@@ -701,3 +701,61 @@ async def test_finish_tool_disabled_raises_and_continues(tmp_path: Path):
     tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
     assert tool_results
     assert "disabled" in tool_results[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_bash_model_timeout_honored_above_settings(tmp_path: Path):
+    """Model's explicit 'timeout' arg overrides the settings default — command must NOT be cancelled."""
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 2, "timeoutSec": 1}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["bash"])
+    agent.providers = {
+        "openai": _FakeProvider(
+            [
+                '{"tool":"bash","args":{"command":"sleep 2 && echo ok","timeout":3}}',
+                "done",
+            ]
+        )
+    }
+
+    await agent.prompt("Run command")
+    tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
+    assert len(tool_results) == 1
+    payload = json.loads(tool_results[0]["content"])
+    assert payload["ok"] is True
+    assert "ok" in payload.get("result", "")
+
+
+@pytest.mark.asyncio
+async def test_bash_no_timeout_uses_settings_default(tmp_path: Path):
+    """When model omits 'timeout', the settings default applies — command is timed out."""
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 2, "timeoutSec": 1}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["bash"])
+    agent.providers = {
+        "openai": _FakeProvider(
+            [
+                '{"tool":"bash","args":{"command":"sleep 3"}}',
+                "done",
+            ]
+        )
+    }
+
+    await agent.prompt("Run command")
+    tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
+    assert tool_results
+    content = tool_results[0]["content"].lower()
+    assert "timed out" in content
+    assert "(cancelled)" not in content

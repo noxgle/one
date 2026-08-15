@@ -87,6 +87,59 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     assert snapshot["coop"] == "off"
     assert snapshot["subagents"] is True
     assert snapshot["bashOutput"] is True
+    assert snapshot["mcpEnabled"] is False
+    assert snapshot["mcpServers"] == []
+
+
+def test_build_sidebar_snapshot_lists_enabled_mcp_servers() -> None:
+    class _FakeMcpManager:
+        def server_status(self) -> list[dict]:
+            return [
+                {"name": "demo", "enabled": True, "running": True, "tools": ["a", "b", "c"], "transport": "stdio", "error": None},
+                {"name": "web", "enabled": True, "running": False, "tools": ["x"], "transport": "http", "error": "boom"},
+                {"name": "old", "enabled": False, "running": False, "tools": [], "transport": "stdio", "error": None},
+            ]
+
+    session = _DummySession()
+    session._mcp_manager = _FakeMcpManager()
+    snapshot = build_sidebar_snapshot(session, retry_state="idle")
+
+    assert snapshot["mcpEnabled"] is True
+    assert [s["name"] for s in snapshot["mcpServers"]] == ["demo", "web"]
+    assert snapshot["mcpServers"][0]["toolCount"] == 3
+    assert snapshot["mcpServers"][0]["transport"] == "stdio"
+    assert snapshot["mcpServers"][1]["error"] == "boom"
+
+
+def test_build_sidebar_snapshot_mcp_manager_raises_is_safe() -> None:
+    class _FakeMcpManagerRaises:
+        def server_status(self) -> list[dict]:
+            raise RuntimeError("boom")
+
+    session = _DummySession()
+    session._mcp_manager = _FakeMcpManagerRaises()
+    snapshot = build_sidebar_snapshot(session, retry_state="idle")
+
+    assert snapshot["mcpEnabled"] is True
+    assert snapshot["mcpServers"] == []
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_renders_mcp_off_without_manager(tmp_path: Path) -> None:
+    """Verify the sidebar shows 'MCP: off' when the session has no _mcp_manager."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not hasattr(session, "_mcp_manager") or session._mcp_manager is None
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        assert "MCP: off" in sidebar.content
 
 
 def test_thinking_frames_are_single_width() -> None:

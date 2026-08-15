@@ -192,7 +192,7 @@ class _StubMcpManager:
     def has_tool(self, name: str) -> bool:
         return any(t.name == name for t in self._tools)
 
-    async def call_tool(self, name: str, arguments: dict) -> dict:
+    async def call_tool(self, name: str, arguments: dict, timeout: float | None = None) -> dict:
         self.called.append((name, arguments))
         return {"ok": True, "tool": name, "args": arguments, "output": "echo: ok", "content": [{"type": "text", "text": "echo: ok"}], "isError": False}
 
@@ -598,3 +598,32 @@ async def test_mcp_manager_enable_server_http_url():
     statuses = manager.server_status()
     assert statuses[0]["transport"] == "http"
     await manager.close()
+
+
+# ---------------------------------------------------------------------------
+# McpManager.call_tool timeout forwarding test
+# ---------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    def __init__(self, name: str) -> None:
+        self.config = McpServerConfig(name=name, command="")
+        self.calls: list[tuple] = []
+
+    async def call_tool(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:
+        self.calls.append((name, arguments, timeout))
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_call_tool_forwards_timeout():
+    manager = McpManager([])
+    client = _RecordingClient("demo")
+    manager._clients = [client]
+    manager._tools = [McpTool(name="t1", description="", input_schema=None, server="demo")]
+
+    await manager.call_tool("t1", {"a": 1}, timeout=42)
+    assert client.calls == [("t1", {"a": 1}, 42)]
+
+    await manager.call_tool("t1", {"a": 2})
+    assert client.calls[1][2] == 120.0

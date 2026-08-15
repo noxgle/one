@@ -347,14 +347,16 @@ class McpManager:
     def errors(self) -> list[str]:
         return list(self._errors)
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
         tool = next((t for t in self._tools if t.name == name), None)
         if tool is None:
             raise RuntimeError(f"Unknown MCP tool: {name}")
         client = next((c for c in self._clients if c.config.name == tool.server), None)
         if client is None:
             raise RuntimeError(f"MCP server '{tool.server}' is not running")
-        result = await client.call_tool(name, arguments)
+        result = await client.call_tool(name, arguments, timeout=timeout or 120.0)
         # Normalize MCP result into the session tool-result contract.
         content = result.get("content") or []
         texts = [str(c.get("text", "")) for c in content if isinstance(c, dict) and c.get("type") == "text"]

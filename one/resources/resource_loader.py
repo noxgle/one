@@ -42,7 +42,7 @@ def _build_header(cwd: str) -> str:
 
 TOOL_ARG_SCHEMAS: dict[str, str] = {
     "read": "{path, offset?, limit?}",
-    "bash": "{command, timeout?}",
+    "bash": "{command, timeout?}  # timeout in seconds; default if omitted",
     "edit": "{path, edits: [{oldString, newString}]}",
     "write": "{path, content}",
     "grep": "{pattern, path?}",
@@ -101,7 +101,7 @@ IDEMPOTENCY
 - Ensure retries do not create inconsistent state.
 
 RESOURCE CONTROL
-- Default timeout 30s if not specified.
+- Default timeout __DEFAULT_TOOL_TIMEOUT__s if not specified.
 - Avoid recursive filesystem scans unless required.
 - Avoid unbounded output.
 - No background daemons or infinite loops.
@@ -273,7 +273,10 @@ class DefaultResourceLoader:
             prompt = f"{_build_header(self.cwd)}\n\n{self.system_prompt}"
         else:
             tools_list = "\n".join(f"- {t} {TOOL_ARG_SCHEMAS.get(t, '{}')}" for t in tools) if tools else "(none)"
-            prompt = _build_header(self.cwd) + _BASE_PROMPT.replace("__TOOLS__", tools_list)
+            default_timeout = getattr(self.settings_manager, "get_tool_timeout_sec", lambda: 30)()
+            prompt = _build_header(self.cwd) + _BASE_PROMPT.replace("__TOOLS__", tools_list).replace(
+                "__DEFAULT_TOOL_TIMEOUT__", str(default_timeout)
+            )
 
             agents_files = self.get_agents_files().get("agentsFiles", [])
             if agents_files:

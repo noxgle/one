@@ -20,6 +20,9 @@ from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, 
 from one.mcp import McpManager
 from one.tools.index import all_tools
 
+# Grace period added to the effective tool timeout for the outer asyncio.wait_for backstop.
+_TOOL_TIMEOUT_GRACE_SEC = 5
+
 # Fallback context window used when a model has no known context_window
 # (dynamic models resolved at runtime). Keeps the ctx gauge/compaction working.
 FALLBACK_CONTEXT_WINDOW = 128_000
@@ -111,7 +114,11 @@ class AgentSession:
 
         mcp_tools = self._mcp_manager.tools() if self._mcp_manager is not None else []
         if mcp_tools:
-            lines = ["\n# MCP Tools", "Call these like any other tool (JSON: {\"name\": ..., \"args\": {...}})."]
+            lines = [
+                "\n# MCP Tools",
+                "Call these like any other tool (JSON: {\"name\": ..., \"args\": {...}}).",
+                "Optional 'timeout' (seconds) in args overrides the per-call timeout.",
+            ]
             for t in mcp_tools:
                 schema = json.dumps(t.input_schema, ensure_ascii=False) if t.input_schema else "{}"
                 lines.append(f"- {t.name} (server: {t.server}): {t.description} args={schema}")
@@ -472,12 +479,13 @@ class AgentSession:
         }
 
     async def _execute_tool_by_name(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
+        effective_timeout: int | float | None = None
         if tool_name not in self._active_tools:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
         tool = all_tools.get(tool_name)
         if not tool:
             if self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
-                return await self._mcp_manager.call_tool(tool_name, args)
+                return await self._mcp_manager.call_tool(tool_name, args, timeout=args.get("timeout"))
             raise RuntimeError(f"Unknown tool: {tool_name}")
 
         cwd = self.session_manager.cwd
@@ -499,7 +507,8 @@ class AgentSession:
         elif tool_name == "ls":
             result = fn(cwd, args.get("path", "."))
         elif tool_name == "bash":
-            result = fn(cwd, args.get("command", ""), args.get("timeout"), self.settings_manager.get_shell_command_prefix())
+            effective_timeout = args.get("timeout") or timeout_sec or self.settings_manager.get_tool_timeout_sec()
+            result = fn(cwd, args.get("command", ""), effective_timeout, self.settings_manager.get_shell_command_prefix())
         elif tool_name == "finish":
             result = fn(args.get("summary", ""), bool(args.get("goal_success", True)))
         elif tool_name == "spawn_subagent":
@@ -513,8 +522,14 @@ class AgentSession:
             task = asyncio.create_task(result)
             self._active_tool_tasks.add(task)
             try:
-                if timeout_sec and timeout_sec > 0:
-                    result = await asyncio.wait_for(task, timeout=timeout_sec)
+                outer_timeout = timeout_sec
+                if tool_name == "bash":
+                    outer_timeout = (effective_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC
+                elif self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
+                    model_timeout = args.get("timeout")
+                    outer_timeout = (model_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC if model_timeout else None
+                if outer_timeout and outer_timeout > 0:
+                    result = await asyncio.wait_for(task, timeout=outer_timeout)
                 else:
                     result = await task
             finally:

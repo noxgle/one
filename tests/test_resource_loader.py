@@ -72,3 +72,19 @@ def test_get_system_prompt_default_tools():
     assert "- read {path, offset?, limit?}" in prompt
     assert "- bash {command, timeout?}" in prompt
     assert '- edit {path, edits: [{oldString, newString}]}' in prompt
+
+
+def test_prompt_reflects_actual_default_timeout():
+    """Custom timeoutSec should appear in the system prompt."""
+    settings = SettingsManager.in_memory({"tools": {"timeoutSec": 45}})
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
+    prompt = loader.get_system_prompt(selected_tools=["bash"])
+    assert "Default timeout 45s if not specified." in prompt
+
+
+def test_prompt_default_timeout_with_default_settings():
+    """With default settings, the prompt should reflect the 30-second default."""
+    settings = _make_settings()
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
+    prompt = loader.get_system_prompt(selected_tools=["bash"])
+    assert "Default timeout 30s if not specified." in prompt
