@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-8 **implemented and committed** (355 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`).
+> Status: Phases 1-8 **implemented and committed** (355 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`). Phase 9 (`apply_patch` tool) **planned** — awaiting "implementuj faze 9".
 
 ## Goal
 
@@ -15,6 +15,9 @@
 
 **Phase 5 goal (approved, planned):**
 7. **`plan` tool:** the model can persist an execution plan for the current task (the prompt already contains PLANNING RULES but no tool to store a plan). The plan is injected into the system prompt on every step, survives compaction and session restarts (jsonl), is cleared on `finish`, requires user approval in cooperation mode, and is visible in the TUI (stream block + sidebar section).
+
+**Phase 9 goal (approved, planned):**
+8. **`apply_patch` tool:** like opencode's `apply_patch` — apply a unified-diff patch (envelope `*** Begin Patch` / `*** End Patch`, operations `*** Add File:` / `*** Update File:` / `*** Delete File:` / `*** Move to:`) to one or more files in a single call, with full validation before any write.
 
 ## Context
 
@@ -42,6 +45,7 @@
 - Cooperation: `plan` added to the default `approvalTools` → approval prompt in cooperation mode.
 - TUI: "Plan:" block in the stream (`plan_update` event) + "Plan" sidebar section (like MCP/Keys).
 - Tests + AGENTS.md (10 → 11 tools).
+- `apply_patch` tool: `{patchText}` unified-diff patch (opencode format: `*** Begin Patch` / `*** End Patch` envelope, `*** Add File:` / `*** Update File:` / `*** Delete File:` headers, optional `*** Move to:`, `@@` hunks with `-`/`+`/context lines); multi-file; validation of the whole patch before any write; paths resolved via `resolve_to_cwd`; added to `DEFAULT_TOOL_NAMES`, `all_tools`, `coding_tools`, `TOOL_ARG_SCHEMAS`, and the default `approvalTools` (cooperation mode).
 
 ### Non-Goals
 - No changes to the agent event contract (`tool_call_start/end`, `turn_*`, snapshots in `test_event_snapshots.py`).
@@ -53,6 +57,7 @@
 - No structured plan format (steps list) — free text only; no plan diffing/editing UI.
 - No changes to the event contract of existing events; `plan_update` is a new additive event.
 - No new settings keys (the `approvalTools` default list changes only).
+- No LSP diagnostics, no auto-formatting, no filesystem watcher events (opencode's apply_patch does these; `one` has none of these subsystems). No BOM handling. No new dependencies (own diff parser). No changes to the event contract.
 
 ## Assumptions
 
@@ -64,6 +69,7 @@
 - The plan is visible to the user in the TUI (stream block + sidebar section) — user decision.
 - Persistence via jsonl `customType: "plan"` messages (user asked how opencode does it; recommendation accepted).
 - In cooperation mode the `plan` call requires approval (user decision); rejection follows the existing `tool_approval_rejected` path.
+- `apply_patch` semantics follow opencode's implementation (verified against `anomalyco/opencode` `packages/opencode/src/tool/apply_patch.ts` + `apply_patch.txt`, branch `dev`): envelope format, headers, hunks, validation-before-write, `Success. Updated the following files:` summary with `A`/`M`/`D` lines. In cooperation mode `apply_patch` requires approval (added to default `approvalTools`).
 
 ## Open Questions
 
@@ -622,6 +628,55 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
   - **Acceptance Criteria:** New tests pass; full suite green (344 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 9: `apply_patch` tool (opencode-style unified-diff patches) — PLANNED
+
+**User request:** "moze wprowadzic tool takiego tez jak w opencode: apply_patch" — a tool that applies unified-diff patches to files, like opencode's `apply_patch`.
+
+**Reference semantics (verified against opencode source, branch `dev`):**
+- `packages/opencode/src/tool/apply_patch.ts` + `apply_patch.txt`: envelope `*** Begin Patch` / `*** End Patch`; per-file sections with headers `*** Add File: <path>` (every line prefixed `+`), `*** Delete File: <path>`, `*** Update File: <path>` (optionally followed by `*** Move to: <path>`); hunks `@@ ...` with `-`/`+`/context (space) lines; parameter `patchText` (required).
+- Validation before any write: parse errors → `apply_patch verification failed: <detail>`; empty patch (`*** Begin Patch\n*** End Patch`) → `patch rejected: empty patch`; no hunks → `apply_patch verification failed: no hunks found`; update of a missing file → verification failure.
+- New files: trailing `\n` appended if missing. Summary: `Success. Updated the following files:` + one line per file (`A <path>` / `M <path>` / `D <path>`).
+- opencode extras NOT applicable to `one`: LSP diagnostics, auto-formatting, filesystem watcher events, BOM handling, permission metadata UI.
+
+**Design for `one` (no new dependencies — hard project constraint):**
+- New `one/tools/apply_patch.py`: `apply_patch_tool(cwd, patchText)` following the `edit_tool` pattern (`resolve_to_cwd`, `{"content": [...], "details": {...}}` return). Own minimal unified-diff parser: split envelope, parse headers, parse hunks (`@@ -l,c +l,c @@`), apply hunks to file content with exact context matching (no fuzz), compute per-file diff via `difflib.unified_diff` for `details.diff`.
+- Operations: add (create file, `+` lines, ensure trailing `\n`), update (apply hunks to existing file), delete (remove file), move (update + `*** Move to:` → write new path, remove old). Multi-file patches supported; ALL files validated before ANY write (all-or-nothing on validation errors).
+- Registration: `one/tools/index.py` — import + `all_tools["apply_patch"]` + `DEFAULT_TOOL_NAMES` + `coding_tools` (mutating tool); `one/resources/resource_loader.py` — `TOOL_ARG_SCHEMAS["apply_patch"]`; `one/core/settings_manager.py:34` — default `approvalTools` becomes `["bash", "write", "edit", "plan", "apply_patch"]`; AGENTS.md 11 → 12 tools.
+- No event-contract changes (normal tool; `tool_call_start/end` unchanged).
+
+**Files:** `one/tools/apply_patch.py` (new), `one/tools/index.py`, `one/resources/resource_loader.py`, `one/core/settings_manager.py`, `tests/test_apply_patch.py` (new), `AGENTS.md`
+
+**Acceptance Criteria:**
+- `apply_patch` callable by the model; schema `{patchText}` in the prompt.
+- Add/Update/Delete/Move + multi-file patches work; validation errors abort before any write.
+- Cooperation mode asks for approval before executing `apply_patch` (default `approvalTools`).
+- Full suite green (355 + new).
+
+**Estimated effort:** ~2.5 h
+
+**Confidence:** High (reference semantics verified from opencode source; tool pattern and registration points already known from Phases 5-7)
+
+- [ ] **Task 9.1: `apply_patch` tool implementation**
+  - **Description:** Create `one/tools/apply_patch.py` with `apply_patch_tool(cwd, patchText)` (pattern: `one/tools/edit.py`). Parse the opencode envelope format: `*** Begin Patch` / `*** End Patch`; sections `*** Add File: <path>` (lines prefixed `+`), `*** Delete File: <path>`, `*** Update File: <path>` with optional `*** Move to: <path>`; hunks `@@ -l,c +l,c @@` with `-`/`+`/context lines. Resolve paths via `resolve_to_cwd(path, cwd)`. Validate the ENTIRE patch before writing anything: unknown header → error; update/delete of a missing file → error; hunk context mismatch → error; empty patch → `patch rejected: empty patch`; no hunks → `no hunks found`; parse errors → `apply_patch verification failed: <detail>`. Apply: add (create with trailing `\n` if missing), update (exact context matching, no fuzz), delete, move (write new path + remove old). Return `{"content": [{"type": "text", "text": "Success. Updated the following files:\nA <path>\nM <path>\nD <path>"}], "details": {"diff": <combined unified diff>}}` (diff via `difflib.unified_diff`, like `edit_tool`).
+  - **Files:** `one/tools/apply_patch.py` (new)
+  - **Dependencies:** None
+  - **Acceptance Criteria:** All four operations + move work; multi-file patches work; any validation error aborts before any write; return shape matches the `edit_tool` pattern.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_apply_patch.py`
+
+- [ ] **Task 9.2: registration (index, schema, approval, AGENTS.md)**
+  - **Description:** `one/tools/index.py`: import `apply_patch_tool`, add `all_tools["apply_patch"] = ToolDef("apply_patch", "Apply a unified-diff patch to files (opencode format: *** Begin Patch / *** End Patch; Add/Update/Delete/Move)", apply_patch_tool)`, add `"apply_patch"` to `DEFAULT_TOOL_NAMES` (lines 27-29) and to `coding_tools` (line 53). `one/resources/resource_loader.py`: add `"apply_patch": "{patchText}  # unified diff patch (*** Begin Patch / *** End Patch envelope; Add/Update/Delete/Move)"` to `TOOL_ARG_SCHEMAS` (lines 43-55). `one/core/settings_manager.py:34`: default `approvalTools` → `["bash", "write", "edit", "plan", "apply_patch"]`. Update `AGENTS.md` (11 → 12 tools; mention `apply_patch` in the tools list).
+  - **Files:** `one/tools/index.py`, `one/resources/resource_loader.py`, `one/core/settings_manager.py`, `AGENTS.md`
+  - **Dependencies:** Task 9.1
+  - **Acceptance Criteria:** `apply_patch` in `DEFAULT_TOOL_NAMES`/`all_tools`/`coding_tools`; schema shown in the prompt; approval prompt in cooperation mode; AGENTS.md lists 12 tools.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tool_calling.py tests/test_auth_and_cli.py`; manual: `python -m one.cli.main --help` shows `apply_patch` in `--tools`.
+
+- [ ] **Task 9.3: tests + full suite**
+  - **Description:** New `tests/test_apply_patch.py` (tmp_path-based, no real FS): add file (with/without trailing `\n`), update (context match, `-`/`+`), delete, move, multi-file patch, empty patch error, no-hunks error, unknown header error, update/delete missing file error, context mismatch error, all-or-nothing (one bad hunk → nothing written), `..`/absolute path behavior consistent with `resolve_to_cwd`, return shape (`content` text + `details.diff`). Run the full suite.
+  - **Files:** `tests/test_apply_patch.py` (new)
+  - **Dependencies:** Task 9.1, Task 9.2
+  - **Acceptance Criteria:** New tests pass; full suite green (355 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -652,6 +707,7 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
 | Restore-on-load misses the plan after compaction | Feature gap | Low | Compaction explicitly keeps `customType: "plan"` messages (Task 5.3) |
 | Golden TUI snapshots change | CI failure | Low | Existing snapshot scenarios have no plan; `getattr` guards dummy sessions |
 | Textual markup parser stricter than Rich (any `[` = tag start) | TUI crash | Certain (reported) | Phase 8: render via `rich.text.Text` objects (literal append), never raw markup strings |
+| Diff parser edge cases (malformed hunks, CRLF, no trailing newline) | Wrong file content | Medium | Strict validation before any write; all-or-nothing semantics; tests cover malformed input |
 
 ## Project Acceptance Criteria
 
@@ -678,6 +734,9 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
 - [x] Tool output / plan text with unescaped `[` (e.g. `[type='CNAME']`, `[1,2,3]`, `[ABC]`, `[{"plan": ">", "x": 1}]`) renders in the TUI stream without MarkupError (Phase 8).
 - [x] Sidebar renders plan text with such chars without MarkupError (Phase 8).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (355 tests).
+- [ ] `apply_patch` tool callable by the model (`{patchText}`); Add/Update/Delete/Move + multi-file patches work; validation aborts before any write (Phase 9).
+- [ ] Cooperation mode asks for approval before executing `apply_patch` (default `approvalTools` includes it) (Phase 9).
+- [ ] Full test suite green: `.venv/bin/python -m pytest -q` (355 + new tests) (Phase 9).
 
 ## Estimated Timeline
 
@@ -687,3 +746,4 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
 - Total: ~5 h; uncertainty low — all phases were small, well-scoped changes in ~6 source files + tests. All work is committed.
 - Phase 5: ~3 h (plan tool: core + session + persistence + approval + TUI + tests + AGENTS.md).
 - Total with Phase 5: ~8 h; Phase 5 uncertainty low — all integration points identified (dispatch branch, system-prompt builder, finish branch, settings defaults, TUI event/sidebar).
+- Phase 9 (apply_patch tool): ~2.5 h; uncertainty low — reference semantics verified from opencode source; registration points known (index.py, resource_loader.py, settings_manager.py, AGENTS.md).

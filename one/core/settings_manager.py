@@ -31,7 +31,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "transport": "http",
     "thinkingBudgets": {},
     "shellCommandPrefix": None,
-    "tools": {"maxSteps": 6, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit", "plan"]},
+    "tools": {"maxSteps": 6, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit", "plan", "apply_patch"]},
     "bash": {"showOutput": True},
     "subagents": {"enabled": True, "maxConcurrent": 2, "maxDepth": 3},
     "askUser": {"timeoutSec": 0},
@@ -173,7 +173,7 @@ class SettingsManager:
         return bool(self.get_tool_settings().get("approval", False))
 
     def get_tool_approval_tools(self) -> list[str]:
-        return list(self.get_tool_settings().get("approvalTools", ["bash", "write", "edit", "plan"]))
+        return list(self.get_tool_settings().get("approvalTools", ["bash", "write", "edit", "plan", "apply_patch"]))
 
     def get_subagents_max_concurrent(self) -> int:
         return int(self.merged().get("subagents", {}).get("maxConcurrent", 2))

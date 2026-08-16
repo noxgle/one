@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .apply_patch import apply_patch_tool
 from .ask_user import ask_user_tool
 from .bash import bash_tool
 from .edit import edit_tool
@@ -25,7 +26,7 @@ class ToolDef:
 
 
 DEFAULT_TOOL_NAMES: list[str] = [
-    "read", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "spawn_subagent", "ask_user",
+    "read", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "spawn_subagent", "ask_user", "apply_patch",
 ]
 
 all_tools: dict[str, ToolDef] = {
@@ -48,7 +49,8 @@ all_tools: dict[str, ToolDef] = {
         "Delegate a subtask to an isolated subagent. Args: 'task' (str) for one subtask, or 'tasks' (list[str]) for parallel subtasks; optional 'model' ('provider/model'); optional 'tools' (list of tool names). Returns the subagent summary, success flag and session id.",
         spawn_subagent_tool,
     ),
+    "apply_patch": ToolDef("apply_patch", "Apply a unified-diff patch to files (opencode format: *** Begin Patch / *** End Patch; Add/Update/Delete/Move)", apply_patch_tool),
 }
 
-coding_tools = [all_tools["read"], all_tools["bash"], all_tools["edit"], all_tools["write"]]
+coding_tools = [all_tools["read"], all_tools["bash"], all_tools["edit"], all_tools["write"], all_tools["apply_patch"]]
 read_only_tools = [all_tools["read"], all_tools["grep"], all_tools["find"], all_tools["ls"]]

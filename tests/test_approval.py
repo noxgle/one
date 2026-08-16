@@ -181,7 +181,7 @@ async def test_approval_finish_never_gated(tmp_path: Path):
 def test_settings_approval_defaults():
     settings = SettingsManager.in_memory()
     assert settings.get_tool_approval() is False
-    assert settings.get_tool_approval_tools() == ["bash", "write", "edit", "plan"]
+    assert settings.get_tool_approval_tools() == ["bash", "write", "edit", "plan", "apply_patch"]
     on = SettingsManager.in_memory({"tools": {"approval": True, "approvalTools": ["bash"]}})
     assert on.get_tool_approval() is True
     assert on.get_tool_approval_tools() == ["bash"]
