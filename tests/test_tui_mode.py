@@ -173,6 +173,44 @@ async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
         assert sidebar.content.index("MCP") < sidebar.content.index("Keys")
 
 
+@pytest.mark.asyncio
+async def test_tui_prompt_queued_while_streaming(tmp_path: Path) -> None:
+    """A plain prompt submitted while the agent is streaming is queued as a
+    follow-up instead of failing with 'streamingBehavior is required'."""
+    import asyncio
+
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.base import ChatResult
+
+    class _SlowStreamProvider:
+        async def chat(self, api_key, model, messages, thinking_level, headers=None):
+            await asyncio.sleep(1.0)
+            return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _SlowStreamProvider()}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "first prompt")
+        for _ in range(100):
+            await pilot.pause()
+            if session.is_streaming:
+                break
+        assert session.is_streaming
+        await _submit(app, pilot, "second prompt")
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "[error]" not in stream
+        assert "second prompt" in session.get_pending_queues()["followUp"]
+        for _ in range(200):
+            await pilot.pause()
+            if not app._turn_active and not session.is_streaming:
+                break
+        assert "second prompt" not in session.get_pending_queues()["followUp"]
+
+
 def test_thinking_frames_are_single_width() -> None:
     assert len(_THINKING_FRAMES) >= 2
     # Each braille frame must occupy exactly one terminal cell.

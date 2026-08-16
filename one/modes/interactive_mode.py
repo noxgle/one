@@ -1036,7 +1036,11 @@ class InteractiveMode:
             if line.startswith("/"):
                 print(f"Unknown command: {line.strip()}. Use /help.")
                 continue
-            await session.prompt(line)
+            if session.is_streaming:
+                await session.prompt(line, {"streamingBehavior": "followUp"})
+                print("Queued follow-up message.")
+            else:
+                await session.prompt(line)
 
     async def _prompt_approval(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
         """Cooperation mode: ask the user before running a mutating tool.

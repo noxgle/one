@@ -786,8 +786,8 @@ if TEXTUAL_AVAILABLE:
                 f"Ctx: {s['contextPercent']:.1f}%\n"
                 f"Retry: {s['retry']}\n"
                 f"Status: {status}\n"
-                f"Coop: {s['coop']} (Ctrl+A)\n"
-                f"Subagents: {'on' if s['subagents'] else 'off'} (Ctrl+S)\n"
+                f"Coop: {s['coop']}\n"
+                f"Subagents: {'on' if s['subagents'] else 'off'}\n"
                 f"Bash: {'on' if s['bashOutput'] else 'off'}\n"
                 f"CWD: {s['cwd']}\n"
                 f"Session: {s['sessionId']}\n"
@@ -796,7 +796,7 @@ if TEXTUAL_AVAILABLE:
                 + "\n".join(mcp_lines) + "\n"
                 "\n"
                 f"[b {self._theme.info}]Keys[/]\n"
-                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+V paste\n"
+                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+V paste\n"
             )
             sidebar = sanitize_display_text(sidebar)
             self.query_one("#sidebar", Static).update(sidebar)
@@ -1414,7 +1414,11 @@ if TEXTUAL_AVAILABLE:
 
             async def _run_prompt() -> None:
                 try:
-                    await self.session.prompt(text)
+                    if self.session.is_streaming:
+                        await self.session.prompt(text, {"streamingBehavior": "followUp"})
+                        self._write("Queued follow-up message.", "info")
+                    else:
+                        await self.session.prompt(text)
                 except Exception as e:
                     self._write(f"[error] {e}", "error")
                     self._refresh_sidebar()
