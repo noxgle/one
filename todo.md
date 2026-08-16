@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-9 **implemented and committed** (393 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`).
+> Status: Phases 1-9 **implemented and committed** (393 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`). Phase 10 (edit tool robustness) **planned** — awaiting "implementuj faze 10".
 
 ## Goal
 
@@ -18,6 +18,9 @@
 
 **Phase 9 goal (approved, planned):**
 8. **`apply_patch` tool:** like opencode's `apply_patch` — apply a unified-diff patch (envelope `*** Begin Patch` / `*** End Patch`, operations `*** Add File:` / `*** Update File:` / `*** Delete File:` / `*** Move to:`) to one or more files in a single call, with full validation before any write.
+
+**Phase 10 goal (approved, planned):**
+9. **`edit` tool robustness (real-usage bug report):** the model frequently calls `edit` with `path` nested INSIDE `edits[0]` instead of as a top-level argument; the tool then fails with a misleading `FileNotFoundError: File not found: ` (empty path) and the model repeats the same mistake. Fix: tolerate the nested `path`, give a clear error naming the actual problem, and make the prompt schema unambiguous.
 
 ## Context
 
@@ -46,6 +49,7 @@
 - TUI: "Plan:" block in the stream (`plan_update` event) + "Plan" sidebar section (like MCP/Keys).
 - Tests + AGENTS.md (10 → 11 tools).
 - `apply_patch` tool: `{patchText}` unified-diff patch (opencode format: `*** Begin Patch` / `*** End Patch` envelope, `*** Add File:` / `*** Update File:` / `*** Delete File:` headers, optional `*** Move to:`, `@@` hunks with `-`/`+`/context lines); multi-file; validation of the whole patch before any write; paths resolved via `resolve_to_cwd`; added to `DEFAULT_TOOL_NAMES`, `all_tools`, `coding_tools`, `TOOL_ARG_SCHEMAS`, and the default `approvalTools` (cooperation mode).
+- `edit` robustness: accept `path` from `edits[0]` when the top-level `path` is missing (model-generated shape); clear `ValueError` naming the real problem when `path` is missing everywhere or `edits` is not a list; prompt schema for `edit` states `path` is TOP-LEVEL.
 
 ### Non-Goals
 - No changes to the agent event contract (`tool_call_start/end`, `turn_*`, snapshots in `test_event_snapshots.py`).
@@ -58,6 +62,7 @@
 - No changes to the event contract of existing events; `plan_update` is a new additive event.
 - No new settings keys (the `approvalTools` default list changes only).
 - No LSP diagnostics, no auto-formatting, no filesystem watcher events (opencode's apply_patch does these; `one` has none of these subsystems). No BOM handling. No new dependencies (own diff parser). No changes to the event contract.
+- No changes to `_execute_tool_by_name` arg plumbing (normalization lives in `edit_tool` itself, directly testable); no changes to other tools (`write`/`bash` have no reported shape errors); no changes to the event contract.
 
 ## Assumptions
 
@@ -70,6 +75,7 @@
 - Persistence via jsonl `customType: "plan"` messages (user asked how opencode does it; recommendation accepted).
 - In cooperation mode the `plan` call requires approval (user decision); rejection follows the existing `tool_approval_rejected` path.
 - `apply_patch` semantics follow opencode's implementation (verified against `anomalyco/opencode` `packages/opencode/src/tool/apply_patch.ts` + `apply_patch.txt`, branch `dev`): envelope format, headers, hunks, validation-before-write, `Success. Updated the following files:` summary with `A`/`M`/`D` lines. In cooperation mode `apply_patch` requires approval (added to default `approvalTools`).
+- The reported failure mode is a model-side JSON shape error (observed with local models via llama.cpp): `path` nested in `edits[0]`. The fix makes `one` tolerant of this shape AND gives a clear error when the shape is unrecoverable — both are needed because weaker models repeat the same mistake when the error does not name the cause.
 
 ## Open Questions
 
@@ -677,6 +683,64 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
   - **Acceptance Criteria:** New tests pass; full suite green (355 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 10: `edit` tool robustness — model puts `path` inside `edits[0]` (real-usage bug report) — PLANNED
+
+**Bug report (user, real usage of `one`):** "podczas korzystania z one jest duzo błedów z edit" — repeated failures. Example observed call:
+```json
+{"tool":"edit","args":{"edits":[{"oldString":"    def test_invalid_room_id_zero(self):\n        ...", "newString":"    def test_invalid_room_id_negative(self):\n        ...", "path":"/tmp/room_reservation/tests/test_reservation_system.py"}]}}
+```
+The model nests `path` INSIDE the edit dict instead of passing it top-level. The session log shows `tool start: edit` → `tool err: edit` → the agent retries with `find` — wasted steps, repeated mistakes.
+
+**Root cause (verified in code):**
+1. `one/core/agent_session.py:525,533-534` — `path_arg = args.get("path") or args.get("file")`; for `edit` it calls `fn(cwd, path_arg or "", args.get("edits", []))`. With the malformed shape, `path_arg` is `""`.
+2. `one/tools/edit.py:24-26` — `resolve_to_cwd("", cwd)` resolves to the CWD DIRECTORY; `p.exists()` is True but `p.is_file()` is False → `raise FileNotFoundError(f"File not found: {path}")` with an EMPTY path. The model sees a misleading "File not found: " that does not name the real problem (wrong JSON shape), so it repeats the same mistake.
+3. The prompt shows only `- edit {path, edits: [{oldString, newString}]}` (`one/resources/resource_loader.py:278`, from `TOOL_ARG_SCHEMAS`); the `ToolDef` description ("Edit files with exact replacement") is NOT in the prompt. The schema line is the model's only hint and is evidently not unambiguous enough for local models.
+4. Secondary failure mode: if the model passes `edits` as a dict (not a list), `edit_tool` iterates over dict keys (strings) → `e.get(...)` → `AttributeError` (unhandled, confusing).
+
+**Planned fix (exact):**
+- `one/tools/edit.py`:
+  - If `path` is empty/missing AND `edits` is a non-empty list whose first element is a dict, recover `path` from `edits[0].get("path")` or `edits[0].get("file")` (tolerate the observed model shape).
+  - If `path` is still empty → `raise ValueError("Edit tool input is invalid. 'path' is required as a top-level argument (not inside edits).")` — names the real cause.
+  - If `edits` is not a list → `raise ValueError("Edit tool input is invalid. edits must be a list of {oldString, newString} objects.")`.
+  - Keep all existing behavior (uniqueness, overlap checks, diff details) unchanged.
+- `one/resources/resource_loader.py` `TOOL_ARG_SCHEMAS["edit"]` → `"{path, edits: [{oldString, newString}]}  # path is TOP-LEVEL (never inside edits); oldString must be unique in the file"` — the prompt then states the rule explicitly.
+- `tests/test_resource_loader.py:55,91` — update the two assertions that check the exact `- edit {path, edits: [{oldString, newString}]}` string to the new schema text.
+- Tests in `tests/test_tools.py`: `edit_tool` with `path` nested in `edits[0]` works (file edited, summary correct); `edit_tool` with no `path` anywhere → `ValueError` matching `top-level`; `edits` as a dict → `ValueError` matching `list`; existing edit tests unchanged and green.
+
+**Files:** `one/tools/edit.py`, `one/resources/resource_loader.py`, `tests/test_tools.py`, `tests/test_resource_loader.py`
+
+**Acceptance Criteria:**
+- The observed malformed call shape (path inside `edits[0]`) succeeds instead of failing.
+- Missing `path` everywhere → clear error naming the top-level requirement.
+- `edits` as dict → clear error.
+- Prompt schema for `edit` states `path` is TOP-LEVEL.
+- Full suite green (393 + new).
+
+**Estimated effort:** ~1 h
+
+**Confidence:** High (root cause fully identified from the reported call + code paths; fix is local to one tool + one schema line)
+
+- [ ] **Task 10.1: `edit_tool` robustness (nested path recovery + clear errors)**
+  - **Description:** In `one/tools/edit.py::edit_tool`: (a) after the existing `if not edits` check, if `path` is empty and `edits` is a non-empty list with a dict first element, set `path = edits[0].get("path") or edits[0].get("file") or ""`; (b) if `path` is still empty → `ValueError("Edit tool input is invalid. 'path' is required as a top-level argument (not inside edits).")`; (c) if `edits` is not a list → `ValueError("Edit tool input is invalid. edits must be a list of {oldString, newString} objects.")` (place this check before the `if not edits` check so a dict does not slip through). Keep uniqueness/overlap/diff behavior unchanged.
+  - **Files:** `one/tools/edit.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** Malformed shape (path in `edits[0]`) succeeds; missing path everywhere → clear ValueError; `edits` as dict → clear ValueError; existing edit behavior unchanged.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tools.py`
+
+- [ ] **Task 10.2: prompt schema + resource-loader test updates**
+  - **Description:** In `one/resources/resource_loader.py` `TOOL_ARG_SCHEMAS` change `"edit": "{path, edits: [{oldString, newString}]}"` to `"edit": "{path, edits: [{oldString, newString}]}  # path is TOP-LEVEL (never inside edits); oldString must be unique in the file"`. Update `tests/test_resource_loader.py` lines 55 and 91 to assert the new string.
+  - **Files:** `one/resources/resource_loader.py`, `tests/test_resource_loader.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** Prompt shows the TOP-LEVEL hint for `edit`; resource-loader tests assert the new schema text.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_resource_loader.py`
+
+- [ ] **Task 10.3: regression tests + full suite**
+  - **Description:** Add tests to `tests/test_tools.py`: (a) `edit_tool(cwd, "", [{"oldString": ..., "newString": ..., "path": "a.txt"}])` edits the file and returns the success dict; (b) `edit_tool(cwd, "", [{"oldString": ..., "newString": ...}])` → `ValueError` matching `top-level`; (c) `edit_tool(cwd, "a.txt", {"oldString": "x"})` → `ValueError` matching `list`. Run the full suite.
+  - **Files:** `tests/test_tools.py`
+  - **Dependencies:** Task 10.1, Task 10.2
+  - **Acceptance Criteria:** New tests pass; full suite green (393 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -708,6 +772,7 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
 | Golden TUI snapshots change | CI failure | Low | Existing snapshot scenarios have no plan; `getattr` guards dummy sessions |
 | Textual markup parser stricter than Rich (any `[` = tag start) | TUI crash | Certain (reported) | Phase 8: render via `rich.text.Text` objects (literal append), never raw markup strings |
 | Diff parser edge cases (malformed hunks, CRLF, no trailing newline) | Wrong file content | Medium | Strict validation before any write; all-or-nothing semantics; tests cover malformed input |
+| Model nests `path` inside `edits[0]` (observed with local models) | Repeated edit failures, wasted steps | High (reported) | Phase 10: recover nested `path`; clear error naming the cause; prompt schema states TOP-LEVEL |
 
 ## Project Acceptance Criteria
 
@@ -737,6 +802,9 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
 - [x] `apply_patch` tool callable by the model (`{patchText}`); Add/Update/Delete/Move + multi-file patches work; validation aborts before any write (Phase 9).
 - [x] Cooperation mode asks for approval before executing `apply_patch` (default `approvalTools` includes it) (Phase 9).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (393 tests) (Phase 9).
+- [ ] `edit` succeeds when the model nests `path` inside `edits[0]`; missing `path` everywhere → clear error naming the top-level requirement; `edits` as dict → clear error (Phase 10).
+- [ ] Prompt schema for `edit` states `path` is TOP-LEVEL (never inside edits) (Phase 10).
+- [ ] Full test suite green: `.venv/bin/python -m pytest -q` (393 + new tests) (Phase 10).
 
 ## Estimated Timeline
 
@@ -748,3 +816,4 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
 - Total with Phase 5: ~8 h; Phase 5 uncertainty low — all integration points identified (dispatch branch, system-prompt builder, finish branch, settings defaults, TUI event/sidebar).
 - Phase 9 (apply_patch tool): ~2.5 h; uncertainty low — reference semantics verified from opencode source; registration points known (index.py, resource_loader.py, settings_manager.py, AGENTS.md).
 - Total with Phase 9: ~10.5 h; Phase 9 delivered in `0ee1cd5` (10 files, +896/-11; 38 new tests; full suite 393 green).
+- Phase 10 (edit tool robustness): ~1 h; uncertainty low — root cause fully identified from the reported call + code paths (agent_session.py:525/533-534, edit.py:24-26, resource_loader.py:278).

@@ -419,3 +419,27 @@ def test_sanitize_display_text_normalizes_carriage_returns_and_stray_esc():
     assert "\x1b" not in sanitize_display_text("pre\x1bpost")
     # strip_ansi removes it, so sanitize_display_text sees "prepost" — clean
     assert sanitize_display_text("pre\x1bpost") == "prepost"
+
+
+def test_edit_path_inside_edits_recovered(tmp_path: Path):
+    """When the model puts 'path' inside edits[0] instead of top-level, recover it."""
+    write_tool(str(tmp_path), "a.txt", "hello world\n")
+    result = edit_tool(str(tmp_path), "", [{"oldString": "hello", "newString": "goodbye", "path": "a.txt"}])
+    assert "Successfully replaced 1 block" in result["content"][0]["text"]
+    after = read_tool(str(tmp_path), "a.txt")
+    assert "goodbye" in after["content"][0]["text"]
+    assert "hello" not in after["content"][0]["text"]
+
+
+def test_edit_missing_path_raises(tmp_path: Path):
+    """When path is empty AND no path inside edits[0], raise ValueError about top-level."""
+    write_tool(str(tmp_path), "a.txt", "hello\n")
+    with pytest.raises(ValueError, match="top-level"):
+        edit_tool(str(tmp_path), "", [{"oldString": "hello", "newString": "goodbye"}])
+
+
+def test_edit_edits_not_list_raises(tmp_path: Path):
+    """When edits is passed as a dict instead of a list, raise ValueError about list."""
+    write_tool(str(tmp_path), "a.txt", "hello\n")
+    with pytest.raises(ValueError, match="list"):
+        edit_tool(str(tmp_path), "a.txt", {"oldString": "x", "newString": "y"})

@@ -43,7 +43,7 @@ def _build_header(cwd: str) -> str:
 TOOL_ARG_SCHEMAS: dict[str, str] = {
     "read": "{path, offset?, limit?}",
     "bash": "{command, timeout?}  # timeout in seconds; default if omitted",
-    "edit": "{path, edits: [{oldString, newString}]}",
+    "edit": "{path, edits: [{oldString, newString}]}  # path is TOP-LEVEL (never inside edits); oldString must be unique in the file",
     "write": "{path, content}",
     "grep": "{pattern, path?}",
     "find": "{pattern?, path?}",
