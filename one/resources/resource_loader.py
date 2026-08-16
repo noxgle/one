@@ -49,6 +49,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "find": "{pattern?, path?}",
     "ls": "{path?}",
     "finish": "{summary, goal_success}  # end the task; summary is shown to the user",
+    "plan": "{plan}  # the execution plan for the current task; visible to you on every step",
     "spawn_subagent": "{task, tasks?, model?, tools?}  # delegate a subtask to an isolated subagent (returns summary)",
     "ask_user": "{question, timeoutSec?}  # ask the human a question and wait for their answer",
 }
@@ -65,6 +66,7 @@ REASONING & ADAPTATION
 - Do NOT output reasoning
 
 PLANNING RULES
+- Use the plan tool to store the plan.
 - Create a plan ONLY if no active plan exists and the task requires >2 steps or deep analysis.
 - Deep analysis includes: log correlation, root cause investigation, audits, state comparison, hypothesis testing.
 - Do NOT plan for single commands, simple reads, or stateless queries.

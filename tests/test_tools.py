@@ -386,6 +386,23 @@ def test_sanitize_display_text_fullscreen_dump_sanitized():
     assert "\ufffd" in clean  # the C1 byte was replaced
 
 
+def test_plan_tool_stores_text() -> None:
+    from one.tools.plan import plan_tool
+
+    result = plan_tool("1. read file\n2. edit content")
+    assert result["ok"] is True
+    assert "Plan stored" in result["result"]
+
+
+def test_plan_tool_rejects_empty() -> None:
+    from one.tools.plan import plan_tool
+
+    with pytest.raises(ValueError):
+        plan_tool("")
+    with pytest.raises(ValueError):
+        plan_tool("   ")
+
+
 def test_sanitize_display_text_plain_and_safe_controls_passthrough():
     from one.tools.common import sanitize_display_text
 

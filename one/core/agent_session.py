@@ -19,6 +19,7 @@ from one.providers.registry import build_provider_registry
 from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, find_worktree
 from one.mcp import McpManager
 from one.tools.index import all_tools
+from one.tools.plan import plan_tool
 
 # Grace period added to the effective tool timeout for the outer asyncio.wait_for backstop.
 _TOOL_TIMEOUT_GRACE_SEC = 5
@@ -64,6 +65,8 @@ class AgentSession:
         self.scoped_models = scoped_models or []
         self.providers = build_provider_registry()
         self.messages: list[dict[str, Any]] = self.session_manager.build_session_context()["messages"]
+        self._plan: str | None = None
+        self._restore_plan_from_messages(self.messages)
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._is_streaming = False
         self._is_compacting = False
@@ -95,6 +98,33 @@ class AgentSession:
                 self.session_manager.append_model_change(self.model.provider, self.model.id)
             self.session_manager.append_thinking_level_change(self.thinking_level)
 
+    def _restore_plan_from_messages(self, messages: list[dict[str, Any]]) -> None:
+        """Restore _plan state from loaded messages and remove plan entries.
+
+        Scans for ``customType == "plan"`` messages; the last one determines
+        whether a plan is active (empty/None content → plan cleared).
+        All plan messages are removed from the provider-visible message list.
+        """
+        plan_value: str | None = None
+        plan_indices: list[int] = []
+        for i, m in enumerate(messages):
+            if m.get("customType") == "plan":
+                plan_indices.append(i)
+                content = m.get("content")
+                if content:
+                    plan_value = str(content)
+        # The last plan message determines whether plan is active.
+        # If the last plan message has empty/None content, plan is cleared.
+        if plan_indices:
+            last_idx = plan_indices[-1]
+            last_msg = messages[last_idx] if last_idx < len(messages) else {}
+            if not last_msg.get("content"):
+                plan_value = None
+        # Remove in reverse order so indices stay valid.
+        for i in reversed(plan_indices):
+            messages.pop(i)
+        self._plan = plan_value
+
     def _assistant_text(self, message: dict[str, Any]) -> str:
         content = message.get("content", "")
         if isinstance(content, list):
@@ -123,6 +153,8 @@ class AgentSession:
                 schema = json.dumps(t.input_schema, ensure_ascii=False) if t.input_schema else "{}"
                 lines.append(f"- {t.name} (server: {t.server}): {t.description} args={schema}")
             prompt = f"{prompt}\n" + "\n".join(lines)
+        if self._plan is not None:
+            prompt = f"{prompt}\n\n# Active Plan\n{self._plan}\nFollow this plan; adapt it via the plan tool only when the situation changes materially."
         return prompt
 
     def _try_parse_tool_call(self, text: str) -> dict[str, Any] | None:
@@ -511,10 +543,21 @@ class AgentSession:
             result = fn(cwd, args.get("command", ""), effective_timeout, self.settings_manager.get_shell_command_prefix())
         elif tool_name == "finish":
             result = fn(args.get("summary", ""), bool(args.get("goal_success", True)))
+            # Clear plan when finish is called (terminal tool)
+            if self._plan:
+                self._plan = None
+                self._emit({"type": "plan_update", "plan": ""})
+                self.session_manager.append_message({"role": "user", "customType": "plan", "content": "", "timestamp": int(time.time() * 1000)})
         elif tool_name == "spawn_subagent":
             result = await self._spawn_subagent(args)
         elif tool_name == "ask_user":
             result = await self._ask_user(args)
+        elif tool_name == "plan":
+            plan_text = args.get("plan", "")
+            result = plan_tool(plan_text)
+            self._plan = plan_text
+            self._emit({"type": "plan_update", "plan": self._plan})
+            self.session_manager.append_message({"role": "user", "customType": "plan", "content": plan_text, "timestamp": int(time.time() * 1000)})
         else:
             raise RuntimeError(f"Unsupported tool: {tool_name}")
 
@@ -1226,6 +1269,10 @@ class AgentSession:
                             # Terminal tool: end the turn with the summary as the
                             # final assistant message; no further provider calls.
                             final_assistant = self._finish_assistant_message(tool_payload)
+                            if self._plan:
+                                self._plan = None
+                                self._emit({"type": "plan_update", "plan": ""})
+                                self.session_manager.append_message({"role": "user", "customType": "plan", "content": "", "timestamp": int(time.time() * 1000)})
                             break
                         if self._abort_requested:
                             final_assistant = self._abort_assistant_message()
@@ -1548,7 +1595,7 @@ class AgentSession:
 
         # The previous compaction summary already lives as a synthetic message in
         # `dropped`; the model input gets it once via prev_summary.
-        history = [m for m in dropped if not (m.get("role") == "custom" and m.get("customType") == "compaction_summary")]
+        history = [m for m in dropped if not (m.get("role") == "custom" and m.get("customType") in {"compaction_summary", "plan"})]
         context = "\n".join(
             f"{m.get('role', '?')}: {m.get('content', '')}"
             for m in self._flatten_conversation(history)
@@ -1666,6 +1713,7 @@ class AgentSession:
                 self.session_manager.append_label_change(target_id, options["label"])
 
         self.messages = self.session_manager.build_session_context()["messages"]
+        self._restore_plan_from_messages(self.messages)
         self._emit({"type": "session_tree", "newLeafId": self.session_manager.get_leaf_id(), "oldLeafId": old_leaf, "summaryEntry": summary_entry})
         editor_text = None
         if target.get("type") == "message" and target.get("message", {}).get("role") == "user":

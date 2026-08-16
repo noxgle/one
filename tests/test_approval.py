@@ -56,10 +56,10 @@ def _make_agent(tmp_path: Path, responses: list[str], approval_callback=None) ->
         _Loader(),
         model,
         "medium",
-        tools=["read", "bash", "write", "edit", "finish"],
+        tools=["read", "bash", "write", "edit", "finish", "plan"],
         approval_callback=approval_callback,
     )
-    agent.providers = {"openai": _RecordingProvider(responses)}
+    agent.providers = {"openai": _RecordingProvider(responses)}  # type: ignore[assignment]
     return agent
 
 
@@ -120,9 +120,9 @@ async def test_approval_reject_skips_execution_and_feeds_reason(tmp_path: Path):
     assert not (tmp_path / "secret.txt").exists()
 
     # The rejection reason reached the model (second provider request context).
-    provider = agent.providers["openai"]
-    assert provider.calls == 2
-    ctx = provider.requests[-1]
+    provider = agent.providers["openai"]  # type: ignore[index]
+    assert provider.calls == 2  # type: ignore[attr-defined]
+    ctx = provider.requests[-1]  # type: ignore[attr-defined]
     ctx_text = "".join(
         str(m.get("content", "")) for m in ctx if isinstance(m.get("content"), str)
     ) + "".join(
@@ -181,7 +181,65 @@ async def test_approval_finish_never_gated(tmp_path: Path):
 def test_settings_approval_defaults():
     settings = SettingsManager.in_memory()
     assert settings.get_tool_approval() is False
-    assert settings.get_tool_approval_tools() == ["bash", "write", "edit"]
+    assert settings.get_tool_approval_tools() == ["bash", "write", "edit", "plan"]
     on = SettingsManager.in_memory({"tools": {"approval": True, "approvalTools": ["bash"]}})
     assert on.get_tool_approval() is True
     assert on.get_tool_approval_tools() == ["bash"]
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_invokes_callback(tmp_path: Path):
+    """plan is in approvalTools — calling plan with an approval callback must invoke it."""
+    calls: list[str] = []
+
+    async def callback(tool: str, args: dict[str, Any]) -> tuple[bool, str]:
+        calls.append(tool)
+        return True, ""
+
+    agent = _make_agent(
+        tmp_path,
+        [
+            '{"tool":"plan","args":{"plan":"step one"}}',
+            '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
+        ],
+        approval_callback=callback,
+    )
+    events = await _prompt(agent, "plan something")
+    assert "plan" in calls
+    # plan_update event emitted with the plan text
+    plan_events = [e for e in events if e.get("type") == "plan_update"]
+    assert len(plan_events) >= 1
+    assert plan_events[0]["plan"] == "step one"
+    assert agent.get_last_assistant_text() == "done"
+    assert any(e["type"] == "turn_end" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_reject_emits_rejection(tmp_path: Path):
+    """plan rejection must emit tool_approval_rejected and feed the reason to the model."""
+    agent = _make_agent(
+        tmp_path,
+        [
+            '{"tool":"plan","args":{"plan":"bad plan"}}',
+            '{"tool":"finish","args":{"summary":"ok not planning","goal_success":true}}',
+        ],
+        approval_callback=lambda tool, args: (False, "plans not allowed"),
+    )
+
+    events = await _prompt(agent, "create a plan")
+
+    # The tool was NOT executed: plan should be None
+    assert agent._plan is None
+
+    # The rejection reason reached the model (second provider request context)
+    provider = agent.providers["openai"]  # type: ignore[index]
+    assert provider.calls == 2  # type: ignore[attr-defined]
+    ctx = provider.requests[-1]  # type: ignore[attr-defined]
+    ctx_text = "".join(
+        str(m.get("content", "")) for m in ctx if isinstance(m.get("content"), str)
+    )
+    assert "plans not allowed" in ctx_text
+
+    # Event contract: approval rejection is surfaced
+    assert any(e["type"] == "tool_approval_rejected" for e in events)
+    assert any(e["type"] == "agent_end" for e in events)

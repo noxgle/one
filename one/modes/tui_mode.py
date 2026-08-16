@@ -92,6 +92,9 @@ _THINKING_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # __MK__: prefix is stripped at render time, so it never shows in the UI.
 _THINKING_MARK = "__MK__:"
 
+# Maximum characters for the plan section in the sidebar (truncated with …).
+_PLAN_SIDEBAR_MAX = 200
+
 
 def evaluate_waiting(
     turn_active: bool,
@@ -778,6 +781,16 @@ if TEXTUAL_AVAILABLE:
                 mcp_lines = ["none"]
             else:
                 mcp_lines = [f"- {sv['name']}" for sv in s["mcpServers"]]
+            plan_text = getattr(self.session, "_plan", None)
+            plan_block = ""
+            if plan_text:
+                display = (
+                    plan_text[: _PLAN_SIDEBAR_MAX] + "…"
+                    if len(plan_text) > _PLAN_SIDEBAR_MAX
+                    else plan_text
+                )
+                plan_block = f"[b {self._theme.info}]Plan[/]\n{display}\n"
+
             sidebar = (
                 f"[b {self._theme.info}]Info[/]\n"
                 f"Model: {s['model']}\n"
@@ -791,8 +804,9 @@ if TEXTUAL_AVAILABLE:
                 f"Bash: {'on' if s['bashOutput'] else 'off'}\n"
                 f"CWD: {s['cwd']}\n"
                 f"Session: {s['sessionId']}\n"
-                "\n"
-                f"[b {self._theme.info}]MCP[/]\n"
+                + plan_block
+                + "\n"
+                + f"[b {self._theme.info}]MCP[/]\n"
                 + "\n".join(mcp_lines) + "\n"
                 "\n"
                 f"[b {self._theme.info}]Keys[/]\n"
@@ -1778,6 +1792,12 @@ if TEXTUAL_AVAILABLE:
                     f"[retry] attempt {event.get('attempt')}/{event.get('maxAttempts')} in {event.get('delayMs')}ms",
                     "warn",
                 )
+            elif et == "plan_update":
+                plan = event.get("plan", "")
+                if plan:
+                    self._write_tool_block(f"Plan:\n{plan}")
+                else:
+                    self._write_tool_block("Plan: cleared")
 
             self._refresh_sidebar()
 

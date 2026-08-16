@@ -9,6 +9,7 @@ from .find import find_tool
 from .finish import finish_tool
 from .grep import grep_tool
 from .ls import ls_tool
+from .plan import plan_tool
 from .read import read_tool
 from .spawn_subagent import spawn_subagent_tool
 from .write import write_tool
@@ -32,6 +33,7 @@ all_tools: dict[str, ToolDef] = {
     "find": ToolDef("find", "Find files by pattern", find_tool),
     "ls": ToolDef("ls", "List directory contents", ls_tool),
     "finish": ToolDef("finish", "End the task with a summary and success flag", finish_tool),
+    "plan": ToolDef("plan", "Store an execution plan for the current task; visible on every step", plan_tool),
     "ask_user": ToolDef(
         "ask_user",
         "Ask the human a question and wait for their answer. Args: 'question' (str, required); optional 'timeoutSec' (int). Use only when you genuinely need human input (ambiguity, missing access, policy decision).",

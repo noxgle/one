@@ -34,6 +34,7 @@ class _DummySession:
         self.session_id = "s-test"
         self.is_streaming = False
         self.is_compacting = False
+        self._plan = None
 
     def get_context_usage(self) -> dict:
         return {"percent": 12.5}
@@ -1278,6 +1279,80 @@ async def test_tui_slash_completion_resets_after_edit(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # Bash error output display (P1-6 regression).
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_plan_update_renders_block(tmp_path: Path):
+    """plan_update with a plan text renders a 'Plan:' block in the stream."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "plan_update",
+            "plan": "1. read file\n2. edit content",
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Plan:" in stream
+        assert "1. read file" in stream
+        assert "2. edit content" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_plan_clear_emits_block(tmp_path: Path):
+    """plan_update with empty text renders 'Plan: cleared' in the stream."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({"type": "plan_update", "plan": ""})
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Plan: cleared" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_shows_plan_section(tmp_path: Path):
+    """Sidebar renders a Plan section when session._plan is set."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = "my plan text"
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        assert "Plan" in sidebar.content
+        assert "my plan text" in sidebar.content
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_hides_plan_section_when_none(tmp_path: Path):
+    """Sidebar does not show a Plan section when session._plan is None."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = None
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        # The Info and MCP sections must still be present; Plan block is absent
+        assert "Info" in sidebar.content
+        assert "MCP" in sidebar.content
 
 
 @pytest.mark.asyncio

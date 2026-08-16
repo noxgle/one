@@ -7,7 +7,7 @@ Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (she
 ## Commands
 
 - Setup: `python3 -m venv .venv && .venv/bin/pip install -e .[dev]` (venv already exists; Python >= 3.12 required)
-- Tests: `.venv/bin/python -m pytest -q` (323 tests, ~90s; `testpaths = tests`, no conftest)
+- Tests: `.venv/bin/python -m pytest -q` (335+ tests, ~90s; `testpaths = tests`, no conftest)
 - Single test: `.venv/bin/python -m pytest tests/test_event_snapshots.py::test_event_snapshot_abort_path`
 - TUI golden snapshots (`tests/snapshots/tui/*.txt`): regenerate with `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py`, then review the diff
 - CLI: `.venv/bin/one ...` or `python -m one.cli.main ...` (tests use the module form)
@@ -30,7 +30,8 @@ Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (she
 - `one/mcp/client.py` — `McpManager`: stdio transport (spawns the server per session) + streamable-HTTP transport; `call_tool` defaults to a 120s timeout.
 - `one/modes/` — `run_mode` (headless one-shot), `print_mode` (text/json), `rpc_mode`, `tui_mode` (Textual), `interactive_mode`.
 - `one/providers/` — adapters `openai_compatible` / `anthropic` / `gemini`; `registry.py` wires them (llama.cpp = OpenAI-compatible).
-- `one/tools/` — 10 tools: read, bash, edit, write, grep, find, ls, finish, ask_user, spawn_subagent. New tools must be registered in `tools/index.py` (`all_tools`, plus `coding_tools`/`read_only_tools` groups).
+- `one/tools/` — 11 tools: read, bash, edit, write, grep, find, ls, finish, plan, ask_user, spawn_subagent. New tools must be registered in `tools/index.py` (`all_tools`, plus `coding_tools`/`read_only_tools` groups).
+- `plan` tool semantics: persistent per-task plan stored via the `plan` tool, injected into the system prompt every step (`# Active Plan`), cleared on `finish`, persisted in session jsonl (`customType: "plan"`), survives compaction, and is approval-gated in cooperation mode (default `approvalTools` includes `plan`).
 - `one/resources/resource_loader.py` — discovers extensions/skills/prompts/themes/AGENTS files.
 - `one/resources/extension_runtime.py` — opencode-style extension hooks contract: a `.py` extension exports `register(ctx) -> hooks` (`tool.execute.before/after`, `chat.message`, `experimental.session.compacting`, `dispose`; any throw in `before` = deny via `tool_approval_rejected`). Auto-bound by `bind_extensions()` in `agent_session_runtime.py`; load/bind/hook errors → `extension_load_error` events, never crash the session. Full contract: `docs/EXTENSIONS.md`.
 

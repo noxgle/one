@@ -211,6 +211,58 @@ async def test_auto_compaction_respects_disabled(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_compaction_preserves_plan_state(tmp_path):
+    """A plan set before compaction must survive: _plan stays set and the system
+    prompt still contains the plan after compaction."""
+    provider = _Provider(["DONE"])
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": False, "recentTokens": 50}},
+        provider=provider,
+    )
+    # Seed enough messages to trigger compaction
+    _seed(agent, count=15)
+
+    # Set a plan (simulating what happens after a plan tool call)
+    agent._plan = "1. analyze\n2. fix\n3. verify"
+    # Also append a plan message so it survives compaction
+    agent.session_manager.append_message({
+        "role": "user",
+        "customType": "plan",
+        "content": "1. analyze\n2. fix\n3. verify",
+        "timestamp": 1234567890,
+    })
+
+    # Compact
+    result = await agent.compact()
+    assert result["skipped"] is False
+
+    # Plan is still set
+    assert agent._plan == "1. analyze\n2. fix\n3. verify"
+
+    # The plan message is still in the jsonl tree
+    entries = agent.session_manager.get_entries()
+    plan_entries = [
+        e for e in entries
+        if e.get("type") == "message" and e.get("message", {}).get("customType") == "plan"
+    ]
+    # Should also find plan messages stored via append_message (type: "message")
+    if not plan_entries:
+        plan_entries = [
+            e for e in entries
+            if isinstance(e, dict) and e.get("customType") == "plan"
+        ]
+    assert len(plan_entries) >= 1
+    content = plan_entries[-1].get("message", {}).get("content") or plan_entries[-1].get("content", "")
+    assert content == "1. analyze\n2. fix\n3. verify"
+
+    # The next system prompt (built from messages) should still contain the plan
+    prompt = agent._build_runtime_system_prompt()
+    assert "# Active Plan" in prompt
+    assert "1. analyze" in prompt
+
+
+@pytest.mark.asyncio
 async def test_auto_compaction_not_below_threshold(tmp_path):
     provider = _Provider(["DONE"])
     agent = _mk_agent(

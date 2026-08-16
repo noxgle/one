@@ -124,7 +124,7 @@ async def test_rpc_get_state_snapshot(tmp_path: Path, monkeypatch: pytest.Monkey
     assert data["autoCompactionEnabled"] is True
     assert data["messageCount"] == 0
     assert data["pendingMessageCount"] == 0
-    assert data["activeTools"] == ["read", "bash", "edit", "write", "grep", "find", "ls", "finish", "ask_user", "spawn_subagent"]
+    assert data["activeTools"] == ["read", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "ask_user", "spawn_subagent"]
     assert data["autoRetryEnabled"] == session.auto_retry_enabled
 
 
@@ -218,7 +218,7 @@ async def test_rpc_retry_settings_and_tool_approval(tmp_path: Path, monkeypatch:
 
     approval = _resp(responses, "get_tool_approval")
     assert approval["success"] is True
-    assert approval["data"] == {"enabled": False, "tools": ["bash", "write", "edit"]}
+    assert approval["data"] == {"enabled": False, "tools": ["bash", "write", "edit", "plan"]}
 
 
 @pytest.mark.asyncio

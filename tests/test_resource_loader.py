@@ -22,16 +22,32 @@ def _make_loader(cwd: str, agent_dir: str, settings: SettingsManager | None = No
 def test_prompt_includes_spawn_subagent_schema():
     settings = _make_settings()
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
-    tools = ["read", "bash", "spawn_subagent", "ask_user", "edit", "write", "grep", "find", "ls", "finish"]
+    tools = ["read", "bash", "spawn_subagent", "ask_user", "edit", "write", "grep", "find", "ls", "finish", "plan"]
     prompt = loader.get_system_prompt(selected_tools=tools)
     assert "- spawn_subagent {task, tasks?, model?, tools?}" in prompt
     assert "- ask_user {question, timeoutSec?}" in prompt
 
 
+def test_prompt_includes_plan_schema():
+    """plan schema is in TOOL_ARG_SCHEMAS and appears in the system prompt."""
+    from one.resources.resource_loader import TOOL_ARG_SCHEMAS
+
+    assert "plan" in TOOL_ARG_SCHEMAS
+    assert "{plan}" in TOOL_ARG_SCHEMAS["plan"]
+
+    settings = _make_settings()
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
+    tools = ["read", "bash", "plan", "finish"]
+    prompt = loader.get_system_prompt(selected_tools=tools)
+    assert "- plan {plan}" in prompt
+    # PLANNING RULES mention the plan tool
+    assert "Use the plan tool to store the plan." in prompt
+
+
 def test_prompt_includes_all_schemas_regression():
     settings = _make_settings()
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
-    tools = ["read", "bash", "spawn_subagent", "ask_user", "edit", "write", "grep", "find", "ls", "finish"]
+    tools = ["read", "bash", "spawn_subagent", "ask_user", "edit", "write", "grep", "find", "ls", "finish", "plan"]
     prompt = loader.get_system_prompt(selected_tools=tools)
     # Regression guards for existing schemas
     assert "- read {path, offset?, limit?}" in prompt
@@ -42,6 +58,7 @@ def test_prompt_includes_all_schemas_regression():
     assert "- find {pattern?, path?}" in prompt
     assert "- ls {path?}" in prompt
     assert "- finish {summary, goal_success}" in prompt
+    assert "- plan {plan}" in prompt
 
 
 def test_prompt_with_custom_system_prompt_skips_builtins():

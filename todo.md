@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-4 **implemented** (325 tests green; Phase 4 code not yet committed).
+> Status: Phases 1-5 **implemented and committed** (340 tests green; Phase 4 in `0265a89`).
 
 ## Goal
 
@@ -13,6 +13,9 @@
 5. Keyboard shortcuts `Ctrl+A` / `Ctrl+S` moved from the Info section into the **Keys section** (Info shows no shortcut hints).
 6. A plain user prompt typed **while the agent is streaming** is queued as a follow-up instead of failing with `[error] streamingBehavior is required while streaming` (TUI and CLI).
 
+**Phase 5 goal (approved, planned):**
+7. **`plan` tool:** the model can persist an execution plan for the current task (the prompt already contains PLANNING RULES but no tool to store a plan). The plan is injected into the system prompt on every step, survives compaction and session restarts (jsonl), is cleared on `finish`, requires user approval in cooperation mode, and is visible in the TUI (stream block + sidebar section).
+
 ## Context
 
 - `one/tools/bash.py::bash_tool` has its own `timeout` param (from model args) producing a clear `"Command timed out"` result (`cancelled: False`).
@@ -20,6 +23,11 @@
 - The system prompt hardcodes `"Default timeout 30s if not specified."` (`one/resources/resource_loader.py`) and does not reflect the actual `tools.timeoutSec`; the bash schema `{command, timeout?}` has no semantics hint.
 - MCP calls go through the same outer `wait_for` (30 s cap) even though `McpClient.call_tool` already has its own 120 s timeout — same bug class.
 - TUI sidebar (`one/modes/tui_mode.py`): `#sidebar` CSS has `width: 42` but **no `height`** → Textual sizes it to content (≈ half screen). `build_sidebar_snapshot()` + `_refresh_sidebar()` render the info panel; `session._mcp_manager.server_status()` already exposes per-server `name/enabled/running/tools/transport/error`.
+- The system prompt (`one/resources/resource_loader.py`, `_BASE_PROMPT` PLANNING RULES, lines 67-73) instructs the model to create at most one plan per task and adapt it, but **no `plan` tool exists** — the rules are dead text. `TOOL_ARG_SCHEMAS` (~46-54) lists 10 tools, no `plan`.
+- `_build_runtime_system_prompt()` (`one/core/agent_session.py:104-126`) is rebuilt on every provider call (`_flatten_messages_for_provider`) — the natural injection point for an active plan (survives compaction).
+- Sessions are `.jsonl` files (`session_manager`); `compaction_summary` messages already use `customType` — the pattern for persisting the plan.
+- `_run_tool_call` (`agent_session.py:541-667`) gates tools listed in `_approval_tools` (from `settings_manager.get_tool_approval_tools()`, default `["bash", "write", "edit"]`) when an approval callback is set (`--cooperation`); `finish` is excluded. Rejection path (`tool_approval_rejected`) already exists.
+- opencode (core) does not persist plans — plan mode is a read-only agent mode, the plan lives in the conversation; plugins (opencode-planner, BRHP) persist via markdown/JSONL. `one` can persist cheaply because sessions are already jsonl.
 
 ## Scope
 
@@ -29,6 +37,11 @@
 - System prompt: dynamic default-timeout text + bash schema hint; MCP tools section notes the optional `timeout` arg.
 - TUI sidebar: full-height layout; enabled MCP clients listed (name, tool count, transport, error marker); `MCP: off` / `MCP: none` states.
 - Tests: new timeout-semantics tests, sidebar snapshot tests, golden SVG regeneration.
+- `plan` tool: `{plan: str}` free-form text; stored as `AgentSession._plan`; injected into the system prompt every step; cleared on `finish`.
+- Persistence: `customType: "plan"` message in the session jsonl (set/update/clear), restored on session load, excluded from compaction and from provider messages.
+- Cooperation: `plan` added to the default `approvalTools` → approval prompt in cooperation mode.
+- TUI: "Plan:" block in the stream (`plan_update` event) + "Plan" sidebar section (like MCP/Keys).
+- Tests + AGENTS.md (10 → 11 tools).
 
 ### Non-Goals
 - No changes to the agent event contract (`tool_call_start/end`, `turn_*`, snapshots in `test_event_snapshots.py`).
@@ -36,6 +49,10 @@
 - No changes to `/mcp list|enable|disable` command behavior.
 - No new settings keys; `tools.timeoutSec` remains the default, not a hard cap.
 - No changes to `execute_bash` (the `/bash` command path) — it already passes the settings timeout directly.
+- No plan propagation to subagents (subagents keep their own context).
+- No structured plan format (steps list) — free text only; no plan diffing/editing UI.
+- No changes to the event contract of existing events; `plan_update` is a new additive event.
+- No new settings keys (the `approvalTools` default list changes only).
 
 ## Assumptions
 
@@ -43,6 +60,10 @@
 - For MCP tools the model may pass `timeout` in `args` even though it is not part of the server's input schema; it is consumed by `one` and not forwarded to the MCP server.
 - `tools.timeoutSec` default stays 30 s; the prompt text is generated from the actual setting.
 - Golden TUI snapshots will change (sidebar content/height) and must be regenerated with `ONE_UPDATE_SNAPSHOTS=1`.
+- The plan is per-task: created by the model, overwritable (the model adapts it), cleared only at `finish` (user decision) — follow-up prompts within the task keep the plan.
+- The plan is visible to the user in the TUI (stream block + sidebar section) — user decision.
+- Persistence via jsonl `customType: "plan"` messages (user asked how opencode does it; recommendation accepted).
+- In cooperation mode the `plan` call requires approval (user decision); rejection follows the existing `tool_approval_rejected` path.
 
 ## Open Questions
 
@@ -94,6 +115,22 @@ MCP section (own header, between Info and Keys):
   - web-deepsearch                    # one bullet per enabled client (name only)
 Keys section:
   Ctrl+C abort | Ctrl+L clear | Ctrl+Q quit | Ctrl+A coop | Ctrl+S subagents | Ctrl+V paste
+```
+
+### Plan tool (final state)
+
+```
+model tool call: {"tool":"plan","args":{"plan": "<text>"}}
+  -> _execute_tool_by_name("plan", args)          # new branch, like ask_user
+       plan_tool(plan)                            # validates non-empty
+       self._plan = plan                          # session state
+       emit plan_update {plan}                    # TUI stream block
+       session_manager.append_message(customType="plan")   # jsonl persistence (NOT self.messages)
+  -> system prompt (every step): "# Active Plan\n<plan>"   # via _build_runtime_system_prompt
+  -> finish (terminal): self._plan = None; emit plan_update {plan: ""}; append cleared marker
+  -> session load: restore _plan from last customType="plan" message; strip plan messages from provider list
+  -> compaction: never drop customType="plan" messages
+  -> cooperation: "plan" in approvalTools -> approval callback before execution
 ```
 
 ## Architecture Decisions
@@ -166,6 +203,19 @@ Keys section:
 **Rationale:** matches user decisions; one consistent rule across TUI and CLI; follow-up messages are automatically popped and processed at the end of the current turn (`agent_session.py` turn loop).
 
 **Tradeoffs:** a queued prompt is processed only after the current turn ends (visible via the sidebar queue counters); no API changes.
+
+### ADR-007: `plan` tool — session state + system-prompt injection + jsonl persistence
+**Decision:** A `plan` tool (`{plan: str}`) stores the plan in `AgentSession._plan`. The active plan is injected into `_build_runtime_system_prompt()` on every provider call (section `# Active Plan`), so it is always visible to the model and survives compaction. The plan is persisted as a `customType: "plan"` message in the session jsonl (set/update/clear), restored on session load, excluded from compaction, and stripped from provider messages. Cleared only on `finish`. `plan` is added to the default `approvalTools` (cooperation mode asks the user). TUI renders a "Plan:" stream block (`plan_update` event) and a sidebar section.
+
+**Alternatives:**
+- Plan as a plain conversation message — pollutes provider context, may be compacted away, no enforcement of "max 1 plan", the model may not treat it as authoritative.
+- Plan as a markdown file via the existing `write` tool — no visibility guarantee, pollutes the workspace, no lifecycle.
+- State-only (no jsonl persistence) — plan lost on session restart; opencode core does exactly this (plan lives in conversation), but `one` sessions are already jsonl so persistence is cheap.
+- Structured steps format — more rigid, harder for the model to adapt; free text chosen.
+
+**Rationale:** the prompt already mandates planning; the tool makes the plan authoritative (system prompt) and durable (jsonl). Matches user decisions: clear only at finish, TUI visibility, cooperation approval, persistence.
+
+**Tradeoffs:** plan text consumes system-prompt tokens every step (bounded by the model's plan size); the plan is not propagated to subagents; `plan_update` is a new event (additive, no contract break).
 
 ## Phases
 
@@ -354,7 +404,104 @@ Keys section:
   - **Dependencies:** Tasks 4.1, 4.2
   - **Acceptance Criteria:** New test passes; existing spinner tests pass; full suite green.
   - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py tests/test_tui_snapshots.py && .venv/bin/python -m pytest -q`
-  - **Committed in:** pending (awaiting commit)
+  - **Committed in:** `0265a89`
+
+### Phase 5: `plan` tool — persistent execution plan (TUI + cooperation) — DONE
+
+**Objective:** the model can store an execution plan via the `plan` tool; the plan is injected into the system prompt on every step, persisted in the session jsonl (survives restart/compaction), cleared on `finish`, gated by user approval in cooperation mode, and visible in the TUI (stream block + sidebar section).
+
+**Prerequisites:** Phases 1-4 (all committed).
+
+**Expected outcome:** `plan` callable by the model (schema + prompt rules updated); plan visible to the model every step; plan survives compaction and session reload; `finish` clears it; cooperation mode asks for approval; TUI shows the plan; full suite green (325 + new tests).
+
+**Estimated effort:** ~3 h
+
+**Confidence:** High
+
+- [x] **Task 5.1: `plan` tool definition + registration**
+  - **Description:**
+    - `one/tools/plan.py`: `plan_tool(plan: str) -> dict` — raises `ValueError` on empty/whitespace plan; returns `{"ok": True, "result": "Plan stored. Follow it; adapt it via the plan tool when the situation changes materially."}` (pattern: `finish.py`).
+    - `one/tools/index.py`: register `plan` in `all_tools` (meta tool like `finish` — NOT in `coding_tools`/`read_only_tools`).
+    - `one/core/agent_session_runtime.py` line 77: add `"plan"` to the default `tool_names` list.
+    - `one/resources/resource_loader.py`: `TOOL_ARG_SCHEMAS["plan"] = "{plan}  # the execution plan for the current task; visible to you on every step"`; PLANNING RULES (lines 67-73) gain a line: "Use the plan tool to store the plan."
+  - **Files:** `one/tools/plan.py` (new), `one/tools/index.py`, `one/core/agent_session_runtime.py`, `one/resources/resource_loader.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - `plan_tool("...")` returns ok; `plan_tool("")` / `plan_tool("   ")` raises `ValueError`.
+    - System prompt tools list contains `- plan {plan}`; PLANNING RULES mention the plan tool.
+    - `plan` is in the default `tool_names` (runtime) and `all_tools`.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_tools.py tests/test_resource_loader.py`
+
+- [x] **Task 5.2: session integration — state, dispatch, system prompt, finish clearing**
+  - **Description:**
+    - `AgentSession.__init__`: `self._plan: str | None = None`.
+    - `_execute_tool_by_name` (`one/core/agent_session.py` ~481): new branch `elif tool_name == "plan":` → `plan_text = args.get("plan", "")`; `result = plan_tool(plan_text)`; `self._plan = plan_text`; `self._emit({"type": "plan_update", "plan": self._plan})`; return result.
+    - `_build_runtime_system_prompt()` (~104-126): when `self._plan` is set, append `\n# Active Plan\n{self._plan}\nFollow this plan; adapt it via the plan tool only when the situation changes materially.` (after the MCP tools section).
+    - Turn loop finish branch (~1221-1229, where `finish` breaks): after `_finish_assistant_message`, `if self._plan: self._plan = None; self._emit({"type": "plan_update", "plan": ""})`.
+  - **Files:** `one/core/agent_session.py`
+  - **Dependencies:** Task 5.1
+  - **Acceptance Criteria:**
+    - Model calls `plan` → `session._plan` set; `plan_update` event emitted with the plan text.
+    - Next provider call's system prompt contains `# Active Plan` + the plan text.
+    - `finish` → `session._plan is None`; `plan_update` with `""` emitted.
+    - Existing event-contract tests unaffected (plan not used in their scenarios).
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_tool_calling.py tests/test_event_snapshots.py`
+
+- [x] **Task 5.3: jsonl persistence — restore on load, compaction exclusion**
+  - **Description:**
+    - On plan set/update (Task 5.2 branch): `self.session_manager.append_message({"role": "user", "customType": "plan", "content": plan_text, "timestamp": int(time.time() * 1000)})` — appended to the jsonl ONLY, NOT to `self.messages` (the provider sees the plan via the system prompt, not as a message).
+    - On clear (finish): append the same with `content: ""` (cleared marker).
+    - Session load/constructor: scan loaded messages for `customType == "plan"`; restore `self._plan` from the last one (`""` → `None`); remove all plan messages from the provider message list.
+    - Compaction (`one/core/agent_session.py`): never drop messages with `customType == "plan"` when selecting the dropped window.
+  - **Files:** `one/core/agent_session.py` (+ `one/core/session_manager.py` only if append/load helpers are needed)
+  - **Dependencies:** Task 5.2
+  - **Acceptance Criteria:**
+    - After a plan call, the session jsonl contains the `customType: "plan"` message; `self.messages` does not.
+    - Reloading the session from jsonl restores `session._plan`; plan messages are absent from provider messages.
+    - Compaction keeps the plan message; after compaction the system prompt still contains the plan.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_compaction.py tests/test_session_manager.py` + new persistence tests (Task 5.6)
+
+- [x] **Task 5.4: cooperation approval for `plan`**
+  - **Description:** `one/core/settings_manager.py`: default `approvalTools` (line 34) and the fallback in `get_tool_approval_tools()` (line 176) become `["bash", "write", "edit", "plan"]`. No change in `_run_tool_call` (plan != finish → gated when an approval callback is set and `plan` ∈ `_approval_tools`; rejection path already exists).
+  - **Files:** `one/core/settings_manager.py`
+  - **Dependencies:** Task 5.2
+  - **Acceptance Criteria:** With an approval callback set, a `plan` call invokes the callback; rejection yields `tool_approval_rejected` + `tool_call_end ok: False` and the model sees the rejection.
+  - **Verification:** new approval test (Task 5.6); `.venv/bin/python -m pytest -q tests/test_auth_and_cli.py tests/test_tool_calling.py`
+
+- [x] **Task 5.5: TUI — "Plan:" stream block + sidebar section**
+  - **Description:**
+    - `on_session_event` (`one/modes/tui_mode.py`): handle `plan_update` → render a `[b]Plan[/]` block in the stream with the plan text (bordered block like tool blocks); `plan == ""` → render nothing.
+    - `_refresh_sidebar()`: add a `[b]Plan[/]` section between the Info block and the MCP section: `getattr(session, "_plan", None)`; when set, show the text truncated to ~200 chars with `…` (constant `_PLAN_SIDEBAR_MAX = 200`); section hidden when no plan. Use `getattr` so dummy sessions without `_plan` don't crash.
+    - Golden snapshots: existing scenarios have no plan → no regeneration expected; if `_DummySession` lacks `_plan`, `getattr` covers it.
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** Task 5.2
+  - **Acceptance Criteria:** `plan_update` renders a Plan block in the stream; sidebar shows the Plan section when `session._plan` is set and hides it when cleared; no crash for sessions without `_plan`.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py tests/test_tui_snapshots.py`
+
+- [x] **Task 5.6: tests — unit, session, persistence, compaction, approval, schema, TUI**
+  - **Description:**
+    - `tests/test_tools.py`: `test_plan_tool_stores_text`, `test_plan_tool_rejects_empty`.
+    - `tests/test_tool_calling.py` (or new `tests/test_plan_tool.py`): fake provider calls `plan` → `session._plan` set, `plan_update` emitted, next system prompt contains the plan; `finish` clears it (`plan_update` with `""`).
+    - Persistence: jsonl contains `customType: "plan"`; reload restores `_plan`; plan messages absent from provider messages.
+    - Compaction: plan survives compaction (message kept, system prompt still contains plan).
+    - Approval: approval callback invoked for `plan`; rejection path (`tool_approval_rejected`).
+    - `tests/test_resource_loader.py`: `TOOL_ARG_SCHEMAS["plan"]` present; prompt contains `- plan {plan}` and the PLANNING RULES mention.
+    - TUI: `plan_update` renders the Plan block; sidebar section shown/hidden (app-level test with `session._plan` set).
+  - **Files:** `tests/test_tools.py`, `tests/test_tool_calling.py` (or `tests/test_plan_tool.py`), `tests/test_compaction.py`, `tests/test_resource_loader.py`, `tests/test_tui_mode.py`
+  - **Dependencies:** Tasks 5.1-5.5
+  - **Acceptance Criteria:** All new tests pass; full suite green (325 + new).
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q`
+
+- [x] **Task 5.7: AGENTS.md — 11 tools**
+  - **Description:** Update `AGENTS.md`: "10 tools" → "11 tools"; add `plan` to the tool list; one line on plan semantics (persistent per-task plan, system-prompt injection, cleared on finish, approval-gated in cooperation mode).
+  - **Files:** `AGENTS.md`
+  - **Dependencies:** Task 5.2
+  - **Acceptance Criteria:** No stale tool count; statement verifiable in the repo.
+  - **Verification:** manual diff review
 
 ## Rollout & Rollback
 
@@ -381,6 +528,10 @@ Keys section:
 | `test_tool_timeout_surfaces_error` (explicit 0.01 s timeout) regresses | CI failure | Low | Effective timeout = model arg → inner timeout fires first; covered in Task 1.3 |
 | `McpManager.call_tool` signature change misses a caller | Runtime error | Very low | Grep confirms single caller (`agent_session.py:480`); default param keeps compatibility |
 | Model requests very long timeout → session appears hung | UX | Medium | Ctrl+C abort; documented in ADR-001; optional hard cap explicitly out of scope |
+| `plan_update` event breaks event-contract snapshots | CI failure | Very low | Additive event; existing scenarios never call `plan`; new tests assert the sequence explicitly |
+| Plan text inflates system-prompt tokens every step | Cost/latency | Medium | Plan size is model-controlled; prompt rules keep it concise; truncation only in the TUI sidebar, not in the prompt |
+| Restore-on-load misses the plan after compaction | Feature gap | Low | Compaction explicitly keeps `customType: "plan"` messages (Task 5.3) |
+| Golden TUI snapshots change | CI failure | Low | Existing snapshot scenarios have no plan; `getattr` guards dummy sessions |
 
 ## Project Acceptance Criteria
 
@@ -395,6 +546,12 @@ Keys section:
 - [x] Plain user prompts during streaming are queued as follow-ups in TUI and CLI (no `streamingBehavior is required` error).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (324 tests).
 - [x] TUI waiting spinner restored: armed for the running turn, survives queued prompts, reappears for session-initiated follow-up turns (Phase 4).
+- [x] `plan` tool callable by the model (`{plan: str}`); schema + PLANNING RULES updated; plan stored in `AgentSession._plan`.
+- [x] Active plan injected into the system prompt on every step (`# Active Plan`); cleared on `finish` (with `plan_update` event).
+- [x] Plan persisted in the session jsonl (`customType: "plan"`), restored on session load, excluded from compaction and provider messages.
+- [x] Cooperation mode asks for approval before executing `plan` (default `approvalTools` includes `plan`); rejection follows the existing path.
+- [x] TUI shows the plan: "Plan:" stream block on `plan_update` + "Plan" sidebar section (hidden when no plan).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (340 tests).
 
 ## Estimated Timeline
 
@@ -402,3 +559,5 @@ Keys section:
 - Phase 2: ~1.5 h (single implementer).
 - Phase 3 (follow-ups): ~1.5 h (sidebar MCP section + Keys shortcuts + prompt queueing + AGENTS.md).
 - Total: ~5 h; uncertainty low — all phases were small, well-scoped changes in ~6 source files + tests. All work is committed.
+- Phase 5: ~3 h (plan tool: core + session + persistence + approval + TUI + tests + AGENTS.md).
+- Total with Phase 5: ~8 h; Phase 5 uncertainty low — all integration points identified (dispatch branch, system-prompt builder, finish branch, settings defaults, TUI event/sidebar).
