@@ -1545,3 +1545,55 @@ async def test_extension_panels_hide_on_new_session(tmp_path: Path):
         app._hide_extension_panels()
         await pilot.pause()
         assert not panel.has_class("visible")
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: plan text with markup chars (no MarkupError) + render guards.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_plan_with_markup_chars_no_crash(tmp_path: Path):
+    """Plan text containing [ ], <, > must not raise MarkupError in the sidebar."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = "[b]bold[/] and [{\"plan\": \">\", \"x\": 1}]"
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # _refresh_sidebar must not raise even with markup-breaking plan text.
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        # The escaped text must be present — brackets should be escaped.
+        assert "Plan" in sidebar.content
+        assert "[b]bold[/]" not in sidebar.content  # not raw (would be interpreted)
+        # The raw plan content should be in escaped form.
+        assert "\\[b]bold\\[/]" in sidebar.content  # escaped by rich_escape
+
+
+@pytest.mark.asyncio
+async def test_tui_plan_update_with_markup_chars_in_stream(tmp_path: Path):
+    """plan_update with markup chars renders the Plan block in the stream without error."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "plan_update",
+            "plan": "[b]bold[/] and [{\"plan\": \">\", \"x\": 1}]",
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Plan:" in stream
+        # The stream renders via rich_escape — check the widget's rendered content
+        # which has the escaped form.
+        widget = app.query_one("#stream", Static)
+        assert "\\[b]bold\\[/]" in widget.content  # escaped brackets (rich_escape)

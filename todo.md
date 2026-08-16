@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-5 **implemented and committed** (340 tests green; Phase 4 in `0265a89`).
+> Status: Phases 1-6 **implemented and committed** (342 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`).
 
 ## Goal
 
@@ -503,6 +503,45 @@ model tool call: {"tool":"plan","args":{"plan": "<text>"}}
   - **Acceptance Criteria:** No stale tool count; statement verifiable in the repo.
   - **Verification:** manual diff review
 
+### Phase 6: TUI crash — plan with markup chars (MarkupError) + render during shutdown (NoMatches) — DONE
+
+**Bug report (user):** during TUI use: `MarkupError: Expected markup value (found '>",\n').` followed by `unhandled exception during asyncio.run() shutdown` with `NoMatches("No nodes match '#stream' on Screen(id='_default')")` in `_render_stream` (`one/modes/tui_mode.py:511`) called from `_run_prompt`'s `finally` (line 1448) after `CancelledError` from the provider.
+
+**Root causes (verified by code reading):**
+1. `_refresh_sidebar` (`one/modes/tui_mode.py:784-792`): the Plan section inserts the RAW plan text (`display`) into the Rich markup string (`plan_block = f"[b {self._theme.info}]Plan[/]\n{display}\n"`), then `self.query_one("#sidebar", Static).update(sidebar)` (line 816) renders it as markup. Plan text containing `[`/`]` (e.g. JSON like `[{"plan": ">", ...}]`) → `MarkupError`. The stream path is safe (`_render_stream` escapes every non-spinner line with `rich_escape`, line 517); the sidebar is not.
+2. `_render_stream` (lines 510-511) and `_refresh_sidebar` (line 816) call `query_one(...)` unconditionally; when the app is closing (Ctrl+C abort during streaming → `CancelledError` → `_run_prompt` `finally` → `_render_stream`), the DOM is torn down → `NoMatches` → unhandled exception during `asyncio.run()` shutdown.
+
+**Planned fix (exact):**
+- `_refresh_sidebar`: escape the plan text before inserting into the markup string: `display = rich_escape(display)` (import already present: `from rich.markup import escape as rich_escape`, line 13).
+- `_render_stream`: guard `query_one("#stream")` with try/except (return early when the widget is gone).
+- `_refresh_sidebar`: guard `query_one("#sidebar", Static)` with try/except (return early).
+- Regression test: TUI test setting `session._plan` to text with markup chars (e.g. `[b]bold[/]` and JSON with brackets) → `_refresh_sidebar` does not raise; sidebar update contains escaped text.
+
+**Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`
+
+**Acceptance Criteria:**
+- Plan text with `[`/`]`/`<`/`>` renders in the sidebar without MarkupError.
+- Abort during streaming while the app is closing does not raise NoMatches (render guards).
+- Existing TUI tests + golden snapshots unchanged; full suite green.
+
+**Estimated effort:** ~0.5 h
+
+**Confidence:** High (root cause fully identified)
+
+- [x] **Task 6.1: escape plan text in sidebar + render guards**
+  - **Description:** In `_refresh_sidebar` (`one/modes/tui_mode.py`): `display = rich_escape(display)` before building `plan_block`. In `_render_stream`: wrap `stream_widget = self.query_one("#stream")` in try/except (return early on failure). In `_refresh_sidebar`: wrap `self.query_one("#sidebar", Static).update(sidebar)` in try/except (return early on failure).
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** Sidebar renders plan text with markup chars without error; render calls are no-ops when the DOM is gone.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py tests/test_tui_snapshots.py`
+
+- [x] **Task 6.2: regression tests + full suite**
+  - **Description:** Add a TUI test: set `session._plan` to text containing `[b]bold[/]` and JSON with brackets (e.g. `[{"plan": ">", "x": 1}]`), call `_refresh_sidebar` (app-level), assert no exception and the sidebar widget content contains the escaped text (no raw `[` markup crash). Run the full suite.
+  - **Files:** `tests/test_tui_mode.py`
+  - **Dependencies:** Task 6.1
+  - **Acceptance Criteria:** New test passes; full suite green (340 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -552,6 +591,9 @@ model tool call: {"tool":"plan","args":{"plan": "<text>"}}
 - [x] Cooperation mode asks for approval before executing `plan` (default `approvalTools` includes `plan`); rejection follows the existing path.
 - [x] TUI shows the plan: "Plan:" stream block on `plan_update` + "Plan" sidebar section (hidden when no plan).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (340 tests).
+- [x] Sidebar renders plan text with markup chars without MarkupError (rich_escape).
+- [x] Render calls are no-ops when the DOM is gone (NoMatches guarded in _render_stream/_refresh_sidebar).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (342 tests).
 
 ## Estimated Timeline
 

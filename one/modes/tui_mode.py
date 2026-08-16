@@ -508,7 +508,10 @@ if TEXTUAL_AVAILABLE:
                 self._off_listener = None
 
         def _render_stream(self) -> None:
-            stream_widget = self.query_one("#stream")
+            try:
+                stream_widget = self.query_one("#stream")
+            except Exception:
+                return
             rendered: list[str] = []
             for line in self._stream_lines:
                 if line.startswith("__MK__:"):
@@ -789,6 +792,7 @@ if TEXTUAL_AVAILABLE:
                     if len(plan_text) > _PLAN_SIDEBAR_MAX
                     else plan_text
                 )
+                display = rich_escape(display)
                 plan_block = f"[b {self._theme.info}]Plan[/]\n{display}\n"
 
             sidebar = (
@@ -813,7 +817,10 @@ if TEXTUAL_AVAILABLE:
                 "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+V paste\n"
             )
             sidebar = sanitize_display_text(sidebar)
-            self.query_one("#sidebar", Static).update(sidebar)
+            try:
+                self.query_one("#sidebar", Static).update(sidebar)
+            except Exception:
+                pass
 
         def _try_auto_copy_selected_stream_text(self) -> None:
             # Textual 8 keeps arbitrary text selections in `screen.selections`
