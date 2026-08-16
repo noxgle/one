@@ -1413,19 +1413,25 @@ if TEXTUAL_AVAILABLE:
             self._last_delta_ts = 0.0
 
             async def _run_prompt() -> None:
+                queued = False
                 try:
                     if self.session.is_streaming:
                         await self.session.prompt(text, {"streamingBehavior": "followUp"})
                         self._write("Queued follow-up message.", "info")
+                        queued = True
                     else:
                         await self.session.prompt(text)
                 except Exception as e:
                     self._write(f"[error] {e}", "error")
                     self._refresh_sidebar()
                 finally:
-                    self._turn_active = False
-                    self._remove_thinking_line()
-                    self._render_stream()
+                    if not queued:
+                        # Only clear the turn state when this submission ran a
+                        # turn. A queued message leaves the current turn (and
+                        # its waiting spinner) in flight.
+                        self._turn_active = False
+                        self._remove_thinking_line()
+                        self._render_stream()
                     self._refresh_sidebar()
 
             asyncio.create_task(_run_prompt())
@@ -1691,6 +1697,12 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_has_live_delta = False
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
+            elif et == "turn_start":
+                # A turn is in flight — arm the waiting spinner. This also
+                # covers turns the session starts by itself (queued follow-ups
+                # drained after the previous turn), which never pass through
+                # on_input_submitted.
+                self._turn_active = True
             elif et == "tool_call_start":
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)

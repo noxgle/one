@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: **all planned work implemented and committed** (324 tests green). Follow-up changes below (Phase 3) were added after the original plan and are also complete.
+> Status: Phases 1-4 **implemented** (325 tests green; Phase 4 code not yet committed).
 
 ## Goal
 
@@ -314,6 +314,48 @@ Keys section:
   - **Verification:** manual diff review
   - **Committed in:** `c535d7f`
 
+### Phase 4: Restore the TUI waiting spinner (regression after prompt queueing) — DONE
+
+**Bug report (user):** "po ostatnich zmianach zniknęła w TUI animacja oczekiwania na wynik pracy modelu" — the `⠋ Ctrl+C abort` waiting spinner no longer shows.
+
+**Root causes (verified by code reading):**
+1. `_run_prompt` in `on_input_submitted` (`one/modes/tui_mode.py` ~line 1415): when the session is streaming, a second prompt is queued (`streamingBehavior: "followUp"`) and the coroutine returns almost immediately — but the `finally` block **unconditionally** runs `self._turn_active = False; self._remove_thinking_line(); self._render_stream()`. The first turn is still in flight, so the spinner (driven by `_tick_waiting` → `evaluate_waiting(self._turn_active, self._last_delta_ts, now)`) is killed for the remainder of that turn.
+2. Follow-up turns started by the session itself (turn loop pops `_follow_up` → `prompt()` → emits `turn_start`, `one/core/agent_session.py` ~1415-1417) never arm `_turn_active`: it is set only in `on_input_submitted`. `on_session_event` handles `turn_end` (clears it) but **ignores `turn_start`** — so queued prompts run with no spinner at all (not even between tool calls / before the first token).
+
+**Planned fix (exact — was drafted, then reverted per process rules):**
+- `_run_prompt` (tui_mode.py): add `queued = False`; set it True in the streaming branch after queueing; in `finally`, run the turn cleanup (`_turn_active = False`, `_remove_thinking_line()`, `_render_stream()`) **only when `not queued`**; always `_refresh_sidebar()`.
+- `on_session_event` (tui_mode.py): add `elif et == "turn_start": self._turn_active = True` (arms the spinner for session-initiated turns — queued follow-ups, retries). Place near the `turn_end` handler; order in the elif chain does not matter.
+- Regression test `test_tui_spinner_survives_queued_prompt_and_resumes_for_followup` in `tests/test_tui_mode.py`: slow provider (1 s sleep before first delta), submit prompt 1, poll until `session.is_streaming`, submit prompt 2 (queued), `await pilot.pause()` a few times, assert `app._turn_active is True` (must survive queueing); then poll until `not app._turn_active and not session.is_streaming` while counting spinner windows (any `line.startswith(_THINKING_MARK)` in `app._stream_lines`), assert `>= 2` windows (turn 1 + follow-up turn).
+
+**Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`
+
+**Acceptance Criteria:**
+- Spinner appears while the first turn runs, survives a queued second prompt, and reappears for the follow-up turn.
+- Existing spinner/queue tests still pass: `test_tui_error_turn_resets_spinner`, `test_tui_ctrl_c_after_finished_error_turn`, `test_tui_prompt_queued_while_streaming`.
+
+**Estimated effort:** ~1 h
+
+**Confidence:** High (root cause fully identified; fix already proven in a working draft)
+
+- [x] **Task 4.1: `queued` flag in `_run_prompt`** — skip turn cleanup when the message was queued
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** After a queued submission, `app._turn_active` stays True while the first turn still runs.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py::test_tui_spinner_survives_queued_prompt_and_resumes_for_followup`
+
+- [x] **Task 4.2: arm `_turn_active` on `turn_start`** in `on_session_event`
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** None (independent of 4.1)
+  - **Acceptance Criteria:** Follow-up turn (session-initiated) shows the spinner while waiting for the first token / between tool calls.
+  - **Verification:** same test as 4.1 (spinner windows >= 2)
+
+- [x] **Task 4.3: regression test + full verification**
+  - **Files:** `tests/test_tui_mode.py`
+  - **Dependencies:** Tasks 4.1, 4.2
+  - **Acceptance Criteria:** New test passes; existing spinner tests pass; full suite green.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py tests/test_tui_snapshots.py && .venv/bin/python -m pytest -q`
+  - **Committed in:** pending (awaiting commit)
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -352,6 +394,7 @@ Keys section:
 - [x] Keyboard shortcuts live only in the Keys section (Ctrl+A coop, Ctrl+S subagents); Info lines have no shortcut hints.
 - [x] Plain user prompts during streaming are queued as follow-ups in TUI and CLI (no `streamingBehavior is required` error).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (324 tests).
+- [x] TUI waiting spinner restored: armed for the running turn, survives queued prompts, reappears for session-initiated follow-up turns (Phase 4).
 
 ## Estimated Timeline
 

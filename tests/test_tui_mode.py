@@ -211,6 +211,57 @@ async def test_tui_prompt_queued_while_streaming(tmp_path: Path) -> None:
         assert "second prompt" not in session.get_pending_queues()["followUp"]
 
 
+@pytest.mark.asyncio
+async def test_tui_spinner_survives_queued_prompt_and_resumes_for_followup(tmp_path: Path) -> None:
+    """The waiting spinner must stay armed when a prompt is queued mid-turn and
+    must reappear when the session starts the follow-up turn on its own."""
+    import asyncio
+
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK
+    from one.providers.base import ChatResult
+
+    class _SlowStreamProvider:
+        async def chat(self, api_key, model, messages, thinking_level, headers=None):
+            await asyncio.sleep(1.0)
+            return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _SlowStreamProvider()}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "first prompt")
+        for _ in range(100):
+            await pilot.pause()
+            if session.is_streaming:
+                break
+        assert session.is_streaming
+        # Queue a second prompt while the first turn is still in flight.
+        await _submit(app, pilot, "second prompt")
+        for _ in range(10):
+            await pilot.pause()
+        # The queued submission must NOT clear the turn state: the first turn
+        # is still running, so the spinner stays armed.
+        assert app._turn_active is True
+
+        # Track how many distinct spinner windows appear; there must be at
+        # least two (turn 1 and the follow-up turn 2).
+        spinner_windows = 0
+        spinner_visible = False
+        for _ in range(300):
+            await pilot.pause()
+            any_spinner = any(line.startswith(_THINKING_MARK) for line in app._stream_lines)
+            if any_spinner and not spinner_visible:
+                spinner_windows += 1
+                spinner_visible = True
+            elif not any_spinner:
+                spinner_visible = False
+            if not app._turn_active and not session.is_streaming:
+                break
+        assert spinner_windows >= 2, "spinner must appear for the running turn AND the follow-up turn"
+
+
 def test_thinking_frames_are_single_width() -> None:
     assert len(_THINKING_FRAMES) >= 2
     # Each braille frame must occupy exactly one terminal cell.
