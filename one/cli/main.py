@@ -16,7 +16,7 @@ from one.core.settings_manager import SettingsManager
 from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode, run_run_mode
 from one.mcp import McpManager
 from one.resources.resource_loader import DefaultResourceLoader
-from one.tools.index import all_tools
+from one.tools.index import DEFAULT_TOOL_NAMES, all_tools
 
 from .args import parse_args, print_help
 
@@ -361,7 +361,7 @@ async def _run(argv: list[str]) -> int:
             settings.get_default_model(),
         )
 
-    tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls", "finish", "spawn_subagent", "ask_user"]
+    tool_names = list(DEFAULT_TOOL_NAMES)
     if parsed.no_tools:
         tool_names = parsed.tools or []
     elif parsed.tools:

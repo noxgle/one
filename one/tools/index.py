@@ -24,6 +24,10 @@ class ToolDef:
         self.fn = fn
 
 
+DEFAULT_TOOL_NAMES: list[str] = [
+    "read", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "spawn_subagent", "ask_user",
+]
+
 all_tools: dict[str, ToolDef] = {
     "read": ToolDef("read", "Read file contents", read_tool),
     "bash": ToolDef("bash", "Execute bash commands", bash_tool),

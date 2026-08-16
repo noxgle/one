@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 
@@ -451,3 +453,28 @@ def test_cli_run_resume_without_task_is_valid(tmp_path: Path):
     )
     assert res.returncode == 1
     assert "No previous user message to resume." in res.stdout
+
+
+def test_cli_help_shows_plan_in_tools_help(tmp_path: Path):
+    """Phase 7 regression: --tools help text must include 'plan'."""
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    res = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "--help"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert res.returncode == 0
+    # The --tools line must include "plan" among the default tools.
+    for line in res.stdout.splitlines():
+        if "--tools" in line:
+            assert "plan" in line, f"--tools line missing 'plan': {line}"
+            break
+    else:
+        pytest.fail("--tools help line not found in --help output")

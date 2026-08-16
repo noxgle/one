@@ -260,7 +260,7 @@ Options:
   --session-dir <dir>
   --no-session
   --models <patterns>
-  --tools <read,bash,edit,write,grep,find,ls,finish,spawn_subagent,ask_user>
+  --tools <read,bash,edit,write,grep,find,ls,finish,plan,spawn_subagent,ask_user>
   --no-tools
   --extension, -e <path>
   --no-extensions

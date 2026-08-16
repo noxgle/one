@@ -621,6 +621,15 @@ def test_finish_tool_registered_in_defaults() -> None:
     assert "finish" in list(all_tools.keys())
 
 
+def test_plan_in_default_tool_names() -> None:
+    from one.tools.index import DEFAULT_TOOL_NAMES, all_tools
+
+    assert "plan" in DEFAULT_TOOL_NAMES
+    # Every name in DEFAULT_TOOL_NAMES must exist in all_tools.
+    for name in DEFAULT_TOOL_NAMES:
+        assert name in all_tools, f"{name!r} in DEFAULT_TOOL_NAMES but missing from all_tools"
+
+
 @pytest.mark.asyncio
 async def test_finish_tool_ends_turn_with_summary(tmp_path: Path):
     auth = AuthStorage.in_memory()

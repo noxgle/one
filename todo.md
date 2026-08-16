@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-6 **implemented and committed** (342 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`).
+> Status: Phases 1-7 **implemented and committed** (344 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`).
 
 ## Goal
 
@@ -540,6 +540,45 @@ model tool call: {"tool":"plan","args":{"plan": "<text>"}}
   - **Files:** `tests/test_tui_mode.py`
   - **Dependencies:** Task 6.1
   - **Acceptance Criteria:** New test passes; full suite green (340 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
+### Phase 7: CLI default tool list missing "plan" — "Tool 'plan' is disabled" — DONE
+
+**Bug report (user, TUI):** model called `plan` with a valid plan payload; session answered `Tool 'plan' is disabled` (tool err: plan), then the user aborted.
+
+**Root cause (verified by code reading):** `one/cli/main.py:364` builds the default tool list WITHOUT `"plan"`:
+`tool_names = ["read", "bash", "edit", "write", "grep", "find", "ls", "finish", "spawn_subagent", "ask_user"]`
+The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallback in `one/core/agent_session_runtime.py:77` (which DOES include `"plan"`) never applies. `AgentSession._active_tools` therefore lacks `plan` → `_execute_tool_by_name` raises `RuntimeError("Tool 'plan' is disabled")`. Phase 5 updated the runtime fallback but missed the CLI default — two hardcoded lists drifted. `one/cli/args.py:263` (`--tools` help text) also lacks `plan`.
+
+**Planned fix (exact):**
+- Define the default tool names ONCE as a module-level constant, e.g. `DEFAULT_TOOL_NAMES` in `one/tools/index.py` (next to `all_tools`), containing: read, bash, edit, write, grep, find, ls, finish, plan, spawn_subagent, ask_user.
+- Use it in `one/cli/main.py:364` (replace the inline list) and in `one/core/agent_session_runtime.py:77` (replace the inline fallback list).
+- Update the `--tools` help text in `one/cli/args.py:263` to include `plan`.
+- Regression test: unit test asserting `"plan" in DEFAULT_TOOL_NAMES` and that every name in `DEFAULT_TOOL_NAMES` exists in `all_tools`; subprocess test (tests/test_auth_and_cli.py pattern) running `python -m one.cli.main --help` asserting `plan` appears in the `--tools` line.
+
+**Files:** `one/tools/index.py`, `one/cli/main.py`, `one/core/agent_session_runtime.py`, `one/cli/args.py`, `tests/test_tool_calling.py` or `tests/test_auth_and_cli.py`
+
+**Acceptance Criteria:**
+- Default CLI/TUI sessions have `plan` in `_active_tools` (no more "Tool 'plan' is disabled").
+- `--tools` help text lists `plan`.
+- Full suite green.
+
+**Estimated effort:** ~0.5 h
+
+**Confidence:** High (root cause fully identified)
+
+- [x] **Task 7.1: single source of truth for default tool names**
+  - **Description:** Add `DEFAULT_TOOL_NAMES` constant to `one/tools/index.py` (read, bash, edit, write, grep, find, ls, finish, plan, spawn_subagent, ask_user). Replace the inline list in `one/cli/main.py:364` and the fallback list in `one/core/agent_session_runtime.py:77` with the constant. Update `--tools` help text in `one/cli/args.py:263` to include `plan`.
+  - **Files:** `one/tools/index.py`, `one/cli/main.py`, `one/core/agent_session_runtime.py`, `one/cli/args.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** No hardcoded tool-name lists remain duplicated; plan is in the default list; help text shows plan.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tool_calling.py tests/test_auth_and_cli.py`
+
+- [x] **Task 7.2: regression tests + full suite**
+  - **Description:** Add a unit test asserting `"plan" in DEFAULT_TOOL_NAMES` and all names resolve in `all_tools`; add a subprocess test (tests/test_auth_and_cli.py pattern) running `python -m one.cli.main --help` and asserting `plan` in the `--tools` line. Run the full suite.
+  - **Files:** `tests/test_tool_calling.py`, `tests/test_auth_and_cli.py`
+  - **Dependencies:** Task 7.1
+  - **Acceptance Criteria:** New tests pass; full suite green (342 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
 ## Rollout & Rollback
