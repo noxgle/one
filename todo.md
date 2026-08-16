@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-7 **implemented and committed** (344 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`).
+> Status: Phases 1-8 **implemented and committed** (355 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`).
 
 ## Goal
 
@@ -581,6 +581,47 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
   - **Acceptance Criteria:** New tests pass; full suite green (342 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 8: TUI crash — Textual's own markup parser rejects unescaped `[` in rendered content (MarkupError) — DONE
+
+**Bug report (user):** after setting a plan, the TUI crashed with `MarkupError: Expected markup value (found '>",\n').` in `_render_stream` (`one/modes/tui_mode.py:521`, `stream_widget.update("\n".join(rendered))`), triggered from `_write_tool_block` (line 665) ← `on_session_event` (line 1782) while rendering a tool result (read) after the plan was set.
+
+**Root cause (verified by web research):**
+1. Textual 8.x has its OWN markup parser (`textual/markup.py`, `MarkupTokenizer`, `expect_markup_expression = Expect("markup value", ...)`) which treats ANY `[` not preceded by a backslash as a tag start and requires `key=value` inside the tag. Content like `[1,2,3]`, `[ABC]`, `[type='CNAME']`, `[{"plan": ">", "x": 1}]` → `MarkupError: Expected markup value (found ...)`.
+2. `rich.markup.escape` (regex `(\\*)(\[[a-z#/@][^[]*?])`) escapes ONLY `[`-prefixed lowercase/`#`/`/`/`@` tags — it does NOT escape `[1,2,3]`, `[ABC]`, `[type='CNAME']`, `[{"plan": ">", "x": 1}]`. Phase 6's fix (`rich_escape` in `_refresh_sidebar` line 792 and in `_render_stream` line 517) is therefore insufficient for Textual's stricter parser. Rich 15.0.0's own markup.py has no "Expected markup value" error — confirmed the error comes from Textual, not Rich.
+3. Sources: dev.to "type='CNAME' crashed my Textual TUI" (fix: build a `rich.text.Text` object instead of a markup string — `Static.update()` accepts a Text renderable and prints it as-is; "escaping is parser-specific"); GitHub anthropics/claude-code#55583 (same error with rich 15.0.0 + textual 8.2.4).
+
+**Planned fix (exact):**
+- `_render_stream` (`one/modes/tui_mode.py` ~510-521): build a `rich.text.Text` object instead of a markup string. For each line: `__MK__:` spinner lines → `text.append_text(Text.from_markup(line))` (spinner markup is intentional); all other lines → `text.append(line + "\n")` (literal, never parsed). `stream_widget.update(text)`.
+- `_refresh_sidebar` (~784-821): same approach — build `Text`; lines that intentionally carry markup (section headers `[b info]...[/]`, `[b]MCP[/]`, `[b]Plan[/]`, Keys line) → `Text.from_markup`; all data lines (plan text, MCP bullets, info values) → `Text.append` literal. Remove the `rich_escape(display)` workaround from Phase 6 (literal append supersedes it).
+- `_show_extension_panel` (same bug class — extension payload JSON can contain `[`/`]`): title via `Text.from_markup`, payload appended literally via `Text.append`.
+- Regression tests: TUI test rendering tool output containing `[type='CNAME']`, `[1,2,3]`, `[ABC]`, `[{"plan": ">", "x": 1}]` → no MarkupError; sidebar with plan containing such text → no MarkupError; existing Phase 6 tests still pass.
+
+**Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`
+
+**Acceptance Criteria:**
+- Rendering a tool result containing `[type='CNAME']` / `[1,2,3]` / `[ABC]` / `[{"plan": ">", "x": 1}]` does not raise MarkupError.
+- Sidebar renders plan text with such chars without MarkupError.
+- Intentional markup (headers, spinner) still renders styled.
+- Golden snapshots regenerated (Text-object rendering changes the SVG representation; visible output verified pixel-identical to pre-Phase-8 goldens — 0 text/bg cell diffs). Full suite green.
+
+**Estimated effort:** ~1 h
+
+**Confidence:** High (root cause fully identified via web research; fix approach proven in the referenced article)
+
+- [x] **Task 8.1: Text-object rendering in `_render_stream` + `_refresh_sidebar`**
+  - **Description:** In `_render_stream` (`one/modes/tui_mode.py` ~510-521): replace the markup-string join with a `rich.text.Text` object — `text = Text()`; `__MK__:` lines → `text.append_text(Text.from_markup(line))`; other lines → `text.append(line + "\n")`; `stream_widget.update(text)`. In `_refresh_sidebar` (~784-821): build the sidebar as a `Text` object — section headers/Keys line via `Text.from_markup`, all data lines (plan text, MCP bullets, info values) via `Text.append` literal; remove the `rich_escape(display)` workaround from Phase 6 (literal append supersedes it).
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** No raw content line is ever passed through Textual's markup parser; intentional markup (headers, spinner) still renders styled; Phase 6 tests still pass.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py tests/test_tui_snapshots.py`
+
+- [x] **Task 8.2: regression tests + full suite**
+  - **Description:** Add TUI tests exercising the REAL Textual render path (app-level, `stream_widget.update` through the actual widget): tool result / plan text containing `[type='CNAME']`, `[1,2,3]`, `[ABC]`, `[{"plan": ">", "x": 1}]` → no MarkupError; sidebar with plan containing such text → no MarkupError. Note: Phase 6 tests have a gap — they don't exercise the real Textual parser (the user's crash content passed those tests but crashed in the real TUI). Run the full suite.
+  - **Files:** `tests/test_tui_mode.py`
+  - **Dependencies:** Task 8.1
+  - **Acceptance Criteria:** New tests pass; full suite green (344 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -610,6 +651,7 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
 | Plan text inflates system-prompt tokens every step | Cost/latency | Medium | Plan size is model-controlled; prompt rules keep it concise; truncation only in the TUI sidebar, not in the prompt |
 | Restore-on-load misses the plan after compaction | Feature gap | Low | Compaction explicitly keeps `customType: "plan"` messages (Task 5.3) |
 | Golden TUI snapshots change | CI failure | Low | Existing snapshot scenarios have no plan; `getattr` guards dummy sessions |
+| Textual markup parser stricter than Rich (any `[` = tag start) | TUI crash | Certain (reported) | Phase 8: render via `rich.text.Text` objects (literal append), never raw markup strings |
 
 ## Project Acceptance Criteria
 
@@ -633,6 +675,9 @@ The CLI always passes `bootstrap["tools"]` (main.py:401), so the runtime fallbac
 - [x] Sidebar renders plan text with markup chars without MarkupError (rich_escape).
 - [x] Render calls are no-ops when the DOM is gone (NoMatches guarded in _render_stream/_refresh_sidebar).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (342 tests).
+- [x] Tool output / plan text with unescaped `[` (e.g. `[type='CNAME']`, `[1,2,3]`, `[ABC]`, `[{"plan": ">", "x": 1}]`) renders in the TUI stream without MarkupError (Phase 8).
+- [x] Sidebar renders plan text with such chars without MarkupError (Phase 8).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (355 tests).
 
 ## Estimated Timeline
 

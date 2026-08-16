@@ -140,9 +140,10 @@ async def test_tui_sidebar_renders_mcp_off_without_manager(tmp_path: Path) -> No
         app._refresh_sidebar()
         await pilot.pause()
         sidebar = app.query_one("#sidebar", Static)
-        assert "MCP" in sidebar.content
-        assert "off" in sidebar.content
-        assert sidebar.content.index("MCP") < sidebar.content.index("Keys")
+        s = str(sidebar.content)
+        assert "MCP" in s
+        assert "off" in s
+        assert s.index("MCP") < s.index("Keys")
 
 
 @pytest.mark.asyncio
@@ -168,10 +169,11 @@ async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
         app._refresh_sidebar()
         await pilot.pause()
         sidebar = app.query_one("#sidebar", Static)
-        assert "- demo" in sidebar.content
-        assert "- web" in sidebar.content
-        assert "- old" not in sidebar.content
-        assert sidebar.content.index("MCP") < sidebar.content.index("Keys")
+        s = str(sidebar.content)
+        assert "- demo" in s
+        assert "- web" in s
+        assert "- old" not in s
+        assert s.index("MCP") < s.index("Keys")
 
 
 @pytest.mark.asyncio
@@ -1554,7 +1556,11 @@ async def test_extension_panels_hide_on_new_session(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_sidebar_plan_with_markup_chars_no_crash(tmp_path: Path):
-    """Plan text containing [ ], <, > must not raise MarkupError in the sidebar."""
+    """Plan text containing [ ], <, > must not raise MarkupError in the sidebar.
+
+    Phase 8: plan data lines are appended as literal Text (not parsed by
+    Textual's markup parser), so raw brackets appear as-is in the output.
+    """
     from textual.widgets import Static
 
     from one.modes.tui_mode import _OneTextualApp
@@ -1568,16 +1574,18 @@ async def test_tui_sidebar_plan_with_markup_chars_no_crash(tmp_path: Path):
         app._refresh_sidebar()
         await pilot.pause()
         sidebar = app.query_one("#sidebar", Static)
-        # The escaped text must be present — brackets should be escaped.
         assert "Plan" in sidebar.content
-        assert "[b]bold[/]" not in sidebar.content  # not raw (would be interpreted)
-        # The raw plan content should be in escaped form.
-        assert "\\[b]bold\\[/]" in sidebar.content  # escaped by rich_escape
+        # Plan data is literal text — brackets appear as-is (not escaped).
+        assert "[b]bold[/]" in sidebar.content
 
 
 @pytest.mark.asyncio
 async def test_tui_plan_update_with_markup_chars_in_stream(tmp_path: Path):
-    """plan_update with markup chars renders the Plan block in the stream without error."""
+    """plan_update with markup chars renders the Plan block in the stream without error.
+
+    Phase 8: stream data lines are appended as literal Text (not parsed by
+    Textual's markup parser), so raw brackets appear as-is in the output.
+    """
     from textual.widgets import Static
 
     from one.modes.tui_mode import _OneTextualApp
@@ -1593,7 +1601,261 @@ async def test_tui_plan_update_with_markup_chars_in_stream(tmp_path: Path):
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "Plan:" in stream
-        # The stream renders via rich_escape — check the widget's rendered content
-        # which has the escaped form.
+        # Stream data is literal text — brackets appear as-is (not escaped).
         widget = app.query_one("#stream", Static)
-        assert "\\[b]bold\\[/]" in widget.content  # escaped brackets (rich_escape)
+        assert "[b]bold[/]" in widget.content
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: Textual MarkupError regression — any `[` in raw content must not
+# crash Textual's own markup parser (textual/markup.py).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_stream_markup_chars_dns_type(tmp_path: Path):
+    """Tool result with [type='CNAME'] must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "read",
+            "ok": True,
+            "result": {"outputText": "DNS entry: [type='CNAME']"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "DNS entry:" in stream
+        assert "[type='CNAME']" in stream
+        widget = app.query_one("#stream", Static)
+        assert "[type='CNAME']" in widget.content
+
+
+@pytest.mark.asyncio
+async def test_tui_stream_markup_chars_bracket_list(tmp_path: Path):
+    """Tool result with [1,2,3] must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "read",
+            "ok": True,
+            "result": {"outputText": "tags: [1,2,3]"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "tags:" in stream
+        assert "[1,2,3]" in stream
+        widget = app.query_one("#stream", Static)
+        assert "[1,2,3]" in widget.content
+
+
+@pytest.mark.asyncio
+async def test_tui_stream_markup_chars_uppercase_brackets(tmp_path: Path):
+    """Tool result with [ABC] must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "read",
+            "ok": True,
+            "result": {"outputText": "section [ABC] end"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "section" in stream
+        assert "[ABC]" in stream
+        widget = app.query_one("#stream", Static)
+        assert "[ABC]" in widget.content
+
+
+@pytest.mark.asyncio
+async def test_tui_stream_markup_chars_json_with_gt(tmp_path: Path):
+    """Tool result with JSON containing [\"plan\": \">\"] must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "read",
+            "ok": True,
+            "result": {"outputText": '[{"plan": ">", "x": 1}]'},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert '"plan": ">' in stream
+        assert '"x": 1' in stream
+        widget = app.query_one("#stream", Static)
+        assert '"plan": ">' in widget.content
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_plan_markup_chars_dns_type(tmp_path: Path):
+    """Sidebar Plan section with [type='CNAME'] must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = "Record [type='CNAME'] points to example.com"
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        assert "Plan" in sidebar.content
+        assert "[type='CNAME']" in sidebar.content
+        assert "Record" in sidebar.content
+        assert "example.com" in sidebar.content
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_plan_markup_chars_bracket_list(tmp_path: Path):
+    """Sidebar Plan section with [1,2,3] must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = "tags: [1,2,3]"
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        assert "Plan" in sidebar.content
+        assert "[1,2,3]" in sidebar.content
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_plan_markup_chars_uppercase_brackets(tmp_path: Path):
+    """Sidebar Plan section with [ABC] must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = "section [ABC] end"
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        assert "Plan" in sidebar.content
+        assert "[ABC]" in sidebar.content
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_plan_markup_chars_json_with_gt(tmp_path: Path):
+    """Sidebar Plan section with JSON containing [\"plan\": \">\"] must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = '[{"plan": ">", "x": 1}]'
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        assert "Plan" in sidebar.content
+        assert '"plan": ">' in sidebar.content
+
+
+@pytest.mark.asyncio
+async def test_tui_stream_spinner_markup_still_rendered(tmp_path: Path):
+    """Intentional spinner markup (colour codes) must still render styled via Text.from_markup."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Directly add a thinking marker line to simulate spinner.
+        app._stream_lines.append("")
+        app._stream_lines.append(f"{_THINKING_MARK}[{app._theme.info}]{_THINKING_FRAMES[0]} Ctrl+C abort[/]")
+        app._stream_lines.append("")
+        app._render_stream()
+        await pilot.pause()
+        widget = app.query_one("#stream", Static)
+        # The spinner text (without __MK__ prefix) must be present.
+        assert "Ctrl+C abort" in widget.content
+        # The raw thinking mark must NOT appear in rendered content.
+        assert _THINKING_MARK not in widget.content
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_info_markup_still_rendered(tmp_path: Path):
+    """Intentional section header markup (colour codes) must still render styled via Text.from_markup."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        # Section headers must be present.
+        assert "Info" in sidebar.content
+        assert "MCP" in sidebar.content
+        assert "Keys" in sidebar.content
+        assert "Plan" not in sidebar.content  # no plan set
+
+
+@pytest.mark.asyncio
+async def test_tui_stream_complex_markup_content_no_crash(tmp_path: Path):
+    """A single line with multiple bracket patterns must not raise MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "tool_call_end",
+            "tool": "read",
+            "ok": True,
+            "result": {"outputText": "a=[b]c[/d] [1,2,3] [XYZ] {'key': 'val'} [type='CNAME']"},
+        })
+        await pilot.pause()
+        widget = app.query_one("#stream", Static)
+        # All bracket content must be present as literal text.
+        assert "[b]c[/d]" in widget.content
+        assert "[1,2,3]" in widget.content
+        assert "[XYZ]" in widget.content
+        assert "[type='CNAME']" in widget.content

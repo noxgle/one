@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import textwrap
 from typing import Any
 
-from rich.markup import escape as rich_escape
+from rich.text import Text
 
 from one.core.types import ModelInfo
 from one.tools.common import sanitize_display_text
@@ -512,13 +512,15 @@ if TEXTUAL_AVAILABLE:
                 stream_widget = self.query_one("#stream")
             except Exception:
                 return
-            rendered: list[str] = []
+            text = Text()
             for line in self._stream_lines:
-                if line.startswith("__MK__:"):
-                    rendered.append(line[len("__MK__:") :])
+                if line.startswith(_THINKING_MARK):
+                    # Intentional markup (colour + spinner frame).
+                    text.append_text(Text.from_markup(line[len(_THINKING_MARK):]))
                 else:
-                    rendered.append(rich_escape(line))
-            stream_widget.update("\n".join(rendered))
+                    # Literal text — never parsed by Textual's markup parser.
+                    text.append(line + "\n")
+            stream_widget.update(text)
             try:
                 self.query_one("#stream_container", VerticalScroll).scroll_end(animate=False)
             except Exception:
@@ -783,40 +785,54 @@ if TEXTUAL_AVAILABLE:
             elif not s["mcpServers"]:
                 mcp_lines = ["none"]
             else:
-                mcp_lines = [f"- {sv['name']}" for sv in s["mcpServers"]]
+                mcp_lines = [f"- {sanitize_display_text(sv['name'])}" for sv in s["mcpServers"]]
             plan_text = getattr(self.session, "_plan", None)
-            plan_block = ""
+
+            info_block = Text()
+            info_block.append_text(Text.from_markup(f"[b {self._theme.info}]Info[/]"))
+            info_block.append("\n")
+            info_block.append(f"Model: {sanitize_display_text(s['model'])}\n")
+            info_block.append(f"Theme: {sanitize_display_text(self._theme.name)}\n")
+            info_block.append(f"Thinking: {sanitize_display_text(s['thinking'])}\n")
+            info_block.append(f"Ctx: {s['contextPercent']:.1f}%\n")
+            info_block.append(f"Retry: {sanitize_display_text(s['retry'])}\n")
+            info_block.append(f"Status: {sanitize_display_text(status)}\n")
+            info_block.append(f"Coop: {sanitize_display_text(s['coop'])}\n")
+            info_block.append(f"Subagents: {'on' if s['subagents'] else 'off'}\n")
+            info_block.append(f"Bash: {'on' if s['bashOutput'] else 'off'}\n")
+            info_block.append(f"CWD: {sanitize_display_text(s['cwd'])}\n")
+            info_block.append(f"Session: {sanitize_display_text(s['sessionId'])}\n")
+
+            plan_block = Text()
             if plan_text:
                 display = (
                     plan_text[: _PLAN_SIDEBAR_MAX] + "…"
                     if len(plan_text) > _PLAN_SIDEBAR_MAX
                     else plan_text
                 )
-                display = rich_escape(display)
-                plan_block = f"[b {self._theme.info}]Plan[/]\n{display}\n"
+                display = sanitize_display_text(display)
+                plan_block.append_text(Text.from_markup(f"[b {self._theme.info}]Plan[/]"))
+                plan_block.append("\n")
+                plan_block.append(display + "\n")
 
-            sidebar = (
-                f"[b {self._theme.info}]Info[/]\n"
-                f"Model: {s['model']}\n"
-                f"Theme: {self._theme.name}\n"
-                f"Thinking: {s['thinking']}\n"
-                f"Ctx: {s['contextPercent']:.1f}%\n"
-                f"Retry: {s['retry']}\n"
-                f"Status: {status}\n"
-                f"Coop: {s['coop']}\n"
-                f"Subagents: {'on' if s['subagents'] else 'off'}\n"
-                f"Bash: {'on' if s['bashOutput'] else 'off'}\n"
-                f"CWD: {s['cwd']}\n"
-                f"Session: {s['sessionId']}\n"
-                + plan_block
-                + "\n"
-                + f"[b {self._theme.info}]MCP[/]\n"
-                + "\n".join(mcp_lines) + "\n"
-                "\n"
-                f"[b {self._theme.info}]Keys[/]\n"
-                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+V paste\n"
-            )
-            sidebar = sanitize_display_text(sidebar)
+            mcp_block = Text()
+            mcp_block.append_text(Text.from_markup(f"[b {self._theme.info}]MCP[/]"))
+            mcp_block.append("\n")
+            mcp_block.append("\n".join(mcp_lines) + "\n")
+
+            keys_block = Text()
+            keys_block.append_text(Text.from_markup(f"[b {self._theme.info}]Keys[/]"))
+            keys_block.append("\n")
+            keys_block.append("Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+V paste\n")
+
+            sidebar = Text()
+            sidebar.append_text(info_block)
+            sidebar.append_text(plan_block)
+            sidebar.append("\n")
+            sidebar.append_text(mcp_block)
+            sidebar.append("\n")
+            sidebar.append_text(keys_block)
+
             try:
                 self.query_one("#sidebar", Static).update(sidebar)
             except Exception:
@@ -1649,17 +1665,18 @@ if TEXTUAL_AVAILABLE:
             ui_type = str(req.get("uiType") or "widget")
             title = str(req.get("title") or "")
             payload = req.get("payload") or {}
-            lines = [f"[b]{title or req.get('extension', 'extension')}[/b]"]
-            lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
-            rendered = "\n".join(lines)
+            content = Text()
+            content.append_text(Text.from_markup(f"[b]{title or req.get('extension', 'extension')}[/b]"))
+            content.append("\n")
+            content.append(json.dumps(payload, ensure_ascii=False, indent=2))
             try:
                 if ui_type == "overlay":
                     overlay = self.query_one("#ext_overlay", Static)
-                    overlay.update(rendered)
+                    overlay.update(content)
                     overlay.add_class("visible")
                 else:
                     panel = self.query_one("#ext_panel", Static)
-                    panel.update(rendered)
+                    panel.update(content)
                     panel.add_class("visible")
             except Exception:
                 pass
