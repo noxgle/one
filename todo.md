@@ -1,10 +1,17 @@
-# Project: one — TUI info panel (MCP list, full height) + tool timeout semantics
+# Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
+
+> Status: **all planned work implemented and committed** (324 tests green). Follow-up changes below (Phase 3) were added after the original plan and are also complete.
 
 ## Goal
 
 1. **Bash timeout:** the model decides the per-command timeout. If the model does not pass `timeout`, the configured default (`tools.timeoutSec`, 30 s) applies. A timed-out command must surface a clear `Command timed out` result to the model — not the ambiguous `(cancelled)` — and the model's explicit `timeout` must actually be honored (today it is silently overridden by the 30 s outer `asyncio.wait_for`).
 2. **MCP tools:** same rule — the model decides (optional `timeout` in args); otherwise the MCP client's own default (120 s) applies. No 30 s outer cap.
 3. **TUI info panel (sidebar):** stretched to the full available height (currently content-height ≈ half screen) and shows the list of enabled MCP clients.
+
+**Follow-up goals (approved later, also done):**
+4. MCP is rendered as its **own sidebar section** (header like `Info`/`Keys`) with one `- <name>` bullet per enabled client — no tool counts/transport (user decision), section always visible (`off`/`none` lines).
+5. Keyboard shortcuts `Ctrl+A` / `Ctrl+S` moved from the Info section into the **Keys section** (Info shows no shortcut hints).
+6. A plain user prompt typed **while the agent is streaming** is queued as a follow-up instead of failing with `[error] streamingBehavior is required while streaming` (TUI and CLI).
 
 ## Context
 
@@ -73,14 +80,20 @@ model tool call: {"tool":"bash","args":{"command":..., "timeout": N?}}
 - User abort (Ctrl+C) → `(cancelled)` — now distinguishable from timeout.
 - Other tools (read/write/edit/grep/find/ls): unchanged outer cap (settings timeout).
 
-### Sidebar (after fix)
+### Sidebar (final state)
 
 ```
 #sidebar { width: 42; height: 1fr; overflow-y: auto; ... }   # full height
-Info section gains:
-  MCP: demo(3,stdio) web(5,http)      # enabled servers, tool count, transport, '!' on error
-  MCP: off                            # started with --no-mcp (no manager)
-  MCP: none                           # no enabled servers configured
+Info block:
+  Model/Theme/Thinking/Ctx/Retry/Status/Coop/Subagents/Bash/CWD/Session
+  (Coop/Subagents without shortcut hints)
+MCP section (own header, between Info and Keys):
+  [b]MCP[/]
+  off                                 # started with --no-mcp (no manager)
+  none                                # no enabled servers configured
+  - web-deepsearch                    # one bullet per enabled client (name only)
+Keys section:
+  Ctrl+C abort | Ctrl+L clear | Ctrl+Q quit | Ctrl+A coop | Ctrl+S subagents | Ctrl+V paste
 ```
 
 ## Architecture Decisions
@@ -129,6 +142,30 @@ Info section gains:
 **Rationale:** one-line CSS fix; snapshot function stays pure/testable; handles `--no-mcp` and empty config gracefully.
 
 **Tradeoffs:** sidebar content grows; `overflow-y: auto` handles small terminals; golden snapshots must be regenerated.
+
+### ADR-005: MCP as a separate sidebar section; shortcuts move to Keys
+**Decision:** The MCP line inside the Info block was replaced by a dedicated section (bold header `MCP`, like `Info`/`Keys`) placed between Info and Keys: one `- <name>` bullet per enabled server (name only — user decision, details dropped), `off` when there is no manager, `none` when nothing is enabled. The section is always visible. `Ctrl+A`/`Ctrl+S` hints were removed from the `Coop:`/`Subagents:` Info lines and both shortcuts are listed in the Keys section.
+
+**Alternatives:**
+- Keep the compact `MCP: demo(3,stdio) web(5,http)` line — user explicitly asked for a separate section with bullets (`- web-deepsearch`).
+- Hide the section when MCP is off — user chose "section always visible" (consistency with the rest of the panel).
+- Keep shortcuts inside Info lines — user explicitly asked Keys-only for shortcuts.
+
+**Rationale:** matches the user's sidebar layout request; each client on its own line removes the >38-char wrap logic; `build_sidebar_snapshot` data (incl. toolCount/transport) is kept for the snapshot API.
+
+**Tradeoffs:** tool counts/transport no longer visible in the sidebar (still in `/mcp list`); golden snapshots regenerate again.
+
+### ADR-006: User prompts during streaming are queued as follow-ups
+**Decision:** `AgentSession.prompt()` raises `RuntimeError("streamingBehavior is required while streaming")` when called without options while a turn is running. TUI `on_input_submitted` and CLI `interactive_mode` now check `session.is_streaming` and call `prompt(text, {"streamingBehavior": "followUp"})` (message lands in the follow-up queue, processed after the current turn; steering queue is still available via `/steer`). Both show a "Queued follow-up message." confirmation; the TUI refreshes the sidebar (queue counters) after queueing.
+
+**Alternatives:**
+- Surface the runtime error to the user (status quo) — the user's bug report explicitly calls the missing queueing a problem.
+- Use `steer` as the default queue — user chose follow-up ("1 A") so a plain prompt never interrupts the current turn.
+- Fix only the TUI — user approved fixing `interactive_mode` too ("2 tak"); same latent bug.
+
+**Rationale:** matches user decisions; one consistent rule across TUI and CLI; follow-up messages are automatically popped and processed at the end of the current turn (`agent_session.py` turn loop).
+
+**Tradeoffs:** a queued prompt is processed only after the current turn ends (visible via the sidebar queue counters); no API changes.
 
 ## Phases
 
@@ -233,6 +270,50 @@ Info section gains:
   - **Verification:**
     - `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py && .venv/bin/python -m pytest -q`
 
+### Phase 3: Follow-ups (sidebar MCP section, Keys shortcuts, prompt queueing) — DONE
+
+**Objective:** finalize the sidebar layout per user feedback (MCP as own section, shortcuts in Keys) and fix prompt queueing during streaming (TUI + CLI).
+
+**Prerequisites:** Phases 1-2.
+
+**Expected outcome:** sidebar renders `Info → MCP (bullets) → Keys`; plain prompts while streaming are queued as follow-ups; all tests green; `AGENTS.md` kept in sync.
+
+**Estimated effort:** ~1.5 h
+
+**Confidence:** High
+
+- [x] **Task 3.1: MCP as a separate sidebar section (bullets)**
+  - **Description:** In `_refresh_sidebar` (`one/modes/tui_mode.py`): replace the `mcp_text` logic (`MCP: off|none|name(...)...` with >38-char wrap) with `mcp_lines = ["off"]` / `["none"]` / `[f"- {sv['name']}" for sv in s["mcpServers"]]`; render a `[b info]MCP[/]` section between the Info block and the Keys block. `build_sidebar_snapshot` unchanged.
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** Phase 2
+  - **Acceptance Criteria:** Sidebar order `Info … Session → MCP → Keys`; bullets `- demo`, `- web`; disabled servers excluded; `off`/`none` states.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py`
+  - **Committed in:** `7684705`
+
+- [x] **Task 3.2: Move Ctrl+A/Ctrl+S to the Keys section**
+  - **Description:** `Coop: {s['coop']} (Ctrl+A)` → `Coop: {s['coop']}`; `Subagents: … (Ctrl+S)` → `Subagents: …`; Keys line gains `Ctrl+S subagents` (Ctrl+A coop already listed).
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** Task 3.1
+  - **Acceptance Criteria:** Info lines carry no shortcut hints; Keys lists Ctrl+A coop and Ctrl+S subagents; goldens regenerated.
+  - **Verification:** `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py`
+  - **Committed in:** `52ca069` (with 3.3)
+
+- [x] **Task 3.3: Queue user prompts during streaming (TUI + CLI)**
+  - **Description:** In `on_input_submitted` (`one/modes/tui_mode.py`): if `self.session.is_streaming` → `await self.session.prompt(text, {"streamingBehavior": "followUp"})` + `self._write("Queued follow-up message.", "info")`, else plain `prompt(text)`. In `interactive_mode.py`: same check + `print("Queued follow-up message.")`. New test `test_tui_prompt_queued_while_streaming` (slow provider; assert no `[error]` in stream, message lands in `get_pending_queues()["followUp"]`, consumed after the turn).
+  - **Files:** `one/modes/tui_mode.py`, `one/modes/interactive_mode.py`, `tests/test_tui_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** Second prompt during a running turn queues (follow-up) instead of `[error] streamingBehavior is required while streaming`; queued message processed after the turn.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py tests/test_interactive_mode.py`
+  - **Committed in:** `52ca069`
+
+- [x] **Task 3.4: AGENTS.md refresh**
+  - **Description:** Update `AGENTS.md`: 323 tests (~90 s), 10 tools, `one/mcp/client.py` (McpManager, 120 s call_tool default), `settings_manager.py` + `run_mode.py`, MCP config gotchas (`settings.json` `mcpServers`, `--no-mcp`, fake managers in tests), `tools.timeoutSec`/bash `timeout` override, `ask_user` implemented, TUI golden snapshot workflow (`ONE_UPDATE_SNAPSHOTS=1`, adler32 hash note), `todo.md` as the active committed plan.
+  - **Files:** `AGENTS.md`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** No stale claims (test/tool counts, roadmap wording); every statement verifiable in the repo.
+  - **Verification:** manual diff review
+  - **Committed in:** `c535d7f`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -267,10 +348,14 @@ Info section gains:
 - [x] System prompt states the actual default timeout and documents the bash `timeout` arg semantics.
 - [x] TUI sidebar spans the full available height.
 - [x] TUI info panel lists enabled MCP clients (name, tool count, transport, error marker) with `MCP: off` / `MCP: none` states.
-- [x] Full test suite green: `.venv/bin/python -m pytest -q` (68+ tests).
+- [x] MCP is a separate sidebar section (header, `- <name>` bullets, `off`/`none` states) between Info and Keys.
+- [x] Keyboard shortcuts live only in the Keys section (Ctrl+A coop, Ctrl+S subagents); Info lines have no shortcut hints.
+- [x] Plain user prompts during streaming are queued as follow-ups in TUI and CLI (no `streamingBehavior is required` error).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (324 tests).
 
 ## Estimated Timeline
 
 - Phase 1: ~2 h (single implementer).
 - Phase 2: ~1.5 h (single implementer).
-- Total: ~3.5 h; uncertainty low — both phases are small, well-scoped changes in 4 source files + tests.
+- Phase 3 (follow-ups): ~1.5 h (sidebar MCP section + Keys shortcuts + prompt queueing + AGENTS.md).
+- Total: ~5 h; uncertainty low — all phases were small, well-scoped changes in ~6 source files + tests. All work is committed.
