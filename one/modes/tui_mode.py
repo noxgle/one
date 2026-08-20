@@ -12,6 +12,7 @@ from typing import Any
 
 from rich.text import Text
 
+from one.core.provider_login import validate_and_fetch
 from one.core.types import ModelInfo
 from one.tools.common import sanitize_display_text
 
@@ -1567,6 +1568,23 @@ if TEXTUAL_AVAILABLE:
         async def _complete_login(self, provider: str, api_key: str, model_input: str) -> None:
             """Persist provider apiKey + defaults and optionally switch the model."""
             session = self.session
+            # Phase 11: validate the key BEFORE storing, then fetch + register
+            # the provider's model list.
+            adapter = getattr(session, "providers", {}).get(provider)
+            if adapter is None:
+                self._write(f"Provider adapter not found for {provider}; key stored without validation.", "warn")
+            else:
+                ok, error, fetched = await validate_and_fetch(adapter, api_key, provider, model_input or None)
+                if not ok:
+                    self._write(f"Authorization failed for {provider}: {error}", "error")
+                    return
+                if error:
+                    self._write(f"Warning: {error}", "warn")
+                if fetched:
+                    added = session.model_registry.register_models(provider, fetched)
+                    session.model_registry.persist_models(provider, fetched)
+                    preview = ", ".join(fetched[:20]) + ("..." if len(fetched) > 20 else "")
+                    self._write(f"Authorized. Fetched {len(fetched)} models ({added} new): {preview}", "info")
             selected_model = None
             if model_input:
                 selected_model = session.model_registry.resolve(provider, model_input, allow_dynamic=True)

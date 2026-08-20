@@ -11,6 +11,22 @@ from .base import ChatResult, ProviderAdapter
 class GeminiAdapter(ProviderAdapter):
     name = "gemini"
 
+    async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url)
+            if resp.is_error:
+                body = resp.text[:1000]
+                raise RuntimeError(f"gemini API error {resp.status_code}: {body}")
+            data = resp.json()
+        out: list[str] = []
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            methods = m.get("supportedGenerationMethods") or []
+            if name and "generateContent" in methods:
+                out.append(name.removeprefix("models/"))
+        return out
+
     async def chat(
         self,
         api_key: str,
@@ -19,6 +35,7 @@ class GeminiAdapter(ProviderAdapter):
         thinking_level: str,
         headers: dict[str, str] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         contents = []
         for m in messages:
@@ -27,9 +44,12 @@ class GeminiAdapter(ProviderAdapter):
             role = "user" if m.get("role") == "user" else "model"
             contents.append({"role": role, "parts": [{"text": str(m.get("content", ""))}]})
 
+        generation_config: dict[str, Any] = {"temperature": 0.1}
+        if max_tokens is not None:
+            generation_config["maxOutputTokens"] = max_tokens
         payload = {
             "contents": contents,
-            "generationConfig": {"temperature": 0.1},
+            "generationConfig": generation_config,
         }
 
         h = {"Content-Type": "application/json"}

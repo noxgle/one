@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -471,6 +472,93 @@ async def test_interactive_short_aliases(monkeypatch, capsys):
     assert "Model cycled to" in out or "No available models to cycle." in out
     assert "Thinking level cycled to" in out
     assert '"levels": [' in out
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_validates_and_fetches_models(tmp_path, monkeypatch, capsys):
+    """Phase 11: /login validates the key, fetches + persists the model list."""
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+
+    auth = AuthStorage.in_memory()
+    session = _DummySession()
+    session.model_registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+
+    class _Stub:
+        async def list_models(self, api_key: str, headers: dict | None = None) -> list[str]:
+            return ["m1", "m2"]
+
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+            return None
+
+    session.providers = {"openai": _Stub()}
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/login openai sk-ok gpt-4.1", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Authorized. Fetched 2 models" in out
+    assert "- m1" in out and "- m2" in out
+    assert "Stored key for openai." in out
+    assert "Default model set to gpt-4.1." in out
+    # Key stored, models registered in-memory and persisted.
+    assert auth.get_api_key("openai") == "sk-ok"
+    assert session.model_registry.find("openai", "m1") is not None
+    data = json.loads((tmp_path / "models.json").read_text(encoding="utf-8"))
+    assert {m["id"] for m in data["providers"]["openai"]} >= {"m1", "m2"}
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_bad_key_not_stored(tmp_path, monkeypatch, capsys):
+    """Phase 11: 401 during validation -> key is NOT stored."""
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+
+    auth = AuthStorage.in_memory()
+    session = _DummySession()
+    session.model_registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+
+    class _Stub:
+        async def list_models(self, api_key: str, headers: dict | None = None) -> list[str]:
+            raise RuntimeError("openai API error 401: invalid key")
+
+    session.providers = {"openai": _Stub()}
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/login openai sk-bad", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Authorization failed for openai" in out
+    assert "Stored key for openai." not in out
+    assert auth.get_api_key("openai") is None
+    assert session.settings_manager.default_provider is None
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_no_auth_provider_fetches_without_key(tmp_path, monkeypatch, capsys):
+    """Phase 11: NO_AUTH providers (llama.cpp) fetch models without a key."""
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+
+    auth = AuthStorage.in_memory()
+    session = _DummySession()
+    session.model_registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+
+    class _Stub:
+        async def list_models(self, api_key: str, headers: dict | None = None) -> list[str]:
+            return ["local", "qwen"]
+
+    session.providers = {"llama.cpp": _Stub()}
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/login llama.cpp", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Fetched 2 models" in out
+    assert "Configured provider llama.cpp." in out
+    assert session.model_registry.find("llama.cpp", "local") is not None
+    data = json.loads((tmp_path / "models.json").read_text(encoding="utf-8"))
+    assert {m["id"] for m in data["providers"]["llama.cpp"]} == {"local", "qwen"}
 
 
 @pytest.mark.asyncio

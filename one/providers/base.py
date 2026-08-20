@@ -23,5 +23,14 @@ class ProviderAdapter:
         thinking_level: str,
         headers: dict[str, str] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
+        raise NotImplementedError
+
+    async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
+        """Return the provider's model ids, or None when no list endpoint exists.
+
+        Providers without a public models-list endpoint (e.g. Anthropic)
+        return None; callers may fall back to a minimal-chat validation.
+        """
         raise NotImplementedError

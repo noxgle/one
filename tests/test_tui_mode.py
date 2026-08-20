@@ -318,12 +318,36 @@ def _mk_app_session(tmp_path: Path, runtime_key: str | None = None):
     auth = AuthStorage.in_memory()
     if runtime_key:
         auth.set_runtime_api_key("openai", runtime_key)
-    registry = ModelRegistry.create(auth)
+    registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
     settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
     session_manager = SessionManager.in_memory(str(tmp_path))
     return AgentSession(session_manager, settings, registry, _FakeLoader(), model, "medium")
+
+
+class _LoginStub:
+    """Phase 11: fake provider adapter for /login tests (no network)."""
+
+    def __init__(
+        self,
+        models: list[str] | None = None,
+        error: Exception | None = None,
+        chat_error: Exception | None = None,
+    ) -> None:
+        self.models = models
+        self.error = error
+        self.chat_error = chat_error
+
+    async def list_models(self, api_key: str, headers: dict | None = None) -> list[str] | None:
+        if self.error is not None:
+            raise self.error
+        return self.models
+
+    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+        if self.chat_error is not None:
+            raise self.chat_error
+        return None
 
 
 class _ErrorProvider:
@@ -780,6 +804,7 @@ async def test_tui_command_login_inline_stores_key(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
+    session.providers = {"openai": _LoginStub(models=[])}
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -801,6 +826,7 @@ async def test_tui_command_login_pending_flow_via_input(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
+    session.providers = {"anthropic": _LoginStub(error=NotImplementedError())}
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -849,6 +875,7 @@ async def test_tui_command_logout_and_cooperation(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
+    session.providers = {"openai": _LoginStub(models=[])}
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()

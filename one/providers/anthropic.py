@@ -11,6 +11,11 @@ from .base import ChatResult, ProviderAdapter
 class AnthropicAdapter(ProviderAdapter):
     name = "anthropic"
 
+    async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
+        # Anthropic has no public models-list endpoint; callers fall back to
+        # minimal-chat validation.
+        return None
+
     async def chat(
         self,
         api_key: str,
@@ -19,6 +24,7 @@ class AnthropicAdapter(ProviderAdapter):
         thinking_level: str,
         headers: dict[str, str] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         content_messages = []
         system = None
@@ -30,7 +36,7 @@ class AnthropicAdapter(ProviderAdapter):
 
         payload: dict[str, Any] = {
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": max_tokens or 4096,
             "messages": content_messages,
         }
         if system:

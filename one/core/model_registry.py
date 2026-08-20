@@ -70,7 +70,8 @@ class ModelRegistry:
     def __init__(self, auth_storage: AuthStorage, models_path: str | None = None) -> None:
         self._auth = auth_storage
         self._models: list[ModelInfo] = list(BUILTIN_MODELS)
-        p = Path(models_path or get_models_path())
+        self._models_path = Path(models_path or get_models_path())
+        p = self._models_path
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
@@ -173,6 +174,47 @@ class ModelRegistry:
             hint = f" (set {env_var} or use /login)" if env_var else " (use /login)"
             return {"ok": False, "error": f"No API key found for {model.provider}{hint}"}
         return {"ok": True, "apiKey": key, "headers": {}}
+
+    def register_models(self, provider: str, model_ids: list[str]) -> int:
+        """Register fetched model ids in memory (dedupe); returns how many were added."""
+        added = 0
+        for mid in model_ids:
+            if not self.find(provider, mid):
+                self._models.append(
+                    ModelInfo(
+                        provider=provider,
+                        id=mid,
+                        reasoning=True,
+                        context_window=None,
+                        base_url=None,
+                        tool_parser=None,
+                    )
+                )
+                added += 1
+        return added
+
+    def persist_models(self, provider: str, model_ids: list[str]) -> None:
+        """Merge fetched model ids into models.json (providers.<provider>).
+
+        Existing entries keep their fields (url/toolParser/contextWindow);
+        only missing ids are added with defaults. Creates the file when absent.
+        """
+        data: dict[str, Any] = {}
+        if self._models_path.exists():
+            try:
+                data = json.loads(self._models_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        providers = data.setdefault("providers", {})
+        existing: dict[str, dict[str, Any]] = {}
+        for m in providers.get(provider, []) or []:
+            if isinstance(m, dict) and m.get("id"):
+                existing[m["id"]] = m
+        for mid in model_ids:
+            existing.setdefault(mid, {"id": mid, "reasoning": True})
+        providers[provider] = list(existing.values())
+        self._models_path.parent.mkdir(parents=True, exist_ok=True)
+        self._models_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
         self._auth.set_stored_api_key(provider, api_key)

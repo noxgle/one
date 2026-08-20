@@ -22,6 +22,7 @@ Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (she
 - `settings.json` `tools.timeoutSec` (default 30) is the per-call tool timeout; the model can override it per call via the bash `timeout` arg. `askUser.timeoutSec` (default 0 = no timeout) governs `ask_user`.
 - The repo's `.one/` is gitignored real session data (may contain real auth keys) — never read or commit it. In tests and manual runs always set `ONE_CODING_AGENT_DIR` to a scratch dir so you don't touch the real config.
 - Auth precedence: runtime > auth file > env var (`<PROVIDER>_API_KEY`, generic fallback for unknown providers). `llama.cpp` needs no key; base URL from `LLAMA_CPP_BASE_URL` env, `--llama-cpp-url` flag, or per-model `url`.
+- `/login <provider> [apiKey] [model]` (interactive + TUI) validates the key BEFORE storing (`validate_and_fetch` in `one/core/provider_login.py`): 401/403 → `Authorization failed`, key NOT stored; on success it fetches the provider's model list (`ProviderAdapter.list_models`, `GET {base}/v1/models` for OpenAI-compatible / Gemini models endpoint; Anthropic has no list endpoint → minimal-chat fallback), registers the models in-memory and persists them to `models.json` (`ModelRegistry.register_models`/`persist_models`). NO_AUTH providers (`llama.cpp`/`ollama`) fetch their list without a key.
 
 ## Architecture
 

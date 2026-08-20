@@ -54,6 +54,33 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             req_headers.update(headers)
         return req_headers
 
+    def _models_url(self) -> str:
+        """OpenAI-compatible models endpoint.
+
+        Bases that already include ``/v1`` (e.g. Ollama local
+        ``http://localhost:11434/v1``) append ``/models``; bases without it
+        (e.g. OpenRouter ``https://openrouter.ai/api``) use ``/v1/models``.
+        """
+        base = self.base_url
+        if base.endswith("/v1"):
+            return f"{base}/models"
+        return f"{base}/v1/models"
+
+    async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
+        req_headers = self._build_headers(api_key, headers)
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(self._models_url(), headers=req_headers)
+            if resp.is_error:
+                body = ""
+                try:
+                    parsed = resp.json()
+                    body = str(parsed.get("error") or parsed)
+                except Exception:
+                    body = resp.text[:1000]
+                raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
+            data = resp.json()
+        return [m.get("id") for m in data.get("data", []) if m.get("id")]
+
     async def chat(
         self,
         api_key: str,
@@ -62,8 +89,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         thinking_level: str,
         headers: dict[str, str] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         payload = self._build_payload(model, messages, thinking_level)
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         use_stream = callable(on_delta)
         if use_stream:
             payload["stream"] = True

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from one.core.provider_login import validate_and_fetch
 from one.core.types import ModelInfo
 from one.config import get_agent_dir
 
@@ -745,6 +746,26 @@ class InteractiveMode:
                     model_input = ""
                 else:
                     model_input = input("Default model (optional): ").strip()
+                # Phase 11: validate the key BEFORE storing, then fetch + register
+                # the provider's model list.
+                adapter = getattr(session, "providers", {}).get(provider)
+                if adapter is None:
+                    print(f"Provider adapter not found for {provider}; key stored without validation.")
+                else:
+                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider, model_input or None)
+                    if not ok:
+                        print(f"Authorization failed for {provider}: {error}")
+                        continue
+                    if error:
+                        print(f"Warning: {error}")
+                    if fetched:
+                        added = session.model_registry.register_models(provider, fetched)
+                        session.model_registry.persist_models(provider, fetched)
+                        print(f"Authorized. Fetched {len(fetched)} models ({added} new).")
+                        for mid in fetched[:20]:
+                            print(f"  - {mid}")
+                        if len(fetched) > 20:
+                            print(f"  ... and {len(fetched) - 20} more")
                 selected_model = None
                 if model_input:
                     selected_model = session.model_registry.resolve(provider, model_input, allow_dynamic=True)
