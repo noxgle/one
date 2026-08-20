@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`).
+> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`).
 
 ## Goal
 
@@ -21,6 +21,12 @@
 
 **Phase 10 goal (approved, planned):**
 9. **`edit` tool robustness (real-usage bug report):** the model frequently calls `edit` with `path` nested INSIDE `edits[0]` instead of as a top-level argument; the tool then fails with a misleading `FileNotFoundError: File not found: ` (empty path) and the model repeats the same mistake. Fix: tolerate the nested `path`, give a clear error naming the actual problem, and make the prompt schema unambiguous.
+
+**Phase 11 goal (approved, planned):**
+10. **`/login` validation + remote model fetch:** today `/login` only stores the API key (`set_stored_api_key`) and sets defaults — it never validates the key against the provider and never fetches the provider's model list (`--list-models` lists only the local registry). Fix: `/login <provider> [apiKey] [model]` validates the key BEFORE storing (401/403 → error, key not stored), then fetches the model list from the provider (`GET {base}/models` for OpenAI-compatible providers, Gemini models endpoint, minimal-chat validation for Anthropic which has no list endpoint), registers the fetched models in the registry and persists them to `models.json`.
+
+**Phase 12 goal (approved, planned):**
+11. **`one run <task>` value-flag bug (discovered during provider verification):** the re-injection loop in `one/cli/args.py:76-94` pairs values only for `_VALUE_FLAGS = {"--answer-file", "--steer-file", "--param"}`; every other value-taking flag (`--provider`, `--model`, `--api-key`, `--thinking`, `--models`, `--tools`, `--theme`, ...) loses its value → `error: argument --provider: expected one argument` (verified live). Fix: pair values for ALL value-taking flags.
 
 ## Context
 
@@ -50,6 +56,10 @@
 - Tests + AGENTS.md (10 → 11 tools).
 - `apply_patch` tool: `{patchText}` unified-diff patch (opencode format: `*** Begin Patch` / `*** End Patch` envelope, `*** Add File:` / `*** Update File:` / `*** Delete File:` headers, optional `*** Move to:`, `@@` hunks with `-`/`+`/context lines); multi-file; validation of the whole patch before any write; paths resolved via `resolve_to_cwd`; added to `DEFAULT_TOOL_NAMES`, `all_tools`, `coding_tools`, `TOOL_ARG_SCHEMAS`, and the default `approvalTools` (cooperation mode).
 - `edit` robustness: accept `path` from `edits[0]` when the top-level `path` is missing (model-generated shape); clear `ValueError` naming the real problem when `path` is missing everywhere or `edits` is not a list; prompt schema for `edit` states `path` is TOP-LEVEL.
+- `/login` validation: `ProviderAdapter.list_models(api_key)` (new async method) — OpenAICompatible: `GET {base_url}/models` (works for openrouter/ollama-cloud/ollama/llama.cpp/deepseek/mistral/groq/xai — endpoints verified live), Gemini: `GET https://generativelanguage.googleapis.com/v1beta/models?key=...` filtered to `generateContent`-capable models, Anthropic: no list endpoint → `list_models` returns `None` and validation falls back to a minimal chat call (max_tokens=1) with the first registered model.
+- `/login` flow (interactive + TUI): validate BEFORE storing (401/403/network error → `Authorization failed for <provider>: <error>`, key NOT stored, defaults NOT changed); on success: store key, fetch models, register in-memory (`ModelRegistry.register_models`), persist to `models.json` (`providers.<provider>` merge, keeping existing `url`/`toolParser`/`contextWindow`), print `Authorized. Fetched N models:` + list, set default provider; optional `[model]` arg resolved against the fetched list.
+- NO_AUTH providers (`llama.cpp`, `ollama`): `/login` without a key still fetches and registers the local model list.
+- `one run` value-flag fix: pair values for ALL value-taking flags in the re-injection loop (`--provider`, `--model`, `--api-key`, `--thinking`, `--llama-cpp-url`, `--ollama-url`, `--system-prompt`, `--append-system-prompt`, `--mode`, `--session`, `--session-dir`, `--models`, `--tools`, `--export`, `--export-format`, `--theme`, `--prompt-template`, `--skill`, `--extension`, `--list-models`, plus the existing `--answer-file`/`--steer-file`/`--param`).
 
 ### Non-Goals
 - No changes to the agent event contract (`tool_call_start/end`, `turn_*`, snapshots in `test_event_snapshots.py`).
@@ -63,6 +73,9 @@
 - No new settings keys (the `approvalTools` default list changes only).
 - No LSP diagnostics, no auto-formatting, no filesystem watcher events (opencode's apply_patch does these; `one` has none of these subsystems). No BOM handling. No new dependencies (own diff parser). No changes to the event contract.
 - No changes to `_execute_tool_by_name` arg plumbing (normalization lives in `edit_tool` itself, directly testable); no changes to other tools (`write`/`bash` have no reported shape errors); no changes to the event contract.
+- No changes to the `--list-models` CLI flag semantics (still lists the local registry; fetched models appear there after `/login` persists them to `models.json`).
+- No auto-login on startup, no key rotation, no provider account/balance checks (the openrouter 402 credit issue is a user-account matter, not a code fix).
+- No changes to the `run` subcommand's task-text semantics (free-form text after flags still works); no new flags.
 
 ## Assumptions
 
@@ -76,6 +89,9 @@
 - In cooperation mode the `plan` call requires approval (user decision); rejection follows the existing `tool_approval_rejected` path.
 - `apply_patch` semantics follow opencode's implementation (verified against `anomalyco/opencode` `packages/opencode/src/tool/apply_patch.ts` + `apply_patch.txt`, branch `dev`): envelope format, headers, hunks, validation-before-write, `Success. Updated the following files:` summary with `A`/`M`/`D` lines. In cooperation mode `apply_patch` requires approval (added to default `approvalTools`).
 - The reported failure mode is a model-side JSON shape error (observed with local models via llama.cpp): `path` nested in `edits[0]`. The fix makes `one` tolerant of this shape AND gives a clear error when the shape is unrecoverable — both are needed because weaker models repeat the same mistake when the error does not name the cause.
+- `/login` validation uses the provider's real API (live-verified: `GET https://openrouter.ai/api/v1/models` and `GET https://ollama.com/v1/models` both return 200 with a `data[].id` list using the stored key). Anthropic has no public models-list endpoint → minimal-chat validation with the first registered model; if none is registered, validation is skipped with a note.
+- Fetched models are persisted to `models.json` automatically (consistent with existing behavior: `set_stored_api_key` writes `auth.json`, `set_default_provider` writes `settings.json`). Existing entries for the provider keep their `url`/`toolParser`/`contextWindow`; new ids get defaults (`reasoning=True`, `context_window=None`).
+- The `one run` flag bug is a pure parsing defect (verified live: `one run "task" --provider openrouter --model openai/gpt-4.1` → `error: argument --provider: expected one argument`); the fix is local to `args.py` and covered by unit tests on `parse_args`.
 
 ## Open Questions
 
@@ -741,6 +757,104 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
   - **Acceptance Criteria:** New tests pass; full suite green (393 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 11: `/login` validation + remote model fetch — DONE (in `d8307a1`)
+
+> Implementation note: live checks showed openrouter AND ollama-cloud expose a PUBLIC `GET /models` (bad key → 200 + full list), so a 200 list does NOT prove a key. Final design: `validate_and_fetch` always proves a given key with a minimal chat call (`max_tokens=1`) against `model_id` or the first fetched model; 401/403 → hard failure (`Authorization failed`, nothing stored); 402 → soft pass with a credit note; 400 (probe model rejects e.g. `reasoning_effort`) → soft pass; other errors → hard failure. `max_tokens` added to all adapter `chat()` signatures (base default `None`).
+
+**Context (verified in code + live):**
+- `/login` (interactive: `one/modes/interactive_mode.py:714-764`; TUI: `one/modes/tui_mode.py:1132-1163` + `_complete_login` 1567-1594) stores the key via `set_stored_api_key` and sets defaults — NO network validation, NO model fetch.
+- `--list-models` (`one/cli/main.py:263-271`) lists only the local registry (builtins + `models.json`).
+- `ProviderAdapter` (`one/providers/base.py`) has only `chat()` — no `list_models`.
+- Live-verified endpoints with the stored keys: `GET https://openrouter.ai/api/v1/models` → 200 `data[].id` list; `GET https://ollama.com/v1/models` → 200 list (ollama-cloud). Anthropic has no public models-list endpoint. Gemini: `GET https://generativelanguage.googleapis.com/v1beta/models?key=...` (filter `supportedGenerationMethods` contains `generateContent`).
+
+**Planned fix (exact):**
+- `one/providers/base.py`: add `async def list_models(self, api_key: str, headers: dict | None = None) -> list[str] | None` (base raises `NotImplementedError`; `None` = "no list available").
+- `one/providers/openai_compatible.py`: `GET {base_url}/models` with Bearer key; parse `data[].id`; on error raise `RuntimeError(f"{name} API error {status}: {body}")` (401/403 surfaces as `Authorization failed`).
+- `one/providers/gemini.py`: `GET https://generativelanguage.googleapis.com/v1beta/models?key={key}`; return ids whose `supportedGenerationMethods` includes `generateContent`.
+- `one/providers/anthropic.py`: `list_models` returns `None`; validation falls back to a minimal chat call (`max_tokens=1`, message "ping") with the first registered model for the provider.
+- `one/core/model_registry.py`: `register_models(provider, ids) -> int` (adds `ModelInfo(provider, id, reasoning=True, context_window=None)` for ids not already present, dedupe) and `persist_models(provider, ids)` (merge into `models.json` `providers.<provider>`, keep existing `url`/`toolParser`/`contextWindow`, write via `get_models_path()`).
+- Login flow helper (new `one/core/provider_login.py` or equivalent): `async def validate_and_fetch(adapter, api_key, provider) -> tuple[bool, str | None, list[str] | None]` — validates BEFORE storing; used by both interactive `/login` and TUI `_complete_login`:
+  - key given → validate first; failure → `Authorization failed for <provider>: <error>`, key NOT stored, defaults NOT changed.
+  - success → store key, fetch models (if list available), `register_models` + `persist_models`, print `Authorized. Fetched N models:` + list, set default provider; optional `[model]` resolved against the fetched list (then default model + session model switch).
+  - NO_AUTH providers (`llama.cpp`, `ollama`): no key → skip validation, still fetch + register the local model list.
+- `AGENTS.md`: document the new `/login` semantics (validation + model fetch).
+
+**Files:** `one/providers/base.py`, `one/providers/openai_compatible.py`, `one/providers/anthropic.py`, `one/providers/gemini.py`, `one/core/model_registry.py`, `one/core/provider_login.py` (new), `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `tests/test_login_validation.py` (new), `tests/test_provider_payloads.py` (or `tests/test_extra_providers.py`), `AGENTS.md`
+
+**Acceptance Criteria:**
+- `/login <provider> <key>` with a valid key: key stored, models fetched + registered + persisted to `models.json`, list printed, default provider set.
+- `/login <provider> <bad-key>`: `Authorization failed`, key NOT stored, defaults unchanged.
+- `/login llama.cpp` (no key): local model list fetched + registered.
+- `--list-models` shows fetched models after `/login` (persisted).
+- Full suite green (396 + new).
+
+**Estimated effort:** ~3 h
+
+**Confidence:** Medium (endpoints verified live; Anthropic validation path is the least certain — no list endpoint, minimal-chat fallback)
+
+- [x] **Task 11.1: `list_models` on provider adapters**
+  - **Description:** Add `async list_models(api_key, headers=None) -> list[str] | None` to `ProviderAdapter` (base: `NotImplementedError`). Implement in `OpenAICompatibleAdapter` (`GET {base_url}/models`, Bearer, parse `data[].id`, error → `RuntimeError` with status+body), `GeminiAdapter` (models endpoint, filter `generateContent`), `AnthropicAdapter` (return `None`). Add a minimal-chat validation helper for Anthropic (chat with `max_tokens=1`, first registered model).
+  - **Files:** `one/providers/base.py`, `one/providers/openai_compatible.py`, `one/providers/anthropic.py`, `one/providers/gemini.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** Each adapter exposes `list_models`; OpenAI-compatible parses `data[].id`; Gemini filters by `generateContent`; Anthropic returns `None`; errors raise `RuntimeError` with status.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_provider_payloads.py tests/test_extra_providers.py` + new unit tests with stub HTTP (httpx MockTransport)
+
+- [x] **Task 11.2: registry registration + persistence**
+  - **Description:** In `one/core/model_registry.py`: `register_models(provider, ids) -> int` (in-memory `ModelInfo` additions with dedupe) and `persist_models(provider, ids)` (merge into `models.json` `providers.<provider>` via `get_models_path()`, keep existing `url`/`toolParser`/`contextWindow`, create file if missing).
+  - **Files:** `one/core/model_registry.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** New ids registered and deduped; `models.json` merged without losing existing per-model fields; file created when missing.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_login_validation.py` (temp-dir models.json)
+
+- [x] **Task 11.3: login flow helper + interactive/TUI wiring**
+  - **Description:** New `one/core/provider_login.py` with `async def validate_and_fetch(adapter, api_key, provider) -> tuple[bool, str | None, list[str] | None]` (validate BEFORE storing; 401/403/network → failure with message). Rewire interactive `/login` (`interactive_mode.py:714-764`) and TUI `_complete_login` (`tui_mode.py:1567-1594`): on success store key, fetch + register + persist models, print `Authorized. Fetched N models:` + list, set default provider, resolve optional `[model]` against fetched list; NO_AUTH providers skip validation but still fetch. Update `AGENTS.md`.
+  - **Files:** `one/core/provider_login.py` (new), `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `AGENTS.md`
+  - **Dependencies:** Task 11.1, Task 11.2
+  - **Acceptance Criteria:** Valid key → stored + models fetched/registered/persisted + list printed; invalid key → `Authorization failed`, nothing stored; no-key NO_AUTH provider → models fetched; `[model]` arg resolved from fetched list.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_login_validation.py tests/test_interactive_mode.py` + manual live check: `/login openrouter <key>` and `/login ollama-cloud <key>` in a scratch agent dir
+
+- [x] **Task 11.4: regression tests + full suite**
+  - **Description:** New `tests/test_login_validation.py`: stub adapters (no network) — success path (key stored, models registered + persisted to temp `models.json`), failure path (401 → key NOT stored), Anthropic minimal-chat fallback, NO_AUTH fetch without key, dedupe/merge behavior. Run the full suite.
+  - **Files:** `tests/test_login_validation.py` (new)
+  - **Dependencies:** Task 11.3
+  - **Acceptance Criteria:** New tests pass; full suite green (396 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
+### Phase 12: `one run <task>` value-flag fix — DONE (in `613ae0e`)
+
+**Context (verified live):** `one/cli/args.py:65-96` — `parse_args` detects the `run` subcommand only when `argv[0] == "run"`; the re-injection loop (76-94) collects flags but pairs values ONLY for `_VALUE_FLAGS = {"--answer-file", "--steer-file", "--param"}`. All other value-taking flags lose their values: `one run "task" --provider openrouter --model openai/gpt-4.1` → `error: argument --provider: expected one argument` (reproduced). Consequence: headless runs cannot select provider/model via flags (only settings/env).
+
+**Planned fix (exact):**
+- `one/cli/args.py`: replace the hardcoded `_VALUE_FLAGS` with the full set of value-taking flags mirroring the `parser.add_argument` calls (lines 99-147): `--provider`, `--model`, `--api-key`, `--llama-cpp-url`, `--ollama-url`, `--system-prompt`, `--append-system-prompt`, `--thinking`, `--mode`, `--session`, `--session-dir`, `--models`, `--tools`, `--export`, `--export-format`, `--theme`, `--prompt-template`, `--skill`, `--extension`, `--list-models`, `--answer-file`, `--steer-file`, `--param`. In the loop: flag in the set → append flag + next arg (if present) and skip both; other `-`-prefixed → append alone; else → task text. Repeatable flags (`--param`, `--skill`, `--extension`, `--prompt-template`, `--theme`) pair per occurrence.
+- Keep `run_task` free-form semantics unchanged (task text = all non-flag tokens).
+
+**Files:** `one/cli/args.py`, `tests/test_auth_and_cli.py`
+
+**Acceptance Criteria:**
+- `parse_args(["run", "task", "--provider", "openrouter", "--model", "openai/gpt-4.1"])` → `provider == "openrouter"`, `model == "openai/gpt-4.1"`, `run_task == "task"`.
+- Flags before the task text work the same: `parse_args(["run", "--provider", "openrouter", "task"])`.
+- `--list-models` (optional-value flag) still works: `run "task" --list-models` and `run "task" --list-models gpt`.
+- Existing behavior unchanged: `one run <task>` without flags, `--json`, `--answer-file`/`--steer-file` pairing.
+- Full suite green (396 + new).
+
+**Estimated effort:** ~1 h
+
+**Confidence:** High (pure parsing defect; unit-testable via `parse_args`)
+
+- [x] **Task 12.1: value-flag pairing in the `run` re-injection loop**
+  - **Description:** In `one/cli/args.py:76-94`, generalize `_VALUE_FLAGS` to the full set of value-taking flags (list above); pair each occurrence with its value; keep task-text collection for everything else.
+  - **Files:** `one/cli/args.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** `--provider`/`--model`/`--api-key`/`--thinking`/`--models`/`--tools`/`--theme`/`--list-models` etc. keep their values with `run`; task text intact; no argparse errors.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_auth_and_cli.py` (new `parse_args` unit tests)
+
+- [x] **Task 12.2: regression tests + full suite**
+  - **Description:** Add `parse_args` unit tests to `tests/test_auth_and_cli.py` (flags after task, flags before task, optional-value `--list-models`, repeatable `--param`, existing `--answer-file` pairing) + one subprocess smoke test (`python -m one.cli.main run "task" --provider openrouter --model openai/gpt-4.1 --json` with scratch `ONE_CODING_AGENT_DIR` asserting no argparse error). Run the full suite.
+  - **Files:** `tests/test_auth_and_cli.py`
+  - **Dependencies:** Task 12.1
+  - **Acceptance Criteria:** New tests pass; full suite green (396 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -773,6 +887,11 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 | Textual markup parser stricter than Rich (any `[` = tag start) | TUI crash | Certain (reported) | Phase 8: render via `rich.text.Text` objects (literal append), never raw markup strings |
 | Diff parser edge cases (malformed hunks, CRLF, no trailing newline) | Wrong file content | Medium | Strict validation before any write; all-or-nothing semantics; tests cover malformed input |
 | Model nests `path` inside `edits[0]` (observed with local models) | Repeated edit failures, wasted steps | High (reported) | Phase 10: recover nested `path`; clear error naming the cause; prompt schema states TOP-LEVEL |
+| `/login` validation hits a provider without a models endpoint (Anthropic) | Validation gap | Medium | Minimal-chat fallback (max_tokens=1); if no model registered, skip validation with a note |
+| `models.json` merge corrupts existing per-model fields (`url`/`toolParser`) | Broken local config | Low | Merge keeps existing entries untouched; only new ids are added; unit tests assert field preservation |
+| Fetched model list is huge (ollama-cloud ~19 models) | Noisy output / big models.json | Low | Print full list (small); registry dedupes; persistence is a merge, not a replace |
+| `one run` flag fix mis-pairs a task word that looks like a flag value | Wrong task text | Low | Pairing only for known value-taking flags; unit tests cover flags before/after task |
+| Anthropic minimal-chat validation costs tokens | Cost | Very low | max_tokens=1, single message; only on explicit `/login` |
 
 ## Project Acceptance Criteria
 
@@ -805,6 +924,12 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 - [x] `edit` succeeds when the model nests `path` inside `edits[0]`; missing `path` everywhere → clear error naming the top-level requirement; `edits` as dict → clear error (Phase 10).
 - [x] Prompt schema for `edit` states `path` is TOP-LEVEL (never inside edits) (Phase 10).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (396 tests) (Phase 10).
+- [x] `/login <provider> <key>` validates the key BEFORE storing; invalid key → `Authorization failed`, nothing stored (Phase 11).
+- [x] `/login` fetches the provider model list, registers it in-memory and persists it to `models.json`; `--list-models` shows fetched models afterwards (Phase 11).
+- [x] NO_AUTH providers (`llama.cpp`, `ollama`) fetch their local model list via `/login` without a key (Phase 11).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (426 tests) (Phase 11).
+- [x] `one run <task> --provider X --model Y` works (no `expected one argument` error); `parse_args` unit tests cover flags before/after task (Phase 12).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (426 tests) (Phase 12).
 
 ## Estimated Timeline
 
@@ -818,3 +943,6 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 - Total with Phase 9: ~10.5 h; Phase 9 delivered in `0ee1cd5` (10 files, +896/-11; 38 new tests; full suite 393 green).
 - Phase 10 (edit tool robustness): ~1 h; uncertainty low — root cause fully identified from the reported call + code paths (agent_session.py:525/533-534, edit.py:24-26, resource_loader.py:278).
 - Total with Phase 10: ~11.5 h; Phase 10 delivered in `3393173` (5 files, +114/-5; 3 new tests; full suite 396 green; reported malformed edit shape verified working end-to-end).
+- Phase 11 (`/login` validation + remote model fetch): done — took longer than planned (~5 h incl. the public-`/models` discovery: openrouter + ollama-cloud return 200 for bad keys, so chat-based key proof (max_tokens=1) validates all keyed providers; Anthropic has no list endpoint → minimal-chat fallback).
+- Phase 12 (`one run` value-flag fix): done — quick, pure parsing fix in args.py; `--provider`/`--model`/etc. now keep their values before/after the task text.
+- Total with Phases 11-12: ~15.5 h (phases 1-10) + ~6 h (phases 11-12).
