@@ -435,6 +435,71 @@ def test_cli_run_resume_flag_parses(tmp_path: Path):
     assert "Usage:" not in res.stdout
 
 
+def test_parse_args_run_value_flags_after_task():
+    """Phase 12: value-taking flags keep their values with the run subcommand."""
+    from one.cli.args import parse_args
+
+    p = parse_args(["run", "task", "--provider", "openrouter", "--model", "openai/gpt-4.1"])
+    assert p.command == "run"
+    assert p.provider == "openrouter"
+    assert p.model == "openai/gpt-4.1"
+    assert p.run_task == "task"
+
+
+def test_parse_args_run_value_flags_before_task():
+    from one.cli.args import parse_args
+
+    p = parse_args(["run", "--provider", "openrouter", "task", "--api-key", "sk-x", "--thinking", "high"])
+    assert p.provider == "openrouter"
+    assert p.api_key == "sk-x"
+    assert p.thinking == "high"
+    assert p.run_task == "task"
+
+
+def test_parse_args_run_list_models_optional_value():
+    from one.cli.args import parse_args
+
+    # --list-models without a value (nargs="?") keeps run_task intact.
+    p = parse_args(["run", "task", "--list-models"])
+    assert p.list_models is True
+    assert p.run_task == "task"
+
+    # --list-models with a value pairs it.
+    p2 = parse_args(["run", "task", "--list-models", "gpt"])
+    assert p2.list_models == "gpt"
+    assert p2.run_task == "task"
+
+
+def test_parse_args_run_repeatable_and_short_flags():
+    from one.cli.args import parse_args
+
+    p = parse_args(["run", "task", "--param", "a=1", "--param", "b=2", "--theme", "dark", "-P", "c=3"])
+    assert p.params == ["a=1", "b=2", "c=3"]
+    assert p.themes == ["dark"]
+    assert p.run_task == "task"
+
+
+def test_cli_run_value_flags_not_argparse_error(tmp_path: Path):
+    """Phase 12: `one run task --provider X --model Y` must not be an argparse error."""
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    res = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "run", "task", "--provider", "openrouter", "--model", "openai/gpt-4.1", "--json"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    # Not a usage/argparse error (returncode 2); dispatch reached the run mode.
+    assert res.returncode != 2
+    assert "expected one argument" not in res.stdout + res.stderr
+    assert "Usage:" not in res.stdout + res.stderr
+
+
 def test_cli_run_resume_without_task_is_valid(tmp_path: Path):
     env = os.environ.copy()
     env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")

@@ -71,20 +71,29 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         command_args = argv[1:]
         if command == "run":
             # Flags may appear before/after the task text; re-inject them so
-            # argparse sees them, keep the rest as the task. Value-taking
-            # flags (--answer-file) must keep their value next to them.
-            _VALUE_FLAGS = {"--answer-file", "--steer-file", "--param"}
+            # argparse sees them, keep the rest as the task. Every value-taking
+            # flag keeps its value next to it (mirrors the add_argument calls
+            # below); boolean flags are re-injected alone. A value is paired
+            # only when the next token exists and does not look like a flag
+            # (this mirrors argparse's nargs="?" behaviour for --list-models).
+            _VALUE_FLAGS = {
+                "--provider", "--model", "--api-key", "--llama-cpp-url", "--ollama-url",
+                "--system-prompt", "--append-system-prompt", "--thinking", "--mode",
+                "--session", "--session-dir", "--models", "--tools", "--export",
+                "--export-format", "--theme", "--prompt-template", "--skill",
+                "--extension", "-e", "--list-models", "--answer-file", "--steer-file",
+                "--param", "-P",
+            }
             flags: list[str] = []
             rest: list[str] = []
             i = 0
             while i < len(command_args):
                 a = command_args[i]
-                if a in _VALUE_FLAGS:
+                if a in _VALUE_FLAGS and i + 1 < len(command_args) and not command_args[i + 1].startswith("-"):
                     flags.append(a)
-                    if i + 1 < len(command_args):
-                        flags.append(command_args[i + 1])
-                        i += 2
-                        continue
+                    flags.append(command_args[i + 1])
+                    i += 2
+                    continue
                 if a.startswith("-"):
                     flags.append(a)
                 else:
