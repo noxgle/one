@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`). Phase 13 **implemented and committed** (435 tests green; `/providers` command, Phase 13 in `793ea32`).
+> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`). Phase 13 **implemented and committed** (435 tests green; `/providers` command, Phase 13 in `793ea32`). Phases 14-15 **implemented and committed** (444 tests green; `/providers` completion/help fixes + `/login refresh <provider>`, in `9dac4d2`).
 
 ## Goal
 
@@ -897,6 +897,88 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
   - **Acceptance Criteria:** New tests pass; full suite green (426 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 14: `/providers` follow-up fixes — DONE (in `9dac4d2`)
+
+**User-reported issues after Phase 13:**
+1. `/providers` missing from the TUI **keybinding** help (`action_help`, `one/modes/tui_mode.py:1736`). The `/help` *command* in both modes already lists it.
+2. Autocompletion does not offer `/providers`: `_SLASH_COMMANDS` (`one/modes/tui_mode.py:193-200`) lacks it (the completer at line 311 filters exactly this tuple).
+3. ollama-cloud shows only 1 model — NOT a bug: `/providers` reads the local registry (`models.json`), which currently holds only the stale builtin `glm-5:cloud`. Fix is operational: run `/login ollama-cloud <key>` once — Phase 11 validation fetches all ~19 live models and persists them to `models.json`; `/providers` then lists them. Optional UX follow-up (out of scope here): a hint in `/providers` output when a provider's model list looks stale, or a `/providers --refresh <provider>` action reusing `validate_and_fetch`.
+
+**Planned fix (exact):**
+- `one/modes/tui_mode.py:193`: add `"/providers"` to `_SLASH_COMMANDS` (after `"/model-cycle"`).
+- `one/modes/tui_mode.py:1736` (`action_help`): insert `/providers` after `/model-cycle` in the one-line help string.
+- `tests/test_tui_mode.py`: add assertions — `"/providers" in _SLASH_COMMANDS`; `action_help` output contains `/providers` (via `app.action_help()` + `_stream_lines`).
+
+**Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`
+
+**Acceptance Criteria:**
+- Typing `/prov` in the TUI input autocompletes to `/providers`.
+- The keybinding help line includes `/providers`.
+- Full suite green (435 + new).
+
+**Estimated effort:** ~0.5 h
+
+**Confidence:** High (two one-line edits + assertions)
+
+- [x] **Task 14.1: completion + keybinding help**
+  - **Description:** Add `"/providers"` to `_SLASH_COMMANDS` and to `action_help`'s command list.
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** As above.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py`
+- [x] **Task 14.2: tests + full suite**
+  - **Description:** Assertions for completion list membership and help output; run full suite.
+  - **Files:** `tests/test_tui_mode.py`
+  - **Dependencies:** Task 14.1
+  - **Acceptance Criteria:** New tests pass; full suite green (435 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
+### Phase 15: `/login refresh <provider>` — re-fetch live model list — DONE (in `9dac4d2`)
+
+**Motivation:** `/providers` reads the LOCAL registry (`models.json`); stale lists (e.g. ollama-cloud showing only the builtin `glm-5:cloud`) can only be fixed today by re-running full `/login <provider> <key>` with the key typed again. User request: pick from the provider's CURRENT list. Placement decided by user: under `/login` (auth+fetch lifecycle), not as a `/providers` flag.
+
+**Approved design:**
+- `/login refresh <provider>` (interactive + TUI):
+  1. Resolve adapter from `session.providers` (missing → error).
+  2. Key via `model_registry.get_api_key_and_headers(ModelInfo(provider=..., id=""))` — handles NO_AUTH (empty key OK), stored keys, env fallback; not-ok → print its error/hint (`set <ENV> or use /login`).
+  3. `validate_and_fetch(adapter, api_key, provider)` — revalidates the key (minimal chat probe; 401/403 → clear failure, nothing changed; 402/400 → soft pass with note).
+  4. On success: `register_models` + `persist_models` (merge into `models.json`), print `Authorized. Fetched N models (added M new).` + numbered list + hint `pick with /providers <number|name> <model-number|id>` or `/model <p>/<id>`.
+  5. On failure: print error; registry untouched.
+- Provider argument is the NAME (consistent with `/login <provider>`); numbering stays a `/providers` concern.
+- Help text updated in both modes: `/login [status|refresh <provider>|provider [apiKey] [model]]`.
+- Non-goals: refreshing ALL providers at once; auto-refresh inside `/providers` listing.
+
+**Files:** `one/modes/interactive_mode.py` (login handler ~731+), `one/modes/tui_mode.py` (`_complete_login` area / command handling), `tests/test_interactive_mode.py`, `tests/test_tui_mode.py`
+
+**Acceptance Criteria:**
+- `/login refresh ollama-cloud` with a stored valid key: models re-fetched, registered + persisted, count + list printed; new ids selectable via `/providers`.
+- NO_AUTH provider (`/login refresh llama.cpp`): fetches without key.
+- Missing key → hint error; invalid key (401/403) → `Authorization failed`, registry unchanged; unknown provider/adapter → clear error.
+- Full suite green (435 + new).
+
+**Estimated effort:** ~1.5 h
+
+**Confidence:** High (reuses tested `validate_and_fetch`/`register_models`/`persist_models` paths from Phase 11)
+
+- [x] **Task 15.1: `/login refresh` in interactive mode**
+  - **Description:** Extend the `/login` handler: `refresh <provider>` branch (key resolution → validate_and_fetch → register/persist → numbered list output); update help line.
+  - **Files:** `one/modes/interactive_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** As above.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_interactive_mode.py`
+- [x] **Task 15.2: `/login refresh` in TUI mode**
+  - **Description:** Same branch in TUI command handling (`self._write` outputs); update help lines (both `/help` command and `action_help`).
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** As above.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py`
+- [x] **Task 15.3: tests + full suite**
+  - **Description:** Interactive tests (stub adapter + stored key success incl. `added N new` count; NO_AUTH; missing-key hint; 401 keeps registry intact) + TUI tests (`_LoginStub` pattern). Run full suite.
+  - **Files:** `tests/test_interactive_mode.py`, `tests/test_tui_mode.py`
+  - **Dependencies:** Task 15.1, 15.2
+  - **Acceptance Criteria:** New tests pass; full suite green (435 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -974,6 +1056,9 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (426 tests) (Phase 12).
 - [x] `/providers` lists only logged-in providers (numbered, `*` on current); second step lists a provider's models; third form switches model + persists defaults; NO_AUTH providers always listed (Phase 13).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (435 tests) (Phase 13).
+- [x] `/providers` is offered by TUI autocompletion (`_SLASH_COMMANDS`) and present in the keybinding help line (Phase 14).
+- [x] `/login refresh <provider>` re-fetches the live model list with the stored key, registers + persists it; NO_AUTH works without key; missing key → hint; 401/403 → registry unchanged (Phase 15).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (444 tests) (Phases 14-15).
 
 ## Estimated Timeline
 
