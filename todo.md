@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`).
+> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`). Phase 13 **implemented and committed** (435 tests green; `/providers` command, Phase 13 in `793ea32`).
 
 ## Goal
 
@@ -855,6 +855,48 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
   - **Acceptance Criteria:** New tests pass; full suite green (396 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 13: `/providers` — display & select logged-in providers — DONE (in `793ea32`)
+
+**Context:** `/model` dumps raw JSON of ALL registry providers (no key info); `/login status` shows auth but no models; switching requires typing `/model <p>/<id>` by hand. Missing: one command listing **logged-in** providers (key present or NO_AUTH) with quick selection.
+
+**Approved design:**
+- `/providers` → numbered list of logged-in providers only (`ModelRegistry.get_available()`), `*` marks current default, model count per provider, usage hint. Not-logged-in providers are NOT shown (user decision).
+- `/providers <number|name>` → second step: numbered list of that provider's registered models + usage hint (no switch yet).
+- `/providers <number|name> <number|model-id>` → switch: reuse the `/model <p>/<m>` path (`set_model` + `set_default_provider`/`set_default_model`; TUI additionally `_refresh_sidebar()`). Selection is registry-only (no dynamic resolve — use `/model` for that).
+- Both modes: `one/modes/interactive_mode.py` (print) and `one/modes/tui_mode.py` (`_write` + sidebar), help text updated in both.
+
+**Files:** `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `tests/test_interactive_mode.py`, `tests/test_tui_mode.py`
+
+**Acceptance Criteria:**
+- `/providers` lists only providers with configured auth (or NO_AUTH), numbered, `*` on current, counts.
+- `/providers 1` (or name) lists that provider's models numbered without switching.
+- `/providers 1 2` / `/providers openrouter glm-5.1` switches model + persists defaults (TUI refreshes sidebar).
+- Unknown/not-logged-in provider or bad model ref → clear error, nothing changed.
+- Full suite green (426 + new).
+
+**Estimated effort:** ~2 h
+
+**Confidence:** High (pure command-layer logic over existing registry APIs)
+
+- [x] **Task 13.1: `/providers` in interactive mode**
+  - **Description:** Add `/providers` handling (list / second-step model list / switch) near the `/model` block; update both help texts.
+  - **Files:** `one/modes/interactive_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** All three forms work; errors as specified; output via `print`.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_interactive_mode.py`
+- [x] **Task 13.2: `/providers` in TUI mode**
+  - **Description:** Same three forms via `self._write(...)`; `_refresh_sidebar()` after a successful switch; update help text.
+  - **Files:** `one/modes/tui_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** As 13.1 plus sidebar refresh; no golden-snapshot changes (new command not exercised there).
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tui_mode.py`
+- [x] **Task 13.3: tests + full suite**
+  - **Description:** Interactive tests (list filters unauthenticated, second step, switch by number/id, error paths) + TUI tests (same core paths via `_mk_app_session` + runtime key). Run full suite.
+  - **Files:** `tests/test_interactive_mode.py`, `tests/test_tui_mode.py`
+  - **Dependencies:** Task 13.1, 13.2
+  - **Acceptance Criteria:** New tests pass; full suite green (426 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -930,6 +972,8 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (426 tests) (Phase 11).
 - [x] `one run <task> --provider X --model Y` works (no `expected one argument` error); `parse_args` unit tests cover flags before/after task (Phase 12).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (426 tests) (Phase 12).
+- [x] `/providers` lists only logged-in providers (numbered, `*` on current); second step lists a provider's models; third form switches model + persists defaults; NO_AUTH providers always listed (Phase 13).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (435 tests) (Phase 13).
 
 ## Estimated Timeline
 
