@@ -262,6 +262,22 @@ async def test_compaction_preserves_plan_state(tmp_path):
     assert "1. analyze" in prompt
 
 
+def test_runtime_prompt_contains_current_date(tmp_path):
+    """Phase 16: the runtime system prompt ends with a fresh '# Current Date' section."""
+    from datetime import datetime
+
+    agent = _mk_agent(tmp_path, {})
+    prompt = agent._build_runtime_system_prompt()
+    now = datetime.now().astimezone()
+    offset = now.strftime("%z") or "+0000"
+    assert "# Current Date" in prompt
+    assert f"Today is {now:%Y-%m-%d} ({now:%A})" in prompt
+    assert f"{now:%H:%M} local time" in prompt
+    assert f"UTC{offset[:3]}:{offset[3:]}" in prompt
+    # The section is appended after the base prompt / plan blocks.
+    assert prompt.index("# Current Date") > 0
+
+
 @pytest.mark.asyncio
 async def test_auto_compaction_not_below_threshold(tmp_path):
     provider = _Provider(["DONE"])

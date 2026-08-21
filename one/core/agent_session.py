@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from one.core.model_registry import ModelRegistry
@@ -155,6 +156,14 @@ class AgentSession:
             prompt = f"{prompt}\n" + "\n".join(lines)
         if self._plan is not None:
             prompt = f"{prompt}\n\n# Active Plan\n{self._plan}\nFollow this plan; adapt it via the plan tool only when the situation changes materially."
+        now = datetime.now().astimezone()
+        offset = now.strftime("%z") or "+0000"
+        offset_fmt = f"{offset[:3]}:{offset[3:]}"
+        tz_name = now.tzname() or "UTC"
+        prompt = (
+            f"{prompt}\n\n# Current Date\n"
+            f"Today is {now:%Y-%m-%d} ({now:%A}), {now:%H:%M} local time ({tz_name}, UTC{offset_fmt})."
+        )
         return prompt
 
     def _try_parse_tool_call(self, text: str) -> dict[str, Any] | None:
