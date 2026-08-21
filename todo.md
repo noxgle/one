@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`). Phase 13 **implemented and committed** (435 tests green; `/providers` command, Phase 13 in `793ea32`). Phases 14-15 **implemented and committed** (444 tests green; `/providers` completion/help fixes + `/login refresh <provider>`, in `9dac4d2`).
+> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`). Phase 13 **implemented and committed** (435 tests green; `/providers` command, Phase 13 in `793ea32`). Phases 14-15 **implemented and committed** (444 tests green; `/providers` completion/help fixes + `/login refresh <provider>`, in `9dac4d2`). Phase 16 **implemented and committed** (445 tests green; `# Current Date` in the system prompt, in `b4777a6`).
 
 ## Goal
 
@@ -979,6 +979,43 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
   - **Acceptance Criteria:** New tests pass; full suite green (435 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 16: current date & time in the system prompt — DONE (in `b4777a6`)
+
+**Motivation:** the model has no notion of "today" — questions like "what did I do yesterday", log analysis, cron/scheduling tasks need the current date/time.
+
+**Approved design (user confirmed):**
+- Injected in `AgentSession._build_runtime_system_prompt()` (`one/core/agent_session.py:134`) as a trailing section — rebuilt every step, so it stays fresh in long sessions and covers ALL modes (run/print/rpc/tui/interactive).
+- Format (local timezone):
+  ```
+  # Current Date
+  Today is 2026-08-21 (Friday), 14:33 local time (CEST, UTC+02:00).
+  ```
+- Section goes LAST (after `# Active Plan`); no config option — always on.
+- No changes to resource_loader / adapters / prompt templates.
+
+**Files:** `one/core/agent_session.py`, plus a unit test in the existing agent-session test file.
+
+**Acceptance Criteria:**
+- Every provider request's system message ends with the `# Current Date` section containing today's date, weekday, HH:MM, tz abbreviation and UTC offset.
+- Existing behavior unchanged otherwise; full suite green (444 + new).
+
+**Estimated effort:** ~0.5 h
+
+**Confidence:** High (single injection point, pure formatting)
+
+- [x] **Task 16.1: inject date section**
+  - **Description:** Append the `# Current Date` section in `_build_runtime_system_prompt()` after the plan block; compute via `datetime.now().astimezone()`.
+  - **Files:** `one/core/agent_session.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** As above.
+  - **Verification:** `.venv/bin/python -m pytest -q <agent-session tests>`
+- [x] **Task 16.2: tests + full suite**
+  - **Description:** Unit test asserting the section exists and contains today's date; run full suite to catch any exact-prompt assertions.
+  - **Files:** existing agent-session test file
+  - **Dependencies:** Task 16.1
+  - **Acceptance Criteria:** New test passes; full suite green (444 + new).
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -1059,6 +1096,8 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 - [x] `/providers` is offered by TUI autocompletion (`_SLASH_COMMANDS`) and present in the keybinding help line (Phase 14).
 - [x] `/login refresh <provider>` re-fetches the live model list with the stored key, registers + persists it; NO_AUTH works without key; missing key → hint; 401/403 → registry unchanged (Phase 15).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (444 tests) (Phases 14-15).
+- [x] Every provider request's system message ends with `# Current Date` (date, weekday, HH:MM, tz abbrev, UTC offset), rebuilt each step (Phase 16).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (445 tests) (Phase 16).
 
 ## Estimated Timeline
 
