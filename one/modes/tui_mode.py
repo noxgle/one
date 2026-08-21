@@ -192,7 +192,7 @@ def _paste_from_system_clipboard() -> str | None:
 
 _SLASH_COMMANDS: tuple[str, ...] = (
     "/exit", "/quit", "/help", "/stats", "/state", "/status", "/queue", "/tools",
-    "/clear", "/abort", "/model", "/model-cycle", "/thinking", "/thinking-cycle",
+    "/clear", "/abort", "/model", "/model-cycle", "/providers", "/thinking", "/thinking-cycle",
     "/theme", "/steer", "/follow", "/compact", "/tree", "/navigate", "/fork",
     "/new", "/login", "/logout", "/retry", "/config", "/extui", "/cooperation",
     "/subagents", "/bash-show", "/mcp",
@@ -889,7 +889,7 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write(
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|provider [apiKey] [model]] | /logout <provider>",
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|refresh <provider>|provider [apiKey] [model]] | /logout <provider>",
                     "info",
                 )
                 self._write("/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info")
@@ -1197,6 +1197,40 @@ if TEXTUAL_AVAILABLE:
                         providers = session.model_registry.providers()
                         statuses = [session.model_registry.get_provider_auth_status(p) for p in providers]
                         self._write(json.dumps({"providers": statuses}, ensure_ascii=False), "info")
+                    return
+                if parts and parts[0] == "refresh":
+                    # Phase 15: re-fetch the live model list with the stored key.
+                    provider = parts[1] if len(parts) >= 2 else ""
+                    if not provider:
+                        self._write("Provider is required. Usage: /login refresh <provider>", "error")
+                        return
+                    adapter = getattr(session, "providers", {}).get(provider)
+                    if adapter is None:
+                        self._write(f"Provider adapter not found for {provider}.", "error")
+                        return
+                    key_info = session.model_registry.get_api_key_and_headers(ModelInfo(provider=provider, id=""))
+                    if not key_info.get("ok"):
+                        self._write(key_info.get("error") or f"No API key for {provider}.", "error")
+                        return
+                    api_key = key_info.get("apiKey", "")
+                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider)
+                    if not ok:
+                        self._write(f"Authorization failed for {provider}: {error}", "error")
+                        return
+                    if error:
+                        self._write(f"Warning: {error}", "warn")
+                    if not fetched:
+                        self._write(f"No models fetched for {provider} (no models endpoint).", "info")
+                        return
+                    added = session.model_registry.register_models(provider, fetched)
+                    session.model_registry.persist_models(provider, fetched)
+                    lines = [f"Authorized. Fetched {len(fetched)} models ({added} new)."]
+                    for i, mid in enumerate(fetched[:20], 1):
+                        lines.append(f"  {i}. {mid}")
+                    if len(fetched) > 20:
+                        lines.append(f"  ... and {len(fetched) - 20} more")
+                    lines.append(f"Pick with /providers {provider} <model-number|id> or /model {provider}/<id>.")
+                    self._write("\n".join(lines), "info")
                     return
                 provider = parts[0] if len(parts) >= 1 else ""
                 if not provider:
@@ -1733,7 +1767,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer = ""
 
         def action_help(self) -> None:
-            self._write("/help /stats /state /status /tools /model /model-cycle /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /mcp /bash /abort /clear /exit", "info")
+            self._write("/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /mcp /bash /abort /clear /exit", "info")
 
         def _show_extension_panel(self, req: dict[str, Any]) -> None:
             """Render an extension widget/overlay payload as a TUI component."""

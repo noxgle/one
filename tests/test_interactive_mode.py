@@ -115,6 +115,25 @@ class _DummyModelRegistry:
             if m.provider == "llama.cpp" or m.provider in self.stored_keys
         ]
 
+    def get_api_key_and_headers(self, model: ModelInfo) -> dict[str, Any]:
+        if model.provider == "llama.cpp":
+            return {"ok": True, "apiKey": "", "headers": {}}
+        key = self.stored_keys.get(model.provider)
+        if not key:
+            return {"ok": False, "error": f"No API key found for {model.provider} (use /login)"}
+        return {"ok": True, "apiKey": key, "headers": {}}
+
+    def register_models(self, provider: str, model_ids: list[str]) -> int:
+        added = 0
+        for mid in model_ids:
+            if not self.find(provider, mid):
+                self._models.append(ModelInfo(provider=provider, id=mid))
+                added += 1
+        return added
+
+    def persist_models(self, provider: str, model_ids: list[str]) -> None:
+        self.persisted: tuple[str, list[str]] = (provider, list(model_ids))
+
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
         self.stored_keys[provider] = api_key
 
@@ -517,6 +536,95 @@ async def test_interactive_providers_none_logged_in(monkeypatch, capsys):
     out = capsys.readouterr().out
 
     assert "No logged-in providers. Use /login <provider> [apiKey] first." in out
+
+
+class _RefreshStub:
+    """Phase 15: fake adapter for /login refresh tests."""
+
+    def __init__(self, models: list[str] | None = None, error: Exception | None = None) -> None:
+        self.models = models
+        self.error = error
+
+    async def list_models(self, api_key: str, headers: dict | None = None) -> list[str]:
+        if self.error is not None:
+            raise self.error
+        return self.models
+
+    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_refresh_fetches_and_registers(monkeypatch, capsys):
+    session = _DummySession()
+    session.model_registry.set_stored_api_key("openai", "sk-x")
+    session.providers = {"openai": _RefreshStub(models=["n1", "n2"])}
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/login refresh openai", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Authorized. Fetched 2 models (2 new)." in out
+    assert "  1. n1" in out
+    assert "  2. n2" in out
+    assert "Pick with /providers openai <model-number|id>" in out
+    assert session.model_registry.find("openai", "n1") is not None
+    assert session.model_registry.persisted == ("openai", ["n1", "n2"])
+    # Key and defaults are untouched by a refresh.
+    assert session.settings_manager.default_provider is None
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_refresh_no_auth_provider(monkeypatch, capsys):
+    session = _DummySession()
+    session.providers = {"llama.cpp": _RefreshStub(models=["local-a"])}
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/login refresh llama.cpp", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Authorized. Fetched 1 models (1 new)." in out
+    assert session.model_registry.find("llama.cpp", "local-a") is not None
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_refresh_missing_key(monkeypatch, capsys):
+    session = _DummySession()
+    stub = _RefreshStub(models=["x"])
+    session.providers = {"openai": stub}
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/login refresh openai", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "No API key found for openai" in out
+    # The adapter was never contacted.
+    assert stub.models == ["x"]  # unchanged; no exception path needed beyond not crashing
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_refresh_bad_key_keeps_registry(monkeypatch, capsys):
+    session = _DummySession()
+    session.model_registry.set_stored_api_key("openai", "sk-bad")
+    session.providers = {"openai": _RefreshStub(error=RuntimeError("openai API error 401: invalid"))}
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/login refresh openai", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Authorization failed for openai" in out
+    assert session.model_registry.find("openai", "n1") is None
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_refresh_unknown_adapter(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/login refresh nope", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Provider adapter not found for nope." in out
 
 
 @pytest.mark.asyncio

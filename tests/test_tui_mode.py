@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -572,7 +573,7 @@ async def test_tui_command_help_lists_all_commands(tmp_path: Path):
             "/tree",
             "/navigate <id> [--summary <text>]",
             "/fork <id>",
-            "/login [status|provider [apiKey] [model]]",
+            "/login [status|refresh <provider>|provider [apiKey] [model]]",
             "/logout <provider>",
             "/retry <on|off>",
             "/config [key] [value]",
@@ -1008,6 +1009,69 @@ async def test_tui_command_providers_error_paths(tmp_path: Path):
         assert "Provider not logged in or unknown: 9 (see /providers)" in stream
 
         assert session.model.id == "gpt-4.1"  # nothing changed
+
+
+# ---------------------------------------------------------------------------
+# Phase 14: completion + keybinding help; Phase 15: /login refresh.
+# ---------------------------------------------------------------------------
+
+
+def test_slash_commands_include_providers():
+    from one.modes.tui_mode import _SLASH_COMMANDS
+
+    assert "/providers" in _SLASH_COMMANDS
+
+
+@pytest.mark.asyncio
+async def test_tui_action_help_lists_providers(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_help()
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "/providers" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_login_refresh_fetches_and_persists(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.model_registry._auth.set_runtime_api_key("prov-a", "k1")
+    session.providers = {"prov-a": _LoginStub(models=["m-1", "m-2"])}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/login refresh prov-a")
+        stream = "\n".join(app._stream_lines)
+        assert "Authorized. Fetched 2 models (2 new)." in stream
+        assert "  1. m-1" in stream
+        assert "Pick with /providers prov-a <model-number|id>" in stream
+        assert session.model_registry.find("prov-a", "m-1") is not None
+        data = json.loads((tmp_path / "models.json").read_text(encoding="utf-8"))
+        assert {m["id"] for m in data["providers"]["prov-a"]} >= {"m-1", "m-2"}
+
+
+@pytest.mark.asyncio
+async def test_tui_login_refresh_missing_key_and_unknown_adapter(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)  # no keys stored
+    session.providers = {"openai": _LoginStub(models=[])}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/login refresh openai")
+        stream = "\n".join(app._stream_lines)
+        assert "No API key found for openai" in stream
+
+        await _submit(app, pilot, "/login refresh nope")
+        stream = "\n".join(app._stream_lines)
+        assert "Provider adapter not found for nope." in stream
 
 
 # ---------------------------------------------------------------------------

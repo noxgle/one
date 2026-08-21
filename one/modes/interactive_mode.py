@@ -494,7 +494,7 @@ class InteractiveMode:
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort | /new\n"
                     "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]\n"
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /mcp [list|enable|disable] | /bash <command>\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
@@ -782,6 +782,39 @@ class InteractiveMode:
                         providers = session.model_registry.providers()
                         statuses = [session.model_registry.get_provider_auth_status(p) for p in providers]
                         print(json.dumps({"providers": statuses}, ensure_ascii=False, indent=2))
+                    continue
+                if parts and parts[0] == "refresh":
+                    # Phase 15: re-fetch the live model list with the stored key.
+                    provider = parts[1] if len(parts) >= 2 else input("Provider: ").strip()
+                    if not provider:
+                        print("Provider is required.")
+                        continue
+                    adapter = getattr(session, "providers", {}).get(provider)
+                    if adapter is None:
+                        print(f"Provider adapter not found for {provider}.")
+                        continue
+                    key_info = session.model_registry.get_api_key_and_headers(ModelInfo(provider=provider, id=""))
+                    if not key_info.get("ok"):
+                        print(key_info.get("error") or f"No API key for {provider}.")
+                        continue
+                    api_key = key_info.get("apiKey", "")
+                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider)
+                    if not ok:
+                        print(f"Authorization failed for {provider}: {error}")
+                        continue
+                    if error:
+                        print(f"Warning: {error}")
+                    if not fetched:
+                        print(f"No models fetched for {provider} (no models endpoint).")
+                        continue
+                    added = session.model_registry.register_models(provider, fetched)
+                    session.model_registry.persist_models(provider, fetched)
+                    print(f"Authorized. Fetched {len(fetched)} models ({added} new).")
+                    for i, mid in enumerate(fetched[:20], 1):
+                        print(f"  {i}. {mid}")
+                    if len(fetched) > 20:
+                        print(f"  ... and {len(fetched) - 20} more")
+                    print(f"Pick with /providers {provider} <model-number|id> or /model {provider}/<id>.")
                     continue
                 provider = parts[0] if len(parts) >= 1 else input("Provider: ").strip()
                 if not provider:
