@@ -885,7 +885,7 @@ if TEXTUAL_AVAILABLE:
             if cmd == "/help":
                 self._write("/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort", "info")
                 self._write(
-                    "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle | /theme [name]",
+                    "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]",
                     "info",
                 )
                 self._write(
@@ -957,6 +957,63 @@ if TEXTUAL_AVAILABLE:
                 session.settings_manager.set_default_provider(result.model.provider)
                 session.settings_manager.set_default_model(result.model.id)
                 self._write(f"Model cycled to {result.model.provider}/{result.model.id}", "info")
+                self._refresh_sidebar()
+                return
+            if cmd == "/providers" or cmd.startswith("/providers "):
+                rest = cmd[len("/providers") :].strip()
+                logged_in = sorted({m.provider for m in session.model_registry.get_available()})
+                if not rest:
+                    if not logged_in:
+                        self._write("No logged-in providers. Use /login <provider> [apiKey] first.", "info")
+                        return
+                    current_provider = session.model.provider if session.model else None
+                    lines = ["Logged-in providers:"]
+                    for i, p in enumerate(logged_in, 1):
+                        count = len(session.model_registry.models_for_provider(p))
+                        marker = "* " if p == current_provider else "  "
+                        cur = f"   (current: {session.model.id})" if p == current_provider and session.model else ""
+                        lines.append(f"{marker}{i}. {p}   {count} models{cur}")
+                    lines.append("Usage: /providers <number|name> lists its models; /providers <number|name> <model-number|id> switches")
+                    self._write("\n".join(lines), "info")
+                    return
+                parts = rest.split(None, 1)
+                prov_arg = parts[0]
+                provider = None
+                if prov_arg.isdigit():
+                    idx = int(prov_arg)
+                    if 1 <= idx <= len(logged_in):
+                        provider = logged_in[idx - 1]
+                elif prov_arg in logged_in:
+                    provider = prov_arg
+                if not provider:
+                    self._write(f"Provider not logged in or unknown: {prov_arg} (see /providers)", "error")
+                    return
+                models = session.model_registry.models_for_provider(provider)
+                if len(parts) == 1:
+                    lines = [f"{provider} models:"]
+                    for i, m in enumerate(models, 1):
+                        lines.append(f"  {i}. {m.id}")
+                    lines.append(f"Usage: /providers {prov_arg} <model-number|id> to switch")
+                    self._write("\n".join(lines), "info")
+                    return
+                sel = parts[1].strip()
+                model = None
+                if sel.isdigit():
+                    midx = int(sel)
+                    if 1 <= midx <= len(models):
+                        model = models[midx - 1]
+                else:
+                    for m in models:
+                        if m.id == sel:
+                            model = m
+                            break
+                if not model:
+                    self._write(f"Model not found for {provider}: {sel} (see /providers {prov_arg})", "error")
+                    return
+                await session.set_model(model)
+                session.settings_manager.set_default_provider(model.provider)
+                session.settings_manager.set_default_model(model.id)
+                self._write(f"Model set to {model.provider}/{model.id} (saved as default)", "info")
                 self._refresh_sidebar()
                 return
             if cmd.startswith("/model "):

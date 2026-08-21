@@ -108,6 +108,13 @@ class _DummyModelRegistry:
     def models_for_provider(self, provider: str) -> list[ModelInfo]:
         return [m for m in self._models if m.provider == provider]
 
+    def get_available(self) -> list[ModelInfo]:
+        """Mirror real semantics: NO_AUTH providers are always usable."""
+        return [
+            m for m in self._models
+            if m.provider == "llama.cpp" or m.provider in self.stored_keys
+        ]
+
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
         self.stored_keys[provider] = api_key
 
@@ -415,6 +422,101 @@ async def test_interactive_model_command_provider_only_unknown(monkeypatch, caps
 
     assert "Provider not found or has no models: nope" in out
     assert session.model.id == "gpt-4.1"  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_interactive_providers_lists_logged_in_only(monkeypatch, capsys):
+    """Phase 13: /providers lists only providers with configured auth."""
+    session = _DummySession()
+    session.model_registry.set_stored_api_key("openai", "sk-x")
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/providers", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Logged-in providers:" in out
+    # openai has a key and is the current model -> marker + current hint.
+    assert "* 1. openai   2 models   (current: gpt-4.1)" in out
+    # openrouter has no key -> not listed at all.
+    assert "openrouter" not in out
+
+
+@pytest.mark.asyncio
+async def test_interactive_providers_second_step_lists_models_without_switching(monkeypatch, capsys):
+    session = _DummySession()
+    session.model_registry.set_stored_api_key("openai", "sk-x")
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/providers 1", "/providers openai", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert out.count("openai models:") == 2
+    assert "  1. gpt-4.1" in out
+    assert "  2. gpt-4o" in out
+    assert "Usage: /providers 1 <model-number|id> to switch" in out
+    # Second step only lists; the model is unchanged.
+    assert "Model set to" not in out
+    assert session.model.provider == "openai"
+    assert session.model.id == "gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_interactive_providers_switch_by_number_and_by_id(monkeypatch, capsys):
+    session = _DummySession()
+    reg = session.model_registry
+    reg.set_stored_api_key("openai", "sk-x")
+    reg.set_stored_api_key("openrouter", "sk-o")
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr(
+        "builtins.input",
+        _mk_input(["/providers 1 2", "/providers openrouter openai/gpt-4.1", "/exit"]),
+    )
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Model set to openai/gpt-4o (saved as default)" in out
+    assert "Model set to openrouter/openai/gpt-4.1 (saved as default)" in out
+    assert session.model.provider == "openrouter"
+    assert session.model.id == "openai/gpt-4.1"
+    assert session.settings_manager.default_provider == "openrouter"
+    assert session.settings_manager.default_model == "openai/gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_interactive_providers_error_paths_change_nothing(monkeypatch, capsys):
+    session = _DummySession()
+    session.model_registry.set_stored_api_key("openai", "sk-x")
+    mode = InteractiveMode(_DummyHost(session))
+    commands = [
+        "/providers",
+        "/providers 3",
+        "/providers nope",
+        "/providers 1 99",
+        "/providers 1 nope-model",
+        "/exit",
+    ]
+    monkeypatch.setattr("builtins.input", _mk_input(commands))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "Logged-in providers:" in out
+    assert "Provider not logged in or unknown: 3 (see /providers)" in out
+    assert "Provider not logged in or unknown: nope (see /providers)" in out
+    assert "Model not found for openai: 99 (see /providers 1)" in out
+    assert "Model not found for openai: nope-model (see /providers 1)" in out
+    assert "Model set to" not in out
+    assert session.model.id == "gpt-4.1"
+
+
+@pytest.mark.asyncio
+async def test_interactive_providers_none_logged_in(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/providers", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+
+    assert "No logged-in providers. Use /login <provider> [apiKey] first." in out
 
 
 @pytest.mark.asyncio

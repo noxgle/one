@@ -493,7 +493,7 @@ class InteractiveMode:
             if line.strip() == "/help":
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort | /new\n"
-                    "/model [provider/model] | /model-cycle | /thinking [level] | /thinking-cycle | /theme [name]\n"
+                    "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /mcp [list|enable|disable] | /bash <command>\n"
@@ -621,6 +621,60 @@ class InteractiveMode:
                     session.settings_manager.set_default_provider(result.model.provider)
                     session.settings_manager.set_default_model(result.model.id)
                     print(f"Model cycled to {result.model.provider}/{result.model.id}")
+                continue
+            if line.strip() == "/providers" or line.startswith("/providers "):
+                rest = line[len("/providers") :].strip()
+                logged_in = sorted({m.provider for m in session.model_registry.get_available()})
+                if not rest:
+                    if not logged_in:
+                        print("No logged-in providers. Use /login <provider> [apiKey] first.")
+                        continue
+                    current_provider = session.model.provider if session.model else None
+                    print("Logged-in providers:")
+                    for i, p in enumerate(logged_in, 1):
+                        count = len(session.model_registry.models_for_provider(p))
+                        marker = "* " if p == current_provider else "  "
+                        cur = f"   (current: {session.model.id})" if p == current_provider and session.model else ""
+                        print(f"{marker}{i}. {p}   {count} models{cur}")
+                    print("Usage: /providers <number|name> lists its models; /providers <number|name> <model-number|id> switches")
+                    continue
+                parts = rest.split(None, 1)
+                prov_arg = parts[0]
+                provider = None
+                if prov_arg.isdigit():
+                    idx = int(prov_arg)
+                    if 1 <= idx <= len(logged_in):
+                        provider = logged_in[idx - 1]
+                elif prov_arg in logged_in:
+                    provider = prov_arg
+                if not provider:
+                    print(f"Provider not logged in or unknown: {prov_arg} (see /providers)")
+                    continue
+                models = session.model_registry.models_for_provider(provider)
+                if len(parts) == 1:
+                    print(f"{provider} models:")
+                    for i, m in enumerate(models, 1):
+                        print(f"  {i}. {m.id}")
+                    print(f"Usage: /providers {prov_arg} <model-number|id> to switch")
+                    continue
+                sel = parts[1].strip()
+                model = None
+                if sel.isdigit():
+                    midx = int(sel)
+                    if 1 <= midx <= len(models):
+                        model = models[midx - 1]
+                else:
+                    for m in models:
+                        if m.id == sel:
+                            model = m
+                            break
+                if not model:
+                    print(f"Model not found for {provider}: {sel} (see /providers {prov_arg})")
+                    continue
+                await session.set_model(model)
+                session.settings_manager.set_default_provider(model.provider)
+                session.settings_manager.set_default_model(model.id)
+                print(f"Model set to {model.provider}/{model.id} (saved as default)")
                 continue
             if line.startswith("/thinking "):
                 level = line[len("/thinking ") :].strip()

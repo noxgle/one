@@ -912,6 +912,105 @@ async def test_tui_command_bash_echo(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# /providers slash-command tests (Phase 13).
+# ---------------------------------------------------------------------------
+
+
+def _mk_providers_session(tmp_path: Path):
+    """Session whose registry has one keyed provider with two models."""
+    session = _mk_app_session(tmp_path)
+    session.model_registry._auth.set_runtime_api_key("prov-a", "k1")
+    session.model_registry.register_models("prov-a", ["m-1", "m-2"])
+    return session
+
+
+@pytest.mark.asyncio
+async def test_tui_command_providers_lists_no_auth_without_keys(tmp_path: Path):
+    """NO_AUTH providers (llama.cpp, ollama) count as logged-in without keys."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)  # no keys at all
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/providers")
+        stream = "\n".join(app._stream_lines)
+        assert "Logged-in providers:" in stream
+        assert "llama.cpp" in stream
+        assert "ollama" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_command_providers_lists_logged_in_only(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_providers_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/providers")
+        stream = "\n".join(app._stream_lines)
+        assert "Logged-in providers:" in stream
+        # sorted: llama.cpp, ollama, prov-a; keyed providers without keys are absent.
+        assert "1. llama.cpp" in stream
+        assert "2. ollama" in stream
+        assert "3. prov-a   2 models" in stream
+        assert "openai" not in stream.split("Logged-in providers:")[-1].split("Usage:")[0]
+
+
+@pytest.mark.asyncio
+async def test_tui_command_providers_second_step_and_switch(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_providers_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/providers prov-a")
+        stream = "\n".join(app._stream_lines)
+        assert "prov-a models:" in stream
+        assert "  1. m-1" in stream
+        assert "  2. m-2" in stream
+        assert session.model.id == "gpt-4.1"  # second step does not switch
+
+        await _submit(app, pilot, "/providers 3 2")
+        stream = "\n".join(app._stream_lines)
+        assert "Model set to prov-a/m-2 (saved as default)" in stream
+        assert session.model.provider == "prov-a"
+        assert session.model.id == "m-2"
+        assert session.settings_manager.merged().get("defaultProvider") == "prov-a"
+        assert session.settings_manager.merged().get("defaultModel") == "m-2"
+
+        await _submit(app, pilot, "/providers prov-a m-1")
+        stream = "\n".join(app._stream_lines)
+        assert "Model set to prov-a/m-1 (saved as default)" in stream
+        assert session.model.id == "m-1"
+
+
+@pytest.mark.asyncio
+async def test_tui_command_providers_error_paths(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_providers_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/providers nope")
+        stream = "\n".join(app._stream_lines)
+        assert "Provider not logged in or unknown: nope (see /providers)" in stream
+
+        await _submit(app, pilot, "/providers prov-a 99")
+        stream = "\n".join(app._stream_lines)
+        assert "Model not found for prov-a: 99 (see /providers prov-a)" in stream
+
+        await _submit(app, pilot, "/providers 9 x")
+        stream = "\n".join(app._stream_lines)
+        assert "Provider not logged in or unknown: 9 (see /providers)" in stream
+
+        assert session.model.id == "gpt-4.1"  # nothing changed
+
+
+# ---------------------------------------------------------------------------
 # MCP slash-command tests.
 # ---------------------------------------------------------------------------
 
