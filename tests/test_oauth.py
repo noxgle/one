@@ -882,7 +882,14 @@ async def test_run_oauth_login_anthropic_paste(monkeypatch):
     from one.core import provider_login as pl_mod
 
     async def fake_login(spec, **kwargs):
-        return {"access_token": "sk-ant-oat01-z", "refresh_token": "r", "expires_in": 3600}
+        # run_login returns a NORMALIZED record (flows convert internally).
+        return {
+            "type": "oauth",
+            "access": "sk-ant-oat01-z",
+            "refresh": "r",
+            "expires": 4102444800000,
+            "accountId": None,
+        }
 
     monkeypatch.setattr(pl_mod, "run_login", fake_login)
     ok, error, fetched = await run_oauth_login(
@@ -892,6 +899,30 @@ async def test_run_oauth_login_anthropic_paste(monkeypatch):
     assert fetched == [{"id": "m1", "contextWindow": None}]
     assert reg.records["anthropic"]["access"] == "sk-ant-oat01-z"
     assert ("anthropic", fetched) in reg.registered
+
+
+@pytest.mark.asyncio
+async def test_run_oauth_login_does_not_double_convert(monkeypatch):
+    """Regression: HOTFIX-3 — record from run_login must be stored verbatim.
+
+    The flows already normalize via build_oauth_record; a second conversion
+    raised "missing access_token (received keys: ['access', ...])".
+    """
+    reg = _RecordingRegistry()
+
+    from one.core import provider_login as pl_mod
+
+    record = {"type": "oauth", "access": "tok", "refresh": "r", "expires": 1, "accountId": "acc"}
+
+    async def fake_login(spec, **kwargs):
+        return dict(record)
+
+    monkeypatch.setattr(pl_mod, "run_login", fake_login)
+    ok, error, fetched = await run_oauth_login(
+        "chatgpt", _FakeAdapter(), reg, open_url=lambda u: None, read_line=lambda: ""
+    )
+    assert ok and error is None
+    assert reg.records["chatgpt"] == record
 
 
 @pytest.mark.asyncio

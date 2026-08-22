@@ -6,7 +6,6 @@ from typing import Any
 
 from one.core.oauth import (
     OAUTH_FLOWS,
-    build_oauth_record,
     run_login,
 )
 
@@ -132,8 +131,10 @@ async def run_oauth_login(
     if read_line is None:
         read_line = input
 
-    token_resp = await run_login(spec, open_url=open_url, read_line=read_line)
-    record = build_oauth_record(spec, token_resp)
+    # run_login (paste/loopback flows) already returns a NORMALIZED record
+    # via build_oauth_record — do NOT convert again (double conversion
+    # raised "missing access_token" on the record-shaped dict).
+    record = await run_login(spec, open_url=open_url, read_line=read_line)
 
     model_registry.set_oauth_record(provider, record)
     access = str(record.get("access", ""))
