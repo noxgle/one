@@ -1120,7 +1120,21 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
 
-### Phase 18 HOTFIX-3: double conversion in `run_oauth_login` — FIXED (commit pending)
+### Phase 18 HOTFIX-4: `ModelRegistry.set_oauth_record` delegation — FIXED (OAuth login end-to-end working)
+
+**Live evidence (HOTFIX-3 worked — token exchange OK):** traceback showed a fully populated record in `run_oauth_login` locals (`type/access/refresh/expires/accountId` with real JWT + accountId) then:
+`AttributeError: 'ModelRegistry' object has no attribute 'set_oauth_record'`
+
+**Root cause:** `set_oauth_record` lives on **AuthStorage**; `run_oauth_login(provider, adapter, model_registry)` calls it on the registry. Sessions expose only `model_registry` (no auth_storage attribute on AgentSession), and ModelRegistry already delegated OAuth *reads* via its private `self._auth` — the write delegation was missed.
+
+**Applied fix:**
+1. `one/core/model_registry.py`: added `set_oauth_record(provider, record)` delegating to `self._auth.set_oauth_record`.
+2. `tests/test_oauth.py`: regression test — registry write lands in AuthStorage; `has_configured_auth` True; `get_api_key_and_headers` returns access token + `ChatGPT-Account-Id`.
+3. Suite green: **489 passed**.
+
+**Status:** full `/login <provider> subscription` path works end-to-end (verified live up to persist). Remaining follow-up unchanged: Codex backend may require the Codex system-prompt prefix for chat requests.
+
+### Phase 18 HOTFIX-3: double conversion in `run_oauth_login` — FIXED & VERIFIED LIVE (token exchange succeeded)
 
 **Live evidence (user reinstall worked — new diagnostics visible):**
 `Subscription login failed: chatgpt token response missing access_token (received keys: ['access', 'accountId', 'expires', 'refresh', 'type'])`
