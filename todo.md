@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`). Phase 13 **implemented and committed** (435 tests green; `/providers` command, Phase 13 in `793ea32`). Phases 14-15 **implemented and committed** (444 tests green; `/providers` completion/help fixes + `/login refresh <provider>`, in `9dac4d2`). Phase 16 **implemented and committed** (445 tests green; `# Current Date` in the system prompt, in `b4777a6`).
+> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`). Phase 13 **implemented and committed** (435 tests green; `/providers` command, Phase 13 in `793ea32`). Phases 14-15 **implemented and committed** (444 tests green; `/providers` completion/help fixes + `/login refresh <provider>`, in `9dac4d2`). Phase 16 **implemented and committed** (445 tests green; `# Current Date` in the system prompt, in `b4777a6`). Phase 17 **implemented and committed** (451 tests green; ctx gauge fallback + real context windows from providers, in `1b59855`).
 
 ## Goal
 
@@ -1016,6 +1016,42 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
   - **Acceptance Criteria:** New test passes; full suite green (444 + new).
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 17: ctx gauge fix + real context windows from providers — DONE (in `1b59855`)
+
+**Motivation:** `ollama-cloud/nemotron-3-ultra` (fetched via `/login`, registered with `context_window=None`) shows no ctx usage. Root cause: `AgentSession.__init__` assigns `self.model` WITHOUT the `FALLBACK_CONTEXT_WINDOW` normalization that only `set_model()` applies (`agent_session.py:64` vs `:981`). Additionally, fetched models never learn their REAL context length even though provider list endpoints expose it (OpenRouter `context_length`, Gemini `inputTokenLimit`).
+
+**Approved design (user picked full scope):**
+- **17.1** helper `_with_fallback_context(model)` used by BOTH `__init__` and `set_model` → every model without a known window gets 128k; gauge + compaction always work.
+- **17.2** pipeline carries `{"id": str, "contextWindow": int | None}`:
+  - `ProviderAdapter.list_models_detailed()` (base default delegates to `list_models()` → `contextWindow: None`; keeps stubs working); overrides: openai_compatible parses `data[].context_length`, gemini parses `inputTokenLimit`; anthropic inherits default (no list endpoint).
+  - `validate_and_fetch` prefers `list_models_detailed` (getattr fallback to `list_models` for exotic adapters/stubs) and returns model entries as dicts.
+  - `register_models` / `persist_models` accept `str | dict` entries; new entries carry `contextWindow`; existing entries get it filled when missing (refresh enriches). models.json load already reads `contextWindow`.
+  - Display loops in interactive/TUI login+refresh handle dicts.
+
+**Files:** `one/core/agent_session.py`, `one/providers/base.py`, `one/providers/openai_compatible.py`, `one/providers/gemini.py`, `one/core/provider_login.py`, `one/core/model_registry.py`, `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, tests.
+
+**Acceptance Criteria:**
+- Session started with a `context_window=None` model has a working ctx gauge (128k fallback).
+- After `/login` on OpenRouter, fetched models persist real `context_length` into models.json and the registry; Gemini persists `inputTokenLimit`; providers without the field fall back to 128k at runtime.
+- Full suite green (445 + new).
+
+**Estimated effort:** ~2 h
+
+**Confidence:** High
+
+- [x] **Task 17.1: fallback normalization in __init__**
+  - **Description:** Extract `_with_fallback_context()`; apply in `AgentSession.__init__` and `set_model`.
+  - **Files:** `one/core/agent_session.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** `get_context_usage()` non-None for a None-window model passed to the constructor.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_compaction.py`
+- [x] **Task 17.2: context lengths end-to-end**
+  - **Description:** As designed above (adapters → provider_login → registry → persistence → mode callers).
+  - **Files:** see file list
+  - **Dependencies:** Task 17.1
+  - **Acceptance Criteria:** As above.
+  - **Verification:** `.venv/bin/python -m pytest -q`
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
@@ -1098,6 +1134,8 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (444 tests) (Phases 14-15).
 - [x] Every provider request's system message ends with `# Current Date` (date, weekday, HH:MM, tz abbrev, UTC offset), rebuilt each step (Phase 16).
 - [x] Full test suite green: `.venv/bin/python -m pytest -q` (445 tests) (Phase 16).
+- [x] Ctx gauge works for every model (128k fallback applied in `__init__` and `set_model`); OpenRouter/Gemini context lengths fetched at `/login`, persisted to models.json, enriched on refresh; providers without the field fall back at runtime (Phase 17).
+- [x] Full test suite green: `.venv/bin/python -m pytest -q` (451 tests) (Phase 17).
 
 ## Estimated Timeline
 
