@@ -20,6 +20,7 @@ PROVIDER_ENV_MAP = {
     "deepseek": "DEEPSEEK_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "groq": "GROQ_API_KEY",
+    "chatgpt": "CHATGPT_API_KEY",
 }
 
 
@@ -44,14 +45,32 @@ class AuthStorage:
 
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
         self._data.setdefault("apiKeys", {})[provider] = api_key
-        if self._path:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+        self._save()
 
     def remove_stored_api_key(self, provider: str) -> None:
         keys = self._data.setdefault("apiKeys", {})
         if provider in keys:
             del keys[provider]
+        self._save()
+
+    # --- OAuth token records (Phase 18: subscription login) ---
+
+    def get_oauth_record(self, provider: str) -> dict[str, Any] | None:
+        """Stored subscription-OAuth record for the provider, when present."""
+        record = self._data.get("oauth", {}).get(provider)
+        return record if isinstance(record, dict) else None
+
+    def set_oauth_record(self, provider: str, record: dict[str, Any]) -> None:
+        self._data.setdefault("oauth", {})[provider] = record
+        self._save()
+
+    def remove_oauth_record(self, provider: str) -> None:
+        records = self._data.setdefault("oauth", {})
+        if provider in records:
+            del records[provider]
+            self._save()
+
+    def _save(self) -> None:
         if self._path:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")

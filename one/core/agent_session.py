@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from one.core.model_registry import ModelRegistry
+from one.core.oauth import OAuthError
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 from one.core.types import ModelInfo
@@ -1029,6 +1030,15 @@ class AgentSession:
             raise RuntimeError(f"Unsupported provider: {self.model.provider}")
         if self.model.base_url and isinstance(provider, OpenAICompatibleAdapter):
             provider = provider.with_base_url(self.model.base_url)
+
+        # Subscription OAuth (Phase 18): refresh the token when nearing expiry.
+        # getattr-guarded so injected test registries without OAuth support work.
+        refresher: Any = getattr(self.model_registry, "ensure_oauth_fresh", None)
+        if callable(refresher) and self.model.provider:
+            try:
+                await refresher(self.model.provider)
+            except OAuthError as e:
+                raise RuntimeError(f"OAuth token refresh failed: {e}") from e
 
         auth = self.model_registry.get_api_key_and_headers(self.model)
         if not auth.get("ok"):

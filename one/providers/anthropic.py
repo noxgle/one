@@ -8,13 +8,51 @@ import httpx
 from .base import ChatResult, ProviderAdapter
 
 
+def _is_oauth_token(api_key: str | None) -> bool:
+    """Subscription access token (Claude Pro/Max login), not an API key."""
+    return bool(api_key) and api_key.startswith("sk-ant-oat")
+
+
 class AnthropicAdapter(ProviderAdapter):
     name = "anthropic"
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
-        # Anthropic has no public models-list endpoint; callers fall back to
-        # minimal-chat validation.
-        return None
+        # Only the subscription-OAuth credential may call GET /v1/models;
+        # plain API keys have no public models-list endpoint and callers fall
+        # back to minimal-chat validation.
+        if not _is_oauth_token(api_key):
+            return None
+        detailed = await self.list_models_detailed(api_key, headers)
+        return [d["id"] for d in (detailed or [])]
+
+    async def list_models_detailed(self, api_key: str, headers: dict[str, str] | None = None) -> list[dict[str, Any]] | None:
+        if not _is_oauth_token(api_key):
+            return None
+        req_headers = self._auth_headers(api_key)
+        if headers:
+            req_headers.update(headers)
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get("https://api.anthropic.com/v1/models", headers=req_headers)
+            if resp.is_error:
+                body = resp.text[:1000]
+                raise RuntimeError(f"anthropic API error {resp.status_code}: {body}")
+            data = resp.json()
+        out: list[dict[str, Any]] = []
+        for m in data.get("data", []):
+            mid = m.get("id")
+            if not mid:
+                continue
+            out.append({"id": mid, "contextWindow": None})
+        return out
+
+    def _auth_headers(self, api_key: str) -> dict[str, str]:
+        if _is_oauth_token(api_key):
+            return {
+                "Authorization": f"Bearer {api_key}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "user-agent": "claude-cli/1.0.0 (external, cli)",
+            }
+        return {"x-api-key": api_key}
 
     async def chat(
         self,
@@ -42,10 +80,10 @@ class AnthropicAdapter(ProviderAdapter):
         if system:
             payload["system"] = system
         req_headers = {
-            "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        req_headers.update(self._auth_headers(api_key))
         if headers:
             req_headers.update(headers)
 

@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from one.core.oauth import OAuthError, oauth_login_hint
 from one.core.provider_login import entry_id as fetched_entry_id
-from one.core.provider_login import validate_and_fetch
+from one.core.provider_login import run_oauth_login, validate_and_fetch
 from one.core.types import ModelInfo
 from one.config import get_agent_dir
 
@@ -820,6 +821,44 @@ class InteractiveMode:
                 provider = parts[0] if len(parts) >= 1 else input("Provider: ").strip()
                 if not provider:
                     print("Provider is required.")
+                    continue
+                # Phase 18: subscription OAuth login (`/login <provider> subscription`).
+                wants_oauth = len(parts) >= 2 and parts[1].lower() in {"subscription", "oauth"}
+                if (
+                    not wants_oauth
+                    and len(parts) < 2
+                    and session.model_registry.requires_api_key(provider)
+                    and oauth_login_hint(provider)
+                ):
+                    print(f"Auth method for {provider}:")
+                    print("  1. Subscription login (browser OAuth)")
+                    print("  2. API key")
+                    choice = input("Choice [1]: ").strip().lower()
+                    wants_oauth = choice in ("", "1", "subscription", "oauth")
+                if wants_oauth:
+                    adapter = getattr(session, "providers", {}).get(provider)
+                    if adapter is None:
+                        print(f"Provider adapter not found for {provider}.")
+                        continue
+                    try:
+                        ok, error, fetched = await run_oauth_login(provider, adapter, session.model_registry)
+                    except OAuthError as e:
+                        print(f"Subscription login failed: {e}")
+                        continue
+                    if not ok:
+                        print(f"Subscription login failed: {error}")
+                        continue
+                    session.settings_manager.set_default_provider(provider)
+                    print(f"Subscription login stored for {provider}.")
+                    if fetched:
+                        print(f"Fetched {len(fetched)} models:")
+                        for i, m in enumerate(fetched[:20], 1):
+                            print(f"  {i}. {fetched_entry_id(m)}")
+                        if len(fetched) > 20:
+                            print(f"  ... and {len(fetched) - 20} more")
+                        print(f"Pick with /providers {provider} <model-number|id> or /model {provider}/<id>.")
+                    else:
+                        print("No models fetched — try /login refresh later.")
                     continue
                 requires_api_key = session.model_registry.requires_api_key(provider)
                 api_key = parts[1] if len(parts) >= 2 else (input("API key: ").strip() if requires_api_key else "")

@@ -5,6 +5,7 @@ from typing import Any
 
 from .anthropic import AnthropicAdapter
 from .base import ProviderAdapter
+from .codex_responses import CodexResponsesAdapter
 from .gemini import GeminiAdapter
 from .openai_compatible import OpenAICompatibleAdapter
 
@@ -25,6 +26,8 @@ def build_provider_registry() -> dict[str, ProviderAdapter]:
         "openai": OpenAICompatibleAdapter("openai", openai_base),
         "anthropic": AnthropicAdapter(),
         "gemini": GeminiAdapter(),
+        # ChatGPT/Codex subscription backend (Responses API, OAuth only).
+        "chatgpt": CodexResponsesAdapter(),
         "openrouter": OpenAICompatibleAdapter("openrouter", openrouter_base),
         # Ollama Cloud rejects some OpenAI-specific fields like reasoning_effort.
         "ollama-cloud": OpenAICompatibleAdapter(

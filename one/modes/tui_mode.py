@@ -12,8 +12,9 @@ from typing import Any
 
 from rich.text import Text
 
+from one.core.oauth import OAuthError
 from one.core.provider_login import entry_id as fetched_entry_id
-from one.core.provider_login import validate_and_fetch
+from one.core.provider_login import run_oauth_login, validate_and_fetch
 from one.core.types import ModelInfo
 from one.tools.common import sanitize_display_text
 
@@ -1236,6 +1237,32 @@ if TEXTUAL_AVAILABLE:
                 provider = parts[0] if len(parts) >= 1 else ""
                 if not provider:
                     self._write("Provider is required. Usage: /login <provider> [apiKey] [model]", "error")
+                    return
+                # Phase 18: subscription OAuth login (`/login <provider> subscription`).
+                if len(parts) >= 2 and parts[1].lower() in {"subscription", "oauth"}:
+                    adapter = getattr(session, "providers", {}).get(provider)
+                    if adapter is None:
+                        self._write(f"Provider adapter not found for {provider}.", "error")
+                        return
+                    try:
+                        ok, error, fetched = await run_oauth_login(provider, adapter, session.model_registry)
+                    except OAuthError as e:
+                        self._write(f"Subscription login failed: {e}", "error")
+                        return
+                    if not ok:
+                        self._write(f"Subscription login failed: {error}", "error")
+                        return
+                    session.settings_manager.set_default_provider(provider)
+                    lines = [f"Subscription login stored for {provider}."]
+                    if fetched:
+                        lines.append(f"Fetched {len(fetched)} models:")
+                        lines += [f"  {i}. {fetched_entry_id(m)}" for i, m in enumerate(fetched[:20], 1)]
+                        if len(fetched) > 20:
+                            lines.append(f"  ... and {len(fetched) - 20} more")
+                        lines.append(f"Pick with /providers {provider} <model-number|id> or /model {provider}/<id>.")
+                    else:
+                        lines.append("No models fetched — try /login refresh later.")
+                    self._write("\n".join(lines), "info")
                     return
                 requires_api_key = session.model_registry.requires_api_key(provider)
                 api_key = parts[1] if len(parts) >= 2 else ""

@@ -42,6 +42,9 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("deepseek", "deepseek-reasoner", reasoning=True, context_window=128_000),
     ModelInfo("mistral", "mistral-large-latest", reasoning=True, context_window=128_000),
     ModelInfo("groq", "llama-3.3-70b-versatile", reasoning=False, context_window=128_000),
+    # ChatGPT/Codex subscription backend (Responses API); the real slug list
+    # is fetched from /models after OAuth login.
+    ModelInfo("chatgpt", "gpt-5.3-codex", reasoning=True, context_window=400_000),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp", "ollama"}
@@ -139,6 +142,9 @@ class ModelRegistry:
     def has_configured_auth(self, model: ModelInfo) -> bool:
         if model.provider in NO_AUTH_PROVIDERS:
             return True
+        if self._auth.get_oauth_record(model.provider):
+            # Subscription OAuth login (Phase 18) counts as configured auth.
+            return True
         return not _is_placeholder_key(self._auth.get_api_key(model.provider))
 
     def get_available(self) -> list[ModelInfo]:
@@ -169,11 +175,34 @@ class ModelRegistry:
         if model.provider in NO_AUTH_PROVIDERS:
             return {"ok": True, "apiKey": "", "headers": {}}
         key = self._auth.get_api_key(model.provider)
-        if _is_placeholder_key(key):
+        headers: dict[str, Any] = {}
+        if not key or _is_placeholder_key(key):
+            # Fall back to a subscription-OAuth access token when present
+            # (Phase 18); ChatGPT additionally needs the account id header.
+            record = self._auth.get_oauth_record(model.provider)
+            if record and record.get("access"):
+                key = str(record["access"])
+                if record.get("accountId"):
+                    headers["ChatGPT-Account-Id"] = str(record["accountId"])
+        if not key or _is_placeholder_key(key):
             env_var = self._auth.env_var_for_provider(model.provider)
             hint = f" (set {env_var} or use /login)" if env_var else " (use /login)"
             return {"ok": False, "error": f"No API key found for {model.provider}{hint}"}
-        return {"ok": True, "apiKey": key, "headers": {}}
+        return {"ok": True, "apiKey": key, "headers": headers}
+
+    async def ensure_oauth_fresh(self, provider: str) -> None:
+        """Refresh the provider's subscription OAuth token when near expiry.
+
+        No-op for providers without an OAuth flow or without a stored record.
+        Raises ``OAuthError`` when the refresh fails.
+        """
+        from one.core.oauth import ensure_fresh_token, is_oauth_provider
+
+        if not is_oauth_provider(provider):
+            return
+        if not self._auth.get_oauth_record(provider):
+            return
+        await ensure_fresh_token(self._auth, provider)
 
     @staticmethod
     def _normalize_entries(model_ids: list[str | dict[str, Any]]) -> list[tuple[str, int | None]]:
