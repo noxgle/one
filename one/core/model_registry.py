@@ -204,6 +204,15 @@ class ModelRegistry:
             return
         await ensure_fresh_token(self._auth, provider)
 
+    def set_oauth_record(self, provider: str, record: dict[str, Any]) -> None:
+        """Store/replace the provider's OAuth record (delegates to auth storage).
+
+        HOTFIX-4: ``provider_login.run_oauth_login`` receives only the registry
+        (sessions do not expose auth storage), so the write path must be
+        delegated here just like the reads above.
+        """
+        self._auth.set_oauth_record(provider, record)
+
     @staticmethod
     def _normalize_entries(model_ids: list[str | dict[str, Any]]) -> list[tuple[str, int | None]]:
         """Accept plain ids or {"id", "contextWindow"} dicts → (id, window) pairs."""

@@ -930,3 +930,37 @@ async def test_run_oauth_login_unknown_provider():
     ok, error, fetched = await run_oauth_login("openai", _FakeAdapter(), _RecordingRegistry())
     assert not ok and "no subscription login" in (error or "")
     assert fetched is None
+
+
+def test_model_registry_set_oauth_record_delegates():
+    """Regression: HOTFIX-4 — registry must delegate OAuth record writes.
+
+    run_oauth_login only receives the registry; without the delegation the
+    persist step crashed with AttributeError after a SUCCESSFUL token exchange.
+    """
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelInfo, ModelRegistry
+
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth)
+    record = {
+        "type": "oauth",
+        "access": "tok",
+        "refresh": "r",
+        "expires": 4102444800000,
+        "accountId": "acc",
+    }
+    registry.set_oauth_record("chatgpt", record)
+    assert auth.get_oauth_record("chatgpt") == record
+
+    model = ModelInfo(
+        id="gpt-5.3-codex",
+        provider="chatgpt",
+        context_window=400_000,
+        reasoning=True,
+    )
+    assert registry.has_configured_auth(model) is True
+    resolved = registry.get_api_key_and_headers(model)
+    assert resolved["ok"] is True
+    assert resolved["apiKey"] == "tok"
+    assert resolved["headers"]["ChatGPT-Account-Id"] == "acc"
