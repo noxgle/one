@@ -1088,6 +1088,38 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 - [x] **Task 18.4:** `codex_responses.py` adapter (Responses wire, SSE, models-by-slug) + provider registration + builtins.
 - [x] **Task 18.5:** `/login` UX (key-vs-browser choice) in interactive+TUI, help texts, full suite green.
 
+### Phase 18 HOTFIX: chatgpt token exchange fails ("token response missing access_token") — DONE
+
+**Symptom (live test):** `/login chatgpt subscription` — browser flow OK (callback + state validated), token exchange returns 200 JSON without `access_token`.
+
+**Root-cause research (opencode source, Aug 2026):** compared our exchange with opencode's working implementation (`anomalyco/opencode`, `packages/core/src/plugin/provider/openai.ts`; older reference in issue #3281). Differences found:
+
+| aspect | opencode (works) | ours (fails) |
+|---|---|---|
+| `state` in token body | NOT sent | sent ← prime suspect |
+| User-Agent | `opencode/<version>` | default `python-httpx/...` |
+| error diagnostics | status surfaced | no body in message |
+| authorize `originator` | `originator=opencode` | `originator=codex_cli_rs` (authorize worked anyway; leave) |
+| expires | `expires_in ?? 3600` | same semantics ✓ |
+| accountId chain | id_token→access: top-level → nested auth claim → orgs[0].id | identical ✓ |
+| refresh body | grant_type/refresh_token/client_id only | identical ✓ |
+
+**Fix plan (exact edits):**
+
+1. `one/core/oauth.py::exchange_authorization_code` — remove `state` param from signature AND body (send only grant_type/code/client_id/redirect_uri/code_verifier); comment why (matches opencode/codex-rs).
+2. `one/core/oauth.py::_token_request` — add `headers={"User-Agent": _user_agent()}` on the POST (`_user_agent()` = `one/{importlib.metadata.version('one')}` fallback `one/0.0.0`); wrap `resp.json()` in try/except (non-dict/None → treat as missing access_token); enrich BOTH errors with `_describe_response(resp)` = `"HTTP {status}: {body[:400] or '<empty body>'}"`; when JSON dict has `error_description`/`error`, append it to the missing-access_token message.
+3. Callers of `exchange_authorization_code` (`run_paste_flow`, `run_loopback_flow`) — drop `state=` kwarg.
+4. Tests (`tests/test_oauth.py`):
+   - `test_anthropic_token_request_uses_json_body`: remove `state="S"` kwarg + `body["state"] == "S"` assertion.
+   - `test_run_paste_flow_code_state` / `..._bare_code_...`: fake_exchange drops `state` param; assert code+verifier only (no state assertions).
+   - NEW `test_token_request_missing_access_token_includes_diagnostics`: 200 response `{"error":"invalid_grant","error_description":"code expired"}` → OAuthError message contains "invalid_grant", "code expired", "HTTP 200".
+   - NEW: assert chatgpt exchange body has exactly {grant_type, code, client_id, redirect_uri, code_verifier}.
+5. Run `.venv/bin/python -m pytest tests/test_oauth.py -q` then full suite; commit as `fix(oauth): align chatgpt token exchange with opencode (drop state, UA header, diagnostics)`.
+
+**Follow-up note (chat runtime, not login):** opencode issue #3281 states the Codex backend requires a specific system prompt starting "You are Codex, based on GPT-5..." for OAuth requests to be accepted — if `/model chatgpt/...` requests get rejected post-login, prepend that instruction prefix in `CodexResponsesAdapter._build_payload`.
+
+**As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
+
 **Implementation notes (as built):**
 - `one/core/oauth.py`: `OAuthFlowSpec` + `ANTHROPIC_OAUTH`/`CHATGPT_OAUTH`; `generate_pkce` (S256), `build_authorize_url`, `_token_request` (json for Anthropic, form for ChatGPT), `exchange_authorization_code`/`refresh_access_token`, `jwt_payload` (no signature check), `extract_chatgpt_account_id` (per-token chain: top-level → nested auth claim → orgs[0]; id_token wins over access_token), `build_oauth_record` (`expires_in` → JWT `exp` → 1h fallback; ms epoch), `ensure_fresh_token(auth, provider, margin_ms=5min)` (no-op without spec/record; raises when expired + no refresh token), `run_paste_flow` (state=verifier fallback for bare CODE), `run_loopback_flow` (threaded HTTPServer on 127.0.0.1:<port>, state validation, provider-error surfacing, timeout 300s), `run_login` dispatcher.
 - AuthStorage: generic `get/set/remove_oauth_record`; ModelRegistry: OAuth record counts as configured auth, `get_api_key_and_headers` falls back to access token (+ injects `ChatGPT-Account-Id` header from record; explicit API key still wins), async `ensure_oauth_fresh(provider)` called in `agent_session._request...` before credential resolution (getattr-guarded for fake registries; OAuthError → RuntimeError).
