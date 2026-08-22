@@ -1120,6 +1120,20 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
 
+### Phase 18 HOTFIX-5: chat 400 + missing Codex models — FIXED
+
+**Live status before fix:** login stored OK; only builtin seed model listed; chat → bare `400 Bad Request` ×3 retries.
+
+**Research findings applied (openai/codex discussion #7296 + LiteLLM-style handlers):**
+1. `input` items now carry `"type": "message"` (backend requires it).
+2. `instructions` fallback `_BASE_INSTRUCTIONS` ("You are Codex, based on GPT-5...") when the session has no system message — empty instructions rejected.
+3. HTTP errors now carry the response body: `_error_with_body()` used in both stream and non-stream paths (`resp.text` / `await resp.aread()`) — next failure shows OpenAI's actual reason.
+4. Login-time model fetch passes `ChatGPT-Account-Id` from the stored record (`_fetch_detailed(adapter, key, headers)` passthrough in `provider_login.py`) — root cause of "No models fetched".
+
+**Tests:** payload asserts `type: message`; new `test_codex_payload_instructions_fallback`, `test_run_oauth_login_passes_account_id_headers`; stream fake got `is_error`/`aread`. Suite green: **491 passed**.
+
+**Next:** user retries chat (works, or shows real server reason) and `/login refresh chatgpt` / re-login for the model list.
+
 ### Phase 18 HOTFIX-4: `ModelRegistry.set_oauth_record` delegation — FIXED (OAuth login end-to-end working)
 
 **Live evidence (HOTFIX-3 worked — token exchange OK):** traceback showed a fully populated record in `run_oauth_login` locals (`type/access/refresh/expires/accountId` with real JWT + accountId) then:
