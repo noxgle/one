@@ -139,14 +139,14 @@ async def test_anthropic_token_request_uses_json_body(monkeypatch):
         return _Resp()
 
     _fake_client_factory(monkeypatch, oauth, handler)
-    resp = await exchange_authorization_code(ANTHROPIC_OAUTH, code="C", verifier="V", state="S")
+    resp = await exchange_authorization_code(ANTHROPIC_OAUTH, code="C", verifier="V")
     assert resp["access_token"] == "sk-ant-oat01-t"
     assert captured["url"] == "https://console.anthropic.com/v1/oauth/token"
     body = captured["kwargs"]["json"]
     assert captured["kwargs"].get("data") is None
     assert body["grant_type"] == "authorization_code"
     assert body["code_verifier"] == "V"
-    assert body["state"] == "S"
+    assert set(body) == {"grant_type", "code", "client_id", "redirect_uri", "code_verifier"}
 
 
 @pytest.mark.asyncio
@@ -195,8 +195,81 @@ async def test_token_request_error_raises_oauth_error(monkeypatch):
         return _Resp()
 
     _fake_client_factory(monkeypatch, oauth, handler)
-    with pytest.raises(OAuthError, match="token endpoint error 400"):
+    with pytest.raises(OAuthError, match="token endpoint error HTTP 400"):
         await refresh_access_token(CHATGPT_OAUTH, "rt")
+
+
+@pytest.mark.asyncio
+async def test_token_request_missing_access_token_includes_diagnostics(monkeypatch):
+    """200-without-access_token must surface status, body and error fields."""
+
+    class _Resp:
+        status_code = 200
+        text = '{"error":"invalid_grant","error_description":"code expired"}'
+        is_error = False
+
+        def json(self) -> dict[str, Any]:
+            return {"error": "invalid_grant", "error_description": "code expired"}
+
+    def handler(method: str, url: str, kwargs: dict[str, Any]) -> _Resp:
+        return _Resp()
+
+    _fake_client_factory(monkeypatch, oauth, handler)
+    with pytest.raises(OAuthError) as exc_info:
+        await exchange_authorization_code(CHATGPT_OAUTH, code="C", verifier="V")
+    msg = str(exc_info.value)
+    assert "missing access_token" in msg
+    assert "invalid_grant" in msg
+    assert "code expired" in msg
+    assert "HTTP 200" in msg
+
+
+@pytest.mark.asyncio
+async def test_token_request_non_json_body_is_handled(monkeypatch):
+    """Non-JSON 2xx body → clean OAuthError with the raw snippet, no crash."""
+
+    class _Resp:
+        status_code = 200
+        text = "<html>blocked</html>"
+        is_error = False
+
+        def json(self) -> dict[str, Any]:
+            raise ValueError("not json")
+
+    def handler(method: str, url: str, kwargs: dict[str, Any]) -> _Resp:
+        return _Resp()
+
+    _fake_client_factory(monkeypatch, oauth, handler)
+    with pytest.raises(OAuthError, match="blocked"):
+        await refresh_access_token(CHATGPT_OAUTH, "rt")
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_exchange_body_exact_shape(monkeypatch):
+    """Token body matches opencode exactly — no extra params (e.g. state)."""
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        status_code = 200
+        text = ""
+        is_error = False
+
+        def json(self) -> dict[str, Any]:
+            return {"access_token": "at", "refresh_token": "rt"}
+
+    def handler(method: str, url: str, kwargs: dict[str, Any]) -> _Resp:
+        captured["kwargs"] = kwargs
+        return _Resp()
+
+    _fake_client_factory(monkeypatch, oauth, handler)
+    await exchange_authorization_code(CHATGPT_OAUTH, code="CB", verifier="VF")
+    assert captured["kwargs"]["data"] == {
+        "grant_type": "authorization_code",
+        "code": "CB",
+        "client_id": CHATGPT_OAUTH.client_id,
+        "redirect_uri": "http://localhost:1455/auth/callback",
+        "code_verifier": "VF",
+    }
 
 
 # --- records / JWT --------------------------------------------------------------
@@ -337,8 +410,8 @@ async def test_run_paste_flow_code_state(monkeypatch):
     opened: list[str] = []
     exchanged: dict[str, Any] = {}
 
-    async def fake_exchange(spec, *, code, verifier, state=None):
-        exchanged.update({"code": code, "verifier": verifier, "state": state})
+    async def fake_exchange(spec, *, code, verifier):
+        exchanged.update({"code": code, "verifier": verifier})
         return {"access_token": "sk-ant-oat01-a", "refresh_token": "r", "expires_in": 3600}
 
     monkeypatch.setattr(oauth, "exchange_authorization_code", fake_exchange)
@@ -349,10 +422,11 @@ async def test_run_paste_flow_code_state(monkeypatch):
     )
     assert len(opened) == 1
     q = urllib.parse.parse_qs(urllib.parse.urlparse(opened[0]).query)
-    # Paste mode uses the verifier as the state fallback.
+    # Paste mode uses the verifier as the state fallback in the AUTHORIZE url.
     assert q["state"] == [exchanged["verifier"]]
     assert exchanged["code"] == "ABCD"
-    assert exchanged["state"] == "STATE123"
+    # Token request carries no state (matches opencode/codex-rs).
+    assert "state" not in exchanged
     assert record["access"] == "sk-ant-oat01-a"
 
 
@@ -361,14 +435,16 @@ async def test_run_paste_flow_bare_code_falls_back_to_verifier(monkeypatch):
     opened: list[str] = []
     exchanged: dict[str, Any] = {}
 
-    async def fake_exchange(spec, *, code, verifier, state=None):
-        exchanged.update({"code": code, "state": state, "verifier": verifier})
+    async def fake_exchange(spec, *, code, verifier):
+        exchanged.update({"code": code, "verifier": verifier})
         return {"access_token": "t", "expires_in": 60}
 
     monkeypatch.setattr(oauth, "exchange_authorization_code", fake_exchange)
     await run_paste_flow(ANTHROPIC_OAUTH, open_url=opened.append, read_line=lambda: "JUSTCODE")
     assert exchanged["code"] == "JUSTCODE"
-    assert exchanged["state"] == exchanged["verifier"]
+    # Authorize URL used the verifier as state so a bare CODE still validates.
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(opened[0]).query)
+    assert q["state"] == [exchanged["verifier"]]
 
 
 @pytest.mark.asyncio

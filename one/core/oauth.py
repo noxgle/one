@@ -145,28 +145,53 @@ def build_authorize_url(spec: OAuthFlowSpec, code_challenge: str, state: str) ->
 # --- token endpoint -----------------------------------------------------------
 
 
+def _user_agent() -> str:
+    try:
+        from importlib.metadata import version
+
+        return f"one/{version('one')}"
+    except Exception:
+        return "one/0.0.0"
+
+
+def _describe_response(resp: Any) -> str:
+    """Compact status+body description for OAuth error messages."""
+    snippet = ""
+    try:
+        snippet = (resp.text or "").strip()[:400]
+    except Exception:
+        pass
+    return f"HTTP {resp.status_code}: {snippet or '<empty body>'}"
+
+
 async def _token_request(spec: OAuthFlowSpec, body: dict[str, str]) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": _user_agent()}) as client:
         if spec.token_content_type == "json":
             resp = await client.post(spec.token_url, json=body)
         else:
             resp = await client.post(spec.token_url, data=body)
     if resp.is_error:
-        detail = ""
-        try:
-            detail = str(resp.json())
-        except Exception:
-            detail = resp.text[:300]
-        raise OAuthError(f"{spec.provider} token endpoint error {resp.status_code}: {detail}")
-    data = resp.json()
-    if not data.get("access_token"):
-        raise OAuthError(f"{spec.provider} token response missing access_token")
+        raise OAuthError(f"{spec.provider} token endpoint error {_describe_response(resp)}")
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    if not isinstance(data, dict) or not data.get("access_token"):
+        # Surface the server's error payload and raw body so failures are
+        # diagnosable (mirrors how opencode/codex report exchange errors).
+        err = ""
+        if isinstance(data, dict):
+            err = str(data.get("error_description") or data.get("error") or "")
+        suffix = f": {err}" if err else ""
+        raise OAuthError(
+            f"{spec.provider} token response missing access_token{suffix} ({_describe_response(resp)})"
+        )
     return data
 
 
-async def exchange_authorization_code(
-    spec: OAuthFlowSpec, *, code: str, verifier: str, state: str | None = None
-) -> dict[str, Any]:
+async def exchange_authorization_code(spec: OAuthFlowSpec, *, code: str, verifier: str) -> dict[str, Any]:
+    # NOTE: no `state` here — matches opencode/codex-rs exactly; extra params
+    # in the token body made auth.openai.com answer without access_token.
     body = {
         "grant_type": "authorization_code",
         "code": code,
@@ -174,8 +199,6 @@ async def exchange_authorization_code(
         "redirect_uri": spec.redirect_uri,
         "code_verifier": verifier,
     }
-    if state:
-        body["state"] = state
     return await _token_request(spec, body)
 
 
@@ -302,7 +325,7 @@ async def run_paste_flow(
         code, state = raw, verifier
     if not code:
         raise OAuthError("No authorization code entered.")
-    token_resp = await exchange_authorization_code(spec, code=code, verifier=verifier, state=state)
+    token_resp = await exchange_authorization_code(spec, code=code, verifier=verifier)
     return build_oauth_record(spec, token_resp)
 
 
@@ -355,7 +378,7 @@ async def run_loopback_flow(
         raise OAuthError("OAuth callback did not contain an authorization code.")
     if callback.get("state") != state:
         raise OAuthError("OAuth state mismatch — restart the login.")
-    token_resp = await exchange_authorization_code(spec, code=code, verifier=verifier, state=state)
+    token_resp = await exchange_authorization_code(spec, code=code, verifier=verifier)
     return build_oauth_record(spec, token_resp)
 
 
