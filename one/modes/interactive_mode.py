@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from one.core.provider_login import entry_id as fetched_entry_id
 from one.core.provider_login import validate_and_fetch
 from one.core.types import ModelInfo
 from one.config import get_agent_dir
@@ -810,8 +811,8 @@ class InteractiveMode:
                     added = session.model_registry.register_models(provider, fetched)
                     session.model_registry.persist_models(provider, fetched)
                     print(f"Authorized. Fetched {len(fetched)} models ({added} new).")
-                    for i, mid in enumerate(fetched[:20], 1):
-                        print(f"  {i}. {mid}")
+                    for i, m in enumerate(fetched[:20], 1):
+                        print(f"  {i}. {fetched_entry_id(m)}")
                     if len(fetched) > 20:
                         print(f"  ... and {len(fetched) - 20} more")
                     print(f"Pick with /providers {provider} <model-number|id> or /model {provider}/<id>.")
@@ -849,8 +850,8 @@ class InteractiveMode:
                         added = session.model_registry.register_models(provider, fetched)
                         session.model_registry.persist_models(provider, fetched)
                         print(f"Authorized. Fetched {len(fetched)} models ({added} new).")
-                        for mid in fetched[:20]:
-                            print(f"  - {mid}")
+                        for m in fetched[:20]:
+                            print(f"  - {fetched_entry_id(m)}")
                         if len(fetched) > 20:
                             print(f"  ... and {len(fetched) - 20} more")
                 selected_model = None

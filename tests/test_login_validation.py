@@ -62,7 +62,7 @@ async def test_validate_and_fetch_success():
     ok, error, models = await validate_and_fetch(a, "sk-1", "openrouter")
     assert ok is True
     assert error is None
-    assert models == ["m1", "m2"]
+    assert models == [{"id": "m1", "contextWindow": None}, {"id": "m2", "contextWindow": None}]
     assert a.list_calls == 1
     # The key is proven with a minimal chat call (max_tokens=1) against the
     # first fetched model, because /models may be a public endpoint.
@@ -87,7 +87,7 @@ async def test_validate_and_fetch_chat_402_is_soft_pass_with_credit_note():
     ok, error, models = await validate_and_fetch(a, "sk-1", "openrouter")
     assert ok is True
     assert error is not None and "credit" in error
-    assert models == ["m1"]
+    assert models == [{"id": "m1", "contextWindow": None}]
 
 
 @pytest.mark.asyncio
@@ -96,7 +96,7 @@ async def test_validate_and_fetch_chat_400_probe_model_issue_is_soft_pass():
     ok, error, models = await validate_and_fetch(a, "sk-1", "openrouter")
     assert ok is True
     assert error is not None and "400" in error
-    assert models == ["m1"]
+    assert models == [{"id": "m1", "contextWindow": None}]
 
 
 @pytest.mark.asyncio
@@ -169,7 +169,7 @@ async def test_validate_and_fetch_no_key_fetches_without_validation():
     ok, error, models = await validate_and_fetch(a, "", "llama.cpp")
     assert ok is True
     assert error is None
-    assert models == ["local1", "local2"]
+    assert models == [{"id": "local1", "contextWindow": None}, {"id": "local2", "contextWindow": None}]
 
 
 @pytest.mark.asyncio
@@ -393,3 +393,149 @@ def test_anthropic_list_models_returns_none():
     from one.providers.anthropic import AnthropicAdapter
 
     assert AnthropicAdapter().name == "anthropic"
+
+
+# --- Phase 17: real context windows end-to-end -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_list_models_detailed_parses_context_length(monkeypatch):
+    from one.providers import openai_compatible as oc
+
+    class _Resp:
+        status_code = 200
+
+        @property
+        def is_error(self) -> bool:
+            return False
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "data": [
+                    {"id": "big", "context_length": 1_000_000},
+                    {"id": "unknown"},
+                    {"id": "junk", "context_length": "oops"},
+                    {"id": ""},
+                ]
+            }
+
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def get(self, url: str, headers: dict[str, str] | None = None):
+            return _Resp()
+
+    monkeypatch.setattr(oc.httpx, "AsyncClient", _FakeClient)
+    adapter = oc.OpenAICompatibleAdapter("openrouter", "https://openrouter.ai/api")
+    detailed = await adapter.list_models_detailed("sk-1")
+    assert detailed == [
+        {"id": "big", "contextWindow": 1_000_000},
+        {"id": "unknown", "contextWindow": None},
+        {"id": "junk", "contextWindow": None},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_list_models_detailed_parses_input_token_limit(monkeypatch):
+    from one.providers import gemini as g
+
+    class _Resp:
+        status_code = 200
+
+        @property
+        def is_error(self) -> bool:
+            return False
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "models": [
+                    {
+                        "name": "models/gemini-2.5-pro",
+                        "supportedGenerationMethods": ["generateContent"],
+                        "inputTokenLimit": 1_048_576,
+                    },
+                    {"name": "models/gemini-tiny", "supportedGenerationMethods": ["generateContent"]},
+                ]
+            }
+
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def get(self, url: str):
+            return _Resp()
+
+    monkeypatch.setattr(g.httpx, "AsyncClient", _FakeClient)
+    adapter = g.GeminiAdapter()
+    detailed = await adapter.list_models_detailed("sk-1")
+    assert detailed == [
+        {"id": "gemini-2.5-pro", "contextWindow": 1_048_576},
+        {"id": "gemini-tiny", "contextWindow": None},
+    ]
+    # list_models stays a thin wrapper over the detailed form.
+    assert await adapter.list_models("sk-1") == ["gemini-2.5-pro", "gemini-tiny"]
+
+
+@pytest.mark.asyncio
+async def test_validate_and_fetch_prefers_detailed_entries():
+    class _DetailedAdapter(_StubAdapter):
+        async def list_models_detailed(
+            self, api_key: str, headers: dict[str, str] | None = None
+        ) -> list[dict[str, Any]] | None:
+            self.list_calls += 1
+            return [
+                {"id": "nemotron-3-ultra", "contextWindow": 262_144},
+                {"id": "glm-5.2", "contextWindow": None},
+            ]
+
+    a = _DetailedAdapter(models=["ignored"])
+    ok, error, models = await validate_and_fetch(a, "sk-1", "ollama-cloud")
+    assert ok is True
+    assert error is None
+    assert models == [
+        {"id": "nemotron-3-ultra", "contextWindow": 262_144},
+        {"id": "glm-5.2", "contextWindow": None},
+    ]
+    # The chat probe uses the first DETAILED entry's id.
+    assert a.chat_calls[0][1] == "nemotron-3-ultra"
+    assert a.list_calls == 1
+
+
+def test_register_and_persist_carry_context_window(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    models_path = tmp_path / "models.json"
+    reg = ModelRegistry.create(auth, str(models_path))
+
+    entries = [
+        {"id": "nemotron-3-ultra", "contextWindow": 262_144},
+        {"id": "no-window"},
+        "plain-string-model",
+    ]
+    added = reg.register_models("ollama-cloud", entries)
+    assert added == 3
+    found = reg.find("ollama-cloud", "nemotron-3-ultra")
+    assert found is not None and found.context_window == 262_144
+    assert reg.find("ollama-cloud", "plain-string-model") is not None
+
+    reg.persist_models("ollama-cloud", entries)
+    reg2 = ModelRegistry.create(auth, str(models_path))
+    m2 = reg2.find("ollama-cloud", "nemotron-3-ultra")
+    assert m2 is not None and m2.context_window == 262_144
+
+    # Refresh with a window enriches an in-memory entry that lacks one.
+    reg2.register_models("ollama-cloud", [{"id": "no-window", "contextWindow": 131_072}])
+    enriched = reg2.find("ollama-cloud", "no-window")
+    assert enriched is not None and enriched.context_window == 131_072

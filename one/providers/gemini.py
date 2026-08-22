@@ -12,6 +12,12 @@ class GeminiAdapter(ProviderAdapter):
     name = "gemini"
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
+        detailed = await self.list_models_detailed(api_key, headers)
+        if detailed is None:
+            return None
+        return [d["id"] for d in detailed]
+
+    async def list_models_detailed(self, api_key: str, headers: dict[str, str] | None = None) -> list[dict[str, Any]] | None:
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url)
@@ -19,12 +25,16 @@ class GeminiAdapter(ProviderAdapter):
                 body = resp.text[:1000]
                 raise RuntimeError(f"gemini API error {resp.status_code}: {body}")
             data = resp.json()
-        out: list[str] = []
+        out: list[dict[str, Any]] = []
         for m in data.get("models", []):
             name = m.get("name", "")
             methods = m.get("supportedGenerationMethods") or []
             if name and "generateContent" in methods:
-                out.append(name.removeprefix("models/"))
+                limit = m.get("inputTokenLimit")
+                out.append({
+                    "id": name.removeprefix("models/"),
+                    "contextWindow": limit if isinstance(limit, int) and limit > 0 else None,
+                })
         return out
 
     async def chat(

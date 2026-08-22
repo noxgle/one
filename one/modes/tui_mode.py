@@ -12,6 +12,7 @@ from typing import Any
 
 from rich.text import Text
 
+from one.core.provider_login import entry_id as fetched_entry_id
 from one.core.provider_login import validate_and_fetch
 from one.core.types import ModelInfo
 from one.tools.common import sanitize_display_text
@@ -1225,8 +1226,8 @@ if TEXTUAL_AVAILABLE:
                     added = session.model_registry.register_models(provider, fetched)
                     session.model_registry.persist_models(provider, fetched)
                     lines = [f"Authorized. Fetched {len(fetched)} models ({added} new)."]
-                    for i, mid in enumerate(fetched[:20], 1):
-                        lines.append(f"  {i}. {mid}")
+                    for i, m in enumerate(fetched[:20], 1):
+                        lines.append(f"  {i}. {fetched_entry_id(m)}")
                     if len(fetched) > 20:
                         lines.append(f"  ... and {len(fetched) - 20} more")
                     lines.append(f"Pick with /providers {provider} <model-number|id> or /model {provider}/<id>.")
@@ -1674,7 +1675,7 @@ if TEXTUAL_AVAILABLE:
                 if fetched:
                     added = session.model_registry.register_models(provider, fetched)
                     session.model_registry.persist_models(provider, fetched)
-                    preview = ", ".join(fetched[:20]) + ("..." if len(fetched) > 20 else "")
+                    preview = ", ".join(fetched_entry_id(m) for m in fetched[:20]) + ("..." if len(fetched) > 20 else "")
                     self._write(f"Authorized. Fetched {len(fetched)} models ({added} new): {preview}", "info")
             selected_model = None
             if model_input:

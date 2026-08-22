@@ -175,29 +175,52 @@ class ModelRegistry:
             return {"ok": False, "error": f"No API key found for {model.provider}{hint}"}
         return {"ok": True, "apiKey": key, "headers": {}}
 
-    def register_models(self, provider: str, model_ids: list[str]) -> int:
-        """Register fetched model ids in memory (dedupe); returns how many were added."""
+    @staticmethod
+    def _normalize_entries(model_ids: list[str | dict[str, Any]]) -> list[tuple[str, int | None]]:
+        """Accept plain ids or {"id", "contextWindow"} dicts → (id, window) pairs."""
+        out: list[tuple[str, int | None]] = []
+        for entry in model_ids:
+            if isinstance(entry, dict) and entry.get("id"):
+                window = entry.get("contextWindow")
+                out.append((entry["id"], window if isinstance(window, int) and window > 0 else None))
+            elif isinstance(entry, str):
+                out.append((entry, None))
+        return out
+
+    def register_models(self, provider: str, model_ids: list[str | dict[str, Any]]) -> int:
+        """Register fetched models in memory (dedupe); returns how many were added.
+
+        Entries may be plain ids or ``{"id", "contextWindow"}`` dicts. Existing
+        registered entries without a context window get enriched when a real
+        one arrives (e.g. on refresh).
+        """
         added = 0
-        for mid in model_ids:
-            if not self.find(provider, mid):
-                self._models.append(
-                    ModelInfo(
-                        provider=provider,
-                        id=mid,
-                        reasoning=True,
-                        context_window=None,
-                        base_url=None,
-                        tool_parser=None,
-                    )
+        for mid, window in self._normalize_entries(model_ids):
+            existing = self.find(provider, mid)
+            if existing is not None:
+                if not existing.context_window and window:
+                    existing.context_window = window
+                continue
+            self._models.append(
+                ModelInfo(
+                    provider=provider,
+                    id=mid,
+                    reasoning=True,
+                    context_window=window,
+                    base_url=None,
+                    tool_parser=None,
                 )
-                added += 1
+            )
+            added += 1
         return added
 
-    def persist_models(self, provider: str, model_ids: list[str]) -> None:
-        """Merge fetched model ids into models.json (providers.<provider>).
+    def persist_models(self, provider: str, model_ids: list[str | dict[str, Any]]) -> None:
+        """Merge fetched models into models.json (providers.<provider>).
 
-        Existing entries keep their fields (url/toolParser/contextWindow);
-        only missing ids are added with defaults. Creates the file when absent.
+        Entries may be plain ids or ``{"id", "contextWindow"}`` dicts. Existing
+        entries keep their fields (url/toolParser/contextWindow); only missing
+        ids are added with defaults, and a known contextWindow is filled in
+        when the stored entry lacks one. Creates the file when absent.
         """
         data: dict[str, Any] = {}
         if self._models_path.exists():
@@ -210,8 +233,10 @@ class ModelRegistry:
         for m in providers.get(provider, []) or []:
             if isinstance(m, dict) and m.get("id"):
                 existing[m["id"]] = m
-        for mid in model_ids:
-            existing.setdefault(mid, {"id": mid, "reasoning": True})
+        for mid, window in self._normalize_entries(model_ids):
+            entry = existing.setdefault(mid, {"id": mid, "reasoning": True})
+            if window and not entry.get("contextWindow"):
+                entry["contextWindow"] = window
         providers[provider] = list(existing.values())
         self._models_path.parent.mkdir(parents=True, exist_ok=True)
         self._models_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

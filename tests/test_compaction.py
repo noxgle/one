@@ -53,12 +53,18 @@ class _FailProvider:
         raise RuntimeError("summarizer down")
 
 
-def _mk_agent(tmp_path, settings_override: dict[str, Any] | None = None, provider: Any = None) -> AgentSession:
+def _mk_agent(
+    tmp_path,
+    settings_override: dict[str, Any] | None = None,
+    provider: Any = None,
+    model: Any = None,
+) -> AgentSession:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
     registry = ModelRegistry.create(auth)
-    model = registry.find("openai", "gpt-4.1")
-    assert model is not None
+    if model is None:
+        model = registry.find("openai", "gpt-4.1")
+        assert model is not None
     settings = SettingsManager.in_memory(settings_override or {"compaction": {"summarizeWithModel": False}})
     session = SessionManager.in_memory(str(tmp_path))
     agent = AgentSession(session, settings, registry, _Loader(), model, "medium")
@@ -276,6 +282,33 @@ def test_runtime_prompt_contains_current_date(tmp_path):
     assert f"UTC{offset[:3]}:{offset[3:]}" in prompt
     # The section is appended after the base prompt / plan blocks.
     assert prompt.index("# Current Date") > 0
+
+
+def test_agent_normalizes_missing_context_window(tmp_path):
+    """Phase 17: a model resolved at runtime without a context window (e.g.
+    fetched via /login) still gets the fallback window so the ctx gauge and
+    compaction work — both via __init__ and set_model."""
+    from one.core.agent_session import FALLBACK_CONTEXT_WINDOW
+    from one.core.types import ModelInfo
+
+    model = ModelInfo(provider="ollama-cloud", id="nemotron-3-ultra", context_window=None)
+    agent = _mk_agent(tmp_path, {}, model=model)
+    assert agent.model is not None and agent.model.context_window == FALLBACK_CONTEXT_WINDOW
+
+    usage = agent.get_context_usage()
+    assert usage is not None
+    assert usage["contextWindow"] == FALLBACK_CONTEXT_WINDOW
+
+
+@pytest.mark.asyncio
+async def test_set_model_normalizes_missing_context_window(tmp_path):
+    from one.core.agent_session import FALLBACK_CONTEXT_WINDOW
+    from one.core.types import ModelInfo
+
+    agent = _mk_agent(tmp_path, {})
+    other = ModelInfo(provider="openrouter", id="some/model", context_window=None)
+    await agent.set_model(other)
+    assert agent.model is not None and agent.model.context_window == FALLBACK_CONTEXT_WINDOW
 
 
 @pytest.mark.asyncio

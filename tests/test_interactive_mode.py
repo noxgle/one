@@ -123,16 +123,18 @@ class _DummyModelRegistry:
             return {"ok": False, "error": f"No API key found for {model.provider} (use /login)"}
         return {"ok": True, "apiKey": key, "headers": {}}
 
-    def register_models(self, provider: str, model_ids: list[str]) -> int:
+    def register_models(self, provider: str, model_ids: list[str | dict[str, Any]]) -> int:
         added = 0
-        for mid in model_ids:
+        for entry in model_ids:
+            mid = entry["id"] if isinstance(entry, dict) else entry
             if not self.find(provider, mid):
-                self._models.append(ModelInfo(provider=provider, id=mid))
+                window = entry.get("contextWindow") if isinstance(entry, dict) else None
+                self._models.append(ModelInfo(provider=provider, id=mid, context_window=window))
                 added += 1
         return added
 
-    def persist_models(self, provider: str, model_ids: list[str]) -> None:
-        self.persisted: tuple[str, list[str]] = (provider, list(model_ids))
+    def persist_models(self, provider: str, model_ids: list[str | dict[str, Any]]) -> None:
+        self.persisted: tuple[str, list[str | dict[str, Any]]] = (provider, list(model_ids))
 
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
         self.stored_keys[provider] = api_key
@@ -569,7 +571,8 @@ async def test_interactive_login_refresh_fetches_and_registers(monkeypatch, caps
     assert "  2. n2" in out
     assert "Pick with /providers openai <model-number|id>" in out
     assert session.model_registry.find("openai", "n1") is not None
-    assert session.model_registry.persisted == ("openai", ["n1", "n2"])
+    assert session.model_registry.persisted[0] == "openai"
+    assert [e["id"] if isinstance(e, dict) else e for e in session.model_registry.persisted[1]] == ["n1", "n2"]
     # Key and defaults are untouched by a refresh.
     assert session.settings_manager.default_provider is None
 

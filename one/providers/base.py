@@ -34,3 +34,15 @@ class ProviderAdapter:
         return None; callers may fall back to a minimal-chat validation.
         """
         raise NotImplementedError
+
+    async def list_models_detailed(self, api_key: str, headers: dict[str, str] | None = None) -> list[dict[str, Any]] | None:
+        """Return model entries as ``{"id": str, "contextWindow": int | None}``.
+
+        Default implementation delegates to :meth:`list_models` with unknown
+        context windows; adapters whose list endpoints expose a context length
+        (OpenRouter ``context_length``, Gemini ``inputTokenLimit``) override it.
+        """
+        models = await self.list_models(api_key, headers)
+        if models is None:
+            return None
+        return [{"id": m, "contextWindow": None} for m in models]

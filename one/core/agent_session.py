@@ -30,6 +30,13 @@ _TOOL_TIMEOUT_GRACE_SEC = 5
 FALLBACK_CONTEXT_WINDOW = 128_000
 
 
+def _with_fallback_context(model: ModelInfo | None) -> ModelInfo | None:
+    """Normalize a model so the ctx gauge/compaction always have a window."""
+    if model is not None and not model.context_window:
+        return replace(model, context_window=FALLBACK_CONTEXT_WINDOW)
+    return model
+
+
 class _AbortSignal(Exception):
     """Internal: abort() cancelled the in-flight provider request."""
 
@@ -61,7 +68,7 @@ class AgentSession:
         self.settings_manager = settings_manager
         self.model_registry = model_registry
         self.resource_loader = resource_loader
-        self.model = model
+        self.model = _with_fallback_context(model)
         self.thinking_level = thinking_level
         self.scoped_models = scoped_models or []
         self.providers = build_provider_registry()
@@ -978,9 +985,7 @@ class AgentSession:
         self.session_manager.append_session_info(name)
 
     async def set_model(self, model: ModelInfo) -> None:
-        if not model.context_window:
-            model = replace(model, context_window=FALLBACK_CONTEXT_WINDOW)
-        self.model = model
+        self.model = _with_fallback_context(model)
         self.session_manager.append_model_change(model.provider, model.id)
 
     def set_thinking_level(self, level: str) -> None:
