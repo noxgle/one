@@ -248,7 +248,10 @@ def build_oauth_record(spec: OAuthFlowSpec, token_resp: dict[str, Any]) -> dict[
     """Normalize a token response into the stored record shape."""
     access = token_resp.get("access_token")
     if not access:
-        raise OAuthError(f"{spec.provider} token response missing access_token")
+        raise OAuthError(
+            f"{spec.provider} token response missing access_token "
+            f"(received keys: {sorted(token_resp) or '[]'})"
+        )
     now_ms = int(time.time() * 1000)
     expires_in = token_resp.get("expires_in")
     if isinstance(expires_in, (int, float)) and expires_in > 0:

@@ -323,7 +323,7 @@ def test_build_oauth_record_shape_and_expiry_fallback():
         {"access_token": _jwt({"chatgpt_account_id": "acc-9"}), "expires_in": 60},
     )
     assert "accountId" not in rec3
-    with pytest.raises(OAuthError):
+    with pytest.raises(OAuthError, match="received keys"):
         build_oauth_record(CHATGPT_OAUTH, {"refresh_token": "rt"})
 
 
