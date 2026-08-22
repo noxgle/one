@@ -1052,6 +1052,56 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
   - **Acceptance Criteria:** As above.
   - **Verification:** `.venv/bin/python -m pytest -q`
 
+### Phase 18: subscription OAuth login (Claude Pro, ChatGPT/Codex) — DONE
+
+**Motivation:** today only API-key auth exists (`auth.json` / env / runtime). Subscription logins (Claude Pro/Max, ChatGPT Plus/Pro) use OAuth — user asked for Codex-style "log in with account".
+
+**Research findings (Aug 2026, reverse-engineered flows — UNDOCUMENTED APIs, may change):**
+
+*Anthropic Claude Pro/Max (simple — copy/paste flow, no local server):*
+- client_id `9d1c250a-e61b-44d9-88ed-5944d1962f5e`; authorize `https://claude.ai/oauth/authorize?code=true&client_id=...&response_type=code&redirect_uri=https://console.anthropic.com/oauth/code/callback&scope=org:create_api_key user:profile user:inference&code_challenge=<S256>&code_challenge_method=S256&state=<verifier>`
+- Browser shows `CODE#STATE`; user pastes it back (no callback server!)
+- Exchange/refresh: POST `https://console.anthropic.com/v1/oauth/token` (JSON): `authorization_code` / `refresh_token` grants
+- Access token = `sk-ant-oat01-...`; usage: `Authorization: Bearer` against `api.anthropic.com/v1/messages` + header `anthropic-beta: oauth-2025-04-20` (+ `claude-code-20250219`), UA `claude-cli/<ver>`; `GET /v1/models` works with the token
+- ⚠️ Anthropic (Feb 2026 docs): Pro/Max OAuth is for official clients only — third-party use at own risk
+
+*OpenAI ChatGPT/Codex (harder — local callback server + Responses API backend):*
+- client_id `app_EMoamEEZ73f0CkXaXp7hrann`; authorize `https://auth.openai.com/oauth/authorize`, redirect `http://localhost:1455/auth/callback` (local HTTP server REQUIRED), scope `openid profile email offline_access`, extra params `id_token_add_organizations=true`, `codex_cli_simplified_flow=true`, `originator`
+- Exchange/refresh: POST `https://auth.openai.com/oauth/token` (form-encoded); proactive refresh ~5 min before expiry + reactive retry once on 401
+- accountId from JWT claims (id_token → access_token fallback chain: top-level `chatgpt_account_id` → `https://api.openai.com/auth`.chatgpt_account_id → `organizations[0].id`)
+- Storage shape: `{"type": "oauth", "access", "refresh", "expires" (ms), "accountId"}`
+- Runtime requests go to `https://chatgpt.com/backend-api/codex/responses` — the **Responses API**, NOT chat/completions: input items use content type `input_text`, `store=false` mandatory, `instructions` required, stateless (full history every request); headers `Authorization: Bearer`, `ChatGPT-Account-Id`, `originator`, `session_id` (UUIDv7, also as `prompt_cache_key`)
+- Models endpoint: `GET /models?client_version=...` → `{"models": [{"slug": ...}]}` (non-standard schema)
+
+**Design:**
+- New `one/core/oauth.py`: PKCE (S256), per-provider flow runners, `ensure_fresh_token()` (margin-based proactive + single reactive retry), token record persistence in `auth.json` (generic `get_oauth_record`/`set_oauth_record` in AuthStorage; file stays 0600-equivalent plaintext like today).
+- `AuthStorage.get_api_key()` extended: OAuth record's live access token counts as the provider key (after `ensure_fresh_token`) so `get_api_key_and_headers` keeps working unchanged.
+- Anthropic adapter: token starting with `sk-ant-oat01` → Bearer auth + OAuth beta headers instead of `x-api-key`.
+- NEW provider `chatgpt` + adapter `one/providers/codex_responses.py`: Responses-API wire (messages→input items, instructions, store=false, SSE delta parsing), non-standard models listing, required headers.
+- `/login <provider>` without a key → interactive choice: `[1] paste API key  [2] log in with browser (subscription)` for oauth-capable providers; help texts updated in both modes.
+- Builtins: seed `chatgpt` provider models (gpt-5.x-codex slugs) so `/providers` works pre-login.
+
+**Sub-tasks (each independently shippable):**
+- [x] **Task 18.1:** OAuth core — PKCE, token records in AuthStorage, `ensure_fresh_token` with refresh grants; unit tests with mocked httpx.
+- [x] **Task 18.2:** Claude Pro login (paste flow) + Anthropic adapter OAuth mode + model fetch; e2e test with stubbed endpoints.
+- [x] **Task 18.3:** ChatGPT login — localhost:1455 callback server (threaded http.server), JWT claim extraction; tests with fake server.
+- [x] **Task 18.4:** `codex_responses.py` adapter (Responses wire, SSE, models-by-slug) + provider registration + builtins.
+- [x] **Task 18.5:** `/login` UX (key-vs-browser choice) in interactive+TUI, help texts, full suite green.
+
+**Implementation notes (as built):**
+- `one/core/oauth.py`: `OAuthFlowSpec` + `ANTHROPIC_OAUTH`/`CHATGPT_OAUTH`; `generate_pkce` (S256), `build_authorize_url`, `_token_request` (json for Anthropic, form for ChatGPT), `exchange_authorization_code`/`refresh_access_token`, `jwt_payload` (no signature check), `extract_chatgpt_account_id` (per-token chain: top-level → nested auth claim → orgs[0]; id_token wins over access_token), `build_oauth_record` (`expires_in` → JWT `exp` → 1h fallback; ms epoch), `ensure_fresh_token(auth, provider, margin_ms=5min)` (no-op without spec/record; raises when expired + no refresh token), `run_paste_flow` (state=verifier fallback for bare CODE), `run_loopback_flow` (threaded HTTPServer on 127.0.0.1:<port>, state validation, provider-error surfacing, timeout 300s), `run_login` dispatcher.
+- AuthStorage: generic `get/set/remove_oauth_record`; ModelRegistry: OAuth record counts as configured auth, `get_api_key_and_headers` falls back to access token (+ injects `ChatGPT-Account-Id` header from record; explicit API key still wins), async `ensure_oauth_fresh(provider)` called in `agent_session._request...` before credential resolution (getattr-guarded for fake registries; OAuthError → RuntimeError).
+- Anthropic adapter: `sk-ant-oat*` tokens → `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20` instead of `x-api-key`; `/v1/models` fetch ONLY for OAuth tokens (None for API keys → minimal-chat validation path unchanged).
+- `chatgpt` provider = `CodexResponsesAdapter`: Responses wire (`input_text` items, `instructions`, `store=false`, `max_output_tokens`, reasoning effort map xhigh→high/off→omit), SSE delta parsing (`response.output_text.delta` / `response.completed` / `response.failed`), models via non-standard `{models:[{slug}]}` endpoint with `client_version` param; headers originator/session_id/Bearer. Builtin seed: `gpt-5.3-codex`.
+- `/login <provider> subscription|oauth` runs the flow in interactive+TUI; interactive additionally offers a `[1] Subscription [2] API key` menu when no key argument given and the provider is oauth-capable. Shared orchestration: `provider_login.run_oauth_login()` (flow → build_oauth_record → persist → best-effort model fetch/register).
+- 33 new tests in `tests/test_oauth.py` (mocked httpx everywhere; loopback tests use a real local server hit via urllib).
+
+**Files:** `one/core/oauth.py` (new), `one/core/auth_storage.py`, `one/providers/anthropic.py`, `one/providers/codex_responses.py` (new), `one/providers/registry.py`, `one/core/model_registry.py` (builtins), `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, tests.
+
+**Estimated effort:** Tasks 18.1-18.2 ≈ one session; 18.3-18.5 ≈ another.
+
+**Confidence:** Medium-High (flows verified against multiple independent implementations; but undocumented → breakage risk)
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
