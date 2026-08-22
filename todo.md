@@ -1120,7 +1120,21 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
 
-### Phase 18 HOTFIX-2: stale `~/.local` install — reinstall required after code changes — PENDING (user action)
+### Phase 18 HOTFIX-3: double conversion in `run_oauth_login` — FIXED (commit pending)
+
+**Live evidence (user reinstall worked — new diagnostics visible):**
+`Subscription login failed: chatgpt token response missing access_token (received keys: ['access', 'accountId', 'expires', 'refresh', 'type'])`
+
+The received keys are OUR RECORD shape (`access`/`refresh`/`expires`/`accountId`/`type`), NOT a token response (`access_token`...). Root cause: `run_paste_flow`/`run_loopback_flow` already return a normalized record via `build_oauth_record`, but `provider_login.run_oauth_login()` called `build_oauth_record(spec, token_resp)` a SECOND time on that record → `record.get("access_token")` is None → raises. Tests missed it because the fake `run_login` mock returned a token-response shape instead of the real record shape.
+
+**Applied fix:**
+1. `one/core/provider_login.py`: `record = await run_login(...)` directly (double conversion removed; unused `build_oauth_record` import dropped).
+2. `tests/test_oauth.py`: `test_run_oauth_login_anthropic_paste` mock now returns the real RECORD shape; added regression test `test_run_oauth_login_does_not_double_convert` (record without `access_token` must be stored verbatim).
+3. Suite green: **488 passed**.
+
+**Next:** user retries `/login chatgpt subscription` — this was the last known blocker in the login path itself.
+
+### Phase 18 HOTFIX-2: stale `~/.local` install — reinstall required after code changes — RESOLVED (user reinstalled editable; new diagnostics confirmed live code)
 
 **Observation:** after the fix, the TUI still prints `chatgpt token response missing access_token` WITHOUT the new `(HTTP ...: ...)` suffix. The fixed `_token_request` ALWAYS appends diagnostics, so a process printing the bare message is running PRE-FIX code.
 
