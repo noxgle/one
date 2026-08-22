@@ -1120,6 +1120,39 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
 
+### Phase 18 HOTFIX-2: stale `~/.local` install — reinstall required after code changes — PENDING (user action)
+
+**Observation:** after the fix, the TUI still prints `chatgpt token response missing access_token` WITHOUT the new `(HTTP ...: ...)` suffix. The fixed `_token_request` ALWAYS appends diagnostics, so a process printing the bare message is running PRE-FIX code.
+
+**CONFIRMED root cause:** `which -a one` resolves to `/home/picon/.local/bin/one` — a FROZEN user-site copy (`~/.local/lib/python3.x/site-packages/one`) snapshot from between commits `00a33a4` (feat OAuth) and `82e9019` (hotfix). It has the login feature but not the fix. Earlier changes "worked automatically" because testing went through `.venv/bin/one` / `python -m one.cli.main`, which always use live repo sources. A frozen `~/.local` copy updates ONLY on explicit `pip install --user`.
+
+**⚠️ USER ACTION REQUIRED — reinstall `one` to the latest version after code changes:**
+
+```bash
+# 1) remove the stale frozen user-site copy
+python3 -m pip uninstall -y one
+rm -f ~/.local/bin/one
+
+# 2) reinstall EDITABLY so bare `one` always tracks repo sources
+python3 -m pip install --user -e /home/picon/workspace/one
+hash -r
+
+# 3) verify
+which -a one        # should point at the editable install
+grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py   # >=1 means hotfix present
+```
+
+**Standing rule:** whenever code changes are pulled/committed and `one` is launched via `~/.local/bin/one`, re-run step 2 (or launch `.venv/bin/one`). Quick sanity check that the running build contains the hotfix: trigger an OAuth error — the message must contain `(HTTP <status>: ...)`.
+
+**Pending code hardening (blocked by edit permissions):**
+- `build_oauth_record`: second raiser of the same bare message — enrich with `(received keys: [...])`; test `build_oauth_record` error assertion updated to `match="received keys"`.
+
+**After reinstall, retry `/login chatgpt subscription`.** If it still fails, the message will now contain `(HTTP <status>: <body>)` — paste it verbatim; that body names the real server-side reason.
+
+- [ ] **User:** run the reinstall block above, then retry `/login chatgpt subscription`
+- [x] **Dev:** `build_oauth_record` hardening done — error now lists `(received keys: [...])`; test asserts `match="received keys"` (487 tests green)
+
+
 **Implementation notes (as built):**
 - `one/core/oauth.py`: `OAuthFlowSpec` + `ANTHROPIC_OAUTH`/`CHATGPT_OAUTH`; `generate_pkce` (S256), `build_authorize_url`, `_token_request` (json for Anthropic, form for ChatGPT), `exchange_authorization_code`/`refresh_access_token`, `jwt_payload` (no signature check), `extract_chatgpt_account_id` (per-token chain: top-level → nested auth claim → orgs[0]; id_token wins over access_token), `build_oauth_record` (`expires_in` → JWT `exp` → 1h fallback; ms epoch), `ensure_fresh_token(auth, provider, margin_ms=5min)` (no-op without spec/record; raises when expired + no refresh token), `run_paste_flow` (state=verifier fallback for bare CODE), `run_loopback_flow` (threaded HTTPServer on 127.0.0.1:<port>, state validation, provider-error surfacing, timeout 300s), `run_login` dispatcher.
 - AuthStorage: generic `get/set/remove_oauth_record`; ModelRegistry: OAuth record counts as configured auth, `get_api_key_and_headers` falls back to access token (+ injects `ChatGPT-Account-Id` header from record; explicit API key still wins), async `ensure_oauth_fresh(provider)` called in `agent_session._request...` before credential resolution (getattr-guarded for fake registries; OAuthError → RuntimeError).
