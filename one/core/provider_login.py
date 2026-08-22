@@ -20,18 +20,21 @@ def entry_id(entry: "str | dict[str, Any]") -> str:
     return entry["id"] if isinstance(entry, dict) else entry
 
 
-async def _fetch_detailed(adapter: Any, key: str) -> list[dict[str, Any]] | None:
+async def _fetch_detailed(
+    adapter: Any, key: str, headers: dict[str, str] | None = None
+) -> list[dict[str, Any]] | None:
     """Fetch model entries as ``{"id", "contextWindow"}`` dicts.
 
     Prefers ``list_models_detailed``; adapters/stubs exposing only
-    ``list_models`` get unknown context windows.
+    ``list_models`` get unknown context windows. ``headers`` are extra
+    auth headers (e.g. ``ChatGPT-Account-Id`` for OAuth providers).
     """
     detailed: Callable[..., Awaitable[list[dict[str, Any]] | None]] | None = getattr(
         adapter, "list_models_detailed", None
     )
     if detailed is not None:
-        return await detailed(key)
-    models = await adapter.list_models(key)
+        return await detailed(key, headers) if headers is not None else await detailed(key)
+    models = await adapter.list_models(key, headers) if headers else await adapter.list_models(key)
     if models is None:
         return None
     return [{"id": m, "contextWindow": None} for m in models]
@@ -139,15 +142,21 @@ async def run_oauth_login(
     model_registry.set_oauth_record(provider, record)
     access = str(record.get("access", ""))
 
+    # OAuth providers may need record-derived headers for their model
+    # endpoint (HOTFIX-5: Codex requires ChatGPT-Account-Id).
+    extra_headers: dict[str, str] = {}
+    if record.get("accountId"):
+        extra_headers["ChatGPT-Account-Id"] = str(record["accountId"])
+
     # Best-effort model fetch with the fresh access token.
     fetched: list[dict[str, Any]] | None = None
     try:
-        fetched = await _fetch_detailed(adapter, access)
+        fetched = await _fetch_detailed(adapter, access, extra_headers or None)
     except Exception:  # noqa: BLE001 - models are optional after login
         fetched = None
     if not fetched and hasattr(adapter, "list_models"):
         try:
-            ids = await adapter.list_models(access)
+            ids = await adapter.list_models(access, extra_headers or None)
             fetched = [{"id": i, "contextWindow": None} for i in (ids or [])]
         except Exception:  # noqa: BLE001
             fetched = None

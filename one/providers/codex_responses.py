@@ -28,6 +28,22 @@ ORIGINATOR = "codex_cli_rs"
 
 _EFFORT_BY_LEVEL = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high"}
 
+# Backend rejects requests with empty `instructions`; sessions that carry no
+# system message fall back to this Codex-flavored base prompt.
+_BASE_INSTRUCTIONS = (
+    "You are Codex, based on GPT-5. You are running as a coding agent inside "
+    "the `one` terminal agent. Help the user with software engineering tasks: "
+    "read and edit code, run commands, and explain your work concisely."
+)
+
+
+def _error_with_body(status_code: int, body: str) -> RuntimeError:
+    """Build an error carrying the server's response body (diagnosability)."""
+    snippet = (body or "").strip()
+    if len(snippet) > 800:
+        snippet = snippet[:800] + "…"
+    return RuntimeError(f"chatgpt API error {status_code}: {snippet}")
+
 
 class CodexResponsesAdapter(ProviderAdapter):
     name = "chatgpt"
@@ -66,13 +82,14 @@ class CodexResponsesAdapter(ProviderAdapter):
                 continue
             input_items.append(
                 {
+                    "type": "message",
                     "role": "user" if role == "user" else "assistant",
                     "content": [{"type": "input_text", "text": str(content)}],
                 }
             )
         payload: dict[str, Any] = {
             "model": model,
-            "instructions": instructions,
+            "instructions": instructions or _BASE_INSTRUCTIONS,
             "input": input_items,
             "store": False,
             "stream": stream,
@@ -115,7 +132,8 @@ class CodexResponsesAdapter(ProviderAdapter):
         if not use_stream:
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(url, json=payload, headers=req_headers)
-                resp.raise_for_status()
+                if resp.is_error:
+                    raise _error_with_body(resp.status_code, resp.text)
                 data = resp.json()
             text, usage, status = self._extract_output(data)
             return ChatResult(text=text, raw=data, usage=usage, stop_reason=status)
@@ -128,7 +146,9 @@ class CodexResponsesAdapter(ProviderAdapter):
 
         async with httpx.AsyncClient(timeout=180) as client:
             async with client.stream("POST", url, json=payload, headers=req_headers) as resp:
-                resp.raise_for_status()
+                if resp.is_error:
+                    raw_body = await resp.aread()
+                    raise _error_with_body(resp.status_code, raw_body.decode(errors="replace"))
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
                         continue

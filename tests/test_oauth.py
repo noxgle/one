@@ -708,6 +708,8 @@ def test_codex_payload_building():
     assert p["store"] is False and p["stream"] is False
     assert p["max_output_tokens"] == 77
     assert p["reasoning"] == {"effort": "high"}
+    # HOTFIX-5: backend requires Responses message items with explicit type.
+    assert all(i["type"] == "message" for i in p["input"])
     assert all(i["content"][0]["type"] == "input_text" for i in p["input"])
     assert [i["role"] for i in p["input"]] == ["user", "assistant"]
     # xhigh clamps to high; off omits reasoning entirely.
@@ -716,6 +718,14 @@ def test_codex_payload_building():
     assert p2["stream"] is True and "max_output_tokens" not in p2
     p3 = ad._build_payload("m", messages, "off", stream=False)
     assert "reasoning" not in p3
+
+
+def test_codex_payload_instructions_fallback():
+    """HOTFIX-5: empty instructions are rejected by the backend — the adapter
+    must fall back to a non-empty base prompt when no system message exists."""
+    ad = CodexResponsesAdapter()
+    p = ad._build_payload("gpt-5.3-codex", [{"role": "user", "content": "hi"}], "medium", stream=False)
+    assert p["instructions"].startswith("You are Codex")
 
 
 @pytest.mark.asyncio
@@ -763,6 +773,7 @@ async def test_codex_nonstream_chat_parses_output(monkeypatch):
 
 class _StreamResp:
     status_code = 200
+    is_error = False
 
     def raise_for_status(self) -> None:
         pass
@@ -773,6 +784,9 @@ class _StreamResp:
     async def aiter_lines(self):
         for line in self._lines:
             yield line
+
+    async def aread(self) -> bytes:
+        return b""
 
 
 @pytest.mark.asyncio
@@ -930,6 +944,35 @@ async def test_run_oauth_login_unknown_provider():
     ok, error, fetched = await run_oauth_login("openai", _FakeAdapter(), _RecordingRegistry())
     assert not ok and "no subscription login" in (error or "")
     assert fetched is None
+
+
+@pytest.mark.asyncio
+async def test_run_oauth_login_passes_account_id_headers(monkeypatch):
+    """HOTFIX-5: Codex models endpoint needs ChatGPT-Account-Id — the record's
+    accountId must reach list_models_detailed as extra headers."""
+    reg = _RecordingRegistry()
+
+    from one.core import provider_login as pl_mod
+
+    seen_headers: list[dict[str, str] | None] = []
+
+    class _HdrAdapter:
+        async def list_models_detailed(self, key, headers=None):
+            seen_headers.append(headers)
+            if not key:
+                raise RuntimeError("no token")
+            return [{"id": "gpt-5.3-codex", "contextWindow": None}]
+
+    async def fake_login(spec, **kwargs):
+        return {"type": "oauth", "access": "tok", "refresh": "r", "expires": 1, "accountId": "acc-1"}
+
+    monkeypatch.setattr(pl_mod, "run_login", fake_login)
+    ok, error, fetched = await run_oauth_login(
+        "chatgpt", _HdrAdapter(), reg, open_url=lambda u: None, read_line=lambda: ""
+    )
+    assert ok and error is None
+    assert fetched == [{"id": "gpt-5.3-codex", "contextWindow": None}]
+    assert seen_headers == [{"ChatGPT-Account-Id": "acc-1"}]
 
 
 def test_model_registry_set_oauth_record_delegates():
