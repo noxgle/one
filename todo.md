@@ -1,6 +1,6 @@
 # Project: one — TUI info panel (MCP list, full height) + tool timeout semantics + follow-ups
 
-> Status: Phases 1-10 **implemented and committed** (396 tests green; Phase 4 in `0265a89`, Phase 5 in `36b72d6`, Phase 6 in `6df9897`, Phase 7 in `2f07d06`, Phase 8 in `22c4652`, Phase 9 in `0ee1cd5`, Phase 10 in `3393173`). Phases 11-12 **implemented and committed** (426 tests green; Phase 11 in `d8307a1`, Phase 12 in `613ae0e`). Phase 13 **implemented and committed** (435 tests green; `/providers` command, Phase 13 in `793ea32`). Phases 14-15 **implemented and committed** (444 tests green; `/providers` completion/help fixes + `/login refresh <provider>`, in `9dac4d2`). Phase 16 **implemented and committed** (445 tests green; `# Current Date` in the system prompt, in `b4777a6`). Phase 17 **implemented and committed** (451 tests green; ctx gauge fallback + real context windows from providers, in `1b59855`).
+> Status: Models-fetch gating fix + GPT-5.6 seeds + README refresh — DONE (0 new tests). Phases 1-17 **implemented and committed**.
 
 ## Goal
 
@@ -1119,6 +1119,33 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 **Follow-up note (chat runtime, not login):** opencode issue #3281 states the Codex backend requires a specific system prompt starting "You are Codex, based on GPT-5..." for OAuth requests to be accepted — if `/model chatgpt/...` requests get rejected post-login, prepend that instruction prefix in `CodexResponsesAdapter._build_payload`.
 
 **As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
+
+### Models-fetch gating fix + GPT-5.6 seeds + README refresh — READY TO APPLY (edits blocked)
+
+**Root cause CONFIRMED (external docs, ZeroClaw + community):** the Codex `/models` endpoint **gates on `client_version`** — a stale/too-low value returns `200 {"models": []}` silently. Our `CLIENT_VERSION = "0.42.0"` triggers exactly that. Fix: bump to `"1.0.0"`.
+
+**Model catalog update (user-requested research, Aug 2026):** current served generation is **GPT-5.6 family (GA 2026-07-09)**: `gpt-5.6-sol` (flagship, max effort/ultra mode), `gpt-5.6-terra` (workhorse, recommended default), `gpt-5.6-luna` (fast/budget). Still selectable: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark (Pro preview). **Deprecated for ChatGPT sign-in: gpt-5.2, gpt-5.3-codex** — so HOTFIX-6 seeds (`gpt-5.1-codex-max`, `gpt-5.1-codex`) are wrong too.
+
+**Apply exactly this (edits blocked):**
+
+1. `one/providers/codex_responses.py`:
+   - `CLIENT_VERSION = "1.0.0"` (+ comment: /models gates on client_version; stale → silent empty list).
+   - `list_models_detailed`: after the shape check, if no entry has a truthy `slug` → raise `RuntimeError("chatgpt models endpoint returned 0 models — server gates the list on client_version; try updating CLIENT_VERSION")`.
+2. `one/core/model_registry.py` BUILTIN_MODELS chatgpt seeds → replace both lines with:
+   ```python
+   ModelInfo("chatgpt", "gpt-5.6-sol", reasoning=True, context_window=None),
+   ModelInfo("chatgpt", "gpt-5.6-terra", reasoning=True, context_window=None),
+   ModelInfo("chatgpt", "gpt-5.6-luna", reasoning=True, context_window=None),
+   ```
+   (comment: current generation as of 2026-08; catalog volatile — fetched live from /models after login; windows unpublished for Codex backend, gauge falls back)
+3. `tests/test_oauth.py`:
+   - `test_model_registry_codex_seed_slugs`: assert `gpt-5.6-sol/-terra/-luna` present; assert `gpt-5.3-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex` absent.
+   - New test: `list_models_detailed` raises "returned 0 models" when mocked JSON is `{"models": []}` (reuse `_Resp` fake pattern).
+4. `README.md`:
+   - Slash table: add row `/providers [name|#] [model|#]` above `/login`; extend `/login` description with `refresh <provider>` and `<provider> subscription`.
+   - New section after Slash commands: `## Subscription login (OAuth)` — anthropic subscription (Claude Pro/Max paste flow), chatgpt subscription (ChatGPT Plus/Pro, loopback 127.0.0.1:1455), tokens in auth.json + auto-refresh + /logout, chatgpt provider = Responses API on chatgpt.com/backend-api/codex, live model list via `/login refresh chatgpt`, fallback seeds gpt-5.6-sol/terra/luna.
+   - TUI highlights: add subscription-login bullet.
+5. Full suite → commit `fix(codex): client_version gating on /models, GPT-5.6 seed slugs; docs: OAuth subscription login`.
 
 ### Review fixes (post Phase-18 review) — DONE
 
