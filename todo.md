@@ -1120,6 +1120,12 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
 
+### Review fixes (post Phase-18 review) — DONE
+
+- **`_describe_response` secret redaction:** before returning the body snippet, apply `re.sub` for keys `code`, `access_token`, `refresh_token`, `id_token`, `code_verifier` (case-insensitive, both `"k":"v"` and `"k": "v"` forms) — replaces values with `[REDACTED]`. Behavior unchanged (400-char cap, `<empty body>` fallback).
+- **`jwt_payload` docstring:** extended to explain that parsing is intentionally unverified because tokens are issued by the provider during our own flow; warns against reusing the helper for untrusted tokens.
+- **Two new loopback tests:** `test_run_loopback_flow_timeout` (no browser navigation, `open_url=lambda u: None`, `port=0`, `timeout_sec=1` → `pytest.raises(OAuthError, match="No OAuth callback received")`) and `test_run_loopback_flow_missing_code` (callback fires with `?state={state}&foo=1` but no `code` → `pytest.raises(OAuthError, match="did not contain an authorization code")`). Both mirror the existing happy-path / error tests' pattern (capture state from the authorize URL, issue the callback via urllib in a thread).
+
 ### Phase 18 HOTFIX-6: real 400 reason visible — wrong model slug + refresh drops account headers — FIXED
 
 **Live evidence (HOTFIX-5 diagnostics worked):**
