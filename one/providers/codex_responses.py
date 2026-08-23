@@ -201,6 +201,10 @@ class CodexResponsesAdapter(ProviderAdapter):
                     body = resp.text[:1000]
                 raise RuntimeError(f"chatgpt API error {resp.status_code}: {body}")
             data = resp.json()
+        # HOTFIX-6: loud error on shape mismatch (silently returning [] hid
+        # missing ChatGPT-Account-Id headers — the response lacked "models").
+        if not isinstance(data, dict) or "models" not in data:
+            raise RuntimeError(f"chatgpt models endpoint returned unexpected shape: {str(data)[:400]}")
         out: list[dict[str, Any]] = []
         for m in data.get("models", []):
             slug = m.get("slug")

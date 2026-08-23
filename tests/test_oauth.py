@@ -1007,3 +1007,123 @@ def test_model_registry_set_oauth_record_delegates():
     assert resolved["ok"] is True
     assert resolved["apiKey"] == "tok"
     assert resolved["headers"]["ChatGPT-Account-Id"] == "acc"
+
+
+@pytest.mark.asyncio
+async def test_validate_and_fetch_forwards_headers(monkeypatch):
+    """HOTFIX-6: validate_and_fetch forwards extra headers to both the models
+    endpoint fetch and the validation chat probe."""
+    from one.core import provider_login as pl_mod
+
+    seen_headers: list[dict[str, str] | None] = []
+
+    class _HdrAdapter:
+        async def list_models_detailed(self, key, headers=None):
+            seen_headers.append(headers)
+            return [{"id": "gpt-5.1-codex-max", "contextWindow": None}]
+
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, max_tokens=None):
+            seen_headers.append(headers)
+            # Pretend validation succeeded
+            raise RuntimeError("400 probe model rejected (key is valid)")
+
+    headers = {"ChatGPT-Account-Id": "acc-99"}
+    ok, error, fetched = await pl_mod.validate_and_fetch(
+        _HdrAdapter(), "sk-test", "chatgpt", headers=headers
+    )
+    # The 400 is a known probe-reject case → soft pass with models.
+    assert ok is True
+    assert "probe model rejected" in (error or "")
+    assert fetched == [{"id": "gpt-5.1-codex-max", "contextWindow": None}]
+    # First call = models endpoint; second call = chat probe.
+    assert seen_headers == [headers, headers]
+
+
+@pytest.mark.asyncio
+async def test_validate_and_fetch_headers_none_by_default(monkeypatch):
+    """HOTFIX-6: omitting headers defaults to None (backward compatible)."""
+    from one.core import provider_login as pl_mod
+
+    seen_headers: list[dict[str, str] | None] = []
+
+    class _HdrAdapter:
+        async def list_models_detailed(self, key, headers=None):
+            seen_headers.append(headers)
+            return [{"id": "m1", "contextWindow": None}]
+
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, max_tokens=None):
+            seen_headers.append(headers)
+            raise RuntimeError("400 probe model rejected (key is valid)")
+
+    ok, error, fetched = await pl_mod.validate_and_fetch(
+        _HdrAdapter(), "sk-test", "chatgpt"
+    )
+    assert ok is True
+    assert seen_headers == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_validate_and_fetch_codex_validation_error_with_headers(monkeypatch):
+    """HOTFIX-6: 400 validation error surfaces the real server reason when
+    headers are forwarded (the old bug — headers dropped → wrong shape → empty
+    models → silent "no models endpoint")."""
+    from one.core import provider_login as pl_mod
+
+    class _HdrAdapter:
+        async def list_models_detailed(self, key, headers=None):
+            return [{"id": "gpt-5.1-codex", "contextWindow": None}]
+
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, max_tokens=None):
+            raise RuntimeError("chatgpt API error 400: The 'gpt-5.1-codex' model is not supported")
+
+    headers = {"ChatGPT-Account-Id": "acc-99"}
+    ok, error, fetched = await pl_mod.validate_and_fetch(
+        _HdrAdapter(), "sk-test", "chatgpt", headers=headers
+    )
+    # 400 from the probe → soft pass; the real reason is surfaced to the user.
+    assert ok is True
+    assert error is not None
+    assert "gpt-5.1-codex" in error
+    assert "not supported" in error
+
+
+@pytest.mark.asyncio
+async def test_codex_list_models_detailed_raises_on_shape_mismatch(monkeypatch):
+    """HOTFIX-6: list_models_detailed raises RuntimeError when the JSON
+    response lacks a 'models' key (was silently returning [])."""
+    from unittest.mock import patch
+
+    import httpx
+
+    adapter = CodexResponsesAdapter()
+
+    # Simulate a response that has no "models" key — happens when the request
+    # is missing ChatGPT-Account-Id (the endpoint returns 200 with empty data).
+    class _Resp:
+        is_error = False
+
+        def json(self) -> dict:
+            return {"status": "ok", "count": 0}
+
+    mock_resp = _Resp()
+
+    async def fake_get(*args, **kwargs):
+        return mock_resp
+
+    with patch.object(httpx.AsyncClient, "get", fake_get):
+        with pytest.raises(RuntimeError, match="unexpected shape"):
+            # list_models_detailed expects headers=None for API-key path,
+            # but the shape validation fires regardless.
+            await adapter.list_models_detailed("fake-key", None)
+
+
+def test_model_registry_codex_seed_slugs():
+    """HOTFIX-6: builtin seed slugs are real Codex model IDs."""
+    from one.core.model_registry import BUILTIN_MODELS
+
+    chatgpt_slugs = [m.id for m in BUILTIN_MODELS if m.provider == "chatgpt"]
+    # gpt-5.3-codex must NOT be present (invented slug).
+    assert "gpt-5.3-codex" not in chatgpt_slugs
+    # Real Codex slugs must be present.
+    assert "gpt-5.1-codex-max" in chatgpt_slugs
+    assert "gpt-5.1-codex" in chatgpt_slugs

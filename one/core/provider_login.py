@@ -45,6 +45,7 @@ async def validate_and_fetch(
     api_key: str,
     provider: str,
     model_id: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[bool, str | None, list[dict[str, Any]] | None]:
     """Validate an API key against a provider and fetch its model list.
 
@@ -68,10 +69,14 @@ async def validate_and_fetch(
 
     With an empty ``api_key`` (NO_AUTH providers like ``llama.cpp``/``ollama``)
     no validation happens; the model list is still fetched when possible.
+
+    ``headers`` are extra auth headers (e.g. ``ChatGPT-Account-Id`` for OAuth
+    providers) forwarded to both the models endpoint fetch and the validation
+    chat probe.
     """
     if not api_key:
         try:
-            models = await _fetch_detailed(adapter, "")
+            models = await _fetch_detailed(adapter, "", headers)
             return True, None, models or []
         except NotImplementedError:
             return True, None, None
@@ -80,7 +85,7 @@ async def validate_and_fetch(
 
     # Key given: fetch the model list first (may be public; does not prove auth).
     try:
-        models = await _fetch_detailed(adapter, api_key)
+        models = await _fetch_detailed(adapter, api_key, headers)
     except NotImplementedError:
         models = None  # no list endpoint (e.g. Anthropic); chat validation below
     except Exception as e:  # noqa: BLE001 - surfaced to the user
@@ -94,7 +99,7 @@ async def validate_and_fetch(
     chat_model = model_id or (ids[0] if ids else None)
     if chat_model:
         try:
-            await adapter.chat(api_key, chat_model, [{"role": "user", "content": "ping"}], "off", max_tokens=1)
+            await adapter.chat(api_key, chat_model, [{"role": "user", "content": "ping"}], "off", max_tokens=1, headers=headers)
         except Exception as e:  # noqa: BLE001 - surfaced to the user
             msg = str(e)
             if "401" in msg or "403" in msg:

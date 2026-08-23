@@ -1215,7 +1215,7 @@ if TEXTUAL_AVAILABLE:
                         self._write(key_info.get("error") or f"No API key for {provider}.", "error")
                         return
                     api_key = key_info.get("apiKey", "")
-                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider)
+                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider, headers=key_info.get("headers") or None)
                     if not ok:
                         self._write(f"Authorization failed for {provider}: {error}", "error")
                         return

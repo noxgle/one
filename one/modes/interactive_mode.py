@@ -800,7 +800,7 @@ class InteractiveMode:
                         print(key_info.get("error") or f"No API key for {provider}.")
                         continue
                     api_key = key_info.get("apiKey", "")
-                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider)
+                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider, headers=key_info.get("headers") or None)
                     if not ok:
                         print(f"Authorization failed for {provider}: {error}")
                         continue

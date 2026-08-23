@@ -44,7 +44,8 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("groq", "llama-3.3-70b-versatile", reasoning=False, context_window=128_000),
     # ChatGPT/Codex subscription backend (Responses API); the real slug list
     # is fetched from /models after OAuth login.
-    ModelInfo("chatgpt", "gpt-5.3-codex", reasoning=True, context_window=400_000),
+    ModelInfo("chatgpt", "gpt-5.1-codex-max", reasoning=True, context_window=400_000),
+    ModelInfo("chatgpt", "gpt-5.1-codex", reasoning=True, context_window=400_000),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp", "ollama"}
