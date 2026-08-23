@@ -1120,6 +1120,27 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
 
+### Phase 18 HOTFIX-6: real 400 reason visible — wrong model slug + refresh drops account headers — FIXED
+
+**Live evidence (HOTFIX-5 diagnostics worked):**
+`chatgpt API error 400: {"detail":"The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account."}`
+→ wire format now ACCEPTED; only the builtin seed slug is not in the account's allow-list. Also `/login refresh chatgpt` prints "no models endpoint" because headers are dropped on that path.
+
+**Diagnosis:**
+1. Builtin seed `gpt-5.3-codex` (model_registry.py:47) is an invented slug; real ChatGPT-Codex slugs are `gpt-5.1-codex-max`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`.
+2. `/login refresh <provider>` gets `key_info["headers"]` from `get_api_key_and_headers` but calls `validate_and_fetch(adapter, api_key, provider)` WITHOUT them → `_fetch_detailed` hits the models endpoint without `ChatGPT-Account-Id` → empty/shape-mismatched response silently becomes "no models endpoint".
+3. `list_models_detailed` returns `[]` silently when the JSON lacks the `"models"` key — shape mismatch must be a loud error.
+
+**Applied fix:**
+1. `one/core/provider_login.py`: `validate_and_fetch` gains `headers: dict[str, str] | None = None`; passes it into BOTH `_fetch_detailed(adapter, key, headers)` calls and the probe `adapter.chat(api_key, chat_model, [...], "off", max_tokens=1, headers=headers)`.
+2. `one/modes/tui_mode.py` (~1218) and `one/modes/interactive_mode.py` (~803): `validate_and_fetch(adapter, api_key, provider, headers=key_info.get("headers") or None)`.
+3. `one/providers/codex_responses.py` `list_models_detailed`: after `data = resp.json()` raises `RuntimeError(f"chatgpt models endpoint returned unexpected shape: {str(data)[:400]}")` when `not isinstance(data, dict) or "models" not in data`.
+4. `one/core/model_registry.py` line ~47: replaced single `gpt-5.3-codex` with `gpt-5.1-codex-max` + `gpt-5.1-codex` (both `reasoning=True, context_window=400_000`).
+5. `tests/test_oauth.py`: 5 new tests — `test_validate_and_fetch_forwards_headers`, `test_validate_and_fetch_headers_none_by_default`, `test_validate_and_fetch_codex_validation_error_with_headers`, `test_codex_list_models_detailed_raises_on_shape_mismatch`, `test_model_registry_codex_seed_slugs`.
+6. Full test suite: **496 passed** (491 + 5 new).
+
+**Then:** `/login refresh chatgpt` should either list real slugs or print the exact HTTP reason; chat with `gpt-5.1-codex-max` expected to work.
+
 ### Phase 18 HOTFIX-5: chat 400 + missing Codex models — FIXED
 
 **Live status before fix:** login stored OK; only builtin seed model listed; chat → bare `400 Bad Request` ×3 retries.
