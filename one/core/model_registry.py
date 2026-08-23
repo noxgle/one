@@ -43,9 +43,11 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("mistral", "mistral-large-latest", reasoning=True, context_window=128_000),
     ModelInfo("groq", "llama-3.3-70b-versatile", reasoning=False, context_window=128_000),
     # ChatGPT/Codex subscription backend (Responses API); the real slug list
-    # is fetched from /models after OAuth login.
-    ModelInfo("chatgpt", "gpt-5.1-codex-max", reasoning=True, context_window=400_000),
-    ModelInfo("chatgpt", "gpt-5.1-codex", reasoning=True, context_window=400_000),
+    # is fetched live from /models after login. Current generation as of 2026-08;
+    # catalog volatile — windows unpublished for Codex backend, gauge falls back.
+    ModelInfo("chatgpt", "gpt-5.6-sol", reasoning=True, context_window=None),
+    ModelInfo("chatgpt", "gpt-5.6-terra", reasoning=True, context_window=None),
+    ModelInfo("chatgpt", "gpt-5.6-luna", reasoning=True, context_window=None),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp", "ollama"}

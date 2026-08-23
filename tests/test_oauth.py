@@ -1167,13 +1167,41 @@ async def test_codex_list_models_detailed_raises_on_shape_mismatch(monkeypatch):
             await adapter.list_models_detailed("fake-key", None)
 
 
+@pytest.mark.asyncio
+async def test_codex_list_models_detailed_raises_on_empty_models(monkeypatch):
+    """When /models returns {"models": []} — the client_version gating
+    response — list_models_detailed must raise a clear RuntimeError."""
+    from one.providers.codex_responses import CodexResponsesAdapter
+
+    class _Resp:
+        status_code = 200
+        text = ""
+        is_error = False
+
+        def json(self) -> dict[str, Any]:
+            return {"models": []}
+
+    def handler(method: str, url: str, kwargs: dict[str, Any]) -> _Resp:
+        return _Resp()
+
+    import one.providers.codex_responses as cod_mod
+
+    _fake_client_factory(monkeypatch, cod_mod, handler)
+    adapter = CodexResponsesAdapter()
+    with pytest.raises(RuntimeError, match="returned 0 models"):
+        await adapter.list_models_detailed("tok")
+
+
 def test_model_registry_codex_seed_slugs():
-    """HOTFIX-6: builtin seed slugs are real Codex model IDs."""
+    """GPT-5.6 seeds are the current builtin codex model IDs."""
     from one.core.model_registry import BUILTIN_MODELS
 
     chatgpt_slugs = [m.id for m in BUILTIN_MODELS if m.provider == "chatgpt"]
-    # gpt-5.3-codex must NOT be present (invented slug).
+    # Old codex slugs must NOT be present.
     assert "gpt-5.3-codex" not in chatgpt_slugs
-    # Real Codex slugs must be present.
-    assert "gpt-5.1-codex-max" in chatgpt_slugs
-    assert "gpt-5.1-codex" in chatgpt_slugs
+    assert "gpt-5.1-codex-max" not in chatgpt_slugs
+    assert "gpt-5.1-codex" not in chatgpt_slugs
+    # Current GPT-5.6 seeds must be present.
+    assert "gpt-5.6-sol" in chatgpt_slugs
+    assert "gpt-5.6-terra" in chatgpt_slugs
+    assert "gpt-5.6-luna" in chatgpt_slugs

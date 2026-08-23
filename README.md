@@ -44,10 +44,11 @@ Switch theme in TUI:
 ```
 
 TUI highlights:
-- live response streaming (provider-dependent; OpenAI-compatible/Anthropic/Gemini supported)
+- live response streaming (provider-dependent; OpenAI-compatible/Anthropic/Gemini/Codex supported)
 - scrollable main stream with scrollbar
 - simplified main stream view (`> ...` for user messages)
 - tool lifecycle visible in stream (`tool start`, `tool ok/err`)
+- subscription-login via `/login chatgpt subscription` / `/login anthropic subscription` (OAuth loopback/paste)
 
 ## Cooperation mode
 
@@ -81,7 +82,8 @@ Available in the TUI and interactive mode (type `/help` in the app):
 | `/navigate <id> [--summary <text>]` | Navigate to a session entry |
 | `/fork <id>` | Fork the session at an entry |
 | `/new` | Start a new session |
-| `/login [status|provider [apiKey] [model]]` | Show or configure provider credentials |
+| `/providers [name|#] [model|#]` | List logged-in providers, models, and switch |
+| `/login [status|refresh <provider>|provider subscription|provider [apiKey] [model]]` | Show or configure provider credentials (subscription = OAuth login flow) |
 | `/logout <provider>` | Remove stored credentials for a provider |
 | `/retry <on|off>` | Enable/disable auto-retry |
 | `/config [key] [value]` | Show or set a config value (e.g. `tools.maxSteps`) |
@@ -94,6 +96,39 @@ Available in the TUI and interactive mode (type `/help` in the app):
 | `/exit`, `/quit` | Quit the app |
 
 CLI flags: `--no-subagents` disables subagents, `--no-bash-output` hides bash output (exit code only).
+
+## Subscription login (OAuth)
+
+`one` supports subscription-based login for Anthropic and ChatGPT/Codex providers via
+OAuth. No API keys required — just your account credentials.
+
+**Anthropic subscription login:**
+1. Run `/login anthropic subscription` (TUI/interactive) or `/login anthropic sk-ant-oat...` for API keys.
+2. The app opens your browser to `console.anthropic.com` for authorization (loopback flow)
+   or shows a paste code for manual authorization (paste flow).
+3. On success the access token and refresh token are stored in `auth.json` under the
+   `anthropic` key with `type: "oauth"`.
+4. Models are fetched from `api.anthropic.com/v1/models` and registered in the local
+   registry + persisted to `models.json`.
+5. Use `/logout anthropic` to revoke the stored token.
+
+**ChatGPT/Codex subscription login:**
+1. Run `/login chatgpt subscription` — the app opens your browser to `chatgpt.com` for
+   OAuth authorization (loopback flow).
+2. The access token is stored in `auth.json` under the `chatgpt` key; the `accountId`
+   (required for the Codex backend) is extracted from the JWT claims.
+3. Models are fetched from `chatgpt.com/backend-api/codex/models` (Responses API) and
+   registered in the local registry. If the endpoint returns zero models the server may
+   be gating the list behind a newer `client_version` header.
+4. Run `/login refresh chatgpt` to re-fetch the live model list without re-entering
+   credentials.
+5. Fallback seed models (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) are used when
+   no models have been fetched yet.
+6. Use `/logout chatgpt` to revoke the stored token.
+
+OAuth tokens are automatically refreshed before expiry. The provider name in `auth.json`
+maps to the Responses API backend for ChatGPT and the Anthropic Messages API for
+Anthropic.
 
 ## MCP servers
 

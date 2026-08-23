@@ -23,7 +23,9 @@ import httpx
 from .base import ChatResult, ProviderAdapter
 
 BASE_URL = "https://chatgpt.com/backend-api/codex"
-CLIENT_VERSION = "0.42.0"
+# The /models endpoint gates on client_version: a stale/too-low value returns
+# an empty {"models": []} with no error. Keep this at a current CLI version.
+CLIENT_VERSION = "1.0.0"
 ORIGINATOR = "codex_cli_rs"
 
 _EFFORT_BY_LEVEL = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high"}
@@ -210,4 +212,9 @@ class CodexResponsesAdapter(ProviderAdapter):
             slug = m.get("slug")
             if slug:
                 out.append({"id": slug, "contextWindow": None})
+        if not out:
+            raise RuntimeError(
+                "chatgpt models endpoint returned 0 models — server gates the "
+                "list on client_version; try updating CLIENT_VERSION"
+            )
         return out
