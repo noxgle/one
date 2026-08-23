@@ -557,6 +557,56 @@ async def test_run_loopback_flow_reports_provider_error(monkeypatch):
         await run_loopback_flow(CHATGPT_OAUTH, open_url=open_url, port=port, timeout_sec=15)
 
 
+@pytest.mark.asyncio
+async def test_run_loopback_flow_timeout(monkeypatch):
+    """No browser navigation → queue.get times out → OAuthError with timeout message."""
+
+    async def fail_exchange(spec, **kw):
+        raise AssertionError("should not exchange on timeout")
+
+    monkeypatch.setattr(oauth, "exchange_authorization_code", fail_exchange)
+    # open_url is a no-op — nothing calls the callback server.
+
+    with pytest.raises(OAuthError, match="No OAuth callback received"):
+        await run_loopback_flow(
+            CHATGPT_OAUTH,
+            open_url=lambda u: None,
+            port=0,
+            timeout_sec=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_loopback_flow_missing_code(monkeypatch):
+    """Callback fires but carries neither code nor error → OAuthError."""
+    port = _free_port()
+
+    async def fail_exchange(spec, **kw):
+        raise AssertionError("should not exchange on missing code")
+
+    monkeypatch.setattr(oauth, "exchange_authorization_code", fail_exchange)
+
+    def open_url(url: str) -> None:
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        state = q["state"][0]
+
+        def hit() -> None:
+            for _ in range(50):
+                try:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/auth/callback?state={state}&foo=1",
+                        timeout=2,
+                    ).read()
+                    return
+                except Exception:
+                    time.sleep(0.02)
+
+        threading.Thread(target=hit, daemon=True).start()
+
+    with pytest.raises(OAuthError, match="did not contain an authorization code"):
+        await run_loopback_flow(CHATGPT_OAUTH, open_url=open_url, port=port, timeout_sec=15)
+
+
 # --- storage roundtrip + registry integration -----------------------------------
 
 

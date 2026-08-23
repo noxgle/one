@@ -22,6 +22,7 @@ import base64
 import hashlib
 import json
 import queue
+import re
 import secrets
 import threading
 import time
@@ -161,6 +162,14 @@ def _describe_response(resp: Any) -> str:
         snippet = (resp.text or "").strip()[:400]
     except Exception:
         pass
+    # Redact secret-looking values so error messages don't leak tokens.
+    for _key in ("code", "access_token", "refresh_token", "id_token", "code_verifier"):
+        snippet = re.sub(
+            r'("(?:' + _key + r')"\s*:\s*")[^"]*(")',
+            r'\1[REDACTED]\2',
+            snippet,
+            flags=re.IGNORECASE,
+        )
     return f"HTTP {resp.status_code}: {snippet or '<empty body>'}"
 
 
@@ -213,7 +222,16 @@ async def refresh_access_token(spec: OAuthFlowSpec, refresh_token: str) -> dict[
 
 
 def jwt_payload(token: str) -> dict[str, Any]:
-    """Decode a JWT payload WITHOUT verifying the signature."""
+    """Decode a JWT payload WITHOUT verifying the signature.
+
+    This is intentionally unverified: the tokens we decode are **issued by the
+    OAuth provider** during our own flow, and the token itself (present in the
+    stored record) is the proof of identity.  Signature verification would
+    require fetching and caching the provider's JWKS keys and adds nothing
+    here.
+
+    **Warning:** do not reuse this helper for untrusted tokens.
+    """
     try:
         part = token.split(".")[1]
         part += "=" * (-len(part) % 4)
