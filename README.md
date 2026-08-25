@@ -90,7 +90,8 @@ Available in the TUI and interactive mode (type `/help` in the app):
 | `/extui <list|request|respond|cancel|clear>` | Extension UI control |
 | `/cooperation [on|off]` | Toggle cooperation mode (approval gates) |
 | `/subagents [on|off]` | Enable/disable subagents (Ctrl+S in TUI) |
-| `/bash-show [on|off]` | Show/hide tool output in the main window (bash, ls, read, grep, find, edit, write; only tool status when off) |
+| `/bash-show [on|off]` | Show/hide tool output in the main window (bash, ls, read, grep, find, edit, write; only tool status when off) (Ctrl+O) |
+| `/history [n]` | List recent slash commands (last 50); `/history N` prints `-> <cmd>` (interactive) or fills input (TUI) |
 | `/mcp [list|enable <name>|disable <name>]` | List, enable, or disable MCP servers (tools are added/removed live) |
 | `/bash <command>` | Run a shell command directly |
 | `/exit`, `/quit` | Quit the app |

@@ -331,6 +331,7 @@ class InteractiveMode:
         retry_state = "idle"
         printed_banner = False
         cooperation_state = "on" if session.approval_callback is not None else "off"
+        command_history: list[str] = []
 
         def _toggle_cooperation() -> None:
             nonlocal cooperation_state
@@ -490,15 +491,41 @@ class InteractiveMode:
                 "/ns": "/new",
             }
             line = aliases.get(line.strip(), line)
-            if line.strip() in {"/exit", "/quit"}:
+            stripped = line.strip()
+            if stripped in {"/exit", "/quit"}:
                 break
-            if line.strip() == "/help":
+            # Handle /history BEFORE recording (don't record the query itself).
+            if stripped == "/history":
+                if not command_history:
+                    print("No commands yet.")
+                else:
+                    for i, entry in enumerate(command_history[-50:], 1):
+                        print(f"{i}. {entry}")
+                continue
+            if stripped.startswith("/history "):
+                arg = stripped[len("/history "):].strip()
+                try:
+                    idx = int(arg)
+                except ValueError:
+                    print(f"Invalid number: {arg}")
+                    continue
+                if idx < 1 or idx > len(command_history):
+                    print(f"Index out of range (1..{len(command_history)})")
+                    continue
+                print(f"-> {command_history[idx - 1]}")
+                continue
+            # Record slash commands only (not plain prompts).
+            if stripped.startswith("/"):
+                command_history.append(stripped)
+                if len(command_history) > 200:
+                    command_history.pop(0)
+            if stripped == "/help":
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort | /new\n"
                     "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
-                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /mcp [list|enable|disable] | /bash <command>\n"
+                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
                 )
                 continue

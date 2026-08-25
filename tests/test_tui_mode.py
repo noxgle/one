@@ -2049,3 +2049,171 @@ async def test_tui_stream_complex_markup_content_no_crash(tmp_path: Path):
         assert "[1,2,3]" in widget.content
         assert "[XYZ]" in widget.content
         assert "[type='CNAME']" in widget.content
+
+
+# ---------------------------------------------------------------------------
+# Phase 19: /history + Ctrl+O bash-show + block-shade spinner
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_history_records_commands_only(tmp_path: Path):
+    """Submit /theme then /history — stream contains "1. /theme".
+    Plain prompt "hello" must NOT appear in /history output."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/theme fallout")
+        await _submit(app, pilot, "hello")
+        await _submit(app, pilot, "/help")
+        await _submit(app, pilot, "/history")
+        stream = "\n".join(app._stream_lines)
+        assert "1. /theme fallout" in stream
+        assert "2. /help" in stream
+        # "hello" must NOT be in the numbered history entries
+        assert "1. hello" not in stream
+        assert "2. hello" not in stream
+        assert "3. hello" not in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_history_populate_input(tmp_path: Path):
+    """Submit /theme, then /history 1 — input widget value == "/theme", no turn started."""
+    from one.modes.tui_mode import _OneTextualApp
+    from textual.widgets import TextArea
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/theme hacker")
+        await _submit(app, pilot, "/history 1")
+        input_widget = app.query_one("#input", TextArea)
+        assert input_widget.text == "/theme hacker"
+
+
+@pytest.mark.asyncio
+async def test_tui_history_out_of_range(tmp_path: Path):
+    """Submit /history 99 — error line."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/history 99")
+        stream = "\n".join(app._stream_lines)
+        assert "Index out of range" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_history_empty(tmp_path: Path):
+    """With no commands yet, /history prints 'No commands yet.'"""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/history")
+        stream = "\n".join(app._stream_lines)
+        assert "No commands yet." in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_history_invalid_number(tmp_path: Path):
+    """Submit /history abc — error line."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/history abc")
+        stream = "\n".join(app._stream_lines)
+        assert "Invalid number" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_history_bash_command_recorded(tmp_path: Path):
+    """Submit /bash echo hi — it should appear in /history."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/bash echo hi")
+        await _submit(app, pilot, "/history")
+        stream = "\n".join(app._stream_lines)
+        assert "1. /bash echo hi" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_spinner_frames_block_shade(tmp_path: Path):
+    """Spinner frames are the block-shade sequence ░▒▓█▓▒."""
+    from one.modes.tui_mode import _THINKING_FRAMES
+
+    assert _THINKING_FRAMES == "░▒▓█▓▒"
+
+
+@pytest.mark.asyncio
+async def test_tui_spinner_advances(tmp_path: Path):
+    """advance_thinking_frame cycles through block-shade frames."""
+    from one.modes.tui_mode import advance_thinking_frame
+
+    frame = 0
+    expected = "░▒▓█▓▒"
+    for ch in expected:
+        assert _THINKING_FRAMES[frame] == ch
+        frame = advance_thinking_frame(frame)
+    assert frame == 0  # loops back to start
+
+
+@pytest.mark.asyncio
+async def test_tui_command_help_includes_history(tmp_path: Path):
+    """/help output must contain /history token."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/help")
+        stream = "\n".join(app._stream_lines)
+        assert "/history [n]" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_history_capped_at_200(tmp_path: Path):
+    """Submitting more than 200 slash commands caps the history at 200."""
+    from one.modes.tui_mode import _OneTextualApp
+    from textual.widgets import TextArea
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for i in range(205):
+            await app._handle_command(f"/config test{i} val{i}")
+        await pilot.pause()
+        # 205 submitted, cap at 200 → first 5 dropped → history = test5..test204
+        assert len(app._command_history) == 200
+        # /history 1 → oldest entry (test5)
+        await app._handle_command("/history 1")
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        assert input_widget.text == "/config test5 val5"
+        # /history 200 → newest entry (test204)
+        await app._handle_command("/history 200")
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        assert input_widget.text == "/config test204 val204"
+        # /history 201 → error
+        await app._handle_command("/history 201")
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Index out of range" in stream

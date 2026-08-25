@@ -89,7 +89,7 @@ def build_sidebar_snapshot(
 
 
 # Braille spinner frames shown in the chat stream while the model is working.
-_THINKING_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_THINKING_FRAMES = "░▒▓█▓▒"
 # Sentinel prefix marking the animated "waiting" line inside _stream_lines so
 # it can be located and removed reliably (even after list trimming). The
 # __MK__: prefix is stripped at render time, so it never shows in the UI.
@@ -197,7 +197,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/clear", "/abort", "/model", "/model-cycle", "/providers", "/thinking", "/thinking-cycle",
     "/theme", "/steer", "/follow", "/compact", "/tree", "/navigate", "/fork",
     "/new", "/login", "/logout", "/retry", "/config", "/extui", "/cooperation",
-    "/subagents", "/bash-show", "/mcp",
+    "/subagents", "/bash-show", "/mcp", "/history",
     "/bash",
 )
 
@@ -434,6 +434,7 @@ if TEXTUAL_AVAILABLE:
             # priority=True so it wins over the focused TextArea's ctrl+a (home).
             Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
+            ("ctrl+o", "toggle_bash_show", "Toggle bash output"),
             ("f1", "help", "Help"),
         ]
 
@@ -455,6 +456,7 @@ if TEXTUAL_AVAILABLE:
             self._last_delta_ts = 0.0
             self._thinking_frame = 0
             self._thinking_active = False
+            self._command_history: list[str] = []
             self._approval_queue: asyncio.Queue | None = None
             self._approval_pending: dict[str, Any] | None = None
             self._extension_ui_pending_request: dict[str, Any] | None = None
@@ -826,7 +828,7 @@ if TEXTUAL_AVAILABLE:
             keys_block = Text()
             keys_block.append_text(Text.from_markup(f"[b {self._theme.info}]Keys[/]"))
             keys_block.append("\n")
-            keys_block.append("Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+V paste\n")
+            keys_block.append("Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+O bash-show\nCtrl+V paste\n")
 
             sidebar = Text()
             sidebar.append_text(info_block)
@@ -868,6 +870,7 @@ if TEXTUAL_AVAILABLE:
 
         async def _handle_command(self, cmd: str) -> None:
             session = self.session
+            original = cmd.strip()
             cmd = {
                 "/q": "/exit",
                 "/h": "/help",
@@ -884,6 +887,34 @@ if TEXTUAL_AVAILABLE:
             if cmd in {"/exit", "/quit"}:
                 self.exit()
                 return
+            # Handle /history BEFORE recording (don't record the query itself).
+            if cmd == "/history":
+                if not self._command_history:
+                    self._write("No commands yet.", "info")
+                else:
+                    for i, entry in enumerate(self._command_history[-50:], 1):
+                        self._write(f"{i}. {entry}", "info")
+                return
+            if cmd.startswith("/history "):
+                arg = cmd[len("/history "):].strip()
+                try:
+                    idx = int(arg)
+                except ValueError:
+                    self._write(f"Invalid number: {arg}", "error")
+                    return
+                if idx < 1 or idx > len(self._command_history):
+                    self._write(f"Index out of range (1..{len(self._command_history)})", "error")
+                    return
+                history_cmd = self._command_history[idx - 1]
+                input_widget = self.query_one("#input", TextArea)
+                input_widget.text = history_cmd
+                input_widget.focus()
+                return
+            # Record slash commands only (not plain prompts).
+            if original.startswith("/"):
+                self._command_history.append(original)
+                if len(self._command_history) > 200:
+                    self._command_history.pop(0)
             if cmd == "/help":
                 self._write("/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort", "info")
                 self._write(
@@ -895,7 +926,7 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write("/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info")
-                self._write("/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /mcp [list|enable|disable] | /bash <command>", "info")
+                self._write("/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>", "info")
                 return
             if cmd == "/clear":
                 stream_widget = self.query_one("#stream")
@@ -1786,6 +1817,12 @@ if TEXTUAL_AVAILABLE:
             self._write(f"Subagents {'enabled' if not enabled else 'disabled'}.", "info")
             self._refresh_sidebar()
 
+        def action_toggle_bash_show(self) -> None:
+            state = getattr(getattr(self.session, "settings_manager", None), "get_bash_show_output", lambda: True)()
+            self.session.settings_manager.set_bash_show_output(not state)
+            self._write(f"Bash output: {'on' if not state else 'off'}.", "info")
+            self._refresh_sidebar()
+
         def action_clear_stream(self) -> None:
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
@@ -1795,7 +1832,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer = ""
 
         def action_help(self) -> None:
-            self._write("/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /mcp /bash /abort /clear /exit", "info")
+            self._write("/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit", "info")
 
         def _show_extension_panel(self, req: dict[str, Any]) -> None:
             """Render an extension widget/overlay payload as a TUI component."""
