@@ -2292,3 +2292,150 @@ async def test_tui_history_records_alias_as_typed(tmp_path: Path):
         stream = "\n".join(app._stream_lines)
         assert "1. /h" in stream
         # The alias expansion happens for dispatch but the recorded entry is the typed text
+
+
+# ---------------------------------------------------------------------------
+# Phase 20: paused spinner during user gates + toast on gate appearance
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_spinner_paused_shows_approval_wait(tmp_path: Path):
+    """When approval is pending and the spinner ticks, it shows a paused label
+    and does NOT advance the thinking frame."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK, evaluate_waiting
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Arm the spinner: turn active + stale delta so evaluate_waiting is True.
+        app._turn_active = True
+        app._last_delta_ts = 0.0  # very old → waiting
+        start_frame = app._thinking_frame
+        # Set approval pending.
+        app._approval_pending = {"tool": "bash", "args": {}}
+        # tick_waiting is sync (not async), call directly.
+        app._tick_waiting()
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "czeka na zatwierdzenie" in stream
+        # Frame must NOT have advanced (paused state freezes it).
+        assert app._thinking_frame == start_frame
+
+
+@pytest.mark.asyncio
+async def test_tui_spinner_paused_shows_ask_user_wait(tmp_path: Path):
+    """When ask_user is pending and the spinner ticks, it shows a paused label."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._turn_active = True
+        app._last_delta_ts = 0.0
+        app._ask_user_pending = {"id": "x"}
+        app._tick_waiting()
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "czeka na Twoją odpowiedź" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
+    """Pending approval shows paused label; after clearing, spinner animates again."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK, evaluate_waiting
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._turn_active = True
+        app._last_delta_ts = 0.0
+        start_frame = app._thinking_frame
+
+        # First tick: approval pending → paused label.
+        app._approval_pending = {"tool": "bash", "args": {}}
+        app._tick_waiting()
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "czeka na zatwierdzenie" in stream
+        assert app._thinking_frame == start_frame
+
+        # Clear the gate.
+        app._approval_pending = None
+        # Second tick: should animate again (frame advances).
+        app._tick_waiting()
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Ctrl+C abort" in stream
+        # Frame should have advanced.
+        assert app._thinking_frame > start_frame
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_prompt_toasts(tmp_path: Path):
+    """_approval_prompt must call notify (toast) with a message containing 'Approve:'."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Capture notify calls.
+        notified: list[str] = []
+        original_notify = app.notify
+        def capture_notify(msg, **kwargs):
+            notified.append(str(msg))
+            # Also call the original so the UI works.
+            try:
+                original_notify(msg, **kwargs)
+            except Exception:
+                pass
+        app.notify = capture_notify  # type: ignore[method-assign]
+
+        # Start the approval prompt (it will block on queue.get()).
+        import asyncio
+        task = asyncio.create_task(app._approval_prompt("bash", {"cmd": "rm -rf /"}))
+        await pilot.pause()
+
+        # The prompt should have called notify already.
+        assert len(notified) >= 1
+        assert any("Approve: bash" in n for n in notified)
+
+        # Answer the prompt to unblock.
+        assert app._approval_queue is not None
+        app._approval_queue.put_nowait(("yes", ""))
+        await task
+        assert app._approval_pending is None
+
+
+@pytest.mark.asyncio
+async def test_tui_ask_user_event_toasts(tmp_path: Path):
+    """ask_user event must trigger a toast notification."""
+    from one.modes.tui_mode import _OneTextualApp, SessionEvent
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        notified: list[str] = []
+        original_notify = app.notify
+        def capture_notify(msg, **kwargs):
+            notified.append(str(msg))
+            try:
+                original_notify(msg, **kwargs)
+            except Exception:
+                pass
+        app.notify = capture_notify  # type: ignore[method-assign]
+
+        # Fire the ask_user event directly.
+        await app.on_session_event(SessionEvent({
+            "type": "ask_user",
+            "id": "q1",
+            "question": "What is your name?",
+        }))
+        await pilot.pause()
+        assert any("Agent czeka na odpowiedź" in n for n in notified)
+        assert app._ask_user_pending is not None

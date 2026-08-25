@@ -555,9 +555,19 @@ if TEXTUAL_AVAILABLE:
                     self._remove_thinking_line()
                     self._render_stream()
                 return
-            self._thinking_frame = advance_thinking_frame(self._thinking_frame)
-            frame = _THINKING_FRAMES[self._thinking_frame]
-            line = f"{_THINKING_MARK}[{self._theme.info}]{frame} Ctrl+C abort[/]"
+            # Check for user-gate pending state: show a paused indicator instead
+            # of advancing the animated spinner.
+            pending_label = ""
+            if self._approval_pending is not None:
+                pending_label = "czeka na zatwierdzenie (Enter = tak / n<powód> = nie)"
+            elif self._ask_user_pending is not None:
+                pending_label = "czeka na Twoją odpowiedź"
+            if pending_label:
+                line = f"{_THINKING_MARK}[{self._theme.warn}]⏸ {pending_label}[/]"
+            else:
+                self._thinking_frame = advance_thinking_frame(self._thinking_frame)
+                frame = _THINKING_FRAMES[self._thinking_frame]
+                line = f"{_THINKING_MARK}[{self._theme.info}]{frame} Ctrl+C abort[/]"
             if self._thinking_active:
                 # Rewrite the existing spinner line in place.
                 for i in range(len(self._stream_lines) - 1, -1, -1):
@@ -1768,6 +1778,7 @@ if TEXTUAL_AVAILABLE:
             self._approval_pending = {"tool": tool_name, "args": args, "stage": "answer"}
             self._approval_queue = asyncio.Queue()
             self._write(f"[Approve] {tool_name} {json.dumps(args, ensure_ascii=False)}", "warn")
+            self._toast(f"Approve: {tool_name}", severity="warning")
             try:
                 input_widget = self.query_one("#input", TextArea)
                 input_widget.placeholder = "Akceptuj (Enter) / n + powód"
@@ -1926,6 +1937,7 @@ if TEXTUAL_AVAILABLE:
             elif et == "ask_user":
                 self._ask_user_pending = {"id": str(event.get("id") or "")}
                 self._write_tool_block(f"agent pyta: {event.get('question')}")
+                self._toast("Agent czeka na odpowiedź", severity="warning")
                 try:
                     input_widget = self.query_one("#input", TextArea)
                     input_widget.placeholder = "Odpowiedź dla agenta:"

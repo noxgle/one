@@ -49,6 +49,7 @@ TUI highlights:
 - simplified main stream view (`> ...` for user messages)
 - tool lifecycle visible in stream (`tool start`, `tool ok/err`)
 - subscription-login via `/login chatgpt subscription` / `/login anthropic subscription` (OAuth loopback/paste)
+- cooperation approval / ask_user pauses the spinner and shows "⏸ czeka na zatwierdzenie" plus a toast notification instead of the animated indicator
 
 ## Cooperation mode
 
