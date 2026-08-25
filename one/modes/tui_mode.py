@@ -434,7 +434,7 @@ if TEXTUAL_AVAILABLE:
             # priority=True so it wins over the focused TextArea's ctrl+a (home).
             Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
-            ("ctrl+o", "toggle_bash_show", "Toggle bash output"),
+            Binding("ctrl+o", "toggle_bash_show", "Toggle bash output", priority=True),
             ("f1", "help", "Help"),
         ]
 
@@ -892,7 +892,8 @@ if TEXTUAL_AVAILABLE:
                 if not self._command_history:
                     self._write("No commands yet.", "info")
                 else:
-                    for i, entry in enumerate(self._command_history[-50:], 1):
+                    recent = self._command_history[-50:]
+                    for i, entry in enumerate(recent, 1):
                         self._write(f"{i}. {entry}", "info")
                 return
             if cmd.startswith("/history "):
@@ -902,10 +903,11 @@ if TEXTUAL_AVAILABLE:
                 except ValueError:
                     self._write(f"Invalid number: {arg}", "error")
                     return
-                if idx < 1 or idx > len(self._command_history):
-                    self._write(f"Index out of range (1..{len(self._command_history)})", "error")
+                recent = self._command_history[-50:]
+                if idx < 1 or idx > len(recent):
+                    self._write(f"Index out of range (1..{len(recent)})", "error")
                     return
-                history_cmd = self._command_history[idx - 1]
+                history_cmd = recent[idx - 1]
                 input_widget = self.query_one("#input", TextArea)
                 input_widget.text = history_cmd
                 input_widget.focus()

@@ -499,7 +499,8 @@ class InteractiveMode:
                 if not command_history:
                     print("No commands yet.")
                 else:
-                    for i, entry in enumerate(command_history[-50:], 1):
+                    recent = command_history[-50:]
+                    for i, entry in enumerate(recent, 1):
                         print(f"{i}. {entry}")
                 continue
             if stripped.startswith("/history "):
@@ -509,10 +510,11 @@ class InteractiveMode:
                 except ValueError:
                     print(f"Invalid number: {arg}")
                     continue
-                if idx < 1 or idx > len(command_history):
-                    print(f"Index out of range (1..{len(command_history)})")
+                recent = command_history[-50:]
+                if idx < 1 or idx > len(recent):
+                    print(f"Index out of range (1..{len(recent)})")
                     continue
-                print(f"-> {command_history[idx - 1]}")
+                print(f"-> {recent[idx - 1]}")
                 continue
             # Record slash commands only (not plain prompts).
             if stripped.startswith("/"):

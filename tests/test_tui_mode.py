@@ -2189,7 +2189,8 @@ async def test_tui_command_help_includes_history(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_history_capped_at_200(tmp_path: Path):
-    """Submitting more than 200 slash commands caps the history at 200."""
+    """Submitting more than 200 slash commands caps the history at 200.
+    /history displays the last 50; lookup is on the SAME window."""
     from one.modes.tui_mode import _OneTextualApp
     from textual.widgets import TextArea
 
@@ -2202,18 +2203,92 @@ async def test_tui_history_capped_at_200(tmp_path: Path):
         await pilot.pause()
         # 205 submitted, cap at 200 → first 5 dropped → history = test5..test204
         assert len(app._command_history) == 200
-        # /history 1 → oldest entry (test5)
+        # /history displays last 50 (test155..test204) numbered 1..50
+        await app._handle_command("/history")
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "1. /config test155 val155" in stream
+        assert "50. /config test204 val204" in stream
+        # /history 1 → oldest of the displayed window (test155)
         await app._handle_command("/history 1")
         await pilot.pause()
         input_widget = app.query_one("#input", TextArea)
-        assert input_widget.text == "/config test5 val5"
-        # /history 200 → newest entry (test204)
-        await app._handle_command("/history 200")
+        assert input_widget.text == "/config test155 val155"
+        # /history 50 → newest of the displayed window (test204)
+        await app._handle_command("/history 50")
         await pilot.pause()
         input_widget = app.query_one("#input", TextArea)
         assert input_widget.text == "/config test204 val204"
-        # /history 201 → error
-        await app._handle_command("/history 201")
+        # /history 51 → out of range (window is 1..50)
+        await app._handle_command("/history 51")
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "Index out of range" in stream
+        assert "out of range" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_history_numbering_matches_lookup_beyond_50(tmp_path: Path):
+    """With >50 commands, /history shows last 50 numbered 1..50; lookup 1→oldest of last 50,
+    lookup 50→newest of last 50."""
+    from one.modes.tui_mode import _OneTextualApp
+    from textual.widgets import TextArea
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Append 60 fake commands directly to the history list
+        for i in range(1, 61):
+            app._command_history.append(f"/model m{i}")
+        # /history → displays last 50 numbered 1..50
+        # Entry 1 should be the oldest of the last 50 = /model m11 (index 10 of the full list)
+        await app._handle_command("/history")
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "1. /model m11" in stream  # oldest of the last 50
+        assert "50. /model m60" in stream  # newest of the last 50
+        # /history 1 → should fill /model m11 (oldest of the sliced window)
+        await app._handle_command("/history 1")
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        assert input_widget.text == "/model m11"
+        # /history 50 → should fill /model m60 (newest of the sliced window)
+        await app._handle_command("/history 50")
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        assert input_widget.text == "/model m60"
+
+
+@pytest.mark.asyncio
+async def test_tui_history_zero_index_out_of_range(tmp_path: Path):
+    """Submit /history 0 → error line contains 'out of range'."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Add at least 1 entry so the history window is non-empty
+        app._command_history.append("/test")
+        await app._handle_command("/history 0")
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "out of range" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_history_records_alias_as_typed(tmp_path: Path):
+    """Submit '/h' (alias of /help), then /history — output must contain '1. /h', not '/help'."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._handle_command("/h")
+        await pilot.pause()
+        await app._handle_command("/history")
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "1. /h" in stream
+        # The alias expansion happens for dispatch but the recorded entry is the typed text
