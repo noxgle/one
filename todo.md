@@ -1120,18 +1120,28 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **As fixed (487 tests):** state dropped from the token body (exact opencode shape: grant_type/code/client_id/redirect_uri/code_verifier); UA header `one/<version>` on token requests; both token-endpoint errors now carry `HTTP <status>: <body[:400]>` plus `error_description`/`error` when present; non-JSON 2xx bodies handled cleanly; 4 test updates + 3 new tests (`missing_access_token_includes_diagnostics`, `non_json_body_is_handled`, `chatgpt_exchange_body_exact_shape`).
 
-### Models-fetch gating fix + GPT-5.6 seeds + README refresh — READY TO APPLY (edits blocked)
+### Phase 19: /history + Ctrl+O bash-show + block-shade spinner — DONE (commit `e76bea5`, 509 tests)
 
-**Root cause CONFIRMED (external docs, ZeroClaw + community):** the Codex `/models` endpoint **gates on `client_version`** — a stale/too-low value returns `200 {"models": []}` silently. Our `CLIENT_VERSION = "0.42.0"` triggers exactly that. Fix: bump to `"1.0.0"`.
+**Task 19.1 — `/history [n]` (commands ONLY — never prompts):** `_command_history` on the TUI app / `command_history` in interactive; records only "/" submissions (cap 200); `/history` lists last 50 oldest→newest ("No commands yet." when empty); `/history N` fills the TUI input WITHOUT submitting and focuses it, interactive prints `-> <cmd>`; out-of-range/non-int → error. `/history` itself is NOT recorded. Registered in completions + /help both modes + README row. Tests: records-commands-only (plain prompt excluded), populate-input, out-of-range, empty, invalid-number, /bash recorded, cap-at-200.
+
+**Task 19.2 — Ctrl+O toggles bash-show:** binding after ctrl+s; `action_toggle_bash_show` flips the setting and writes "Bash output: on/off."; sidebar Keys shows `Ctrl+O bash-show`; keybinding help line + README `(Ctrl+O)` hint updated.
+
+**Task 19.3 — spinner:** `_THINKING_FRAMES = "░▒▓█▓▒"` (block-shade pulse, loops seamlessly). Theme coloring preserved via existing `[self._theme.info]` markup rebuilt each tick — no hardcoded colors.
+
+**Snapshots regenerated (expected adler32 hash churn + Keys row):** base.txt, overlay.txt, widget_panel.txt. Suite: **509 passed** (10 new tests).
+
+### Models-fetch gating fix + GPT-5.6 seeds + README refresh — DONE
+
+**Root cause CONFIRMED (external docs, ZeroClaw + community):** the Codex `/models` endpoint **gates on `client_version`** — a stale/too-low value returns `200 {"models": []}` silently. Our `CLIENT_VERSION = "0.42.0"` triggered exactly that. Fixed: bumped to `"1.0.0"`.
 
 **Model catalog update (user-requested research, Aug 2026):** current served generation is **GPT-5.6 family (GA 2026-07-09)**: `gpt-5.6-sol` (flagship, max effort/ultra mode), `gpt-5.6-terra` (workhorse, recommended default), `gpt-5.6-luna` (fast/budget). Still selectable: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark (Pro preview). **Deprecated for ChatGPT sign-in: gpt-5.2, gpt-5.3-codex** — so HOTFIX-6 seeds (`gpt-5.1-codex-max`, `gpt-5.1-codex`) are wrong too.
 
-**Apply exactly this (edits blocked):**
+**As applied (commit `f01802d`, 499 tests):**
 
 1. `one/providers/codex_responses.py`:
    - `CLIENT_VERSION = "1.0.0"` (+ comment: /models gates on client_version; stale → silent empty list).
    - `list_models_detailed`: after the shape check, if no entry has a truthy `slug` → raise `RuntimeError("chatgpt models endpoint returned 0 models — server gates the list on client_version; try updating CLIENT_VERSION")`.
-2. `one/core/model_registry.py` BUILTIN_MODELS chatgpt seeds → replace both lines with:
+2. `one/core/model_registry.py` BUILTIN_MODELS chatgpt seeds → replaced with:
    ```python
    ModelInfo("chatgpt", "gpt-5.6-sol", reasoning=True, context_window=None),
    ModelInfo("chatgpt", "gpt-5.6-terra", reasoning=True, context_window=None),
