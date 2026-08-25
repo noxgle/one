@@ -1130,6 +1130,16 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **Snapshots regenerated (expected adler32 hash churn + Keys row):** base.txt, overlay.txt, widget_panel.txt. Suite: **509 passed** (10 new tests).
 
+### Phase 20: paused spinner during approval / ask_user gates — PENDING
+
+**Context:** cooperation-mode approval gate waits indefinitely BY DESIGN; meanwhile the spinner keeps animating "agent myśli", misleading users into thinking the session hung (user report 2026-08-25: bash tool call looked stuck — it was the [Approve] gate).
+
+**Task 20.1 — paused spinner state:** in `_tick_waiting` (tui_mode.py ~550), when turn active AND (`_approval_pending` OR `_ask_user_pending`): do NOT advance frame; render `{_THINKING_MARK}[{theme.warn}]⏸ czeka na zatwierdzenie (Enter = tak / n<powód> = nie)[/]` for approval, `⏸ czeka na Twoją odpowiedź` for ask_user. Same in-place rewrite path. Normal spinner resumes on next tick after gate clears.
+
+**Task 20.2 — toast on gate appearance:** `_approval_prompt` → `_toast(f"Approve: {tool_name}", severity="warning")`; ask_user event handler → `_toast("Agent czeka na odpowiedź", severity="warning")`.
+
+**Task 20.3 — tests:** paused-on-approval (label shown, frame NOT advanced), paused-on-ask_user, resume-after-clear (Ctrl+C abort line returns), approval prompt fires toast. README TUI bullet.
+
 ### Models-fetch gating fix + GPT-5.6 seeds + README refresh — DONE
 
 **Root cause CONFIRMED (external docs, ZeroClaw + community):** the Codex `/models` endpoint **gates on `client_version`** — a stale/too-low value returns `200 {"models": []}` silently. Our `CLIENT_VERSION = "0.42.0"` triggered exactly that. Fixed: bumped to `"1.0.0"`.
