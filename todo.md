@@ -1130,7 +1130,7 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **Snapshots regenerated (expected adler32 hash churn + Keys row):** base.txt, overlay.txt, widget_panel.txt. Suite: **509 passed** (10 new tests).
 
-### Phase 20: paused spinner during approval / ask_user gates — PENDING
+### Phase 20: paused spinner during approval / ask_user gates — DONE (517 tests)
 
 **Context:** cooperation-mode approval gate waits indefinitely BY DESIGN; meanwhile the spinner keeps animating "agent myśli", misleading users into thinking the session hung (user report 2026-08-25: bash tool call looked stuck — it was the [Approve] gate).
 
