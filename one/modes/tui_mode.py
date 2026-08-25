@@ -559,7 +559,7 @@ if TEXTUAL_AVAILABLE:
             # of advancing the animated spinner.
             pending_label = ""
             if self._approval_pending is not None:
-                pending_label = "czeka na zatwierdzenie (Enter = tak / n<powód> = nie)"
+                pending_label = "czeka na zatwierdzenie"
             elif self._ask_user_pending is not None:
                 pending_label = "czeka na Twoją odpowiedź"
             if pending_label:
