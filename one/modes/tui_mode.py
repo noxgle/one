@@ -480,6 +480,30 @@ if TEXTUAL_AVAILABLE:
             # flight but no assistant text is currently streaming.
             self.set_interval(0.15, self._tick_waiting)
             self._bind_session()
+            _logo_lines = [
+                r" ██████╗ ███╗   ██╗███████╗",
+                r"██╔═══██╗████╗  ██║██╔════╝",
+                r"██║   ██║██╔██╗ ██║█████╗  ",
+                r"██║   ██║██║╚██╗██║██╔══╝  ",
+                r"╚██████╔╝██║ ╚████║███████╗",
+                r" ╚═════╝ ╚═╝  ╚═══╝╚══════╝",
+                "",
+                r"███████╗ ██████╗ ██████╗    ",
+                r"██╔════╝██╔═══██╗██╔══██╗   ",
+                r"█████╗  ██║   ██║██████╔╝   ",
+                r"██╔══╝  ╚██╗ ██╔╝██╔══██╗   ",
+                r"██║     ╚████╔╝ ██║  ██║   ",
+                r"╚═╝      ╚═══╝  ╚═╝  ╚═╝   ",
+                "",
+                r"███████╗██╗   ██╗███████╗██████╗ ██╗   ██╗ ██████╗ ███╗   ██╗███████╗",
+                r"██╔════╝██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔═══██╗████╗  ██║██╔════╝",
+                r"█████╗  ██║   ██║█████╗  ██████╔╝ ╚████╔╝ ██║   ██║██╔██╗ ██║█████╗  ",
+                r"██╔══╝  ╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  ██║   ██║██║╚██╗██║██╔══╝  ",
+                r"███████╗ ╚████╔╝ ███████╗██║  ██║   ██║   ╚██████╔╝██║ ╚████║███████╗",
+                r"╚══════╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚══════╝",
+            ]
+            for _line in _logo_lines:
+                self._write(_line, "info")
             self._write("one TUI v2 ready. /help", "info")
             self._refresh_sidebar()
 
@@ -555,12 +579,11 @@ if TEXTUAL_AVAILABLE:
                     self._remove_thinking_line()
                     self._render_stream()
                 return
-            # Check for user-gate pending state: show a paused indicator instead
-            # of advancing the animated spinner.
+            # Check for user-gate pending state: show a paused indicator only
+            # for ask_user (approval gate is no longer shown as a paused label
+            # — the approval prompt widget handles that instead).
             pending_label = ""
-            if self._approval_pending is not None:
-                pending_label = "czeka na zatwierdzenie"
-            elif self._ask_user_pending is not None:
+            if self._ask_user_pending is not None:
                 pending_label = "czeka na Twoją odpowiedź"
             if pending_label:
                 line = f"{_THINKING_MARK}[{self._theme.warn}]⏸ {pending_label}[/]"
@@ -1778,7 +1801,7 @@ if TEXTUAL_AVAILABLE:
             self._approval_pending = {"tool": tool_name, "args": args, "stage": "answer"}
             self._approval_queue = asyncio.Queue()
             self._write(f"[Approve] {tool_name} {json.dumps(args, ensure_ascii=False)}", "warn")
-            self._toast(f"Approve: {tool_name}", severity="warning")
+            self._toast(f"Approve: {tool_name}", severity="warning", timeout=8.0)
             try:
                 input_widget = self.query_one("#input", TextArea)
                 input_widget.placeholder = "Akceptuj (Enter) / n + powód"

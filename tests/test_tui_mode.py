@@ -1260,8 +1260,9 @@ async def test_tui_copy_selected_stream_text(tmp_path: Path):
 
         app._copy_to_clipboard = fake_copy  # type: ignore[method-assign]
         stream_widget = app.query_one("#stream")
-        # Selection offsets are (x, y): line 1 ("hello world"), columns 0..5.
-        app.screen.selections = {stream_widget: Selection(Offset(0, 1), Offset(5, 1))}
+        # Selection offsets are (x, y): the logo lines are written on mount,
+        # "one TUI v2 ready" is at y=20, and "hello world" is at y=21.
+        app.screen.selections = {stream_widget: Selection(Offset(0, 21), Offset(5, 21))}
         app._try_auto_copy_selected_stream_text()
 
         assert received == ["hello"]
@@ -2301,8 +2302,8 @@ async def test_tui_history_records_alias_as_typed(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_spinner_paused_shows_approval_wait(tmp_path: Path):
-    """When approval is pending and the spinner ticks, it shows a paused label
-    and does NOT advance the thinking frame."""
+    """Approval pending no longer shows a paused label — normal spinner
+    advances (approval gate is handled by the approval prompt widget)."""
     from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK, evaluate_waiting
 
     session = _mk_app_session(tmp_path)
@@ -2313,15 +2314,16 @@ async def test_tui_spinner_paused_shows_approval_wait(tmp_path: Path):
         app._turn_active = True
         app._last_delta_ts = 0.0  # very old → waiting
         start_frame = app._thinking_frame
-        # Set approval pending.
+        # Set approval pending — should NOT pause the spinner anymore.
         app._approval_pending = {"tool": "bash", "args": {}}
         # tick_waiting is sync (not async), call directly.
         app._tick_waiting()
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "czeka na zatwierdzenie" in stream
-        # Frame must NOT have advanced (paused state freezes it).
-        assert app._thinking_frame == start_frame
+        # No "zatwierdzenie" in the stream; frame should have advanced.
+        assert "zatwierdzenie" not in stream
+        # Frame must have advanced (spinner animates normally).
+        assert app._thinking_frame != start_frame
 
 
 @pytest.mark.asyncio
@@ -2344,7 +2346,7 @@ async def test_tui_spinner_paused_shows_ask_user_wait(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
-    """Pending approval shows paused label; after clearing, spinner animates again."""
+    """ask_user pending shows paused label; after clearing, spinner animates again."""
     from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK, evaluate_waiting
 
     session = _mk_app_session(tmp_path)
@@ -2355,16 +2357,16 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
         app._last_delta_ts = 0.0
         start_frame = app._thinking_frame
 
-        # First tick: approval pending → paused label.
-        app._approval_pending = {"tool": "bash", "args": {}}
+        # First tick: ask_user pending → paused label.
+        app._ask_user_pending = {"id": "x"}
         app._tick_waiting()
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "czeka na zatwierdzenie" in stream
+        assert "czeka na Twoją odpowiedź" in stream
         assert app._thinking_frame == start_frame
 
         # Clear the gate.
-        app._approval_pending = None
+        app._ask_user_pending = None
         # Second tick: should animate again (frame advances).
         app._tick_waiting()
         await pilot.pause()
@@ -2376,7 +2378,8 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_approval_prompt_toasts(tmp_path: Path):
-    """_approval_prompt must call notify (toast) with a message containing 'Approve:'."""
+    """_approval_prompt must call notify (toast) with a message containing 'Approve:'
+    and timeout=8.0."""
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -2384,10 +2387,10 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
     async with app.run_test() as pilot:
         await pilot.pause()
         # Capture notify calls.
-        notified: list[str] = []
+        notified: list[tuple[str, dict]] = []
         original_notify = app.notify
         def capture_notify(msg, **kwargs):
-            notified.append(str(msg))
+            notified.append((str(msg), kwargs))
             # Also call the original so the UI works.
             try:
                 original_notify(msg, **kwargs)
@@ -2402,7 +2405,13 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
 
         # The prompt should have called notify already.
         assert len(notified) >= 1
-        assert any("Approve: bash" in n for n in notified)
+        assert any("Approve: bash" in n for n, _ in notified)
+        # Verify timeout=8.0 is passed.
+        timeout_kwargs = [kwargs for _, kwargs in notified if "Approve: bash" in str(kwargs)]
+        # Find the actual call with the "Approve:" message
+        approve_call = [kwargs for msg, kwargs in notified if "Approve: bash" in msg]
+        assert len(approve_call) >= 1
+        assert approve_call[0].get("timeout") == 8.0
 
         # Answer the prompt to unblock.
         assert app._approval_queue is not None
@@ -2439,3 +2448,22 @@ async def test_tui_ask_user_event_toasts(tmp_path: Path):
         await pilot.pause()
         assert any("Agent czeka na odpowiedź" in n for n in notified)
         assert app._ask_user_pending is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 21: TUI startup logo.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_welcome_includes_logo(tmp_path: Path):
+    """TUI mount must write ASCII logo lines containing '██╗' anchors."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "██╗" in stream
+        assert "one TUI v2 ready. /help" in stream

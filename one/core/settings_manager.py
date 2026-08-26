@@ -25,6 +25,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
     "theme": "default",
+    "defaultMode": "tui",
     "quietStartup": False,
     "steeringMode": "interrupt",
     "followUpMode": "queue",
@@ -111,6 +112,10 @@ class SettingsManager:
 
     def get_theme(self) -> str:
         return self.merged().get("theme", "default")
+
+    def get_default_mode(self) -> str:
+        mode = str(self.merged().get("defaultMode") or "tui").lower()
+        return mode if mode in {"tui", "cli"} else "tui"
 
     def get_quiet_startup(self) -> bool:
         return bool(self.merged().get("quietStartup", False))

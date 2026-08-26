@@ -124,6 +124,8 @@ async def _run(argv: list[str]) -> int:
     agent_dir = str(agent_dir_path)
 
     settings = SettingsManager.create(cwd, agent_dir)
+    if parsed.mode is None:
+        parsed.mode = settings.get_default_mode()
     if parsed.no_subagents:
         settings.set_subagents_enabled(False, persist=False)
     if parsed.no_bash_output:
