@@ -1206,6 +1206,35 @@ if piece_reasoning:
 
 **Tests:** `pytest tests/test_providers.py -q && pytest -q`
 
+### Phase 28: fix TUI thinking whitespace stripping (root cause) — DONE (535 tests)
+
+**Root cause:** `one/modes/tui_mode.py:1955` does `delta = event.get("delta", "").strip()` — strips the leading space that `one/providers/openai_compatible.py` adds (`" " + reasoning_str`). So TUI receives `" user"` but stores `"user"`, causing `"The"+"user"="Theuser"`.
+
+**Fix** in `one/modes/tui_mode.py` (~1954):
+```python
+# BEFORE:
+delta = event.get("delta", "").strip()
+if delta:
+    if not self._thinking_label_shown:
+        self._write("Thinking:")
+        self._thinking_label_shown = True
+        self._thinking_buffer = ""
+    self._thinking_buffer += sanitize_display_text(delta)
+
+# AFTER:
+delta = event.get("delta", "")
+if not delta or not delta.strip():
+    continue
+if not self._thinking_label_shown:
+    self._write("Thinking:")
+    self._thinking_label_shown = True
+    self._thinking_buffer = ""
+self._thinking_buffer += sanitize_display_text(delta)
+```
+Preserve leading space; only `.strip()` for empty-check. `sanitize_display_text` preserves spaces (verified).
+
+**Tests:** `pytest tests/test_tui_mode.py -q && pytest -q`
+
 **Problem:** Llama.cpp returns `reasoning_content` tokens without leading spaces ("Theuserwantsme" instead of "The user wants me"). Each token is passed directly to `on_thinking_delta` without spacing.
 
 **Fix** in `one/providers/openai_compatible.py` (~line 173-179):
