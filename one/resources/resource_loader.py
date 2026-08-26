@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,27 @@ def _system_env() -> str:
 
 
 def _user_privileges() -> str:
+    """Detect user privilege level: root, sudo with/without password, or plain user."""
     try:
-        if hasattr(os, "geteuid"):
-            return "root" if os.geteuid() == 0 else "user"
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return "root"
+    except Exception:
+        pass
+    try:
+        # Test passwordless sudo
+        result = subprocess.run(
+            ["sudo", "-n", "true"],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return "user(sudo nopasswd)"
+        # Check if user is in sudo/wheel group (sudo available, needs password)
+        result = subprocess.run(
+            ["groups"], capture_output=True, text=True, timeout=5,
+        )
+        groups = result.stdout.strip().split()
+        if "sudo" in groups or "wheel" in groups:
+            return "user(sudo)"
     except Exception:
         pass
     return "user"

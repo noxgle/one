@@ -79,4 +79,4 @@ def test_env_helpers_do_not_crash() -> None:
     assert "Current time:" in header
     assert "workspace=/tmp/some/workspace" in header
     assert isinstance(_system_env(), str) and _system_env()
-    assert _user_privileges() in {"root", "user"}
+    assert _user_privileges() in {"root", "user", "user(sudo)", "user(sudo nopasswd)"}

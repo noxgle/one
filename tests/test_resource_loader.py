@@ -105,3 +105,61 @@ def test_prompt_default_timeout_with_default_settings():
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
     prompt = loader.get_system_prompt(selected_tools=["bash"])
     assert "Default timeout 30s if not specified." in prompt
+
+
+class TestUserPrivileges:
+    """Tests for _user_privileges() covering all return paths."""
+
+    def test_user_privileges_root(self, monkeypatch):
+        """When euid is 0, should return 'root'."""
+        from one.resources import resource_loader
+
+        monkeypatch.setattr(resource_loader.os, "geteuid", lambda: 0)
+        assert resource_loader._user_privileges() == "root"
+
+    def test_user_privileges_sudo_nopasswd(self, monkeypatch):
+        """When sudo -n true succeeds, should return 'user(sudo nopasswd)'."""
+        from unittest.mock import patch
+
+        from one.resources import resource_loader
+
+        monkeypatch.setattr(resource_loader.os, "geteuid", lambda: 1000)
+        fake_result = type("_FakeResult", (), {"returncode": 0, "stdout": b"", "stderr": b""})()
+        with patch.object(resource_loader.subprocess, "run", return_value=fake_result):
+            assert resource_loader._user_privileges() == "user(sudo nopasswd)"
+
+    def test_user_privileges_sudo_with_password(self, monkeypatch):
+        """sudo -n fails but user is in sudo/wheel group → 'user(sudo)'."""
+        from unittest.mock import patch
+
+        from one.resources import resource_loader
+
+        monkeypatch.setattr(resource_loader.os, "geteuid", lambda: 1000)
+
+        def _fake_run(cmd, **kwargs):
+            if cmd[0] == "sudo":
+                return type("_FakeResult", (), {"returncode": 1, "stdout": b"", "stderr": b""})()
+            if cmd[0] == "groups":
+                return type("_FakeResult", (), {"returncode": 0, "stdout": "user sudo docker\n", "stderr": b""})()
+            return type("_FakeResult", (), {"returncode": 1, "stdout": "", "stderr": b""})()
+
+        with patch.object(resource_loader.subprocess, "run", side_effect=_fake_run):
+            assert resource_loader._user_privileges() == "user(sudo)"
+
+    def test_user_privileges_plain_user(self, monkeypatch):
+        """sudo -n fails and no sudo/wheel group → 'user'."""
+        from unittest.mock import patch
+
+        from one.resources import resource_loader
+
+        monkeypatch.setattr(resource_loader.os, "geteuid", lambda: 1000)
+
+        def _fake_run(cmd, **kwargs):
+            if cmd[0] == "sudo":
+                return type("_FakeResult", (), {"returncode": 1, "stdout": b"", "stderr": b""})()
+            if cmd[0] == "groups":
+                return type("_FakeResult", (), {"returncode": 0, "stdout": "user docker\n", "stderr": b""})()
+            return type("_FakeResult", (), {"returncode": 1, "stdout": "", "stderr": b""})()
+
+        with patch.object(resource_loader.subprocess, "run", side_effect=_fake_run):
+            assert resource_loader._user_privileges() == "user"
