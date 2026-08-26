@@ -1152,7 +1152,7 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 26: fix thinking token spacing in provider (llama.cpp) — DONE (535 tests)
 
-### Phase 27: fix thinking token spacing logic (dedicated counter) — PENDING
+### Phase 27: fix thinking token spacing logic (dedicated counter) — DONE (535 tests)
 
 **Problem:** Current fix uses `len(text_parts) > 1` but `text_parts` includes both content and reasoning tokens, making the counter unreliable.
 
