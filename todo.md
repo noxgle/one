@@ -1148,6 +1148,20 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 24: styled thinking stream with "Thinking: " label — DONE (535 tests)
 
+### Phase 25: fix thinking text concatenation (whitespace stripped) — PENDING
+
+**Context:** thinking deltas are stripped of whitespace before accumulation, causing "Theuserisaskingme..." instead of "The user is asking me...".
+
+**Fix** in `one/core/agent_session.py` `_on_thinking_delta` (~line 1097):
+```python
+# BEFORE:
+self._emit({"type": "thinking_delta", "delta": delta.strip()})
+
+# AFTER:
+self._emit({"type": "thinking_delta", "delta": delta})
+```
+Keep the empty-check strip, but emit original delta to preserve word spacing.
+
 **Context:** thinking tokens now stream correctly (Phase 23) but render as regular text. User wants: (1) "Thinking: " prefix before thinking content, (2) different color shade tied to theme (e.g., dimmed info color).
 
 **Changes:**
