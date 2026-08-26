@@ -1140,6 +1140,26 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **Task 20.3 — tests:** paused-on-approval (label shown, frame NOT advanced), paused-on-ask_user, resume-after-clear (Ctrl+C abort line returns), approval prompt fires toast. README TUI bullet.
 
+### Phase 21: defaultMode setting, remove approval spinner text, longer Approve toast, TUI logo — PENDING
+
+**Context:** user requests 3 UX changes: (1) configurable default launch mode (tui/cli, default tui) so bare `one` opens TUI; (2) remove the "⏸ czeka na zatwierdzenie" text entirely (was misleading/annoying) and extend Approve toast duration (1.8s→8s); (3) insert ASCII logo in TUI startup.
+
+**Task 21.1 — `defaultMode` setting:**
+- `settings_manager.py` DEFAULT_SETTINGS: add top-level `"defaultMode": "tui"`.
+- `SettingsManager`: add `get_default_mode() -> str` — returns `str(merged.get("defaultMode","tui"))` clamped to {"tui","cli"}, fallback "tui".
+- `cli/main.py` `_run()`: after `settings = SettingsManager.create(...)` (~line 126), add `if parsed.mode is None: parsed.mode = settings.get_default_mode()`. Current dispatch: `"tui"`→TuiMode, else→InteractiveMode — works as-is.
+- Tests: `get_default_mode()` unit (default "tui", override "cli", invalid fallback to "tui"); CLI help table if documented.
+
+**Task 21.2 — remove approval paused label + longer toast:**
+- `_tick_waiting` (tui_mode.py): remove `if self._approval_pending is not None: pending_label = ...` block entirely. Keep `_ask_user_pending` block as-is (user did not request its removal). When approval pending: normal spinner animation resumes (back to pre-Phase-20 behavior).
+- `_approval_prompt` toast: change to `_toast(f"Approve: {tool_name}", severity="warning", timeout=8.0)` (was default 1.8s).
+- Tests: update approval-spinner test (now frame advances, NO "zatwierdzenie" in line); update resume test to use ask_user pending; verify toast called with timeout=8.0.
+
+**Task 21.3 — ASCII logo in TUI:**
+- Insert the 20-line ASCII art logo (ONE / CODE / AGENCY blocks) via `_write(line)` calls before the existing `self._write("one TUI v2 ready. /help", "info")` at line 483.
+- Tests: assert stream contains one of the logo anchor lines (e.g. any line containing `"██╗"`).
+- Snapshots: regenerate base/overlay/widget_panel — expected churn (logo now in initial stream). Run `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest tests/test_tui_snapshots.py -q`.
+
 ### Models-fetch gating fix + GPT-5.6 seeds + README refresh — DONE
 
 **Root cause CONFIRMED (external docs, ZeroClaw + community):** the Codex `/models` endpoint **gates on `client_version`** — a stale/too-low value returns `200 {"models": []}` silently. Our `CLIENT_VERSION = "0.42.0"` triggered exactly that. Fixed: bumped to `"1.0.0"`.
