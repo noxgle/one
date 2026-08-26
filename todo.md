@@ -1142,6 +1142,22 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 21: defaultMode setting, remove approval spinner text, longer Approve toast, TUI logo — DONE (522 tests)
 
+### Phase 22: enrich `_user_privileges()` with sudo detection — PENDING
+
+**Context:** `_user_privileges()` in `resource_loader.py` currently returns only `"root"` or `"user"`. User wants it to also detect sudo access and passwordless sudo.
+
+**Implementation** in `one/resources/resource_loader.py`:
+1. If `os.geteuid() == 0` → return `"root"`
+2. Try `sudo -n true` (exit 0 = passwordless works) → return `"user(sudo nopasswd)"`
+3. Check `groups` output for `"sudo"` or `"wheel"` → return `"user(sudo)"`
+4. Fallback → return `"user"`
+
+All subprocess calls wrapped in try/except with 5s timeout. Import subprocess lazily inside the function.
+
+**Tests** in `tests/test_resource_loader.py` or new file: mock `os.geteuid` and `subprocess.run` to cover all 4 return paths. One test for root, one for nopasswd, one for sudo-with-password, one for no-sudo.
+
+**Verification:** header string (line 39) now shows e.g. `user_privileges=user(sudo nopasswd)` instead of just `user`.
+
 **Context:** user requests 3 UX changes: (1) configurable default launch mode (tui/cli, default tui) so bare `one` opens TUI; (2) remove the "⏸ czeka na zatwierdzenie" text entirely (was misleading/annoying) and extend Approve toast duration (1.8s→8s); (3) insert ASCII logo in TUI startup.
 
 **Task 21.1 — `defaultMode` setting:**
