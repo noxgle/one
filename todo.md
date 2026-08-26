@@ -1146,6 +1146,19 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 23: fix thinking/reasoning streaming for llama.cpp — DONE (532 tests)
 
+### Phase 24: styled thinking stream with "Thinking: " label — PENDING
+
+**Context:** thinking tokens now stream correctly (Phase 23) but render as regular text. User wants: (1) "Thinking: " prefix before thinking content, (2) different color shade tied to theme (e.g., dimmed info color).
+
+**Changes:**
+1. `one/providers/base.py` ProviderAdapter: add optional `on_thinking_delta: Callable[[str], None] | None = None` to `chat()` signature
+2. `one/providers/openai_compatible.py`: accept `on_thinking_delta`, call it for `reasoning_content` instead of `on_delta`
+3. `one/providers/anthropic.py`, `gemini.py`, `codex_responses.py`: accept `on_thinking_delta` param (no-op for now)
+4. `one/core/agent_session.py`: create `_on_thinking_delta` callback that emits `{"type": "thinking_delta", "delta": text}`; pass to provider
+5. `one/modes/tui_mode.py`: handle `thinking_delta` events — on first thinking delta, prepend "Thinking: " line in `theme.info` color; subsequent deltas append in same color using Rich markup `[theme.info]...[/]`
+
+**Tests:** verify thinking_delta events emitted, TUI renders "Thinking: " prefix with color.
+
 **Context:** llama.cpp with reasoning models (Qwen, DeepSeek) returns thinking tokens in `delta.reasoning_content`, but `openai_compatible.py` streaming only extracts `delta.content`. Thinking is silently dropped → user sees no streaming thinking.
 
 **Root cause** in `one/providers/openai_compatible.py`:
