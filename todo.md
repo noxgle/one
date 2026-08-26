@@ -1140,7 +1140,7 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 **Task 20.3 — tests:** paused-on-approval (label shown, frame NOT advanced), paused-on-ask_user, resume-after-clear (Ctrl+C abort line returns), approval prompt fires toast. README TUI bullet.
 
-### Phase 21: defaultMode setting, remove approval spinner text, longer Approve toast, TUI logo — PENDING
+### Phase 21: defaultMode setting, remove approval spinner text, longer Approve toast, TUI logo — DONE (522 tests)
 
 **Context:** user requests 3 UX changes: (1) configurable default launch mode (tui/cli, default tui) so bare `one` opens TUI; (2) remove the "⏸ czeka na zatwierdzenie" text entirely (was misleading/annoying) and extend Approve toast duration (1.8s→8s); (3) insert ASCII logo in TUI startup.
 
