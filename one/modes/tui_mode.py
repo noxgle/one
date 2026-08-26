@@ -1952,8 +1952,8 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
             elif et == "thinking_delta":
-                delta = event.get("delta", "").strip()
-                if delta:
+                delta = event.get("delta", "")
+                if delta and delta.strip():
                     if not self._thinking_label_shown:
                         self._write("Thinking:")
                         self._thinking_label_shown = True
