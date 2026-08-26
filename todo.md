@@ -1144,7 +1144,7 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 22: enrich `_user_privileges()` with sudo detection — DONE (526 tests)
 
-### Phase 23: fix thinking/reasoning streaming for llama.cpp — PENDING
+### Phase 23: fix thinking/reasoning streaming for llama.cpp — DONE (532 tests)
 
 **Context:** llama.cpp with reasoning models (Qwen, DeepSeek) returns thinking tokens in `delta.reasoning_content`, but `openai_compatible.py` streaming only extracts `delta.content`. Thinking is silently dropped → user sees no streaming thinking.
 
