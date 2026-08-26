@@ -1142,7 +1142,7 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 21: defaultMode setting, remove approval spinner text, longer Approve toast, TUI logo — DONE (522 tests)
 
-### Phase 22: enrich `_user_privileges()` with sudo detection — PENDING
+### Phase 22: enrich `_user_privileges()` with sudo detection — DONE (526 tests)
 
 **Context:** `_user_privileges()` in `resource_loader.py` currently returns only `"root"` or `"user"`. User wants it to also detect sudo access and passwordless sudo.
 
