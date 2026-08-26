@@ -1150,6 +1150,42 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 25: fix thinking text concatenation (whitespace stripped) — DONE (535 tests)
 
+### Phase 26: fix thinking token spacing in provider (llama.cpp) — DONE (535 tests)
+
+**Problem:** Llama.cpp returns `reasoning_content` tokens without leading spaces ("Theuserwantsme" instead of "The user wants me"). Each token is passed directly to `on_thinking_delta` without spacing.
+
+**Fix** in `one/providers/openai_compatible.py` (~line 173-179):
+```python
+# BEFORE:
+piece_reasoning = delta.get("reasoning_content")
+if piece_reasoning:
+    text_parts.append(str(piece_reasoning))
+    try:
+        if on_thinking_delta:
+            on_thinking_delta(str(piece_reasoning))
+        elif on_delta:
+            on_delta(str(piece_reasoning))
+    except Exception:
+        pass
+
+# AFTER:
+piece_reasoning = delta.get("reasoning_content")
+if piece_reasoning:
+    text_parts.append(str(piece_reasoning))
+    try:
+        reasoning_str = str(piece_reasoning)
+        if reasoning_str and not reasoning_str[0].isspace() and len(text_parts) > 1:
+            reasoning_str = " " + reasoning_str
+        if on_thinking_delta:
+            on_thinking_delta(reasoning_str)
+        elif on_delta:
+            on_delta(reasoning_str)
+    except Exception:
+        pass
+```
+
+**Tests:** `pytest tests/test_providers.py -q && pytest -q`
+
 **Context:** thinking deltas are stripped of whitespace before accumulation, causing "Theuserisaskingme..." instead of "The user is asking me...".
 
 **Fix** in `one/core/agent_session.py` `_on_thinking_delta` (~line 1097):
