@@ -1152,6 +1152,60 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 26: fix thinking token spacing in provider (llama.cpp) — DONE (535 tests)
 
+### Phase 27: fix thinking token spacing logic (dedicated counter) — PENDING
+
+**Problem:** Current fix uses `len(text_parts) > 1` but `text_parts` includes both content and reasoning tokens, making the counter unreliable.
+
+**Fix** in `one/providers/openai_compatible.py` (~line 139-187):
+
+```python
+# BEFORE (line 139-142):
+text_parts: list[str] = []
+usage: dict[str, Any] = {}
+stop_reason: str | None = None
+raw_last: dict[str, Any] = {}
+
+# AFTER:
+text_parts: list[str] = []
+usage: dict[str, Any] = {}
+stop_reason: str | None = None
+raw_last: dict[str, Any] = {}
+reasoning_token_count = 0  # ← ADD
+
+# BEFORE (line 174-187):
+piece_reasoning = delta.get("reasoning_content")
+if piece_reasoning:
+    text_parts.append(str(piece_reasoning))
+    try:
+        reasoning_str = str(piece_reasoning)
+        if reasoning_str and not reasoning_str[0].isspace() and len(text_parts) > 1:
+            reasoning_str = " " + reasoning_str
+        if on_thinking_delta:
+            on_thinking_delta(reasoning_str)
+        elif on_delta:
+            on_delta(reasoning_str)
+    except Exception:
+        pass
+
+# AFTER:
+piece_reasoning = delta.get("reasoning_content")
+if piece_reasoning:
+    text_parts.append(str(piece_reasoning))
+    try:
+        reasoning_str = str(piece_reasoning)
+        reasoning_token_count += 1
+        if reasoning_str and not reasoning_str[0].isspace() and reasoning_token_count > 1:
+            reasoning_str = " " + reasoning_str
+        if on_thinking_delta:
+            on_thinking_delta(reasoning_str)
+        elif on_delta:
+            on_delta(reasoning_str)
+    except Exception:
+        pass
+```
+
+**Tests:** `pytest tests/test_providers.py -q && pytest -q`
+
 **Problem:** Llama.cpp returns `reasoning_content` tokens without leading spaces ("Theuserwantsme" instead of "The user wants me"). Each token is passed directly to `on_thinking_delta` without spacing.
 
 **Fix** in `one/providers/openai_compatible.py` (~line 173-179):
