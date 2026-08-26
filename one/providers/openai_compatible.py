@@ -128,7 +128,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
             choice = (data.get("choices") or [{}])[0]
             msg = choice.get("message", {})
-            text = msg.get("content") or ""
+            thinking = msg.get("reasoning_content") or ""
+            content = msg.get("content") or ""
+            text = (thinking + "\n\n" + content) if thinking else content
             usage = data.get("usage") or {}
             stop = choice.get("finish_reason")
             return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop)
@@ -166,6 +168,13 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         text_parts.append(str(piece))
                         try:
                             on_delta(str(piece))
+                        except Exception:
+                            pass
+                    piece_reasoning = delta.get("reasoning_content")
+                    if piece_reasoning:
+                        text_parts.append(str(piece_reasoning))
+                        try:
+                            on_delta(str(piece_reasoning))
                         except Exception:
                             pass
                     if choice.get("finish_reason"):
