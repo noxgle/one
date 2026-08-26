@@ -1144,6 +1144,22 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 22: enrich `_user_privileges()` with sudo detection — DONE (526 tests)
 
+### Phase 23: fix thinking/reasoning streaming for llama.cpp — PENDING
+
+**Context:** llama.cpp with reasoning models (Qwen, DeepSeek) returns thinking tokens in `delta.reasoning_content`, but `openai_compatible.py` streaming only extracts `delta.content`. Thinking is silently dropped → user sees no streaming thinking.
+
+**Root cause** in `one/providers/openai_compatible.py`:
+- Streaming path (line 162-170): only `delta.get("content")` is checked
+- Non-streaming path (line 129-134): only `msg.get("content")` is extracted
+
+**Fix** in `one/providers/openai_compatible.py`:
+1. Streaming path: after extracting `delta.content`, also check `delta.get("reasoning_content")` and pass to `on_delta` (thinking tokens appear inline in stream)
+2. Non-streaming path: also extract `msg.get("reasoning_content")` and prepend to text (or append with separator)
+
+**Tests** in `tests/test_providers.py` or new file: mock streaming response with `reasoning_content` field, verify it's passed to `on_delta` and included in `ChatResult.text`.
+
+**Verification:** restart TUI with llama.cpp reasoning model → thinking tokens should stream in real-time.
+
 **Context:** `_user_privileges()` in `resource_loader.py` currently returns only `"root"` or `"user"`. User wants it to also detect sudo access and passwordless sudo.
 
 **Implementation** in `one/resources/resource_loader.py`:
