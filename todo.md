@@ -1148,7 +1148,7 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 24: styled thinking stream with "Thinking: " label — DONE (535 tests)
 
-### Phase 25: fix thinking text concatenation (whitespace stripped) — PENDING
+### Phase 25: fix thinking text concatenation (whitespace stripped) — DONE (535 tests)
 
 **Context:** thinking deltas are stripped of whitespace before accumulation, causing "Theuserisaskingme..." instead of "The user is asking me...".
 
