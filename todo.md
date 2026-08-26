@@ -1208,6 +1208,47 @@ if piece_reasoning:
 
 ### Phase 28: fix TUI thinking whitespace stripping (root cause) — DONE (535 tests)
 
+### Phase 29: fix thinking history ordering (new block per turn) — DONE (535 tests)
+
+**Problem:** `thinking_delta` handler finds the *last* `_THINKING_TEXT_MARK` line via reverse search and rewrites it in-place. After history: `[Thinking:][thinking1][tool][answer]`, the next prompt's thinking overwrites `thinking1` at the top instead of creating a new block after the second prompt. User expects history order: `prompt → thinking → tool → answer` per turn.
+
+**Root cause:** `one/modes/tui_mode.py:1964-1969` loops `for i in range(len(_stream_lines)-1,-1,-1)` and rewrites any previous `_THINKING_TEXT_MARK` line, not the current turn's line.
+
+**Fix** in `one/modes/tui_mode.py`:
+
+1. `__init__` (~460) add state:
+```python
+self._thinking_line_idx: int | None = None
+```
+
+2. `thinking_delta` (~1954) use index instead of search:
+```python
+elif et == "thinking_delta":
+    delta = event.get("delta", "")
+    if delta and delta.strip():
+        if not self._thinking_label_shown:
+            self._write("Thinking:")
+            self._thinking_label_shown = True
+            self._thinking_buffer = ""
+            self._thinking_line_idx = None
+        self._thinking_buffer += sanitize_display_text(delta)
+        line_text = f"{_THINKING_TEXT_MARK}[{self._theme.info}]{self._thinking_buffer}[/]"
+        if self._thinking_line_idx is not None and 0 <= self._thinking_line_idx < len(self._stream_lines) and self._stream_lines[self._thinking_line_idx].startswith(_THINKING_TEXT_MARK):
+            self._stream_lines[self._thinking_line_idx] = line_text
+        else:
+            self._stream_lines.append("")
+            self._stream_lines.append(line_text)
+            self._thinking_line_idx = len(self._stream_lines) - 1
+        self._render_stream()
+```
+
+3. `turn_start` (~1980) and `turn_end` (~2042) reset:
+```python
+self._thinking_line_idx = None
+```
+
+**Tests:** `pytest tests/test_tui_mode.py -q && pytest -q` (expect 535)
+
 **Root cause:** `one/modes/tui_mode.py:1955` does `delta = event.get("delta", "").strip()` — strips the leading space that `one/providers/openai_compatible.py` adds (`" " + reasoning_str`). So TUI receives `" user"` but stores `"user"`, causing `"The"+"user"="Theuser"`.
 
 **Fix** in `one/modes/tui_mode.py` (~1954):
