@@ -298,3 +298,68 @@ async def test_event_snapshot_abort_during_retry_backoff_is_instant(tmp_path: Pa
     assert {"type": "turn_end", "attempt": 1, "ok": True, "reason": "abort", "aborted": True} in compact
     # retry never happened
     assert not any(e.get("attempt") == 2 for e in compact)
+
+
+# ── Phase 24: thinking_delta event ───────────────────────────────────────────
+
+class _ProviderWithThinking:
+    """Provider that fires thinking_delta events for reasoning_content."""
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls = 0
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        on_delta: Any = None,
+        on_thinking_delta: Any = None,
+        max_tokens: int | None = None,
+    ) -> Any:
+        from one.providers.base import ChatResult
+
+        idx = min(self.calls, len(self.responses) - 1)
+        self.calls += 1
+        text = self.responses[idx]
+        # Split text into "thinking" (before ---) and "content" (after ---)
+        if "---" in text:
+            thinking, content = text.split("---", 1)
+            thinking = thinking.strip()
+            content = content.strip()
+            # Fire thinking_delta events
+            if on_thinking_delta and thinking:
+                # Emit in chunks of 4 chars to simulate streaming
+                for i in range(0, len(thinking), 4):
+                    on_thinking_delta(thinking[i : i + 4])
+            # Fire on_delta for content
+            if on_delta and content:
+                on_delta(content)
+            return ChatResult(text=thinking + "\n\n" + content, raw={}, usage={}, stop_reason="stop")
+        return ChatResult(text=text, raw={}, usage={}, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_thinking_delta_event_emitted(tmp_path: Path):
+    """Provider fires thinking_delta events for reasoning_content."""
+    agent = _mk_agent(tmp_path)
+    agent.providers = {"openai": _ProviderWithThinking(["I am thinking about this\n---\nHere is the answer"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("go")
+
+    # Verify thinking_delta events were emitted
+    thinking_events = [e for e in events if e.get("type") == "thinking_delta"]
+    assert len(thinking_events) > 0
+
+    # All chunks should be part of the thinking text
+    all_thinking = "".join(e.get("delta", "") for e in thinking_events)
+    assert "thinking" in all_thinking
+
+    # The full text should contain both thinking and content
+    message_updates = [e for e in events if e.get("type") == "message_update"]
+    assert any("answer" in str(e) for e in message_updates)

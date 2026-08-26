@@ -104,6 +104,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         thinking_level: str,
         headers: dict[str, str] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None,
     ) -> ChatResult:
         payload = self._build_payload(model, messages, thinking_level)
@@ -174,7 +175,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     if piece_reasoning:
                         text_parts.append(str(piece_reasoning))
                         try:
-                            on_delta(str(piece_reasoning))
+                            if on_thinking_delta:
+                                on_thinking_delta(str(piece_reasoning))
+                            elif on_delta:
+                                on_delta(str(piece_reasoning))
                         except Exception:
                             pass
                     if choice.get("finish_reason"):

@@ -1094,6 +1094,11 @@ class AgentSession:
                 }
             )
 
+        def _on_thinking_delta(delta: str) -> None:
+            if not delta:
+                return
+            self._emit({"type": "thinking_delta", "delta": delta})
+
         chat_kwargs = {
             "api_key": auth["apiKey"],
             "model": self.model.id,
@@ -1104,6 +1109,8 @@ class AgentSession:
         sig = inspect.signature(provider.chat)
         if allow_live_stream and "on_delta" in sig.parameters:
             chat_kwargs["on_delta"] = _on_delta
+        if "on_thinking_delta" in sig.parameters:
+            chat_kwargs["on_thinking_delta"] = _on_thinking_delta
 
         task = asyncio.create_task(provider.chat(**chat_kwargs))
         self._active_chat_tasks.add(task)

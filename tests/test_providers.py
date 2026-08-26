@@ -315,3 +315,98 @@ async def test_non_streaming_only_reasoning_no_content(adapter: OpenAICompatible
     assert thinking in result.text
     # Should be thinking + "\n\n" + ""
     assert result.text == thinking + "\n\n"
+
+
+# ── Phase 24: on_thinking_delta ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_on_thinking_delta_called_for_reasoning(adapter: OpenAICompatibleAdapter):
+    """When both on_delta and on_thinking_delta are provided, reasoning_content
+    goes ONLY to on_thinking_delta (not on_delta)."""
+
+    reasoning_text = "Let me think about this carefully."
+    content_text = "Here is the answer."
+
+    sse_lines = _sse(
+        {"choices": [{"delta": {"reasoning_content": reasoning_text}}]},
+        {"choices": [{"delta": {"content": content_text}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )
+
+    thinking_deltas: list[str] = []
+    normal_deltas: list[str] = []
+
+    def on_thinking_delta(piece: str) -> None:
+        thinking_deltas.append(piece)
+
+    def on_delta(piece: str) -> None:
+        normal_deltas.append(piece)
+
+    stream_ctx = _StreamContext(sse_lines)
+
+    with patch.object(httpx, "AsyncClient") as MockClient:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.stream = lambda *a, **k: stream_ctx
+        MockClient.return_value = mock_client
+
+        result = await adapter.chat(
+            api_key="key",
+            model="qwen-test",
+            messages=[{"role": "user", "content": "hello"}],
+            thinking_level="high",
+            on_delta=on_delta,
+            on_thinking_delta=on_thinking_delta,
+        )
+
+    # reasoning_content goes only to on_thinking_delta
+    assert reasoning_text in thinking_deltas
+    assert reasoning_text not in normal_deltas
+    # normal content goes only to on_delta
+    assert content_text in normal_deltas
+    assert content_text not in thinking_deltas
+
+
+@pytest.mark.asyncio
+async def test_on_thinking_delta_fallback_to_on_delta(adapter: OpenAICompatibleAdapter):
+    """When on_thinking_delta is None, reasoning_content falls back to on_delta
+    (backward compatibility)."""
+
+    reasoning_text = "I thought about it."
+    content_text = "The answer is 42."
+
+    sse_lines = _sse(
+        {"choices": [{"delta": {"reasoning_content": reasoning_text}}]},
+        {"choices": [{"delta": {"content": content_text}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )
+
+    captured_deltas: list[str] = []
+
+    def on_delta(piece: str) -> None:
+        captured_deltas.append(piece)
+
+    stream_ctx = _StreamContext(sse_lines)
+
+    with patch.object(httpx, "AsyncClient") as MockClient:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.stream = lambda *a, **k: stream_ctx
+        MockClient.return_value = mock_client
+
+        result = await adapter.chat(
+            api_key="key",
+            model="qwen-test",
+            messages=[{"role": "user", "content": "test"}],
+            thinking_level="high",
+            on_delta=on_delta,
+            # on_thinking_delta is intentionally omitted
+        )
+
+    # Both should appear in on_delta for backward compat
+    assert reasoning_text in captured_deltas
+    assert content_text in captured_deltas
+    assert reasoning_text in result.text
+    assert content_text in result.text

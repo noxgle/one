@@ -456,6 +456,7 @@ if TEXTUAL_AVAILABLE:
             self._last_delta_ts = 0.0
             self._thinking_frame = 0
             self._thinking_active = False
+            self._thinking_label_shown = False
             self._command_history: list[str] = []
             self._approval_queue: asyncio.Queue | None = None
             self._approval_pending: dict[str, Any] | None = None
@@ -1945,12 +1946,21 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_has_live_delta = False
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
+            elif et == "thinking_delta":
+                delta = event.get("delta", "")
+                if delta:
+                    if not self._thinking_label_shown:
+                        self._write("Thinking:")
+                        self._thinking_label_shown = True
+                    self._stream_lines.append(f"[{self._theme.info}]{sanitize_display_text(delta)}[/]")
+                    self._render_stream()
             elif et == "turn_start":
                 # A turn is in flight — arm the waiting spinner. This also
                 # covers turns the session starts by itself (queued follow-ups
                 # drained after the previous turn), which never pass through
                 # on_input_submitted.
                 self._turn_active = True
+                self._thinking_label_shown = False
             elif et == "tool_call_start":
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
@@ -2011,6 +2021,7 @@ if TEXTUAL_AVAILABLE:
             elif et == "turn_end":
                 self._retry_state = "idle"
                 self._turn_active = False
+                self._thinking_label_shown = False
                 self._remove_thinking_line()
                 self._render_stream()
                 if event.get("ok") is False:

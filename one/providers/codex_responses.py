@@ -124,6 +124,7 @@ class CodexResponsesAdapter(ProviderAdapter):
         thinking_level: str,
         headers: dict[str, str] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None,
     ) -> ChatResult:
         url = f"{BASE_URL}/responses"
