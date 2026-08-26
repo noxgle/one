@@ -140,6 +140,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         usage: dict[str, Any] = {}
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
+        reasoning_token_count = 0
 
         async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
             async with client.stream("POST", f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers) as resp:
@@ -176,8 +177,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         text_parts.append(str(piece_reasoning))
                         try:
                             reasoning_str = str(piece_reasoning)
+                            reasoning_token_count += 1
                             # Add leading space if token doesn't start with whitespace (llama.cpp tokenization)
-                            if reasoning_str and not reasoning_str[0].isspace() and len(text_parts) > 1:
+                            if reasoning_str and not reasoning_str[0].isspace() and reasoning_token_count > 1:
                                 reasoning_str = " " + reasoning_str
                             if on_thinking_delta:
                                 on_thinking_delta(reasoning_str)
