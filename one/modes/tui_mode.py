@@ -459,6 +459,7 @@ if TEXTUAL_AVAILABLE:
             self._thinking_active = False
             self._thinking_label_shown = False
             self._thinking_buffer: str = ""
+            self._thinking_line_idx: int | None = None
             self._command_history: list[str] = []
             self._approval_queue: asyncio.Queue | None = None
             self._approval_pending: dict[str, Any] | None = None
@@ -1958,18 +1959,15 @@ if TEXTUAL_AVAILABLE:
                         self._write("Thinking:")
                         self._thinking_label_shown = True
                         self._thinking_buffer = ""
+                        self._thinking_line_idx = None
                     self._thinking_buffer += sanitize_display_text(delta)
-                    # Find and rewrite the thinking text line in-place
                     line_text = f"{_THINKING_TEXT_MARK}[{self._theme.info}]{self._thinking_buffer}[/]"
-                    found = False
-                    for i in range(len(self._stream_lines) - 1, -1, -1):
-                        if self._stream_lines[i].startswith(_THINKING_TEXT_MARK):
-                            self._stream_lines[i] = line_text
-                            found = True
-                            break
-                    if not found:
+                    if self._thinking_line_idx is not None and 0 <= self._thinking_line_idx < len(self._stream_lines) and self._stream_lines[self._thinking_line_idx].startswith(_THINKING_TEXT_MARK):
+                        self._stream_lines[self._thinking_line_idx] = line_text
+                    else:
                         self._stream_lines.append("")
                         self._stream_lines.append(line_text)
+                        self._thinking_line_idx = len(self._stream_lines) - 1
                     self._render_stream()
             elif et == "turn_start":
                 # A turn is in flight — arm the waiting spinner. This also
@@ -1979,6 +1977,7 @@ if TEXTUAL_AVAILABLE:
                 self._turn_active = True
                 self._thinking_label_shown = False
                 self._thinking_buffer = ""
+                self._thinking_line_idx = None
             elif et == "tool_call_start":
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
@@ -2041,6 +2040,7 @@ if TEXTUAL_AVAILABLE:
                 self._turn_active = False
                 self._thinking_label_shown = False
                 self._thinking_buffer = ""
+                self._thinking_line_idx = None
                 self._remove_thinking_line()
                 self._render_stream()
                 if event.get("ok") is False:
