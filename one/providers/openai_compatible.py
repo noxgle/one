@@ -175,10 +175,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     if piece_reasoning:
                         text_parts.append(str(piece_reasoning))
                         try:
+                            reasoning_str = str(piece_reasoning)
+                            # Add leading space if token doesn't start with whitespace (llama.cpp tokenization)
+                            if reasoning_str and not reasoning_str[0].isspace() and len(text_parts) > 1:
+                                reasoning_str = " " + reasoning_str
                             if on_thinking_delta:
-                                on_thinking_delta(str(piece_reasoning))
+                                on_thinking_delta(reasoning_str)
                             elif on_delta:
-                                on_delta(str(piece_reasoning))
+                                on_delta(reasoning_str)
                         except Exception:
                             pass
                     if choice.get("finish_reason"):
