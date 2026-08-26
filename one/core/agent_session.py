@@ -1095,9 +1095,9 @@ class AgentSession:
             )
 
         def _on_thinking_delta(delta: str) -> None:
-            if not delta:
+            if not delta or not delta.strip():
                 return
-            self._emit({"type": "thinking_delta", "delta": delta})
+            self._emit({"type": "thinking_delta", "delta": delta.strip()})
 
         chat_kwargs = {
             "api_key": auth["apiKey"],
