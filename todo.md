@@ -1146,7 +1146,7 @@ The model nests `path` INSIDE the edit dict instead of passing it top-level. The
 
 ### Phase 23: fix thinking/reasoning streaming for llama.cpp — DONE (532 tests)
 
-### Phase 24: styled thinking stream with "Thinking: " label — PENDING
+### Phase 24: styled thinking stream with "Thinking: " label — DONE (535 tests)
 
 **Context:** thinking tokens now stream correctly (Phase 23) but render as regular text. User wants: (1) "Thinking: " prefix before thinking content, (2) different color shade tied to theme (e.g., dimmed info color).
 
