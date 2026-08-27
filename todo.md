@@ -1597,7 +1597,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - `.venv/bin/python -m pytest -q tests/test_tools.py tests/test_tool_calling.py tests/test_event_snapshots.py tests/test_rpc_mode.py`
   - **Delivered:** structured timeout/cancellation contract, `tool_call_end ok:false`, distinct abort semantics, direct CLI/TUI/RPC propagation, process cleanup and event regressions.
 
-- [ ] **Task 30.4: make credential removal complete and auth status accurate**
+- [x] **Task 30.4: make credential removal complete and auth status accurate — DONE (`98c9761`, 636-test suite)**
   - **Description:** Add one credential-removal operation that clears runtime API keys, stored API keys, and stored OAuth records for a provider. Route TUI, interactive, and RPC `/logout` through it. Make provider auth status include OAuth records. Unless a provider revocation endpoint is actually called, change user-facing language from “revoke” to “remove locally.”
   - **Files:** `one/core/auth_storage.py`, `one/core/model_registry.py`, `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `README.md`, `tests/test_auth_and_cli.py`, `tests/test_oauth.py`, `tests/test_interactive_mode.py`, `tests/test_tui_mode.py`, `tests/test_rpc_mode.py`, `tests/test_rpc_snapshots.py`
   - **Dependencies:** Task 30.2
@@ -1608,6 +1608,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - Documentation does not claim server-side revocation unless implemented and verified.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_auth_and_cli.py tests/test_oauth.py tests/test_interactive_mode.py tests/test_tui_mode.py tests/test_rpc_mode.py tests/test_rpc_snapshots.py`
+  - **Delivered:** atomic complete local credential removal; shared API-key/OAuth status predicate; interactive/TUI/RPC integration; local-only documentation; 36 focused regressions.
 
 - [ ] **Task 30.5: align RPC login with validated login flow**
   - **Description:** Make RPC login asynchronous and route it through the same `validate_and_fetch` orchestration used by TUI/interactive modes. Reject unknown providers and invalid keys before persistence; fetch/register/persist models on success; support the same no-auth provider behavior where applicable. Return structured RPC errors without leaking credentials.
@@ -1773,7 +1774,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 - [x] No cooperation-enabled execution path lets a subagent mutate without approval.
 - [x] Sensitive local state has restrictive permissions and resilient writes.
 - [x] Bash timeout produces `ok:false`; abort and timeout remain distinct.
-- [ ] Logout removes runtime, stored API-key, and OAuth credentials locally.
+- [x] Logout removes runtime, stored API-key, and OAuth credentials locally.
 - [ ] RPC login validates before storage and refreshes models consistently.
 - [ ] `apply_patch` rejects collisions and restores state after apply failure.
 - [ ] TUI preserves chronological `thinking → tool → thinking → answer` history.
