@@ -808,6 +808,7 @@ class AgentSession:
             thinking_level=self.thinking_level,
             scoped_models=self.scoped_models,
             tools=sub_tools,
+            approval_callback=self.approval_callback,
         )
         sub.providers = self.providers
 

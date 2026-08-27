@@ -285,3 +285,286 @@ def test_settings_subagents_and_bash_defaults() -> None:
     assert settings.get_bash_show_output() is False
     assert settings.merged()["subagents"]["enabled"] is False
     assert settings.merged()["bash"]["showOutput"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 30.1: subagent approval propagation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_child_mutation_invokes_parent_approval_callback_and_executes_when_approved(tmp_path: Path):
+    """When cooperation is enabled on the parent, a child mutating tool call must
+    invoke the parent's approval callback.  If the callback returns True the tool
+    runs and the mutation persists.
+    """
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    async def approval_callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        call_log.append((tool_name, args))
+        return True, ""
+
+    spawn_json = json.dumps({"tool": "spawn_subagent", "args": {"task": "write a file"}})
+    write_json = json.dumps({"tool": "write", "args": {"path": "child_out.txt", "content": "hello child"}})
+    finish_json = json.dumps({"tool": "finish", "args": {"summary": "child done", "goal_success": True}})
+
+    session_dir = str(tmp_path / "sessions")
+    manager = SessionManager.create(str(tmp_path), session_dir)
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 5, "timeoutSec": 5}})
+
+    agent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "write", "finish"])
+    agent.providers = {"openai": _Provider([spawn_json, write_json, finish_json])}
+    agent.approval_callback = approval_callback  # cooperation enabled
+
+    await agent.prompt("go")
+
+    # The approval callback must have been called for the child's write tool.
+    assert len(call_log) == 1, f"Expected 1 approval call, got {call_log}"
+    assert call_log[0][0] == "write"
+    assert call_log[0][1]["path"] == "child_out.txt"
+    assert call_log[0][1]["content"] == "hello child"
+
+    # The mutation must have persisted (file was written).
+    assert (tmp_path / "child_out.txt").read_text().strip() == "hello child"
+
+
+@pytest.mark.asyncio
+async def test_child_mutation_rejection_prevents_mutation(tmp_path: Path):
+    """When the parent approval callback rejects a child mutating tool, the
+    mutation must NOT happen and the child must receive the rejection reason."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    async def approval_callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        call_log.append((tool_name, args))
+        if tool_name == "write":
+            return False, "not allowed in subagents"
+        return True, ""
+
+    spawn_json = json.dumps({"tool": "spawn_subagent", "args": {"task": "write a file"}})
+    write_json = json.dumps({"tool": "write", "args": {"path": "secret.txt", "content": "top secret"}})
+    finish_json = json.dumps({"tool": "finish", "args": {"summary": "child finished", "goal_success": True}})
+
+    session_dir = str(tmp_path / "sessions")
+    manager = SessionManager.create(str(tmp_path), session_dir)
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 6, "timeoutSec": 5}})
+
+    agent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "write", "edit", "finish"])
+    agent.providers = {"openai": _Provider([spawn_json, write_json, finish_json])}
+    agent.approval_callback = approval_callback
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("go")
+
+    # The file must NOT exist (rejection prevented the mutation).
+    assert not (tmp_path / "secret.txt").exists()
+
+    # The child session jsonl must contain the rejection (the child recorded
+    # the rejected tool call).  Find the child file and check its content.
+    jsonl_files = sorted(Path(session_dir).glob("*.jsonl"))
+    assert len(jsonl_files) == 2
+    subagent_file = None
+    for f in jsonl_files:
+        lines = f.read_text(encoding="utf-8").splitlines()
+        if lines:
+            header = json.loads(lines[0])
+            if header.get("subagentDepth") == 1:
+                subagent_file = f
+                break
+    assert subagent_file is not None, "Subagent session file not found"
+    subagent_content = subagent_file.read_text(encoding="utf-8")
+    # The rejection reason should be in the tool result message.
+    assert "not allowed in subagents" in subagent_content or "User rejected" in subagent_content
+
+
+@pytest.mark.asyncio
+async def test_child_autonomous_when_cooperation_off(tmp_path: Path):
+    """When cooperation is disabled (no approval callback), a child subagent
+    must run mutating tools autonomously without any callback invocation."""
+    callback_called = False
+
+    async def approval_callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        nonlocal callback_called
+        callback_called = True
+        return True, ""
+
+    spawn_json = json.dumps({"tool": "spawn_subagent", "args": {"task": "write a file"}})
+    write_json = json.dumps({"tool": "write", "args": {"path": "auto_child.txt", "content": "autonomous"}})
+    finish_json = json.dumps({"tool": "finish", "args": {"summary": "auto child done", "goal_success": True}})
+
+    session_dir = str(tmp_path / "sessions")
+    manager = SessionManager.create(str(tmp_path), session_dir)
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 5, "timeoutSec": 5}})
+
+    agent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "write", "finish"])
+    agent.providers = {"openai": _Provider([spawn_json, write_json, finish_json])}
+    # approval_callback is None — cooperation is OFF
+    assert agent.approval_callback is None
+
+    await agent.prompt("go")
+
+    # The callback must NOT have been called for any child tool.
+    assert not callback_called, "Approval callback should not be called when cooperation is off"
+
+    # The file must exist (child ran autonomously).
+    assert (tmp_path / "auto_child.txt").read_text().strip() == "autonomous"
+
+
+@pytest.mark.asyncio
+async def test_child_bash_tool_also_propagates_approval(tmp_path: Path):
+    """Child bash tool calls must also be gated by the parent's approval callback."""
+    call_log: list[str] = []
+
+    async def approval_callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        call_log.append(tool_name)
+        return True, ""
+
+    spawn_json = json.dumps({"tool": "spawn_subagent", "args": {"task": "run echo"}})
+    bash_json = json.dumps({"tool": "bash", "args": {"command": f"echo child_bash > {tmp_path}/bash_out.txt"}})
+    finish_json = json.dumps({"tool": "finish", "args": {"summary": "bash child done", "goal_success": True}})
+
+    session_dir = str(tmp_path / "sessions")
+    manager = SessionManager.create(str(tmp_path), session_dir)
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 5, "timeoutSec": 5}})
+
+    agent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "bash", "finish"])
+    agent.providers = {"openai": _Provider([spawn_json, bash_json, finish_json])}
+    agent.approval_callback = approval_callback
+
+    await agent.prompt("go")
+
+    assert "bash" in call_log
+    assert (tmp_path / "bash_out.txt").read_text().strip() == "child_bash"
+
+
+@pytest.mark.asyncio
+async def test_parallel_children_approval_no_lost_requests(tmp_path: Path):
+    """Two subagents launched concurrently must each reach the parent's approval
+    gate for their mutating tools.  The shared callback is invoked once per child
+    mutation, and both mutations complete when approved — no deadlock, no lost
+    requests."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+    lock = asyncio.Lock()
+
+    async def approval_callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        # Yield briefly to maximise the window where both children can
+        # interleave their approval requests on the same callback instance.
+        await asyncio.sleep(0.02)
+        async with lock:
+            call_log.append((tool_name, dict(args)))
+        return True, ""
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 6, "timeoutSec": 5}})
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    session_dir = str(tmp_path / "sessions")
+    parent_mgr = SessionManager.create(str(tmp_path), session_dir)
+    parent = AgentSession(parent_mgr, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "write", "finish"])
+    parent.approval_callback = approval_callback
+
+    # Manually create two child sessions (the same mechanism _run_subagent
+    # uses internally) with their own providers and the parent's approval
+    # callback propagated.
+    child_a = AgentSession(
+        SessionManager(parent_mgr.cwd, parent_mgr.session_dir, None, True),
+        parent.settings_manager,
+        parent.model_registry,
+        parent.resource_loader,
+        model,
+        parent.thinking_level,
+        tools=["write", "finish"],
+        approval_callback=parent.approval_callback,
+    )
+    child_a.providers = {"openai": _Provider([
+        json.dumps({"tool": "write", "args": {"path": "child_a.txt", "content": "from child a"}}),
+        json.dumps({"tool": "finish", "args": {"summary": "child a done", "goal_success": True}}),
+    ])}
+
+    child_b = AgentSession(
+        SessionManager(parent_mgr.cwd, parent_mgr.session_dir, None, True),
+        parent.settings_manager,
+        parent.model_registry,
+        parent.resource_loader,
+        model,
+        parent.thinking_level,
+        tools=["write", "finish"],
+        approval_callback=parent.approval_callback,
+    )
+    child_b.providers = {"openai": _Provider([
+        json.dumps({"tool": "write", "args": {"path": "child_b.txt", "content": "from child b"}}),
+        json.dumps({"tool": "finish", "args": {"summary": "child b done", "goal_success": True}}),
+    ])}
+
+    # Launch both children concurrently — same pattern _run_subagent uses.
+    task_a = asyncio.create_task(child_a.prompt("write a file"))
+    task_b = asyncio.create_task(child_b.prompt("write another file"))
+    await asyncio.gather(task_a, task_b)
+
+    # The approval callback must have been invoked exactly twice (once per
+    # child's write tool), with distinct file paths.
+    assert len(call_log) == 2, f"Expected 2 approval calls, got {call_log}"
+    tools_called = [entry[0] for entry in call_log]
+    assert tools_called == ["write", "write"], f"Expected two 'write' calls, got {tools_called}"
+    paths = {entry[1]["path"] for entry in call_log}
+    assert paths == {"child_a.txt", "child_b.txt"}, f"Expected distinct paths, got {paths}"
+
+    # Both files must exist on disk — mutations were not lost.
+    content_a = (tmp_path / "child_a.txt").read_text(encoding="utf-8").strip()
+    content_b = (tmp_path / "child_b.txt").read_text(encoding="utf-8").strip()
+    assert "from child a" in content_a, f"child_a.txt has wrong content: {content_a}"
+    assert "from child b" in content_b, f"child_b.txt has wrong content: {content_b}"
+
+
+@pytest.mark.asyncio
+async def test_child_plan_tool_approval_in_cooperation(tmp_path: Path):
+    """When cooperation is enabled, child plan tool calls must also require approval."""
+    call_log: list[str] = []
+
+    async def approval_callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        call_log.append(tool_name)
+        return True, ""
+
+    spawn_json = json.dumps({"tool": "spawn_subagent", "args": {"task": "create a plan"}})
+    plan_json = json.dumps({"tool": "plan", "args": {"plan": "step 1"}})
+    finish_json = json.dumps({"tool": "finish", "args": {"summary": "planned", "goal_success": True}})
+
+    session_dir = str(tmp_path / "sessions")
+    manager = SessionManager.create(str(tmp_path), session_dir)
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 5, "timeoutSec": 5}})
+
+    agent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "plan", "finish"])
+    agent.providers = {"openai": _Provider([spawn_json, plan_json, finish_json])}
+    agent.approval_callback = approval_callback
+
+    await agent.prompt("go")
+
+    assert "plan" in call_log
