@@ -1556,7 +1556,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 11. **Low — extension hook contract mismatch:** assigning a replacement dict to `output["args"]` is documented but ignored.
 12. **Release blockers:** missing LICENSE, CI, SECURITY.md, CONTRIBUTING.md, CHANGELOG.md, complete package metadata, release installation docs, and supported-platform declaration.
 
-- [ ] **Task 30.1: preserve cooperation approval inside subagents**
+- [x] **Task 30.1: preserve cooperation approval inside subagents — DONE (`5aa720c`, 600-test suite)**
   - **Description:** Propagate the parent session's approval policy into every child `AgentSession`. A child with mutating tools must invoke the same approval callback for `bash`, `write`, `edit`, `plan`, and `apply_patch`. Ensure parallel subagents serialize or safely queue approval prompts instead of racing the TUI/interactive input. Decide explicitly whether spawning itself needs approval; the minimum invariant is that every child mutation is gated.
   - **Files:** `one/core/agent_session.py`, `one/modes/tui_mode.py`, `one/modes/interactive_mode.py`, `tests/test_subagents.py`, `tests/test_approval.py`
   - **Dependencies:** None
@@ -1567,8 +1567,9 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - Cooperation-off behavior remains autonomous.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_subagents.py tests/test_approval.py`
+  - **Delivered:** parent approval callback propagated to child sessions; approve/reject/autonomous/bash/plan/parallel regressions covered.
 
-- [ ] **Task 30.2: add secure and atomic persistence primitives**
+- [x] **Task 30.2: add secure and atomic persistence primitives — DONE (`c1292d6`, 600-test suite)**
   - **Description:** Introduce a shared persistence helper that creates the agent directory with mode `0700`, writes sensitive files through a same-directory temporary file plus `flush`/`fsync`/`os.replace`, and enforces mode `0600` on POSIX. Apply it to auth, settings, models, session rewrites/creation, and reports. Preserve append behavior safely for session/report JSONL and document Windows behavior. Do not silently discard malformed JSON; surface a recoverable configuration error and retain the corrupted file for diagnosis.
   - **Files:** `one/config.py`, `one/core/auth_storage.py`, `one/core/settings_manager.py`, `one/core/model_registry.py`, `one/core/session_manager.py`, `one/modes/run_mode.py`, `tests/test_auth_and_cli.py`, `tests/test_settings.py`, `tests/test_session_manager.py`, `tests/test_run_mode.py`, `tests/test_config_paths.py`
   - **Dependencies:** None
@@ -1581,8 +1582,9 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_auth_and_cli.py tests/test_settings.py tests/test_session_manager.py tests/test_run_mode.py tests/test_config_paths.py`
     - Manual POSIX check: create scratch `ONE_CODING_AGENT_DIR`, save auth/session data, and verify with `stat`.
+  - **Delivered:** shared atomic/private persistence helper; auth/settings/models/session/report integration; malformed-state locks and stderr warnings; legacy migration hardening; 54 focused persistence tests.
 
-- [ ] **Task 30.3: report bash timeouts as failed tool calls**
+- [x] **Task 30.3: report bash timeouts as failed tool calls — DONE (`461141b`, 600-test suite)**
   - **Description:** Give timeout a structured result or dedicated exception so `_run_tool_call` emits `ok:false`, a stable timeout error type/flag, the captured output, and the real exit status. Preserve the distinction between user abort (`aborted/cancelled`) and timeout. Ensure direct `/bash` and RPC callers expose the same semantics.
   - **Files:** `one/tools/bash.py`, `one/core/agent_session.py`, `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `tests/test_tools.py`, `tests/test_tool_calling.py`, `tests/test_event_snapshots.py`, `tests/test_rpc_mode.py`
   - **Dependencies:** None
@@ -1593,6 +1595,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - User abort still emits the existing abort contract.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_tools.py tests/test_tool_calling.py tests/test_event_snapshots.py tests/test_rpc_mode.py`
+  - **Delivered:** structured timeout/cancellation contract, `tool_call_end ok:false`, distinct abort semantics, direct CLI/TUI/RPC propagation, process cleanup and event regressions.
 
 - [ ] **Task 30.4: make credential removal complete and auth status accurate**
   - **Description:** Add one credential-removal operation that clears runtime API keys, stored API keys, and stored OAuth records for a provider. Route TUI, interactive, and RPC `/logout` through it. Make provider auth status include OAuth records. Unless a provider revocation endpoint is actually called, change user-facing language from “revoke” to “remove locally.”
@@ -1767,9 +1770,9 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 
 #### Phase 30 project acceptance criteria
 
-- [ ] No cooperation-enabled execution path lets a subagent mutate without approval.
-- [ ] Sensitive local state has restrictive permissions and resilient writes.
-- [ ] Bash timeout produces `ok:false`; abort and timeout remain distinct.
+- [x] No cooperation-enabled execution path lets a subagent mutate without approval.
+- [x] Sensitive local state has restrictive permissions and resilient writes.
+- [x] Bash timeout produces `ok:false`; abort and timeout remain distinct.
 - [ ] Logout removes runtime, stored API-key, and OAuth credentials locally.
 - [ ] RPC login validates before storage and refreshes models consistently.
 - [ ] `apply_patch` rejects collisions and restores state after apply failure.
