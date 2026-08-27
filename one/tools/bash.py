@@ -61,19 +61,27 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
         _kill_process_group(proc.pid)
         proc.kill()
         await asyncio.sleep(0.1)
+        exit_code = proc.returncode if proc.returncode is not None else -1
+        if exit_code == 0:
+            exit_code = -1
         return {
+            "ok": False,
             "output": output.decode("utf-8", errors="ignore"),
-            "exitCode": proc.returncode or -1,
+            "exitCode": exit_code,
+            "timedOut": False,
             "cancelled": True,
             "truncated": False,
             "fullscreen": False,
             "fullOutputPath": None,
             "content": [{"type": "text", "text": "(cancelled)"}],
             "details": None,
+            "error": "(cancelled)",
+            "errorType": "CancelledError",
         }
     except asyncio.TimeoutError:
         _kill_process_group(proc.pid)
         proc.kill()
+        timed_out = True
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=1)
             output += out or b""
@@ -81,6 +89,8 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
             # Avoid hanging forever on buggy shell/process states.
             pass
         output += b"\n\nCommand timed out"
+    else:
+        timed_out = False
 
     text = output.decode("utf-8", errors="ignore")
     trunc = truncate_tail(text)
@@ -104,9 +114,16 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
     if proc.returncode is not None and proc.returncode > 0:
         raise RuntimeError(shown + f"\n\nCommand exited with code {proc.returncode}")
 
+    # Ensure exitCode is never None or zero for timeout/cancel; use actual return code or fallback.
+    exit_code = proc.returncode
+    if timed_out and (exit_code is None or exit_code == 0):
+        exit_code = -1
+
     return {
+        "ok": not timed_out,
         "output": text,
-        "exitCode": proc.returncode,
+        "exitCode": exit_code,
+        "timedOut": timed_out,
         "cancelled": False,
         "truncated": trunc["truncated"],
         "fullscreen": fullscreen,
@@ -117,6 +134,8 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
             "fullscreen": fullscreen,
             "fullOutputPath": full_path,
         },
+        "error": "Command timed out" if timed_out else None,
+        "errorType": "TimeoutError" if timed_out else None,
     }
 
 

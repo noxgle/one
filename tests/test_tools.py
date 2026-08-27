@@ -142,6 +142,9 @@ def test_bash_tool_success(tmp_path: Path):
     result = asyncio.run(bash_tool(str(tmp_path), "echo hello"))
     assert "hello" in result["content"][0]["text"]
     assert result["exitCode"] == 0
+    assert result["ok"] is True
+    assert result["timedOut"] is False
+    assert result["cancelled"] is False
     assert result["truncated"] is False
 
 
@@ -226,6 +229,9 @@ async def test_execute_bash_default_timeout(tmp_path: Path):
     """execute_bash applies the configured tool timeout (default 30s) instead of hanging forever."""
     agent = _mk_agent(tmp_path, settings_override={"tools": {"maxSteps": 4, "timeoutSec": 2}})
     result = await agent.execute_bash("sleep 30")
+    assert result["ok"] is False
+    assert result["timedOut"] is True
+    assert result["errorType"] == "TimeoutError"
     assert result["exitCode"] != 0
     assert "timed out" in result["output"].lower()
     # The sleep process must be gone.
@@ -245,10 +251,15 @@ async def test_abort_kills_active_bash(tmp_path: Path):
     task = asyncio.create_task(agent.execute_bash("sleep 1000"))
     await asyncio.sleep(0.2)
     await agent.abort()
-    try:
-        await asyncio.wait_for(task, timeout=5)
-    except asyncio.CancelledError:
-        pass
+    # execute_bash must return the structured cancellation dict from bash_tool — do not silently pass on CancelledError.
+    result = await asyncio.wait_for(task, timeout=5)
+    assert isinstance(result, dict)
+    assert result.get("ok") is False
+    assert result.get("timedOut") is False
+    assert result.get("cancelled") is True
+    assert result.get("errorType") == "CancelledError"
+    exit_code = result.get("exitCode")
+    assert exit_code is not None and exit_code != 0
     proc = await asyncio.create_subprocess_shell(
         "pgrep -f '[s]leep 1000' || true",
         stdout=asyncio.subprocess.PIPE,
@@ -302,6 +313,18 @@ async def test_abort_kills_bash_running_via_tool_loop(tmp_path: Path):
     assert turn_end
     assert turn_end[-1]["aborted"] is True
     assert turn_end[-1]["reason"] == "abort"
+
+    # Bash tool_call_end: ok:false, aborted:true, result.cancelled:true, result.timedOut:false, no timeout classification
+    tool_call_ends = [e for e in events if e.get("type") == "tool_call_end"]
+    bash_end = next((e for e in tool_call_ends if e.get("tool") == "bash"), None)
+    assert bash_end is not None
+    assert bash_end["ok"] is False
+    assert bash_end.get("aborted") is True
+    result = bash_end["result"]
+    assert result["cancelled"] is True
+    assert result["timedOut"] is False
+    # No timeout classification: errorType must not be TimeoutError
+    assert result.get("errorType") != "TimeoutError"
 
 
 def test_bash_tool_fullscreen_flagged_and_hinted(tmp_path: Path):
@@ -443,3 +466,46 @@ def test_edit_edits_not_list_raises(tmp_path: Path):
     write_tool(str(tmp_path), "a.txt", "hello\n")
     with pytest.raises(ValueError, match="list"):
         edit_tool(str(tmp_path), "a.txt", {"oldString": "x", "newString": "y"})
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_timeout_exitCode_never_none_or_zero(tmp_path: Path):
+    """After kill/communicate the exitCode must be a negative return code or -1 fallback — never None or zero."""
+    from one.tools.bash import bash_tool
+
+    result = await bash_tool(str(tmp_path), "sleep 100", timeout=0.05)
+    assert result["ok"] is False
+    assert result["timedOut"] is True
+    assert result["errorType"] == "TimeoutError"
+    exit_code = result["exitCode"]
+    assert exit_code is not None, "timeout exitCode must never be None"
+    assert exit_code != 0, "timeout exitCode must never be zero"
+    assert isinstance(exit_code, int), "exitCode must be int"
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_cancel_returns_structured_result(tmp_path: Path):
+    """bash_tool catches CancelledError and returns structured result (not raising)."""
+    from one.tools.bash import bash_tool
+
+    async def run_with_cancel():
+        task = asyncio.create_task(bash_tool(str(tmp_path), "sleep 100"))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            return await task
+        except asyncio.CancelledError:
+            # If bash_tool re-raises, we catch here
+            return None
+
+    result = await run_with_cancel()
+    # bash_tool should catch CancelledError and return a structured dict
+    assert result is not None
+    assert isinstance(result, dict)
+    assert result.get("ok") is False
+    assert result.get("timedOut") is False
+    assert result.get("cancelled") is True
+    assert result.get("errorType") == "CancelledError"
+    exit_code = result.get("exitCode")
+    assert exit_code is not None
+    assert exit_code != 0

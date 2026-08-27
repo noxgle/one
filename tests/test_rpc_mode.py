@@ -307,3 +307,47 @@ async def test_rpc_get_pending_questions_empty(tmp_path: Path, monkeypatch: pyte
     r = _resp(responses, "get_pending_questions", "1")
     assert r["success"] is True
     assert r["data"]["questions"] == []
+
+
+@pytest.mark.asyncio
+async def test_rpc_bash_structured_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """RPC bash with structured timeout result: data.ok:false, timedOut:true, errorType:TimeoutError, nonzero exitCode."""
+    session = _mk_session(tmp_path)
+
+    # Monkeypatch execute_bash to return a structured timeout result
+    original_execute = session.execute_bash
+
+    async def fake_execute_bash(command):
+        return {
+            "ok": False,
+            "output": "some output\n\nCommand timed out",
+            "exitCode": -9,
+            "timedOut": True,
+            "cancelled": False,
+            "truncated": False,
+            "fullscreen": False,
+            "fullOutputPath": None,
+            "content": [{"type": "text", "text": "some output\n\nCommand timed out"}],
+            "details": {"truncation": None, "fullscreen": False, "fullOutputPath": None},
+            "error": "Command timed out",
+            "errorType": "TimeoutError",
+        }
+
+    monkeypatch.setattr(session, "execute_bash", fake_execute_bash)
+
+    responses = await _run_rpc(
+        monkeypatch,
+        capsys,
+        session,
+        [json.dumps({"type": "bash", "id": "b1", "command": "sleep 100"})],
+    )
+    r = _resp(responses, "bash", "b1")
+    # Transport envelope: command processed successfully (RPC itself succeeded)
+    assert r["success"] is True
+    data = r["data"]
+    # But the bash result itself carries structured timeout fields
+    assert data["ok"] is False
+    assert data["timedOut"] is True
+    assert data["errorType"] == "TimeoutError"
+    assert data["exitCode"] is not None and data["exitCode"] != 0
+    assert data["cancelled"] is False

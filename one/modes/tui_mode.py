@@ -1603,7 +1603,19 @@ if TEXTUAL_AVAILABLE:
                 try:
                     result = await session.execute_bash(command)
                     output = (result.get("output") or "").rstrip()
-                    if getattr(session.settings_manager, "get_bash_show_output", lambda: True)() and output:
+                    if result.get("timedOut") or result.get("cancelled"):
+                        # Avoid duplicating "Command timed out" if output already ends with it.
+                        error_msg = result.get("error", "(timeout)")
+                        if result.get("timedOut") and output.lower().endswith("command timed out"):
+                            self._write(f"[bash] {error_msg}", "warn")
+                            stripped = output[:-len("Command timed out")].rstrip()
+                            if stripped:
+                                self._write_tool_block(stripped)
+                        else:
+                            self._write(f"[bash] {error_msg}", "warn")
+                            if output:
+                                self._write_tool_block(output)
+                    elif getattr(session.settings_manager, "get_bash_show_output", lambda: True)() and output:
                         self._write_tool_block(output)
                     else:
                         self._write(f"[bash] exitCode={result.get('exitCode')}", "info")

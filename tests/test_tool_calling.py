@@ -179,6 +179,10 @@ async def test_tool_timeout_surfaces_error(tmp_path: Path):
     settings = SettingsManager.in_memory({"tools": {"maxSteps": 2, "timeoutSec": 1}})
     session = SessionManager.in_memory(str(tmp_path))
     agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["bash"])
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
     agent.providers = {
         "openai": _FakeProvider(
             [
@@ -192,7 +196,20 @@ async def test_tool_timeout_surfaces_error(tmp_path: Path):
     # Assistant finishes second step; tool result should carry timeout error.
     tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
     assert tool_results
-    assert "timeout" in tool_results[0]["content"].lower()
+    payload = json.loads(tool_results[0]["content"])
+    assert payload["ok"] is False
+    assert payload["timedOut"] is True
+    assert payload["errorType"] == "TimeoutError"
+    assert payload["exitCode"] is not None and payload["exitCode"] != 0
+    assert "timed out" in payload["error"].lower()
+
+    # Event assertions: tool_call_end for bash has ok:false, result.timedOut true, no aborted true
+    tool_call_ends = [e for e in events if e.get("type") == "tool_call_end"]
+    bash_end = next((e for e in tool_call_ends if e.get("tool") == "bash"), None)
+    assert bash_end is not None
+    assert bash_end["ok"] is False
+    assert bash_end["result"]["timedOut"] is True
+    assert bash_end.get("aborted") is not True  # timeout must NOT have aborted:true
 
 
 @pytest.mark.asyncio

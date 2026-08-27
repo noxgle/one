@@ -1113,7 +1113,17 @@ class InteractiveMode:
                 try:
                     result = await session.execute_bash(command)
                     output = (result.get("output") or "").rstrip()
-                    if getattr(session.settings_manager, "get_bash_show_output", lambda: True)() and output:
+                    if result.get("timedOut") or result.get("cancelled"):
+                        # Avoid duplicating "Command timed out" if output already ends with it.
+                        error_msg = result.get("error", "(timeout)")
+                        if result.get("timedOut") and output.lower().endswith("command timed out"):
+                            print(f"[bash] {error_msg}")
+                            print(output[:-len("Command timed out")].rstrip() if output[:-len("Command timed out")].rstrip() else "")
+                        else:
+                            print(f"[bash] {error_msg}")
+                            if output:
+                                print(output)
+                    elif getattr(session.settings_manager, "get_bash_show_output", lambda: True)() and output:
                         print(output)
                     else:
                         print(f"[bash] exitCode={result.get('exitCode')}")

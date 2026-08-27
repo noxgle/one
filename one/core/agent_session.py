@@ -499,6 +499,12 @@ class AgentSession:
             msg_payload["error"] = payload.get("error")
             if payload.get("errorType"):
                 msg_payload["errorType"] = payload.get("errorType")
+            if payload.get("timedOut") is True:
+                msg_payload["timedOut"] = True
+            if payload.get("cancelled") is True:
+                msg_payload["cancelled"] = True
+            if payload.get("exitCode") is not None:
+                msg_payload["exitCode"] = payload.get("exitCode")
         return msg_payload
 
     def _abort_assistant_message(self) -> dict[str, Any]:
@@ -657,25 +663,60 @@ class AgentSession:
         self._emit({"type": "tool_call_start", "tool": tool_name, "args": args})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)
-            text = ""
-            content = result.get("content")
-            if isinstance(content, list):
-                text = "".join(x.get("text", "") for x in content if isinstance(x, dict))
-            if not text:
-                text = str(result.get("output", ""))
-            payload = {
-                "ok": True,
-                "tool": tool_name,
-                "args": args,
-                "result": text,
-                "outputText": text,
-                "content": result.get("content"),
-                "details": result.get("details"),
-                "exitCode": result.get("exitCode"),
-                "truncated": result.get("truncated"),
-                "fullOutputPath": result.get("fullOutputPath"),
-                "rawResult": result,
-            }
+            if result.get("ok", True) is True:
+                text = ""
+                content = result.get("content")
+                if isinstance(content, list):
+                    text = "".join(x.get("text", "") for x in content if isinstance(x, dict))
+                if not text:
+                    text = str(result.get("output", ""))
+                payload: dict[str, Any] = {
+                    "ok": True,
+                    "tool": tool_name,
+                    "args": args,
+                    "result": text,
+                    "outputText": text,
+                    "content": result.get("content"),
+                    "details": result.get("details"),
+                    "exitCode": result.get("exitCode"),
+                    "truncated": result.get("truncated"),
+                    "fullOutputPath": result.get("fullOutputPath"),
+                    "rawResult": result,
+                }
+                # Only propagate timedOut/cancelled when the raw tool result actually has them.
+                if "timedOut" in result:
+                    payload["timedOut"] = result.get("timedOut", False)
+                if "cancelled" in result:
+                    payload["cancelled"] = result.get("cancelled", False)
+            else:
+                # Tool returned a structured failure (e.g. bash timeout/cancel).
+                text = ""
+                content = result.get("content")
+                if isinstance(content, list):
+                    text = "".join(x.get("text", "") for x in content if isinstance(x, dict))
+                if not text:
+                    text = str(result.get("output", ""))
+                payload = {
+                    "ok": False,
+                    "tool": tool_name,
+                    "args": args,
+                    "result": text,
+                    "outputText": text,
+                    "content": result.get("content"),
+                    "details": result.get("details"),
+                    "exitCode": result.get("exitCode"),
+                    "truncated": result.get("truncated"),
+                    "fullOutputPath": result.get("fullOutputPath"),
+                    "rawResult": result,
+                    "error": result.get("error"),
+                    "errorType": result.get("errorType"),
+                    "timedOut": result.get("timedOut", False),
+                    "cancelled": result.get("cancelled", False),
+                }
+                # When raw result has cancelled:True → set aborted:True on payload
+                # (timeout must have aborted absent/False to stay distinct).
+                if result.get("cancelled") is True:
+                    payload["aborted"] = True
         except asyncio.CancelledError:
             payload: dict[str, Any] = {
                 "ok": False,
