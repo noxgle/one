@@ -54,11 +54,13 @@ class _RuntimeHost:
         return {"cancelled": False, "selectedText": None}
 
 
-def _mk_session(tmp_path: Path) -> AgentSession:
+def _mk_session(tmp_path: Path, *, models_path: Path | None = None) -> AgentSession:
     auth = AuthStorage.in_memory()
     # NOTE: no runtime API key here — a runtime key would shadow stored keys
     # in get_provider_auth_status() and break login/logout assertions.
-    registry = ModelRegistry.create(auth)
+    # Always use an isolated tmp_path models file — never fall back to global config.
+    mp = models_path or (tmp_path / "models.json")
+    registry = ModelRegistry.create(auth, str(mp))
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
     settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
@@ -223,13 +225,18 @@ async def test_rpc_retry_settings_and_tool_approval(tmp_path: Path, monkeypatch:
 
 @pytest.mark.asyncio
 async def test_rpc_login_logout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
-    session = _mk_session(tmp_path)
+    """RPC login/logout using a fake adapter (no network, no unsafe direct storage)."""
+    adapter = _LoginStubAdapter(models=["m1"])
+    session = _mk_session_with_provider(tmp_path, "openai", adapter)
+    models_path = tmp_path / "models.json"
+    session.model_registry._models_path = models_path
+
     responses = await _run_rpc(
         monkeypatch,
         capsys,
         session,
         [
-            json.dumps({"type": "login", "id": "1", "provider": "openai", "apiKey": "k123"}),
+            json.dumps({"type": "login", "id": "1", "provider": "openai", "apiKey": "sk-ok"}),
             json.dumps({"type": "logout", "id": "2", "provider": "openai"}),
             json.dumps({"type": "login", "id": "3", "provider": "openai"}),
         ],
@@ -351,3 +358,346 @@ async def test_rpc_bash_structured_timeout(tmp_path: Path, monkeypatch: pytest.M
     assert data["errorType"] == "TimeoutError"
     assert data["exitCode"] is not None and data["exitCode"] != 0
     assert data["cancelled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 30.5: RPC login via validate_and_fetch
+# ---------------------------------------------------------------------------
+
+
+class _LoginStubAdapter:
+    """Fake adapter for RPC login tests: configurable list_models / chat behaviour."""
+
+    def __init__(
+        self,
+        models: list[str] | None = None,
+        detailed: list[dict[str, Any]] | None = None,
+        error: Exception | None = None,
+        chat_error: Exception | None = None,
+    ) -> None:
+        self.models = models
+        self.detailed = detailed
+        self.error = error
+        self.chat_error = chat_error
+        self.list_calls = 0
+        self.chat_calls: list[tuple[str, str, list[dict[str, Any]], int | None]] = []
+
+    async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
+        self.list_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.models
+
+    async def list_models_detailed(
+        self, api_key: str, headers: dict[str, str] | None = None
+    ) -> list[dict[str, Any]] | None:
+        self.list_calls += 1
+        if self.error is not None:
+            raise self.error
+        if self.detailed is not None:
+            return self.detailed
+        return [{"id": m, "contextWindow": None} for m in (self.models or [])]
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        on_delta=None,
+        max_tokens: int | None = None,
+    ):
+        self.chat_calls.append((api_key, model, messages, max_tokens))
+        if self.chat_error is not None:
+            raise self.chat_error
+        return None
+
+
+def _mk_session_with_provider(tmp_path: Path, provider: str, adapter: _LoginStubAdapter, *, models_path: Path | None = None) -> AgentSession:
+    """Create a session with the given provider pre-injected into session.providers."""
+    auth = AuthStorage.in_memory()
+    # Always use an isolated tmp_path models file — never fall back to None
+    # which would resolve real user config and potentially write it.
+    mp = models_path or (tmp_path / "models.json")
+    registry = ModelRegistry.create(auth, str(mp))
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session_manager = SessionManager.in_memory(str(tmp_path))
+    session = AgentSession(session_manager, settings, registry, _FakeLoader(str(tmp_path)), model, "medium")
+    session.providers[provider] = adapter
+    return session
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Known provider success: detailed entries with contextWindow registered/persisted; models.json verified; key stored; safe response schema."""
+    models_path = tmp_path / "models.json"
+    adapter = _LoginStubAdapter(
+        detailed=[
+            {"id": "nemotron-3-ultra", "contextWindow": 262_144},
+            {"id": "glm-5.2", "contextWindow": None},
+        ],
+    )
+    session = _mk_session_with_provider(tmp_path, "openai", adapter, models_path=models_path)
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openai", "apiKey": "sk-test-key"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is True
+    assert r["data"]["provider"] == "openai"
+    assert r["data"]["status"]["configured"] is True
+    # Safe response schema: no key/token leakage in parsed JSON
+    all_json = json.dumps(responses)
+    assert "apiKey" not in all_json
+    assert "sk-test-key" not in all_json
+    # Key stored
+    assert session.model_registry._auth.get_api_key("openai") == "sk-test-key"
+    # Models registered in-memory with context windows
+    m1 = session.model_registry.find("openai", "nemotron-3-ultra")
+    assert m1 is not None
+    assert m1.context_window == 262_144
+    m2 = session.model_registry.find("openai", "glm-5.2")
+    assert m2 is not None
+    assert m2.context_window is None
+    # Chat probe used first detailed model id
+    assert adapter.chat_calls[0][1] == "nemotron-3-ultra"
+    # models.json persisted correctly
+    persisted = json.loads(models_path.read_text(encoding="utf-8"))
+    entries = {e["id"]: e for e in persisted["providers"]["openai"]}
+    assert entries["nemotron-3-ultra"]["contextWindow"] == 262_144
+    # contextWindow=None means key absent (persist_models skips falsy values)
+    assert entries["glm-5.2"].get("contextWindow") is None
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_401_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Invalid 401: failure, no key/model persistence, models absent from registry and file."""
+    models_path = tmp_path / "models.json"
+    adapter = _LoginStubAdapter(
+        models=["custom-fail-1"],
+        chat_error=RuntimeError("openrouter API error 401: bad key"),
+    )
+    session = _mk_session_with_provider(tmp_path, "openrouter", adapter, models_path=models_path)
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openrouter", "apiKey": "sk-bad"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is False
+    assert "Authorization failed" in r["error"]
+    # Nothing persisted
+    assert session.model_registry._auth.get_api_key("openrouter") is None
+    # Attempted models absent from in-memory registry
+    assert session.model_registry.find("openrouter", "custom-fail-1") is None
+    # models.json file absent (never written on failure)
+    assert not models_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_403_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Invalid 403: failure, no key/model persistence, models absent from registry and file."""
+    models_path = tmp_path / "models.json"
+    adapter = _LoginStubAdapter(
+        error=RuntimeError("openrouter API error 403: forbidden"),
+    )
+    session = _mk_session_with_provider(tmp_path, "openrouter", adapter, models_path=models_path)
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openrouter", "apiKey": "sk-bad"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is False
+    assert "Authorization failed" in r["error"]
+    # Nothing persisted
+    assert session.model_registry._auth.get_api_key("openrouter") is None
+    # models.json file absent (never written on failure)
+    assert not models_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_validation_failure_after_model_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Generic chat validation failure after model list: failure, no key/model persistence, models absent from registry and file."""
+    models_path = tmp_path / "models.json"
+    adapter = _LoginStubAdapter(
+        models=["custom-fail-1"],
+        chat_error=RuntimeError("openrouter API error 500: boom"),
+    )
+    session = _mk_session_with_provider(tmp_path, "openrouter", adapter, models_path=models_path)
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openrouter", "apiKey": "sk-test"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is False
+    assert "Validation failed" in r["error"]
+    assert session.model_registry._auth.get_api_key("openrouter") is None
+    # Attempted models absent from in-memory registry
+    assert session.model_registry.find("openrouter", "custom-fail-1") is None
+    # models.json file absent (never written on failure)
+    assert not models_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_unknown_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Unknown provider: failure/no mutation."""
+    session = _mk_session(tmp_path)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "nonexistent", "apiKey": "sk-x"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is False
+    assert "unknown provider" in r["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_missing_key_for_auth_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Missing key for auth provider: failure."""
+    session = _mk_session(tmp_path)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openai"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is False
+    assert "apiKey is required" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_no_auth_provider_without_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """No-auth provider without apiKey: success, models fetched/registered/persisted, no stored apiKeys entry, models.json verified."""
+    models_path = tmp_path / "models.json"
+    adapter = _LoginStubAdapter(models=["local1", "local2"])
+    session = _mk_session_with_provider(tmp_path, "llama.cpp", adapter, models_path=models_path)
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "llama.cpp"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is True
+    assert r["data"]["provider"] == "llama.cpp"
+    # No apiKeys entry stored
+    assert session.model_registry._auth._data.get("apiKeys", {}).get("llama.cpp") is None
+    # Models registered
+    assert session.model_registry.find("llama.cpp", "local1") is not None
+    assert session.model_registry.find("llama.cpp", "local2") is not None
+    assert adapter.list_calls == 1
+    # No chat calls (no validation for no-auth providers)
+    assert adapter.chat_calls == []
+    # models.json persisted correctly
+    persisted = json.loads(models_path.read_text(encoding="utf-8"))
+    entries = {e["id"]: e for e in persisted["providers"]["llama.cpp"]}
+    assert "local1" in entries and "local2" in entries
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_reflected_secret_in_adapter_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Adapter exception containing the secret: parsed response JSON does not contain exact key/token; no double prefix."""
+    secret = "sk-secret-token-xyz-123"
+    adapter = _LoginStubAdapter(
+        models=["m1"],
+        chat_error=RuntimeError(f"openrouter API error 401: invalid key: {secret}"),
+    )
+    session = _mk_session_with_provider(tmp_path, "openrouter", adapter)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openrouter", "apiKey": secret})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is False
+    # Assert against parsed response JSON (meaningful — responses list contains raw JSON strings captured by _run_rpc)
+    r_json = json.dumps(responses)
+    assert secret not in r_json, f"secret leaked in RPC response: {r_json}"
+    # Stable error message preserved (no double prefix)
+    assert "Authorization failed" in r["error"]
+    assert r["error"].count("Authorization failed") == 1
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_no_auth_adapter_error_no_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """No-auth provider whose adapter raises during list_models: success but no models."""
+    adapter = _LoginStubAdapter(error=RuntimeError("connection refused"))
+    session = _mk_session_with_provider(tmp_path, "llama.cpp", adapter)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "llama.cpp"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is True  # no-auth: fetch error is a warning, not failure
+    # Status still shows configured (NO_AUTH is always "configured")
+    assert r["data"]["status"]["configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_400_probe_model_soft_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """400 on probe (e.g. reasoning_effort not supported): success with warning."""
+    adapter = _LoginStubAdapter(
+        models=["m1"],
+        chat_error=RuntimeError("openrouter API error 400: reasoning_effort not supported"),
+    )
+    session = _mk_session_with_provider(tmp_path, "openrouter", adapter)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openrouter", "apiKey": "sk-ok"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is True
+    assert r["data"]["provider"] == "openrouter"
+    # Key is stored even on soft-pass
+    assert session.model_registry._auth.get_api_key("openrouter") == "sk-ok"
+    assert "warning" in r["data"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_model_id_passed_to_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Explicit modelId passed to validation probe."""
+    adapter = _LoginStubAdapter(models=["m1"])
+    session = _mk_session_with_provider(tmp_path, "openai", adapter)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openai", "apiKey": "sk-x", "modelId": "custom-model"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is True
+    # Chat probe used the explicit model_id
+    assert adapter.chat_calls[0][1] == "custom-model"
+
+
+@pytest.mark.asyncio
+async def test_rpc_login_preserves_pre_existing_auth_and_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """Unrelated pre-existing auth/models remain intact after login."""
+    models_path = tmp_path / "models.json"
+    models_path.write_text(
+        json.dumps({"providers": {"anthropic": [{"id": "claude-3", "reasoning": True}]}}),
+        encoding="utf-8",
+    )
+    auth = AuthStorage.in_memory()
+    auth.set_stored_api_key("anthropic", "sk-anthropic-key")
+    registry = ModelRegistry.create(auth, str(models_path))
+    adapter = _LoginStubAdapter(models=["new1", "new2"])
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session_manager = SessionManager.in_memory(str(tmp_path))
+    session = AgentSession(session_manager, settings, registry, _FakeLoader(str(tmp_path)), model, "medium")
+    session.providers["openai"] = adapter
+    session.providers["anthropic"] = _LoginStubAdapter()
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "login", "id": "1", "provider": "openai", "apiKey": "sk-open"})],
+    )
+    r = _resp(responses, "login", "1")
+    assert r["success"] is True
+    # Anthropic auth preserved
+    assert session.model_registry._auth.get_api_key("anthropic") == "sk-anthropic-key"
+    # Anthropic model still there
+    assert session.model_registry.find("anthropic", "claude-3") is not None

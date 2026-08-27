@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import webbrowser
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -8,6 +9,89 @@ from one.core.oauth import (
     OAUTH_FLOWS,
     run_login,
 )
+
+
+# ---------------------------------------------------------------------------
+# Credential sanitizer
+# ---------------------------------------------------------------------------
+# Sanitizer for exception-derived login messages.  Must be applied *before*
+# any message is returned or raised so that no caller leaks secrets.
+#
+# Strategy (ordered — earlier patterns match first):
+#   1. Remove the exact submitted secret (full substring).
+#   2. Redact Bearer/Basic authorization header values.
+#   3. Redact common credential query parameters (key, api_key, access,
+#      access_token, refresh, refresh_token, id_token, apiKey, client_secret,
+#      token).
+#   4. Redact common credential tokens in JSON-ish / dict-ish fragments
+#      (both double-quoted JSON and single-quoted Python-dict style).
+# Preserves useful HTTP status codes and reason text.
+
+
+def _redact_credentials(message: str | None, *secrets: str) -> str:
+    """Return *message* with every secret value redacted from credential contexts.
+
+    Steps (applied in order):
+      1. Exact substring replacement of each secret (full redaction).
+      2. Bearer / Basic authorization header value redaction.
+      3. Query-parameter value redaction (key=, api_key=, access=, access_token=,
+         refresh=, refresh_token=, id_token=, apiKey=, client_secret=, token=, …).
+      4. JSON-ish / dict-ish token value redaction in common credential fields
+         (double-quoted JSON + single-quoted Python-dict style).
+
+    If no secrets are provided only the structured redaction rules (2-4)
+    are applied — useful for general sanitization of adapter errors.
+    """
+    if not message:
+        return ""
+
+    text = message
+
+    # 1. Exact secret removal — always redacts the raw secret anywhere.
+    for secret in secrets:
+        if secret and secret in text:
+            text = text.replace(secret, "<REDACTED>")
+
+    # 2. Bearer / Basic header value redaction.
+    text = re.sub(
+        r'(Bearer\s+)[^\s,"\']+',
+        r'\1<REDACTED>',
+        text,
+    )
+    text = re.sub(
+        r'(Basic\s+)[^\s,"\']+',
+        r'\1<REDACTED>',
+        text,
+    )
+
+    # 3. Query-param credential redaction — comprehensive key names.
+    text = re.sub(
+        r'((?:key|api_key|access|access_token|refresh|refresh_token|'
+        r'id_token|apiKey|client_secret|token)\s*=\s*)[^\s"&]+',
+        r'\1<REDACTED>',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 4a. JSON-ish token value redaction (double-quoted keys/values).
+    text = re.sub(
+        r'("(?:access|access_token|refresh|refresh_token|id_token|'
+        r'apiKey|api_key|client_secret|token)"\s*:\s*")([^\"]+)(")',
+        r'\g<1><REDACTED>\3',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 4b. Single-quoted Python-dict-like redaction (same fields).
+    text = re.sub(
+        r"('(?:access|access_token|refresh|refresh_token|id_token|"
+        r"apiKey|api_key|client_secret|token)'\s*:\s*')([^']+)'",
+        r"\g<1><REDACTED>'",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    return text
 
 
 def _entry_ids(entries: list[dict[str, Any]] | None) -> list[str] | None:
@@ -81,7 +165,7 @@ async def validate_and_fetch(
         except NotImplementedError:
             return True, None, None
         except Exception as e:  # noqa: BLE001 - surfaced to the user
-            return True, f"could not fetch models: {e}", None
+            return True, _redact_credentials(f"could not fetch models: {e}"), None
 
     # Key given: fetch the model list first (may be public; does not prove auth).
     try:
@@ -89,7 +173,7 @@ async def validate_and_fetch(
     except NotImplementedError:
         models = None  # no list endpoint (e.g. Anthropic); chat validation below
     except Exception as e:  # noqa: BLE001 - surfaced to the user
-        msg = str(e)
+        msg = _redact_credentials(str(e), api_key)
         if "401" in msg or "403" in msg:
             return False, f"Authorization failed: {msg}", None
         return True, f"could not fetch models: {msg}", None
@@ -101,7 +185,7 @@ async def validate_and_fetch(
         try:
             await adapter.chat(api_key, chat_model, [{"role": "user", "content": "ping"}], "off", max_tokens=1, headers=headers)
         except Exception as e:  # noqa: BLE001 - surfaced to the user
-            msg = str(e)
+            msg = _redact_credentials(str(e), api_key)
             if "401" in msg or "403" in msg:
                 return False, f"Authorization failed: {msg}", None
             if "402" in msg:

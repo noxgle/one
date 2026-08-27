@@ -5,6 +5,8 @@ import json
 import uuid
 from typing import Any
 
+from one.core.provider_login import _redact_credentials, validate_and_fetch
+
 from .rpc_types import RpcResponse
 
 
@@ -257,19 +259,52 @@ async def run_rpc_mode(runtime_host: Any) -> None:
             elif ctype == "login":
                 provider = (cmd.get("provider") or "").strip()
                 api_key = cmd.get("apiKey") or ""
+                model_id = cmd.get("modelId") or cmd.get("model") or ""
                 if not provider:
                     output(error(cid, ctype, "provider is required"))
-                elif not api_key:
+                elif session.providers.get(provider) is None:
+                    output(error(cid, ctype, f"unknown provider: {provider}"))
+                elif session.model_registry.requires_api_key(provider) and not api_key:
                     output(error(cid, ctype, "apiKey is required"))
                 else:
-                    session.model_registry.set_stored_api_key(provider, api_key)
-                    output(
-                        success(
-                            cid,
-                            ctype,
-                            {"provider": provider, "status": session.model_registry.get_provider_auth_status(provider)},
+                    # Phase 30.5: validate BEFORE storing, then register/persist models.
+                    adapter = session.providers[provider]
+                    try:
+                        ok, error_msg, fetched = await validate_and_fetch(
+                            adapter, api_key, provider, model_id or None,
                         )
-                    )
+                    except Exception as exc:  # noqa: BLE001 - sanitize the raw exception
+                        output(error(cid, ctype, _redact_credentials(str(exc), api_key)))
+                        continue
+                    if not ok:
+                        # error_msg already classified by validate_and_fetch
+                        # (e.g. "Authorization failed: …", "Validation failed: …");
+                        # do NOT prepend another prefix — preserve the stable message.
+                        output(error(cid, ctype, error_msg or "Authorization failed"))
+                        continue
+                    # Register + persist models on success (sanitize if persist raises).
+                    if fetched:
+                        try:
+                            session.model_registry.register_models(provider, fetched)
+                            session.model_registry.persist_models(provider, fetched)
+                        except Exception as exc:  # noqa: BLE001
+                            output(error(cid, ctype, _redact_credentials(str(exc), api_key)))
+                            continue
+                    # Store the key only after validation succeeds.
+                    if api_key:
+                        try:
+                            session.model_registry.set_stored_api_key(provider, api_key)
+                        except Exception as exc:  # noqa: BLE001
+                            output(error(cid, ctype, _redact_credentials(str(exc), api_key)))
+                            continue
+                    # Success response: never echo keys/tokens.
+                    resp_data: dict[str, Any] = {
+                        "provider": provider,
+                        "status": session.model_registry.get_provider_auth_status(provider),
+                    }
+                    if error_msg:
+                        resp_data["warning"] = error_msg
+                    output(success(cid, ctype, resp_data))
             elif ctype == "logout":
                 provider = (cmd.get("provider") or "").strip()
                 if not provider:

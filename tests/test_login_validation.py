@@ -539,3 +539,121 @@ def test_register_and_persist_carry_context_window(tmp_path: Path):
     reg2.register_models("ollama-cloud", [{"id": "no-window", "contextWindow": 131_072}])
     enriched = reg2.find("ollama-cloud", "no-window")
     assert enriched is not None and enriched.context_window == 131_072
+
+
+# ---------------------------------------------------------------------------
+# Phase 30.5: credential sanitizer
+# ---------------------------------------------------------------------------
+
+
+def test_redact_credentials_exact_secret():
+    from one.core.provider_login import _redact_credentials
+
+    secret = "sk-secret-123"
+    msg = f"API error: key={secret} is invalid"
+    result = _redact_credentials(msg, secret)
+    assert secret not in result
+    assert "<REDACTED>" in result
+    assert "API error" in result
+    assert "is invalid" in result
+
+
+def test_redact_credentials_bearer_token():
+    from one.core.provider_login import _redact_credentials
+
+    msg = "error with Bearer sk-bearer-token-xyz in header"
+    result = _redact_credentials(msg)
+    assert "sk-bearer-token-xyz" not in result
+    assert "<REDACTED>" in result
+    assert "Bearer" in result
+
+
+def test_redact_credentials_query_params():
+    from one.core.provider_login import _redact_credentials
+
+    msg = "GET /v1/models?key=sk-query-key-abc HTTP/1.1"
+    result = _redact_credentials(msg)
+    assert "sk-query-key-abc" not in result
+    assert "<REDACTED>" in result
+
+
+def test_redact_credentials_json_tokens():
+    from one.core.provider_login import _redact_credentials
+
+    msg = '{"access_token": "tok-abc-123", "refresh_token": "rt-xyz"}'
+    result = _redact_credentials(msg)
+    assert "tok-abc-123" not in result
+    assert "rt-xyz" not in result
+    assert "access_token" in result
+    assert "refresh_token" in result
+
+
+def test_redact_credentials_preserves_http_status():
+    from one.core.provider_login import _redact_credentials
+
+    secret = "sk-401-err"
+    msg = "openrouter API error 401: bad key: sk-401-err"
+    result = _redact_credentials(msg, secret)
+    assert "401" in result
+    assert "bad key" in result
+    assert "openrouter API error" in result
+    assert secret not in result
+
+
+def test_redact_credentials_empty_no_crash():
+    from one.core.provider_login import _redact_credentials
+
+    assert _redact_credentials("") == ""
+    assert _redact_credentials("safe text") == "safe text"
+
+
+def test_redact_credentials_normalized_access_query_param():
+    from one.core.provider_login import _redact_credentials
+
+    msg = "GET /v1/models?access=tok-access-xyz HTTP/1.1"
+    result = _redact_credentials(msg)
+    assert "tok-access-xyz" not in result
+    assert "<REDACTED>" in result
+
+
+def test_redact_credentials_normalized_refresh_query_param():
+    from one.core.provider_login import _redact_credentials
+
+    msg = "GET /v1/models?refresh=rt-refresh-abc HTTP/1.1"
+    result = _redact_credentials(msg)
+    assert "rt-refresh-abc" not in result
+    assert "<REDACTED>" in result
+
+
+def test_redact_credentials_client_secret_query_param():
+    from one.core.provider_login import _redact_credentials
+
+    msg = "GET /v1/token?client_secret=cs-secret-123 HTTP/1.1"
+    result = _redact_credentials(msg)
+    assert "cs-secret-123" not in result
+    assert "<REDACTED>" in result
+
+
+def test_redact_credentials_json_normalized_access_refresh_client_secret():
+    from one.core.provider_login import _redact_credentials
+
+    msg = '{"access": "tok-access-xyz", "refresh": "rt-refresh-abc", "client_secret": "cs-secret-123"}'
+    result = _redact_credentials(msg)
+    assert "tok-access-xyz" not in result
+    assert "rt-refresh-abc" not in result
+    assert "cs-secret-123" not in result
+    assert "access" in result
+    assert "refresh" in result
+    assert "client_secret" in result
+
+
+def test_redact_credentials_single_quoted_dict_like():
+    from one.core.provider_login import _redact_credentials
+
+    msg = "{'access_token': 'tok-single-abc', 'refresh': 'rt-single-xyz'}"
+    result = _redact_credentials(msg)
+    assert "tok-single-abc" not in result
+    assert "rt-single-xyz" not in result
+    assert "access_token" in result
+    assert "refresh" in result
+    assert "<REDACTED>" in result
