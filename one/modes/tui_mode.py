@@ -1359,8 +1359,8 @@ if TEXTUAL_AVAILABLE:
                 if not provider:
                     self._write("Usage: /logout <provider>", "error")
                     return
-                session.model_registry.remove_stored_api_key(provider)
-                self._write(f"Removed stored key for {provider}.", "info")
+                session.model_registry.remove_provider_credentials(provider)
+                self._write(f"Removed credentials for {provider} locally.", "info")
                 return
             if cmd.startswith("/retry "):
                 mode = cmd[len("/retry ") :].strip().lower()

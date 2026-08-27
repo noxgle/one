@@ -99,6 +99,61 @@ class AuthStorage:
             del records[provider]
             self._save()
 
+    # --- Complete credential removal (Phase 30.4) ---
+
+    def remove_provider_credentials(self, provider: str) -> None:
+        """Remove ALL one-managed credentials for *provider* (runtime, stored, OAuth).
+
+        Calls ``_require_writable()`` first so a malformed/locked auth file raises
+        ``RuntimeError`` instead of silently clearing in-memory state and reporting
+        a misleading "successful" partial logout.
+
+        Validates BOTH ``apiKeys`` and ``oauth`` containers are dicts (or absent)
+        BEFORE any mutation — this prevents partial logout when either container is
+        malformed (e.g. valid ``apiKeys`` but invalid ``oauth``).  Only after all
+        preflight validation succeeds does the method remove the runtime key,
+        persisted records, and save at most once when disk data actually changed.
+
+        Unrelated providers are preserved; empty valid maps are pruned.
+        """
+        # Enforce writability before touching anything.
+        self._require_writable()
+
+        # ── Preflight: validate BOTH containers BEFORE any mutation ─────────
+        api_keys = self._data.get("apiKeys")
+        if api_keys is not None and not isinstance(api_keys, dict):
+            raise RuntimeError(
+                f"auth.json apiKeys is not a dict (got {type(api_keys).__name__}); "
+                "repair the file before removing credentials"
+            )
+        oauth = self._data.get("oauth")
+        if oauth is not None and not isinstance(oauth, dict):
+            raise RuntimeError(
+                f"auth.json oauth is not a dict (got {type(oauth).__name__}); "
+                "repair the file before removing credentials"
+            )
+
+        # ── Mutation: runtime key ─────────
+        self._runtime.pop(provider, None)
+
+        # ── Mutation: persisted containers ─────────
+        disk_changed = False
+
+        if api_keys is not None and provider in api_keys:
+            del api_keys[provider]
+            if not api_keys:
+                del self._data["apiKeys"]
+            disk_changed = True
+
+        if oauth is not None and provider in oauth:
+            del oauth[provider]
+            if not oauth:
+                del self._data["oauth"]
+            disk_changed = True
+
+        if disk_changed:
+            self._save()
+
     def _save(self) -> None:
         if self._path is None:
             return

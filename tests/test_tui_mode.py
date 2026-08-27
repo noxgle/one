@@ -883,7 +883,7 @@ async def test_tui_command_logout_and_cooperation(tmp_path: Path):
         await _submit(app, pilot, "/login openai sk-test")
         await _submit(app, pilot, "/logout openai")
         stream = "\n".join(app._stream_lines)
-        assert "Removed stored key for openai." in stream
+        assert "Removed credentials for openai locally." in stream
         keys = session.model_registry._auth._data.get("apiKeys", {})
         assert "openai" not in keys
 

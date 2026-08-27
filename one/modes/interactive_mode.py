@@ -944,8 +944,8 @@ class InteractiveMode:
                 if not provider:
                     print("Usage: /logout <provider>")
                     continue
-                session.model_registry.remove_stored_api_key(provider)
-                print(f"Removed stored key for {provider}.")
+                session.model_registry.remove_provider_credentials(provider)
+                print(f"Removed credentials for {provider} locally.")
                 continue
             if line.startswith("/retry "):
                 mode = line[len("/retry ") :].strip().lower()

@@ -178,13 +178,34 @@ class ModelRegistry:
             )
         return None
 
+    # --- Auth predicate (shared by has_configured_auth and get_provider_auth_status) ---
+
+    @staticmethod
+    def _has_usable_auth(auth: AuthStorage, provider: str) -> bool:
+        """Return True when the provider has usable auth: a real API key or a
+        structurally valid OAuth record.  Environment keys count; they cannot
+        be removed by logout (they are runtime-supplied, not one-managed).
+
+        An OAuth record is "usable" when it is a dict with type==oauth and a
+        non-empty access token.
+        """
+        if provider in NO_AUTH_PROVIDERS:
+            return True
+        # OAuth record takes precedence — a valid record means configured.
+        record = auth.get_oauth_record(provider)
+        if record and isinstance(record, dict):
+            if record.get("type") == "oauth":
+                acc = record.get("access")
+                if isinstance(acc, str) and acc.strip():
+                    return True
+        # Fallback to API key (runtime > stored > env); must not be a placeholder.
+        if not _is_placeholder_key(auth.get_api_key(provider)):
+            return True
+        return False
+
     def has_configured_auth(self, model: ModelInfo) -> bool:
-        if model.provider in NO_AUTH_PROVIDERS:
-            return True
-        if self._auth.get_oauth_record(model.provider):
-            # Subscription OAuth login (Phase 18) counts as configured auth.
-            return True
-        return not _is_placeholder_key(self._auth.get_api_key(model.provider))
+        """Delegate to the shared predicate — NO_AUTH is handled inside."""
+        return self._has_usable_auth(self._auth, model.provider)
 
     def get_available(self) -> list[ModelInfo]:
         return [m for m in self._models if self.has_configured_auth(m)]
@@ -349,6 +370,10 @@ class ModelRegistry:
     def remove_stored_api_key(self, provider: str) -> None:
         self._auth.remove_stored_api_key(provider)
 
+    def remove_provider_credentials(self, provider: str) -> None:
+        """Delegate complete credential removal to auth storage (Phase 30.4)."""
+        self._auth.remove_provider_credentials(provider)
+
     def requires_api_key(self, provider: str) -> bool:
         return provider not in NO_AUTH_PROVIDERS
 
@@ -356,7 +381,7 @@ class ModelRegistry:
         return {
             "provider": provider,
             "requiresApiKey": self.requires_api_key(provider),
-            "configured": bool(self._auth.get_api_key(provider)),
+            "configured": self._has_usable_auth(self._auth, provider),
             "envVar": self._auth.env_var_for_provider(provider),
         }
 

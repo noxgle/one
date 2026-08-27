@@ -275,7 +275,7 @@ async def run_rpc_mode(runtime_host: Any) -> None:
                 if not provider:
                     output(error(cid, ctype, "provider is required"))
                 else:
-                    session.model_registry.remove_stored_api_key(provider)
+                    session.model_registry.remove_provider_credentials(provider)
                     output(
                         success(
                             cid,

@@ -142,6 +142,11 @@ class _DummyModelRegistry:
     def remove_stored_api_key(self, provider: str) -> None:
         self.stored_keys.pop(provider, None)
 
+    def remove_provider_credentials(self, provider: str) -> None:
+        """Phase 30.4: clear runtime and stored credentials for a provider."""
+        # runtime keys are stored in self.stored_keys (mimics _runtime)
+        self.stored_keys.pop(provider, None)
+
     def requires_api_key(self, provider: str) -> bool:
         return provider != "llama.cpp"
 
@@ -361,7 +366,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert "Queued follow-up message." in out
     assert "Stored key for openai." in out
     assert '"provider": "openai"' in out
-    assert "Removed stored key for openai." in out
+    assert "Removed credentials for openai locally." in out
     assert "Auto-retry set to off." in out
     assert "Updated tools.maxSteps." in out
     assert "ran:echo hi" in out
