@@ -1522,6 +1522,265 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 
 **Confidence:** Medium-High (flows verified against multiple independent implementations; but undocumented → breakage risk)
 
+### Phase 30: public GitHub release readiness and security hardening — PENDING
+
+**Objective:** Close the security, correctness, packaging, and documentation blockers found during the milestone code review so the repository can be published safely on GitHub.
+
+**Prerequisites:** Phases 1–29 complete; Phase 29 commits `cc56276` and `3a7834b`; user decisions recorded below.
+
+**Expected outcome:** Cooperation mode cannot be bypassed, sensitive local state is protected, mutating tools report failures correctly, authentication behavior is consistent, release artifacts install cleanly, OAuth/Codex is explicitly experimental opt-in, and the public repository has a license, CI, security policy, and accurate documentation.
+
+**Estimated effort:** 4–7 implementation sessions plus CI/platform follow-up.
+
+**Confidence:** Medium — source-level root causes are identified, but transactional patching, platform permissions, workspace trust, and undocumented OAuth APIs require careful regression testing.
+
+#### Confirmed decisions
+
+- **License:** MIT.
+- **Workspace trust:** keep automatic loading of project `.one/extensions` and `.one/settings.json` MCP configuration. This is an explicitly accepted risk; documentation must warn that `one` must only be started in trusted repositories and show the safe command `one --no-extensions --no-mcp`.
+- **OAuth/Codex:** retain subscription OAuth and the Codex backend only as an experimental, explicit opt-in; disable them by default.
+- **Release target:** public GitHub repository first; prepare packaging metadata and clean-install checks so PyPI publishing can follow without redesign.
+
+#### Review findings
+
+1. **Critical — untrusted workspace code execution:** project `.one/extensions/*.py` is imported and project MCP commands are started before the first prompt (`one/resources/resource_loader.py`, `one/resources/extension_runtime.py`, `one/core/settings_manager.py`, `one/cli/main.py`, `one/mcp/client.py`). Auto-load remains by user decision, so this must be treated as a documented trust boundary.
+2. **Critical — cooperation bypass:** subagents inherit mutating tools but not the parent's `approval_callback` (`one/core/agent_session.py`).
+3. **High — local secrets/privacy:** auth, settings, sessions, reports, and model state use ordinary writes without enforced private modes or atomic replacement.
+4. **High — `apply_patch` is not all-or-nothing:** Add may overwrite an existing path; multi-file and move failures can leave partial mutations.
+5. **High — bash timeout is reported as success:** `bash_tool` returns normally after timeout and `_run_tool_call` emits `ok: true`.
+6. **High — logout is incomplete:** stored OAuth and runtime credentials survive `/logout`; README incorrectly says tokens are revoked.
+7. **Medium — thinking history remains wrong within one turn:** a second reasoning segment after a tool updates the pre-tool block because state resets only at `turn_start`/`turn_end`.
+8. **Medium — reasoning spacing heuristic may corrupt punctuation/subwords:** the OpenAI-compatible adapter prepends spaces to every later whitespace-free reasoning delta.
+9. **Medium — RPC login skips validation/model refresh:** unlike TUI/interactive login, it stores the key directly.
+10. **Medium — SDK `agentDir` isolation is incomplete:** default auth, model, and session managers still resolve global paths.
+11. **Low — extension hook contract mismatch:** assigning a replacement dict to `output["args"]` is documented but ignored.
+12. **Release blockers:** missing LICENSE, CI, SECURITY.md, CONTRIBUTING.md, CHANGELOG.md, complete package metadata, release installation docs, and supported-platform declaration.
+
+- [ ] **Task 30.1: preserve cooperation approval inside subagents**
+  - **Description:** Propagate the parent session's approval policy into every child `AgentSession`. A child with mutating tools must invoke the same approval callback for `bash`, `write`, `edit`, `plan`, and `apply_patch`. Ensure parallel subagents serialize or safely queue approval prompts instead of racing the TUI/interactive input. Decide explicitly whether spawning itself needs approval; the minimum invariant is that every child mutation is gated.
+  - **Files:** `one/core/agent_session.py`, `one/modes/tui_mode.py`, `one/modes/interactive_mode.py`, `tests/test_subagents.py`, `tests/test_approval.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - A cooperation-enabled parent cannot cause a child to execute any configured mutating tool without approval.
+    - Rejection produces the existing `tool_approval_rejected`/`tool_call_end ok:false` contract in the child.
+    - Parallel child approval requests do not overwrite or deadlock each other.
+    - Cooperation-off behavior remains autonomous.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_subagents.py tests/test_approval.py`
+
+- [ ] **Task 30.2: add secure and atomic persistence primitives**
+  - **Description:** Introduce a shared persistence helper that creates the agent directory with mode `0700`, writes sensitive files through a same-directory temporary file plus `flush`/`fsync`/`os.replace`, and enforces mode `0600` on POSIX. Apply it to auth, settings, models, session rewrites/creation, and reports. Preserve append behavior safely for session/report JSONL and document Windows behavior. Do not silently discard malformed JSON; surface a recoverable configuration error and retain the corrupted file for diagnosis.
+  - **Files:** `one/config.py`, `one/core/auth_storage.py`, `one/core/settings_manager.py`, `one/core/model_registry.py`, `one/core/session_manager.py`, `one/modes/run_mode.py`, `tests/test_auth_and_cli.py`, `tests/test_settings.py`, `tests/test_session_manager.py`, `tests/test_run_mode.py`, `tests/test_config_paths.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - New POSIX agent directories are `0700`; credential/config/session/report files are `0600`.
+    - Replacing a JSON file is atomic and interruption cannot expose a truncated destination.
+    - Existing overly broad modes are tightened on the next successful load/save.
+    - Windows remains functional without relying on POSIX chmod semantics.
+    - Corrupt JSON is reported rather than silently treated as empty state.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_auth_and_cli.py tests/test_settings.py tests/test_session_manager.py tests/test_run_mode.py tests/test_config_paths.py`
+    - Manual POSIX check: create scratch `ONE_CODING_AGENT_DIR`, save auth/session data, and verify with `stat`.
+
+- [ ] **Task 30.3: report bash timeouts as failed tool calls**
+  - **Description:** Give timeout a structured result or dedicated exception so `_run_tool_call` emits `ok:false`, a stable timeout error type/flag, the captured output, and the real exit status. Preserve the distinction between user abort (`aborted/cancelled`) and timeout. Ensure direct `/bash` and RPC callers expose the same semantics.
+  - **Files:** `one/tools/bash.py`, `one/core/agent_session.py`, `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `tests/test_tools.py`, `tests/test_tool_calling.py`, `tests/test_event_snapshots.py`, `tests/test_rpc_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - Timed-out bash calls emit `tool_call_end ok:false` and contain `Command timed out`.
+    - Timeout is not reported as cancellation or successful exit code zero.
+    - Explicit model timeout and configured default timeout remain honored.
+    - User abort still emits the existing abort contract.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_tools.py tests/test_tool_calling.py tests/test_event_snapshots.py tests/test_rpc_mode.py`
+
+- [ ] **Task 30.4: make credential removal complete and auth status accurate**
+  - **Description:** Add one credential-removal operation that clears runtime API keys, stored API keys, and stored OAuth records for a provider. Route TUI, interactive, and RPC `/logout` through it. Make provider auth status include OAuth records. Unless a provider revocation endpoint is actually called, change user-facing language from “revoke” to “remove locally.”
+  - **Files:** `one/core/auth_storage.py`, `one/core/model_registry.py`, `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `README.md`, `tests/test_auth_and_cli.py`, `tests/test_oauth.py`, `tests/test_interactive_mode.py`, `tests/test_tui_mode.py`, `tests/test_rpc_mode.py`, `tests/test_rpc_snapshots.py`
+  - **Dependencies:** Task 30.2
+  - **Acceptance Criteria:**
+    - `/logout chatgpt` and `/logout anthropic` remove OAuth access/refresh records and any API/runtime key.
+    - `get_provider_auth_status().configured` reflects either valid OAuth or API-key configuration.
+    - Restarting after logout does not reactivate the provider.
+    - Documentation does not claim server-side revocation unless implemented and verified.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_auth_and_cli.py tests/test_oauth.py tests/test_interactive_mode.py tests/test_tui_mode.py tests/test_rpc_mode.py tests/test_rpc_snapshots.py`
+
+- [ ] **Task 30.5: align RPC login with validated login flow**
+  - **Description:** Make RPC login asynchronous and route it through the same `validate_and_fetch` orchestration used by TUI/interactive modes. Reject unknown providers and invalid keys before persistence; fetch/register/persist models on success; support the same no-auth provider behavior where applicable. Return structured RPC errors without leaking credentials.
+  - **Files:** `one/modes/rpc_mode.py`, `one/core/provider_login.py`, `one/core/model_registry.py`, `tests/test_rpc_mode.py`, `tests/test_rpc_snapshots.py`, `tests/test_login_validation.py`
+  - **Dependencies:** Task 30.4
+  - **Acceptance Criteria:**
+    - Invalid RPC credentials are never written.
+    - Successful RPC login refreshes the model registry consistently with other modes.
+    - RPC responses never echo API keys or OAuth tokens.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_rpc_mode.py tests/test_rpc_snapshots.py tests/test_login_validation.py`
+
+- [ ] **Task 30.6: make `apply_patch` collision-safe and rollback-safe**
+  - **Description:** Expand preflight validation to every source and destination: reject Add when the target exists, reject conflicting duplicate operations, reject move destination collisions unless explicitly defined, validate parent paths/symlinks, and calculate all final contents before writes. Stage changed files in the same filesystem and implement rollback for multi-file writes/deletes/moves if any apply step fails. Update the documented guarantee to precisely match achievable semantics.
+  - **Files:** `one/tools/apply_patch.py`, `one/resources/resource_loader.py`, `tests/test_apply_patch.py`, `README.md`
+  - **Dependencies:** Task 30.2 shared atomic-write helper where appropriate
+  - **Acceptance Criteria:**
+    - Add never silently overwrites an existing file.
+    - A failure in operation N leaves operations 1..N-1 unchanged after rollback.
+    - Move failure cannot leave both stale source and unintended destination content.
+    - Tests cover collision, duplicate target, symlink, permission/apply failure, and rollback.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_apply_patch.py`
+
+- [ ] **Task 30.7: preserve chronological thinking blocks across tool loops**
+  - **Description:** Treat each provider reasoning segment as a distinct stream block. At minimum, finalize/reset thinking block state when a tool call begins so later reasoning is appended after the tool result rather than rewriting the pre-tool block. Prefer an explicit additive reasoning-start/end event if boundary inference from existing events is ambiguous. Re-evaluate the provider's synthetic whitespace logic; preserve raw provider deltas whenever possible or add separators only at safe alphanumeric boundaries.
+  - **Files:** `one/providers/openai_compatible.py`, `one/core/agent_session.py` if additive boundaries are required, `one/modes/tui_mode.py`, `tests/test_providers.py`, `tests/test_event_snapshots.py`, `tests/test_tui_mode.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - One turn renders chronologically as `prompt → thinking A → tool start/result → thinking B → answer`.
+    - Earlier thinking blocks never move or change after their tool begins.
+    - Whitespace, contractions, punctuation, markdown, code, and subword chunks render without artificial corruption.
+    - A model with no reasoning emits no `Thinking:` label.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_providers.py tests/test_event_snapshots.py tests/test_tui_mode.py`
+
+- [ ] **Task 30.8: honor SDK `agentDir` for all default state**
+  - **Description:** Construct default auth, model, settings, and session paths from `options["agentDir"]` rather than global environment resolution. Keep dependency injection precedence unchanged and prevent SDK calls from mutating the user's global configuration when a custom agent directory is supplied.
+  - **Files:** `one/core/sdk.py`, `one/core/auth_storage.py`, `one/core/model_registry.py`, `one/core/session_manager.py`, `tests/test_sdk_smoke.py`, `tests/test_config_paths.py`
+  - **Dependencies:** Task 30.2
+  - **Acceptance Criteria:**
+    - Custom SDK `agentDir` contains auth, models, settings, sessions, and reports generated by that SDK session.
+    - No corresponding files are created in the global agent directory.
+    - Explicit injected managers continue to win over defaults.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_sdk_smoke.py tests/test_config_paths.py`
+
+- [ ] **Task 30.9: implement the documented extension args-mutation contract**
+  - **Description:** After each `tool.execute.before` hook, accept a returned args dict or a replacement assigned to `output["args"]`; validate that the final value is a dict and pass the result into subsequent hooks. Define precedence when both mechanisms are used and update docs/tests accordingly.
+  - **Files:** `one/resources/extension_runtime.py`, `docs/EXTENSIONS.md`, `tests/test_extension_runtime.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - `output["args"] = {...}` changes the executed tool arguments.
+    - Returning a dict remains supported.
+    - Invalid replacement types deny safely with an actionable extension error.
+    - Multiple before-hooks receive the previous hook's effective args.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_extension_runtime.py`
+
+- [ ] **Task 30.10: gate subscription OAuth/Codex behind experimental opt-in**
+  - **Description:** Add an explicit experimental feature gate, disabled by default, for subscription OAuth and the undocumented Codex backend. Do not expose subscription login commands/providers as generally supported unless enabled. Display a concise warning covering unofficial endpoints, instability, and provider terms. Keep ordinary API-key providers unaffected.
+  - **Files:** `one/core/settings_manager.py`, `one/core/oauth.py`, `one/providers/codex_responses.py`, `one/providers/registry.py`, `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `one/cli/args.py`, `README.md`, `SECURITY.md`, `tests/test_oauth.py`, `tests/test_auth_and_cli.py`, `tests/test_interactive_mode.py`, `tests/test_tui_mode.py`, `tests/test_rpc_mode.py`
+  - **Dependencies:** Tasks 30.4 and 30.5
+  - **Acceptance Criteria:**
+    - Fresh/default installs do not initiate or advertise subscription OAuth/Codex as stable functionality.
+    - Explicit opt-in enables the existing flow and shows the experimental warning.
+    - API-key login remains unchanged.
+    - No access/refresh token appears in logs, exceptions, RPC responses, or reports.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_oauth.py tests/test_auth_and_cli.py tests/test_interactive_mode.py tests/test_tui_mode.py tests/test_rpc_mode.py`
+
+- [ ] **Task 30.11: document the accepted workspace auto-load trust boundary**
+  - **Description:** Because project extension/MCP auto-load remains enabled by user decision, add a prominent warning before setup examples: running `one` in a repository can execute `.one/extensions/*.py` and MCP commands from `.one/settings.json`. State that only trusted repositories are supported and provide `one --no-extensions --no-mcp` as the restricted startup command. Document extensions/MCP as unsandboxed, arbitrary-code trust boundaries.
+  - **Files:** `README.md`, `SECURITY.md`, `docs/EXTENSIONS.md`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - The warning is visible before users are instructed to run `one` in a repository.
+    - SECURITY.md describes project extensions, MCP, shell/file tools, session logs, provider data transmission, and plaintext local state after hardening.
+    - Documentation does not describe cooperation mode as a sandbox.
+  - **Verification:**
+    - Manual documentation review against `one/cli/main.py`, `one/resources/resource_loader.py`, and `one/mcp/client.py` behavior.
+
+- [ ] **Task 30.12: add open-source license and complete package metadata**
+  - **Description:** Add the MIT license and declare it using current PEP 639-compatible metadata. Complete project URLs, keywords, classifiers, author/contact decision, Python/platform support, and distribution name. Keep runtime `VERSION`, package metadata, MCP client version, and CLI `--version` sourced from one authoritative version. If PyPI name `one` is unavailable, use the approved distribution name while preserving the `one` import/console command where possible.
+  - **Files:** `LICENSE`, `pyproject.toml`, `one/config.py`, `one/mcp/client.py`, `README.md`, `tests/test_auth_and_cli.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - Repository has valid MIT text and package metadata declares MIT.
+    - Wheel/sdist metadata passes `twine check`.
+    - One version source drives package, CLI, and protocol client identity.
+    - Project URLs point to the final public GitHub repository.
+  - **Verification:**
+    - `python -m build`
+    - `twine check dist/*`
+    - `.venv/bin/one --version`
+
+- [ ] **Task 30.13: add public repository documentation and governance files**
+  - **Description:** Add SECURITY.md, CONTRIBUTING.md, CHANGELOG.md, and optionally CODE_OF_CONDUCT.md. Rewrite README installation for public users, document `one run`, supported modes/platforms, configuration paths, credential/session privacy, safe startup, OAuth experimental opt-in, release maturity, and uninstall/upgrade. Remove private LAN addresses and stale claims. Decide whether the internal `todo.md` implementation diary belongs in the public repository; redact machine-specific paths and sensitive operational history if retained.
+  - **Files:** `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md` (optional), `TODO.md`, `todo.md`, `docs/EXTENSIONS.md`, `.gitignore`
+  - **Dependencies:** Tasks 30.1–30.12 for accurate behavior
+  - **Acceptance Criteria:**
+    - New users can install, configure, run, update, and uninstall without repository-specific knowledge.
+    - Security reporting instructions and supported-version policy are explicit.
+    - No private IPs, absolute personal paths, real credentials, or misleading “revocation/sandbox” claims remain.
+    - English is used for public reference documentation or translations are clearly organized.
+  - **Verification:**
+    - Search tracked content for `/home/`, private IP ranges, credential patterns, stale test counts, and undocumented commands.
+    - Manual link and command review.
+
+- [ ] **Task 30.14: add CI, dependency, packaging, and security gates**
+  - **Description:** Create GitHub Actions for pytest and package build on supported Python versions/platforms. Start with Ubuntu and macOS Python 3.12/3.13; treat Windows as experimental until shell-dependent behavior is resolved. Add dependency review/update automation, secret scanning guidance, and a clean-wheel installation smoke test. Tests must always use a scratch `ONE_CODING_AGENT_DIR` and must not call real providers/MCP servers.
+  - **Files:** `.github/workflows/ci.yml`, `.github/workflows/release.yml` (publishing disabled or protected until approved), `.github/dependabot.yml`, `pyproject.toml`, `tests/test_cross_platform_smoke.py`, `CONTRIBUTING.md`
+  - **Dependencies:** Tasks 30.1–30.13
+  - **Acceptance Criteria:**
+    - Pull requests run isolated tests and build wheel/sdist.
+    - Clean-install smoke runs `one --version` and `one --help` from the built wheel.
+    - CI never reads developer auth/config and never reaches real external services.
+    - Release workflow uses protected trusted publishing and cannot publish from arbitrary PRs.
+  - **Verification:**
+    - `ONE_CODING_AGENT_DIR="$(mktemp -d)" .venv/bin/python -m pytest -q -p no:cacheprovider`
+    - `python -m build && twine check dist/*`
+    - Install wheel into a fresh temporary venv and run `one --version`, `one --help`.
+
+- [ ] **Task 30.15: perform final release audit and create the public repository**
+  - **Description:** Run the complete isolated suite, packaging smoke, secret scan of files and full git history, dependency vulnerability audit, and repository integrity checks. Review every generated artifact and untracked file before staging. Configure the GitHub remote only after all blockers are closed; push without publishing packages automatically.
+  - **Files:** No source changes expected; release notes/tag metadata only after audit. Do not add ` Release Readiness.md` or other untracked files without explicit review.
+  - **Dependencies:** Tasks 30.1–30.14
+  - **Acceptance Criteria:**
+    - Full suite, build, clean install, metadata, secret scan, and dependency audit pass.
+    - `git status --short` is clean and no private artifact is tracked.
+    - GitHub repository has branch protection, security reporting, CI badges, license, and release notes.
+    - First public tag remains pre-1.0/alpha and OAuth/Codex is visibly experimental opt-in.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q`
+    - `git diff --check && git fsck --full`
+    - `gitleaks detect --source . --no-banner`
+    - `pip-audit`
+    - `python -m build && twine check dist/*`
+    - Clean venv wheel-install smoke test.
+
+#### Phase 30 rollout and rollback
+
+- Land security/correctness fixes before documentation claims or public push.
+- Keep changes in reviewable commits grouped by trust boundary, persistence/auth, tool correctness, OAuth gating, and release infrastructure.
+- Roll back individual behavior changes by commit; persistence migrations must be backward-compatible and never delete existing credentials/sessions without explicit user action.
+- Do not publish to PyPI in the same step as first making the GitHub repository public; observe CI and installation feedback first.
+
+#### Phase 30 risks and mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Accepted auto-load executes malicious workspace code | Critical host compromise | Medium | Prominent trust warning; safe startup flags; only trusted repositories supported |
+| Approval propagation deadlocks parallel subagents | Session hang | Medium | Central approval queue; concurrency tests; abort coverage |
+| Permission tightening breaks Windows or existing installs | Startup/config failure | Medium | POSIX-only chmod path; migration tests; preserve backups and surface errors |
+| Transactional patch rollback itself fails | Partial workspace mutation | Low–Medium | Same-filesystem staging; backups; collision preflight; explicit recovery diagnostics |
+| OAuth/Codex undocumented API changes | Login/chat failure or provider-policy risk | High | Experimental opt-in, isolated adapter, explicit warning, no stable compatibility promise |
+| Reasoning whitespace normalization damages output | Incorrect TUI transcript | Medium | Preserve raw deltas; boundary-specific tests for punctuation/code/subwords |
+| Public history exposes personal data | Privacy incident | Low but high impact | Full-history secret scan and manual review before remote push |
+| PyPI/distribution name unavailable | Release delay | Medium | Resolve distribution name before URLs/badges/workflow are finalized |
+
+#### Phase 30 project acceptance criteria
+
+- [ ] No cooperation-enabled execution path lets a subagent mutate without approval.
+- [ ] Sensitive local state has restrictive permissions and resilient writes.
+- [ ] Bash timeout produces `ok:false`; abort and timeout remain distinct.
+- [ ] Logout removes runtime, stored API-key, and OAuth credentials locally.
+- [ ] RPC login validates before storage and refreshes models consistently.
+- [ ] `apply_patch` rejects collisions and restores state after apply failure.
+- [ ] TUI preserves chronological `thinking → tool → thinking → answer` history.
+- [ ] SDK custom `agentDir` isolates all default state.
+- [ ] OAuth/Codex is disabled by default and clearly marked experimental.
+- [ ] Workspace extension/MCP auto-load risk is prominently documented.
+- [ ] MIT license, complete package metadata, public docs, and CI are present.
+- [ ] Full isolated tests, package build, clean install, secret scan, and dependency audit pass.
+- [ ] Repository is clean and reviewed before adding/pushing the public remote.
+
 ## Rollout & Rollback
 
 - No config migration, no schema changes, no new dependencies. Rollout = normal commit.
