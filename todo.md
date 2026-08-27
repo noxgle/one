@@ -1610,7 +1610,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - `.venv/bin/python -m pytest -q tests/test_auth_and_cli.py tests/test_oauth.py tests/test_interactive_mode.py tests/test_tui_mode.py tests/test_rpc_mode.py tests/test_rpc_snapshots.py`
   - **Delivered:** atomic complete local credential removal; shared API-key/OAuth status predicate; interactive/TUI/RPC integration; local-only documentation; 36 focused regressions.
 
-- [ ] **Task 30.5: align RPC login with validated login flow**
+- [x] **Task 30.5: align RPC login with validated login flow — DONE (`9c4b0a4`, 659-test suite)**
   - **Description:** Make RPC login asynchronous and route it through the same `validate_and_fetch` orchestration used by TUI/interactive modes. Reject unknown providers and invalid keys before persistence; fetch/register/persist models on success; support the same no-auth provider behavior where applicable. Return structured RPC errors without leaking credentials.
   - **Files:** `one/modes/rpc_mode.py`, `one/core/provider_login.py`, `one/core/model_registry.py`, `tests/test_rpc_mode.py`, `tests/test_rpc_snapshots.py`, `tests/test_login_validation.py`
   - **Dependencies:** Task 30.4
@@ -1620,6 +1620,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - RPC responses never echo API keys or OAuth tokens.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_rpc_mode.py tests/test_rpc_snapshots.py tests/test_login_validation.py`
+  - **Delivered:** async validated RPC login; unknown/no-auth handling; model refresh and context-window persistence; credential-safe structured errors; 62 focused tests.
 
 - [ ] **Task 30.6: make `apply_patch` collision-safe and rollback-safe**
   - **Description:** Expand preflight validation to every source and destination: reject Add when the target exists, reject conflicting duplicate operations, reject move destination collisions unless explicitly defined, validate parent paths/symlinks, and calculate all final contents before writes. Stage changed files in the same filesystem and implement rollback for multi-file writes/deletes/moves if any apply step fails. Update the documented guarantee to precisely match achievable semantics.
@@ -1775,7 +1776,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 - [x] Sensitive local state has restrictive permissions and resilient writes.
 - [x] Bash timeout produces `ok:false`; abort and timeout remain distinct.
 - [x] Logout removes runtime, stored API-key, and OAuth credentials locally.
-- [ ] RPC login validates before storage and refreshes models consistently.
+- [x] RPC login validates before storage and refreshes models consistently.
 - [ ] `apply_patch` rejects collisions and restores state after apply failure.
 - [ ] TUI preserves chronological `thinking → tool → thinking → answer` history.
 - [ ] SDK custom `agentDir` isolates all default state.
