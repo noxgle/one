@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from one.config import get_agent_dir
+from one.core.persistence import (
+    append_private_text,
+    atomic_write_text,
+    ensure_private_dir,
+    ensure_private_file,
+)
 
 CURRENT_SESSION_VERSION = 4
 
@@ -24,7 +31,7 @@ def get_default_session_dir(cwd: str, agent_dir: str | None = None) -> str:
     a = Path(agent_dir or get_agent_dir())
     safe = "--" + cwd.strip("/\\").replace("/", "-").replace("\\", "-").replace(":", "-") + "--"
     d = a / "sessions" / safe
-    d.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(d)
     return str(d)
 
 
@@ -48,8 +55,8 @@ class SessionManager:
         self._entries: list[dict[str, Any]] = []
         self._by_id: dict[str, dict[str, Any]] = {}
         self._leaf_id: str | None = None
-        Path(session_dir).mkdir(parents=True, exist_ok=True) if persist and session_dir else None
-
+        if persist and session_dir:
+            ensure_private_dir(Path(session_dir))
         if self._session_file and Path(self._session_file).exists():
             self._load(self._session_file)
         else:
@@ -72,7 +79,14 @@ class SessionManager:
             self._session_file = str(Path(self._session_dir) / f"{ts}_{sid}.jsonl")
 
     def _load(self, path: str) -> None:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        p = Path(path)
+        # Tighten existing opened session file and its parent dir.
+        try:
+            ensure_private_dir(p.parent)
+            ensure_private_file(p, 0o600)
+        except Exception:
+            pass
+        lines = p.read_text(encoding="utf-8").splitlines()
         parsed: list[dict[str, Any]] = []
         for line in lines:
             try:
@@ -145,15 +159,21 @@ class SessionManager:
             return
         path = Path(self._session_file)
         if not path.exists():
-            path.write_text("\n".join(json.dumps(x) for x in self._entries) + "\n", encoding="utf-8")
+            # First write: write the full session header + entries atomically.
+            atomic_write_text(
+                path, "\n".join(json.dumps(x) for x in self._entries) + "\n"
+            )
             return
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        # Append-only for subsequent entries.
+        append_private_text(path, json.dumps(entry) + "\n")
 
     def _rewrite(self) -> None:
         if not self._persist or not self._session_file:
             return
-        Path(self._session_file).write_text("\n".join(json.dumps(x) for x in self._entries) + "\n", encoding="utf-8")
+        atomic_write_text(
+            Path(self._session_file),
+            "\n".join(json.dumps(x) for x in self._entries) + "\n",
+        )
 
     def append_message(self, message: dict[str, Any]) -> str:
         return self._append(
@@ -441,6 +461,11 @@ class SessionManager:
             file_ts = ts.replace(":", "-").replace(".", "-")
             self._session_file = str(Path(self._session_dir) / f"{file_ts}_{sid}.jsonl")
             self._rewrite()
+            # Tighten the new branch file.
+            try:
+                ensure_private_file(Path(self._session_file), 0o600)
+            except Exception:
+                pass
             return self._session_file
         return None
 
@@ -486,7 +511,7 @@ class SessionManager:
     @classmethod
     def continue_recent(cls, cwd: str, session_dir: str | None = None) -> "SessionManager":
         d = Path(session_dir or get_default_session_dir(cwd))
-        d.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(d)
         files = sorted(d.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)
         if files:
             return cls.open(str(files[0]), str(d))

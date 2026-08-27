@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from one.core.persistence import append_private_text, ensure_private_dir
+
 
 def _ask_user_queue(session: Any) -> asyncio.Queue:
     """Queue of ask_user events emitted by the session."""
@@ -147,7 +149,7 @@ async def run_run_mode(runtime_host: Any, options: dict[str, Any]) -> int:
     if agent_dir:
         try:
             report_dir = Path(agent_dir)
-            report_dir.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(report_dir)
             report_path = report_dir / "reports.jsonl"
             entry = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -160,8 +162,7 @@ async def run_run_mode(runtime_host: Any, options: dict[str, Any]) -> int:
                 "sessionFile": getattr(session, "session_file", None),
                 "stats": session.get_session_stats() if hasattr(session, "get_session_stats") else None,
             }
-            with report_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            append_private_text(report_path, json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             report_path = None
     if report_path is not None and not options.get("json"):

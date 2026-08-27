@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from one.config import get_auth_path
+from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_private_file, load_json_text_safe
 
 PROVIDER_ENV_MAP = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -33,21 +34,47 @@ class AuthStorage:
         self._path = Path(path or get_auth_path()) if not in_memory else None
         self._runtime: dict[str, str] = {}
         self._data: dict[str, Any] = {}
+        self._errors: list[dict[str, Any]] = []
         self._in_memory = in_memory
+        # Guard: refuse to overwrite a known-malformed file.
+        self._data_is_locked: bool = False  # True when file is malformed/non-dict.
         if self._path and self._path.exists():
-            try:
-                self._data = json.loads(self._path.read_text(encoding="utf-8"))
-            except Exception:
-                self._data = {}
+            data, err = load_json_text_safe(self._path)
+            if err is not None:
+                self._errors.append({"scope": "auth", "error": err})
+                self._data_is_locked = True
+            elif isinstance(data, dict):
+                self._data = data
+            else:
+                # Valid JSON but not a dict (e.g. list/str/number).
+                self._errors.append(
+                    {"scope": "auth", "error": ValueError("auth state is not a JSON object")}
+                )
+                self._data_is_locked = True
+            # Tighten existing file/dir on POSIX.
+            ensure_private_dir(self._path.parent)
+            ensure_private_file(self._path, 0o600)
+
+    # --- Writability guard ---
+
+    def _require_writable(self) -> None:
+        """Raise before mutation if the on-disk file is malformed."""
+        if self._data_is_locked:
+            raise RuntimeError(
+                "auth file is malformed or not a JSON object; "
+                "repair it before the agent can persist state"
+            )
 
     def set_runtime_api_key(self, provider: str, api_key: str) -> None:
         self._runtime[provider] = api_key
 
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
+        self._require_writable()
         self._data.setdefault("apiKeys", {})[provider] = api_key
         self._save()
 
     def remove_stored_api_key(self, provider: str) -> None:
+        self._require_writable()
         keys = self._data.setdefault("apiKeys", {})
         if provider in keys:
             del keys[provider]
@@ -61,19 +88,33 @@ class AuthStorage:
         return record if isinstance(record, dict) else None
 
     def set_oauth_record(self, provider: str, record: dict[str, Any]) -> None:
+        self._require_writable()
         self._data.setdefault("oauth", {})[provider] = record
         self._save()
 
     def remove_oauth_record(self, provider: str) -> None:
+        self._require_writable()
         records = self._data.setdefault("oauth", {})
         if provider in records:
             del records[provider]
             self._save()
 
     def _save(self) -> None:
-        if self._path:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+        if self._path is None:
+            return
+        # Refuse to overwrite a known-malformed file: report the error,
+        # do NOT silently replace it.
+        if self._data_is_locked:
+            raise RuntimeError(
+                "auth file is malformed or not a JSON object; "
+                "repair it before the agent can persist state"
+            )
+        atomic_write_text(self._path, json.dumps(self._data, indent=2) + "\n")
+
+    def drain_errors(self) -> list[dict[str, Any]]:
+        out = self._errors[:]
+        self._errors = []
+        return out
 
     def get_api_key(self, provider: str) -> str | None:
         if provider in self._runtime:

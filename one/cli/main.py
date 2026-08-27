@@ -11,6 +11,7 @@ from one.config import APP_NAME, ENV_AGENT_DIR, VERSION, get_agent_dir, get_mode
 from one.core.agent_session_runtime import AgentSessionRuntimeHost, create_agent_session_runtime
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
+from one.core.persistence import ensure_private_dir
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
 from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode, run_run_mode
@@ -110,7 +111,7 @@ async def _run(argv: list[str]) -> int:
     fallback_agent_dir_path = Path(cwd) / ".one" / "agent"
     agent_dir_path = Path(get_agent_dir())
     try:
-        agent_dir_path.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(agent_dir_path)
         # Validate writability; existing read-only dirs can pass mkdir(exist_ok=True).
         probe = agent_dir_path / ".write_probe"
         probe.write_text("ok", encoding="utf-8")
@@ -118,20 +119,32 @@ async def _run(argv: list[str]) -> int:
     except OSError:
         # Fallback for read-only home or sandboxed environments.
         agent_dir_path = fallback_agent_dir_path
-        agent_dir_path.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(agent_dir_path)
     # Keep config path resolution consistent for this process.
     os.environ[ENV_AGENT_DIR] = str(agent_dir_path)
     agent_dir = str(agent_dir_path)
 
     settings = SettingsManager.create(cwd, agent_dir)
+    auth = AuthStorage.create()
+    registry = ModelRegistry.create(auth, get_models_path())
+
+    # Emit safe startup warnings for collected load errors to stderr.
+    import sys as _sys
+
+    for source in (settings, auth, registry):
+        for err in source.drain_errors():
+            scope = err.get("scope", "unknown")
+            exc = err.get("error")
+            msg = str(exc) if exc else ""
+            # Never leak file contents or credentials.
+            print(f"[warn] {scope} config load error: {type(exc).__name__}: {msg}", file=_sys.stderr)
+
     if parsed.mode is None:
         parsed.mode = settings.get_default_mode()
     if parsed.no_subagents:
         settings.set_subagents_enabled(False, persist=False)
     if parsed.no_bash_output:
         settings.set_bash_show_output(False, persist=False)
-    auth = AuthStorage.create()
-    registry = ModelRegistry.create(auth, get_models_path())
 
     if parsed.command:
         cmd = parsed.command
@@ -315,7 +328,7 @@ async def _run(argv: list[str]) -> int:
     if configured_session_dir:
         try:
             sd_path = Path(configured_session_dir)
-            sd_path.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(sd_path)
             probe = sd_path / ".write_probe"
             probe.write_text("ok", encoding="utf-8")
             probe.unlink(missing_ok=True)

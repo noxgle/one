@@ -15,6 +15,62 @@ def _expand(path: str) -> str:
     return str(Path(path).expanduser())
 
 
+def _tighten_migrated_state(agent_dir: Path) -> None:
+    """Best-effort permission tightening after a successful legacy migration.
+
+    Uses the public persistence helpers via a local import to avoid
+    circular-import risk with ``one/core/persistence``.  On failure the
+    already-copied files remain untouched and the caller has already
+    selected the XDG path.
+    """
+    from one.core.persistence import ensure_private_dir, ensure_private_file
+
+    # Top-level agent dir → 0700.
+    try:
+        ensure_private_dir(agent_dir)
+    except OSError:
+        pass
+
+    # Sensitive files at the top level → 0600.
+    for child in agent_dir.iterdir():
+        if child.is_file() and child.name in (
+            "auth.json",
+            "settings.json",
+            "models.json",
+        ):
+            try:
+                ensure_private_file(child, 0o600)
+            except OSError:
+                pass
+        elif child.is_file() and child.name.endswith(".jsonl"):
+            # Top-level reports.jsonl and similar state JSONL files.
+            try:
+                ensure_private_file(child, 0o600)
+            except OSError:
+                pass
+
+    # Recursively tighten session layout.
+    sessions_dir = agent_dir / "sessions"
+    if sessions_dir.is_dir():
+        try:
+            ensure_private_dir(sessions_dir)
+        except OSError:
+            pass
+        for root, dirs, files in os.walk(str(sessions_dir)):
+            root_path = Path(root)
+            for d in dirs:
+                try:
+                    ensure_private_dir(root_path / d)
+                except OSError:
+                    pass
+            for f in files:
+                if f.endswith(".jsonl"):
+                    try:
+                        ensure_private_file(root_path / f, 0o600)
+                    except OSError:
+                        pass
+
+
 def get_agent_dir() -> str:
     env = os.getenv(ENV_AGENT_DIR)
     if env:
@@ -27,10 +83,16 @@ def get_agent_dir() -> str:
         try:
             xdg_agent_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(legacy_agent_dir, xdg_agent_dir)
-            return str(xdg_agent_dir)
         except Exception:
             # If migration fails, keep backward-compatible behavior.
             return str(legacy_agent_dir)
+        # Migration copy succeeded — tighten permissions (best-effort).
+        # Permission failure must NOT change the selected path.
+        try:
+            _tighten_migrated_state(xdg_agent_dir)
+        except OSError:
+            pass
+        return str(xdg_agent_dir)
     return str(xdg_agent_dir)
 
 

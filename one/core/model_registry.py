@@ -6,6 +6,7 @@ from typing import Any
 
 from one.config import get_models_path
 from one.core.auth_storage import AuthStorage
+from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_private_file, load_json_text_safe
 from one.core.types import ModelInfo
 
 BUILTIN_MODELS: list[ModelInfo] = [
@@ -77,25 +78,60 @@ class ModelRegistry:
         self._auth = auth_storage
         self._models: list[ModelInfo] = list(BUILTIN_MODELS)
         self._models_path = Path(models_path or get_models_path())
+        self._errors: list[dict[str, Any]] = []
+        # Guard: refuse to overwrite a known-malformed models.json.
+        self._models_path_is_locked: bool = False
         p = self._models_path
         if p.exists():
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                for provider, models in data.get("providers", {}).items():
-                    for model in models:
-                        self._models.append(
-                            ModelInfo(
-                                provider=provider,
-                                id=model["id"],
-                                reasoning=model.get("reasoning", True),
-                                context_window=model.get("contextWindow"),
-                                base_url=model.get("url") or model.get("baseUrl"),
-                                tool_parser=model.get("toolParser"),
+            data, err = load_json_text_safe(p)
+            if err is not None:
+                self._errors.append({"scope": "models", "error": err})
+                self._models_path_is_locked = True
+            elif isinstance(data, dict):
+                providers = data.get("providers", {})
+                if not isinstance(providers, dict):
+                    self._errors.append(
+                        {"scope": "models", "error": ValueError("models.json providers is not a dict")}
+                    )
+                else:
+                    for provider, models in providers.items():
+                        if not isinstance(models, list):
+                            self._errors.append(
+                                {
+                                    "scope": "models",
+                                    "error": ValueError(
+                                        f"models.json providers.{provider} is not a list"
+                                    ),
+                                }
                             )
-                        )
-            except Exception:
-                pass
+                            continue
+                        for model in models:
+                            if isinstance(model, dict) and model.get("id"):
+                                self._models.append(
+                                    ModelInfo(
+                                        provider=provider,
+                                        id=model["id"],
+                                        reasoning=model.get("reasoning", True),
+                                        context_window=model.get("contextWindow"),
+                                        base_url=model.get("url") or model.get("baseUrl"),
+                                        tool_parser=model.get("toolParser"),
+                                    )
+                                )
+            else:
+                # Valid JSON but not a dict.
+                self._errors.append(
+                    {"scope": "models", "error": ValueError("models state is not a JSON object")}
+                )
+                self._models_path_is_locked = True
+            # Tighten existing file/dir on POSIX.
+            ensure_private_dir(p.parent)
+            ensure_private_file(p, 0o600)
         self._models = self._dedupe_models(self._models)
+
+    def drain_errors(self) -> list[dict[str, Any]]:
+        out = self._errors[:]
+        self._errors = []
+        return out
 
     @staticmethod
     def _dedupe_models(models: list[ModelInfo]) -> list[ModelInfo]:
@@ -262,13 +298,37 @@ class ModelRegistry:
         entries keep their fields (url/toolParser/contextWindow); only missing
         ids are added with defaults, and a known contextWindow is filled in
         when the stored entry lacks one. Creates the file when absent.
+
+        Raises RuntimeError if the existing models.json is known to be malformed.
         """
+        # If we already know the file is corrupt, refuse to overwrite it.
+        if self._models_path_is_locked:
+            raise RuntimeError(
+                "models.json is malformed or not a JSON object; "
+                "repair it before the agent can persist models"
+            )
         data: dict[str, Any] = {}
         if self._models_path.exists():
-            try:
-                data = json.loads(self._models_path.read_text(encoding="utf-8"))
-            except Exception:
-                data = {}
+            loaded_data, err = load_json_text_safe(self._models_path)
+            if err is not None:
+                # First time encountering the error during persist (lazy check).
+                self._errors.append({"scope": "models", "error": err})
+                self._models_path_is_locked = True
+                raise RuntimeError(
+                    "models.json is malformed or not a JSON object; "
+                    "repair it before the agent can persist models"
+                )
+            if isinstance(loaded_data, dict):
+                data = loaded_data
+            else:
+                self._errors.append(
+                    {"scope": "models", "error": ValueError("models state is not a JSON object")}
+                )
+                self._models_path_is_locked = True
+                raise RuntimeError(
+                    "models.json is malformed or not a JSON object; "
+                    "repair it before the agent can persist models"
+                )
         providers = data.setdefault("providers", {})
         existing: dict[str, dict[str, Any]] = {}
         for m in providers.get(provider, []) or []:
@@ -279,8 +339,9 @@ class ModelRegistry:
             if window and not entry.get("contextWindow"):
                 entry["contextWindow"] = window
         providers[provider] = list(existing.values())
-        self._models_path.parent.mkdir(parents=True, exist_ok=True)
-        self._models_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        atomic_write_text(self._models_path, json.dumps(data, indent=2) + "\n")
+        # After a successful write the file is known-good again.
+        self._models_path_is_locked = False
 
     def set_stored_api_key(self, provider: str, api_key: str) -> None:
         self._auth.set_stored_api_key(provider, api_key)

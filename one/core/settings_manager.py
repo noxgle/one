@@ -6,7 +6,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from one.config import get_agent_dir, get_settings_path
+from one.config import get_agent_dir
+from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_private_file, load_json_text_safe
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "defaultProvider": None,
@@ -55,31 +56,82 @@ class SettingsManager:
     def __init__(self, cwd: str, agent_dir: str, in_memory: bool = False, initial: dict[str, Any] | None = None) -> None:
         self._cwd = cwd
         self._agent_dir = agent_dir
-        self._global_path = Path(get_settings_path()) if not in_memory else None
+        # Intentionally uses the *injected* agent_dir (may be custom/TEST)
+        # rather than consulting ``get_agent_dir()`` — preserves test isolation
+        # and allows CLI --agent-dir to control global settings path.
+        self._global_path = Path(agent_dir) / "settings.json" if not in_memory else None
         self._project_path = Path(cwd) / ".one" / "settings.json" if not in_memory else None
         self._errors: list[dict[str, Any]] = []
         self._in_memory = in_memory
+        # Guard: refuse to overwrite a known-malformed global settings file.
+        self._global_is_locked: bool = False
         if in_memory:
             self._global = _deep_merge(DEFAULT_SETTINGS, initial or {})
             self._project = {}
         else:
-            self._global = self._load(self._global_path, "global")
+            self._global, self._global_is_locked = self._load_global(self._global_path)
             self._project = self._load(self._project_path, "project")
 
     def _load(self, path: Path | None, scope: str) -> dict[str, Any]:
         if not path or not path.exists():
             return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception as e:
-            self._errors.append({"scope": scope, "error": e})
+        data, err = load_json_text_safe(path)
+        if err is not None:
+            self._errors.append({"scope": scope, "error": err})
             return {}
+        if isinstance(data, dict):
+            return data
+        # Valid JSON but not a dict — record as error, return defaults.
+        self._errors.append({"scope": scope, "error": ValueError(f"{scope} settings is not a JSON object")})
+        return {}
+
+    def _load_global(self, path: Path | None) -> tuple[dict[str, Any], bool]:
+        """Load global settings and return (parsed, is_locked).
+
+        ``is_locked`` is True when the file is malformed or non-dict, so
+        that subsequent saves are refused.  Tightens file/dir to 0600/0700
+        on POSIX for ALL branches (valid, malformed, non-dict).
+        """
+        if not path or not path.exists():
+            return {}, False
+        data, err = load_json_text_safe(path)
+        # Always tighten existing global file/dir on POSIX.
+        try:
+            ensure_private_dir(path.parent)
+            ensure_private_file(path, 0o600)
+        except Exception:
+            pass
+        if err is not None:
+            self._errors.append({"scope": "global", "error": err})
+            return {}, True
+        if isinstance(data, dict):
+            return data, False
+        # Valid JSON but not a dict — record and lock.
+        self._errors.append(
+            {"scope": "global", "error": ValueError("global settings is not a JSON object")}
+        )
+        return {}, True
 
     def _save_global(self) -> None:
         if self._in_memory or not self._global_path:
             return
-        self._global_path.parent.mkdir(parents=True, exist_ok=True)
-        self._global_path.write_text(json.dumps(self._global, indent=2), encoding="utf-8")
+        # Refuse to overwrite a known-malformed global file.
+        if self._global_is_locked:
+            raise RuntimeError(
+                "global settings file is malformed or not a JSON object; "
+                "repair it before the agent can persist config"
+            )
+        atomic_write_text(self._global_path, json.dumps(self._global, indent=2) + "\n")
+
+    # --- Writability guard ---
+
+    def _require_writable_global(self) -> None:
+        """Raise before mutation if the global file is malformed."""
+        if self._global_is_locked:
+            raise RuntimeError(
+                "global settings file is malformed or not a JSON object; "
+                "repair it before the agent can persist config"
+            )
 
     def drain_errors(self) -> list[dict[str, Any]]:
         out = self._errors[:]
@@ -190,6 +242,8 @@ class SettingsManager:
         return bool(self.merged().get("subagents", {}).get("enabled", True))
 
     def set_subagents_enabled(self, enabled: bool, persist: bool = True) -> None:
+        if persist:
+            self._require_writable_global()
         subagents = dict(self._global.get("subagents", {}))
         subagents["enabled"] = bool(enabled)
         self._global["subagents"] = subagents
@@ -206,6 +260,8 @@ class SettingsManager:
         return bool(self.merged().get("bash", {}).get("showOutput", True))
 
     def set_bash_show_output(self, enabled: bool, persist: bool = True) -> None:
+        if persist:
+            self._require_writable_global()
         bash = dict(self._global.get("bash", {}))
         bash["showOutput"] = bool(enabled)
         self._global["bash"] = bash
@@ -230,6 +286,7 @@ class SettingsManager:
 
     def set_mcp_server_enabled(self, name: str, enabled: bool) -> None:
         """Persist the enabled flag for an MCP server config entry."""
+        self._require_writable_global()
         mcp = dict(self._global.get("mcpServers", {}) or {})
         entry = dict(mcp.get(name, {}) or {})
         entry["enabled"] = bool(enabled)
@@ -238,36 +295,44 @@ class SettingsManager:
         self._save_global()
 
     def set_retry_enabled(self, enabled: bool) -> None:
+        self._require_writable_global()
         retry = self._global.get("retry", {})
         retry["enabled"] = enabled
         self._global["retry"] = retry
         self._save_global()
 
     def set_steering_mode(self, mode: str) -> None:
+        self._require_writable_global()
         self._global["steeringMode"] = mode
         self._save_global()
 
     def set_follow_up_mode(self, mode: str) -> None:
+        self._require_writable_global()
         self._global["followUpMode"] = mode
         self._save_global()
 
     def set_theme(self, theme: str) -> None:
+        self._require_writable_global()
         self._global["theme"] = theme
         self._save_global()
 
     def set_default_provider(self, provider: str | None) -> None:
+        self._require_writable_global()
         self._global["defaultProvider"] = provider
         self._save_global()
 
     def set_default_model(self, model: str | None) -> None:
+        self._require_writable_global()
         self._global["defaultModel"] = model
         self._save_global()
 
     def set_default_thinking_level(self, level: str) -> None:
+        self._require_writable_global()
         self._global["defaultThinkingLevel"] = level
         self._save_global()
 
     def set_tool_settings(self, max_steps: int | None = None, timeout_sec: int | None = None) -> None:
+        self._require_writable_global()
         tools = dict(self._global.get("tools", {}))
         if max_steps is not None:
             tools["maxSteps"] = int(max_steps)
@@ -277,11 +342,13 @@ class SettingsManager:
         self._save_global()
 
     def set_packages(self, packages: list[str]) -> None:
+        self._require_writable_global()
         self._global["packages"] = sorted(set(packages))
         self._save_global()
 
     def set_config_value(self, key: str, value: Any) -> None:
         # Dotted-path setter for simple CLI config edits.
+        self._require_writable_global()
         parts = [p for p in key.split(".") if p]
         if not parts:
             raise ValueError("Invalid config key")
