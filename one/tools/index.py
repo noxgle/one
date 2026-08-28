@@ -49,7 +49,7 @@ all_tools: dict[str, ToolDef] = {
         "Delegate a subtask to an isolated subagent. Args: 'task' (str) for one subtask, or 'tasks' (list[str]) for parallel subtasks; optional 'model' ('provider/model'); optional 'tools' (list of tool names). Returns the subagent summary, success flag and session id.",
         spawn_subagent_tool,
     ),
-    "apply_patch": ToolDef("apply_patch", "Apply a unified-diff patch to files (opencode format: *** Begin Patch / *** End Patch; Add/Update/Delete/Move)", apply_patch_tool),
+    "apply_patch": ToolDef("apply_patch", "Apply a unified-diff patch to files (opencode format: *** Begin Patch / *** End Patch; Add/Update/Delete/Move; staged, backup/rollback-protected; Add/Move targets must be absent; conflicts and symlinks rejected)", apply_patch_tool),
 }
 
 coding_tools = [all_tools["read"], all_tools["bash"], all_tools["edit"], all_tools["write"], all_tools["apply_patch"]]

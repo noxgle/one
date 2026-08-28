@@ -55,8 +55,27 @@ TUI highlights:
 
 By default `one` works autonomously. With `--cooperation` (or `/cooperation`, Ctrl+A
 in the TUI/interactive mode) it asks before running mutating tools (`bash`, `write`,
-`edit`); rejections require a reason that is fed back to the model. Mid-task steering
+`edit`, `plan`, `apply_patch`); rejections require a reason that is fed back to the model. Mid-task steering
 (`/steer`, `/follow`) and abort (Ctrl+C) work in every interactive mode.
+
+## Apply patch safety
+
+`apply_patch` applies unified-diff hunks via a staged, transactional workflow:
+
+- **Collision policy:** Add and Delete/Update target the same path is a cross-role conflict
+  (rejected). Duplicate sources, duplicate targets, and hardlink aliases are rejected.
+- **Symlink policy:** Any existing symlink component (leaf or ancestor) for a source or
+  target causes rejection.
+- **Staged backup/rollback:** All outputs are computed and staged to temp files before any
+  mutation. Original files are evacuated to same-directory backups. On commit failure,
+  installed outputs are unlinked (if identity unchanged), backups are restored only when
+  the original path is absent, and stages/dirs are cleaned. Retained backups are reported
+  for manual recovery.
+- **Path support:** Absolute and `..` paths are supported. Cross-filesystem Move is staged
+  as copy+delete (not inode-preserving).
+- **Explicit non-guarantees:** `apply_patch` provides no guarantee against crash/power-loss,
+  concurrent hostile filesystem modification, or rollback I/O failure. In such cases,
+  backups may remain and must be handled manually.
 
 ## Slash commands
 
