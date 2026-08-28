@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from one.config import get_agent_dir
@@ -22,33 +23,64 @@ class AgentSessionRuntime:
     resource_loader: DefaultResourceLoader
 
 
+def _resolve_runtime_agent_dir(bootstrap: dict[str, Any]) -> str:
+    """Resolve *agentDir* for runtime — explicit nonempty value wins."""
+    explicit = bootstrap.get("agentDir")
+    if explicit:
+        return str(Path(explicit).resolve())
+    return get_agent_dir()
+
+
 async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[str, Any]) -> AgentSessionRuntime:
     cwd = options.get("cwd")
-    agent_dir = bootstrap.get("agentDir") or get_agent_dir()
-    auth_storage = bootstrap.get("authStorage") or AuthStorage.create()
-    model_registry = bootstrap.get("modelRegistry") or ModelRegistry.create(auth_storage)
-    settings_manager = bootstrap.get("settingsManager") or SettingsManager.create(cwd, agent_dir)
-    resource_loader = options.get("resourceLoader") or bootstrap.get("resourceLoader") or DefaultResourceLoader(
-        cwd=cwd,
-        agent_dir=agent_dir,
-        settings_manager=settings_manager,
-        additional_extension_paths=bootstrap.get("resourceLoaderOptions", {}).get("additionalExtensionPaths"),
-        additional_skill_paths=bootstrap.get("resourceLoaderOptions", {}).get("additionalSkillPaths"),
-        additional_prompt_template_paths=bootstrap.get("resourceLoaderOptions", {}).get("additionalPromptTemplatePaths"),
-        additional_theme_paths=bootstrap.get("resourceLoaderOptions", {}).get("additionalThemePaths"),
-        no_extensions=bootstrap.get("resourceLoaderOptions", {}).get("noExtensions", False),
-        no_skills=bootstrap.get("resourceLoaderOptions", {}).get("noSkills", False),
-        no_prompt_templates=bootstrap.get("resourceLoaderOptions", {}).get("noPromptTemplates", False),
-        no_themes=bootstrap.get("resourceLoaderOptions", {}).get("noThemes", False),
-        system_prompt=bootstrap.get("resourceLoaderOptions", {}).get("systemPrompt"),
-        append_system_prompt=bootstrap.get("resourceLoaderOptions", {}).get("appendSystemPrompt"),
-    )
+    agent_dir = _resolve_runtime_agent_dir(bootstrap)
+    # ── Auth storage (explicit > default under agentDir > global helper) ──
+    auth_storage = bootstrap.get("authStorage")
+    if auth_storage is None:
+        auth_storage = AuthStorage.create(str(Path(agent_dir) / "auth.json"))
+    # ── Model registry (explicit > default under agentDir) ──────────────
+    model_registry = bootstrap.get("modelRegistry")
+    if model_registry is None:
+        model_registry = ModelRegistry.create(auth_storage, str(Path(agent_dir) / "models.json"))
+    # ── Settings manager (explicit > default under agentDir) ────────────
+    settings_manager = bootstrap.get("settingsManager")
+    if settings_manager is None:
+        settings_manager = SettingsManager.create(cwd, agent_dir)
+    # ── Resource loader (explicit > bootstrap > default) ─────────────────
+    explicit_loader = options.get("resourceLoader")
+    if explicit_loader is not None:
+        resource_loader = explicit_loader
+    else:
+        bootstrap_loader = bootstrap.get("resourceLoader")
+        if bootstrap_loader is not None:
+            resource_loader = bootstrap_loader
+        else:
+            resource_loader = DefaultResourceLoader(
+                cwd=cwd,
+                agent_dir=agent_dir,
+                settings_manager=settings_manager,
+                additional_extension_paths=bootstrap.get("resourceLoaderOptions", {}).get("additionalExtensionPaths"),
+                additional_skill_paths=bootstrap.get("resourceLoaderOptions", {}).get("additionalSkillPaths"),
+                additional_prompt_template_paths=bootstrap.get("resourceLoaderOptions", {}).get("additionalPromptTemplatePaths"),
+                additional_theme_paths=bootstrap.get("resourceLoaderOptions", {}).get("additionalThemePaths"),
+                no_extensions=bootstrap.get("resourceLoaderOptions", {}).get("noExtensions", False),
+                no_skills=bootstrap.get("resourceLoaderOptions", {}).get("noSkills", False),
+                no_prompt_templates=bootstrap.get("resourceLoaderOptions", {}).get("noPromptTemplates", False),
+                no_themes=bootstrap.get("resourceLoaderOptions", {}).get("noThemes", False),
+                system_prompt=bootstrap.get("resourceLoaderOptions", {}).get("systemPrompt"),
+                append_system_prompt=bootstrap.get("resourceLoaderOptions", {}).get("appendSystemPrompt"),
+            )
     await resource_loader.reload()
 
-    session_manager = options.get("sessionManager") or SessionManager.create(
-        cwd,
-        settings_manager.get_session_dir() or get_default_session_dir(cwd, agent_dir),
-    )
+    # ── Session manager (explicit > default under agentDir) ──────────────
+    explicit_session = options.get("sessionManager")
+    if explicit_session is not None:
+        session_manager = explicit_session
+    else:
+        session_manager = SessionManager.create(
+            cwd,
+            settings_manager.get_session_dir() or get_default_session_dir(cwd, agent_dir),
+        )
 
     model = bootstrap.get("model")
     if not model:
