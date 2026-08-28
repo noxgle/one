@@ -1622,7 +1622,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - `.venv/bin/python -m pytest -q tests/test_rpc_mode.py tests/test_rpc_snapshots.py tests/test_login_validation.py`
   - **Delivered:** async validated RPC login; unknown/no-auth handling; model refresh and context-window persistence; credential-safe structured errors; 62 focused tests.
 
-- [ ] **Task 30.6: make `apply_patch` collision-safe and rollback-safe**
+- [x] **Task 30.6: make `apply_patch` collision-safe and rollback-safe — DONE (`27d9f98`, 699-test suite)**
   - **Description:** Expand preflight validation to every source and destination: reject Add when the target exists, reject conflicting duplicate operations, reject move destination collisions unless explicitly defined, validate parent paths/symlinks, and calculate all final contents before writes. Stage changed files in the same filesystem and implement rollback for multi-file writes/deletes/moves if any apply step fails. Update the documented guarantee to precisely match achievable semantics.
   - **Files:** `one/tools/apply_patch.py`, `one/resources/resource_loader.py`, `tests/test_apply_patch.py`, `README.md`
   - **Dependencies:** Task 30.2 shared atomic-write helper where appropriate
@@ -1633,6 +1633,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - Tests cover collision, duplicate target, symlink, permission/apply failure, and rollback.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_apply_patch.py`
+  - **Delivered:** strict collision/symlink/hardlink preflight; compute-first same-filesystem staging; source backups and identity-safe rollback; concurrent-change diagnostics; precise safety documentation; 78 focused tests.
 
 - [ ] **Task 30.7: preserve chronological thinking blocks across tool loops**
   - **Description:** Treat each provider reasoning segment as a distinct stream block. At minimum, finalize/reset thinking block state when a tool call begins so later reasoning is appended after the tool result rather than rewriting the pre-tool block. Prefer an explicit additive reasoning-start/end event if boundary inference from existing events is ambiguous. Re-evaluate the provider's synthetic whitespace logic; preserve raw provider deltas whenever possible or add separators only at safe alphanumeric boundaries.
@@ -1777,7 +1778,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 - [x] Bash timeout produces `ok:false`; abort and timeout remain distinct.
 - [x] Logout removes runtime, stored API-key, and OAuth credentials locally.
 - [x] RPC login validates before storage and refreshes models consistently.
-- [ ] `apply_patch` rejects collisions and restores state after apply failure.
+- [x] `apply_patch` rejects collisions and restores state after apply failure.
 - [ ] TUI preserves chronological `thinking → tool → thinking → answer` history.
 - [ ] SDK custom `agentDir` isolates all default state.
 - [ ] OAuth/Codex is disabled by default and clearly marked experimental.
