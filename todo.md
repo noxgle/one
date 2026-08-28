@@ -1635,7 +1635,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - `.venv/bin/python -m pytest -q tests/test_apply_patch.py`
   - **Delivered:** strict collision/symlink/hardlink preflight; compute-first same-filesystem staging; source backups and identity-safe rollback; concurrent-change diagnostics; precise safety documentation; 78 focused tests.
 
-- [ ] **Task 30.7: preserve chronological thinking blocks across tool loops**
+- [x] **Task 30.7: preserve chronological thinking blocks across tool loops — DONE (`b6c82d4`, 712-test suite)**
   - **Description:** Treat each provider reasoning segment as a distinct stream block. At minimum, finalize/reset thinking block state when a tool call begins so later reasoning is appended after the tool result rather than rewriting the pre-tool block. Prefer an explicit additive reasoning-start/end event if boundary inference from existing events is ambiguous. Re-evaluate the provider's synthetic whitespace logic; preserve raw provider deltas whenever possible or add separators only at safe alphanumeric boundaries.
   - **Files:** `one/providers/openai_compatible.py`, `one/core/agent_session.py` if additive boundaries are required, `one/modes/tui_mode.py`, `tests/test_providers.py`, `tests/test_event_snapshots.py`, `tests/test_tui_mode.py`
   - **Dependencies:** None
@@ -1646,6 +1646,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - A model with no reasoning emits no `Thinking:` label.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_providers.py tests/test_event_snapshots.py tests/test_tui_mode.py`
+  - **Delivered:** raw reasoning deltas without synthetic spacing; whitespace-preserving AgentSession events; immutable per-tool-loop TUI thinking blocks; Rich-safe literal rendering; 134 focused tests.
 
 - [ ] **Task 30.8: honor SDK `agentDir` for all default state**
   - **Description:** Construct default auth, model, settings, and session paths from `options["agentDir"]` rather than global environment resolution. Keep dependency injection precedence unchanged and prevent SDK calls from mutating the user's global configuration when a custom agent directory is supplied.
@@ -1779,7 +1780,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 - [x] Logout removes runtime, stored API-key, and OAuth credentials locally.
 - [x] RPC login validates before storage and refreshes models consistently.
 - [x] `apply_patch` rejects collisions and restores state after apply failure.
-- [ ] TUI preserves chronological `thinking → tool → thinking → answer` history.
+- [x] TUI preserves chronological `thinking → tool → thinking → answer` history.
 - [ ] SDK custom `agentDir` isolates all default state.
 - [ ] OAuth/Codex is disabled by default and clearly marked experimental.
 - [ ] Workspace extension/MCP auto-load risk is prominently documented.
