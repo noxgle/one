@@ -1660,7 +1660,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - `.venv/bin/python -m pytest -q tests/test_sdk_smoke.py tests/test_config_paths.py`
   - **Delivered:** explicit custom auth/models/settings/session defaults for SDK and direct runtime, preserved explicit dependency precedence, reports/custom global sentinel isolation coverage, 24 focused tests, full suite 720 passed.
 
-- [ ] **Task 30.9: implement the documented extension args-mutation contract**
+- [x] **Task 30.9: implement the documented extension args-mutation contract**
   - **Description:** After each `tool.execute.before` hook, accept a returned args dict or a replacement assigned to `output["args"]`; validate that the final value is a dict and pass the result into subsequent hooks. Define precedence when both mechanisms are used and update docs/tests accordingly.
   - **Files:** `one/resources/extension_runtime.py`, `docs/EXTENSIONS.md`, `tests/test_extension_runtime.py`
   - **Dependencies:** None
@@ -1671,6 +1671,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - Multiple before-hooks receive the previous hook's effective args.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_extension_runtime.py`
+  - **Delivered:** per-hook output/return args-mutation, same-hook returned-dict precedence, validated multi-hook chaining, safe TypeError deny for invalid/missing values, updated EXTENSIONS docs, 16 focused tests, full suite 727 passed.
 
 - [ ] **Task 30.10: gate subscription OAuth/Codex behind experimental opt-in**
   - **Description:** Add an explicit experimental feature gate, disabled by default, for subscription OAuth and the undocumented Codex backend. Do not expose subscription login commands/providers as generally supported unless enabled. Display a concise warning covering unofficial endpoints, instability, and provider terms. Keep ordinary API-key providers unaffected.
