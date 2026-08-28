@@ -52,10 +52,19 @@ def _mk_agent(
 ) -> AgentSession:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
-    registry = ModelRegistry.create(auth)
+    # Explicit tmp models path so we don't pollute real user config.
+    models_dir = str(tmp_path / "models")
+    Path(models_dir).mkdir(parents=True, exist_ok=True)
+    registry = ModelRegistry.create(auth, models_path=models_dir + "/models.json")
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
-    settings = SettingsManager.in_memory(settings_override or {"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    # Explicit in-memory SettingsManager with tmp cwd/agent_dir.
+    settings = SettingsManager(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path / "agent"),
+        in_memory=True,
+        initial=settings_override or {"tools": {"maxSteps": 4, "timeoutSec": 5}},
+    )
     session = SessionManager.in_memory(str(tmp_path))
     return AgentSession(session, settings, registry, _Loader(extensions, str(tmp_path)), model, "medium", tools=tools)
 
@@ -342,3 +351,434 @@ def register(ctx):
     assert _read_log(tmp_path) == []
     await agent.dispose()
     assert "dispose" in _read_log(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 30.9 — chaining, precedence, and error paths for call_before_tool
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_output_args_integration_changes_tool_call_start_and_result(tmp_path: Path):
+    """output['args'] assignment changes the tool_call_start event AND the actual tool result."""
+    (tmp_path / "original.txt").write_text("original\n", encoding="utf-8")
+    (tmp_path / "replaced.txt").write_text("replaced\n", encoding="utf-8")
+    ext = _write_ext(
+        tmp_path,
+        "mutate_output.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def register(ctx):
+    def before(input, output):
+        _log("before:" + input["tool"])
+        # Mutate via output["args"] (not return)
+        output["args"] = {{"path": "replaced.txt"}}
+    def after(input, output):
+        _log("after:" + input["tool"] + ":" + str(output["output"]))
+    return {{"tool.execute.before": before, "tool.execute.after": after}}
+""",
+    )
+    agent = _mk_agent(tmp_path, extensions=[ext], tools=["read"])
+    agent.providers = {"openai": _Provider(['{"tool":"read","args":{"path":"original.txt"}}', "DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.bind_extensions()
+    await agent.prompt("go")
+
+    assert "before:read" in _read_log(tmp_path)
+    tcs = [e for e in events if e.get("type") == "tool_call_start" and e.get("tool") == "read"]
+    assert tcs, "tool_call_start should exist"
+    assert tcs[0]["args"] == {"path": "replaced.txt"}
+    # The after hook should have seen "replaced" text.
+    assert any(line.startswith("after:read:") and "replaced" in line for line in _read_log(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_multiple_hook_chaining_with_async_hook(tmp_path: Path):
+    """Multiple hooks chain: hook 2 observes hook 1 effective args; async hook participates."""
+    # Two separate extensions — single extension dict can't have duplicate keys
+    ext1 = _write_ext(
+        tmp_path,
+        "chain_a.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    _log("h1_in:" + str(input["args"]))
+    output["args"] = {{"path": "b.txt"}}
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    ext2 = _write_ext(
+        tmp_path,
+        "chain_b.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+async def before(input, output):
+    _log("h2_in:" + str(input["args"]))
+    _log("h2_out_before:" + str(output["args"]))
+    output["args"] = {{"path": output["args"]["path"], "suffix": True}}
+    return {{"path": output["args"]["path"], "suffix": True}}
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    agent = _mk_agent(tmp_path, extensions=[ext1, ext2], tools=["read"])
+    # Provider returns original args; hooks will chain and transform them.
+    agent.providers = {"openai": _Provider(['{"tool":"read","args":{"path":"a.txt"}}', "DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.bind_extensions()
+    await agent.prompt("go")
+
+    log_lines = _read_log(tmp_path)
+    assert "h1_in:{'path': 'a.txt'}" in log_lines
+    assert "h2_in:{'path': 'b.txt'}" in log_lines
+    assert "h2_out_before:{'path': 'b.txt'}" in log_lines
+    tcs = [e for e in events if e.get("type") == "tool_call_start" and e.get("tool") == "read"]
+    assert tcs
+    assert tcs[0]["args"] == {"path": "b.txt", "suffix": True}
+
+
+@pytest.mark.asyncio
+async def test_returned_dict_precedence_over_output_assignment(tmp_path: Path):
+    """SAME hook: invalid output['args'] but returned dict wins; next hook observes returned dict."""
+    ext1 = _write_ext(
+        tmp_path,
+        "precedence_a.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    # Assign invalid value — would fail, but returned dict overrides
+    output["args"] = "invalid-string"
+    _log("h1")
+    # Returned dict overrides this hook's own output["args"] assignment
+    return {{"path": "b.txt", "mode": "override"}}
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    ext2 = _write_ext(
+        tmp_path,
+        "precedence_b.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    # Must observe the returned dict from h1 (chaining works)
+    _log("h2_in:" + str(input["args"]))
+    output["args"] = {{"path": input["args"]["path"], "mode": input["args"]["mode"], "chained": True}}
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    agent = _mk_agent(tmp_path, extensions=[ext1, ext2], tools=["read"])
+    agent.providers = {"openai": _Provider(['{"tool":"read","args":{"path":"a.txt"}}', "DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.bind_extensions()
+    await agent.prompt("go")
+
+    log_lines = _read_log(tmp_path)
+    assert "h1" in log_lines
+    # h2 must see the returned dict from h1 (chaining proves precedence)
+    assert "h2_in:{'path': 'b.txt', 'mode': 'override'}" in log_lines
+    tcs = [e for e in events if e.get("type") == "tool_call_start" and e.get("tool") == "read"]
+    assert tcs
+    assert tcs[0]["args"] == {"path": "b.txt", "mode": "override", "chained": True}
+    # No error events — returned dict was valid
+    assert not any(e.get("type") == "extension_load_error" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_invalid_output_assignment_raises_type_error_and_denies(tmp_path: Path):
+    """Invalid output['args'] (non-dict, no dict return) → TypeError, deny, no execution."""
+    ext1 = _write_ext(
+        tmp_path,
+        "bad_output.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    output["args"] = "not-a-dict"
+    # ret is None — candidate becomes the invalid string → TypeError
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    ext2 = _write_ext(
+        tmp_path,
+        "bad_output_2.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    _log("h2-called")
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    agent = _mk_agent(tmp_path, extensions=[ext1, ext2], tools=["read"])
+    agent.providers = {"openai": _Provider(['{"tool":"read","args":{"path":"a.txt"}}', "DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.bind_extensions()
+    await agent.prompt("go")
+
+    # TypeError extension_load_error with actionable message
+    ext_errors = [e for e in events if e.get("type") == "extension_load_error"]
+    assert len(ext_errors) == 1
+    assert ext_errors[0]["hook"] == "tool.execute.before"
+    assert ext_errors[0]["errorType"] == "TypeError"
+    msg = ext_errors[0]["error"]
+    assert 'output["args"]' in msg
+    assert "str" in msg
+
+    # Approval rejected and failed tool_call_end
+    rejected = [e for e in events if e.get("type") == "tool_approval_rejected"]
+    assert len(rejected) == 1
+    ended = [e for e in events if e.get("type") == "tool_call_end"]
+    assert ended and ended[-1]["ok"] is False
+    # No tool_call_start (tool was never executed)
+    assert not any(e.get("type") == "tool_call_start" for e in events)
+    # h2 was never called — short-circuit on first hook error
+    log_lines = _read_log(tmp_path)
+    assert "h2-called" not in log_lines
+
+
+@pytest.mark.asyncio
+async def test_invalid_non_dict_return_raises_type_error_and_denies(tmp_path: Path):
+    """Non-None non-dict return → TypeError, deny, no execution, later hooks not called."""
+    # Two extensions — first returns invalid type, second should not be called
+    ext1 = _write_ext(
+        tmp_path,
+        "bad_return.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    return 42  # invalid return type
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    ext2 = _write_ext(
+        tmp_path,
+        "bad_return_2.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    _log("h2-called")
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    agent = _mk_agent(tmp_path, extensions=[ext1, ext2], tools=["read"])
+    agent.providers = {"openai": _Provider(['{"tool":"read","args":{"path":"a.txt"}}', "DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.bind_extensions()
+    await agent.prompt("go")
+
+    # TypeError extension_load_error
+    ext_errors = [e for e in events if e.get("type") == "extension_load_error"]
+    assert len(ext_errors) == 1
+    assert ext_errors[0]["hook"] == "tool.execute.before"
+    assert "TypeError" in ext_errors[0].get("errorType", "")
+
+    # Approval rejected and failed tool_call_end
+    rejected = [e for e in events if e.get("type") == "tool_approval_rejected"]
+    assert len(rejected) == 1
+    ended = [e for e in events if e.get("type") == "tool_call_end"]
+    assert ended and ended[-1]["ok"] is False
+    # No tool_call_start (tool was never executed)
+    assert not any(e.get("type") == "tool_call_start" for e in events)
+    # hook_2 was never called (short-circuit)
+    log_lines = _read_log(tmp_path)
+    assert "h2-called" not in log_lines
+
+
+@pytest.mark.asyncio
+async def test_missing_output_args_raises_type_error_and_denies(tmp_path: Path):
+    """Hook deletes output['args'] key and returns None → actionable TypeError, deny."""
+    ext = _write_ext(
+        tmp_path,
+        "delete_args.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    del output["args"]
+    # ret is None — output["args"] key is missing → TypeError
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    agent = _mk_agent(tmp_path, extensions=[ext], tools=["read"])
+    agent.providers = {"openai": _Provider(['{"tool":"read","args":{"path":"a.txt"}}', "DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.bind_extensions()
+    await agent.prompt("go")
+
+    # TypeError extension_load_error with actionable message about missing key
+    ext_errors = [e for e in events if e.get("type") == "extension_load_error"]
+    assert len(ext_errors) == 1
+    assert ext_errors[0]["hook"] == "tool.execute.before"
+    assert "TypeError" in ext_errors[0].get("errorType", "")
+    msg = ext_errors[0]["error"]
+    assert "output" in msg.lower() and "args" in msg.lower()
+
+    # Approval rejected and failed tool_call_end
+    rejected = [e for e in events if e.get("type") == "tool_approval_rejected"]
+    assert len(rejected) == 1
+    ended = [e for e in events if e.get("type") == "tool_call_end"]
+    assert ended and ended[-1]["ok"] is False
+    # No tool_call_start (tool was never executed)
+    assert not any(e.get("type") == "tool_call_start" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_earlier_valid_return_cannot_mask_later_invalid_output(tmp_path: Path):
+    """Regression: earlier hook returns valid dict, later hook assigns invalid with no return
+    → MUST deny. Proves that a valid returned dict from an earlier hook does not protect
+    against an invalid output["args"] set by a subsequent hook.
+    """
+    ext1 = _write_ext(
+        tmp_path,
+        "valid_return.py",
+        """
+def register(ctx):
+    def before(input, output):
+        # Returns valid dict — out_args becomes this dict
+        return {"path": "a.txt"}
+    return {"tool.execute.before": before}
+""",
+    )
+    ext2 = _write_ext(
+        tmp_path,
+        "invalid_output.py",
+        f"""
+from pathlib import Path
+
+LOG = Path({str(_log_file(tmp_path))!r})
+
+def _log(msg: str) -> None:
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(msg + "\\n")
+
+def before(input, output):
+    _log("h2_in:" + str(input["args"]))
+    # Assign invalid value and return None — candidate = "invalid-string" → TypeError
+    output["args"] = "invalid-string"
+    # No return → None → output["args"] is the candidate, which is not a dict
+
+def register(ctx):
+    return {{"tool.execute.before": before}}
+""",
+    )
+    agent = _mk_agent(tmp_path, extensions=[ext1, ext2], tools=["read"])
+    agent.providers = {"openai": _Provider(['{"tool":"read","args":{"path":"a.txt"}}', "DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.bind_extensions()
+    await agent.prompt("go")
+
+    # TypeError extension_load_error
+    ext_errors = [e for e in events if e.get("type") == "extension_load_error"]
+    assert len(ext_errors) == 1
+    assert ext_errors[0]["hook"] == "tool.execute.before"
+    assert "TypeError" in ext_errors[0].get("errorType", "")
+    msg = ext_errors[0]["error"]
+    assert 'output["args"]' in msg
+
+    # Approval rejected and failed tool_call_end
+    rejected = [e for e in events if e.get("type") == "tool_approval_rejected"]
+    assert len(rejected) == 1
+    ended = [e for e in events if e.get("type") == "tool_call_end"]
+    assert ended and ended[-1]["ok"] is False
+    # No tool_call_start (tool was never executed)
+    assert not any(e.get("type") == "tool_call_start" for e in events)
+    # h2 was called (it ran and observed the valid dict from h1)
+    log_lines = _read_log(tmp_path)
+    assert "h2_in:{'path': 'a.txt'}" in log_lines

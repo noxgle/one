@@ -51,11 +51,25 @@ Pola `ctx` (`ExtensionContext`):
 
 | hook | kiedy | input | output | efekt |
 |---|---|---|---|---|
-| `tool.execute.before` | przed każdym wywołaniem toola (przed `tool_call_start`) | `{directory, worktree, sessionID, tool, args}` | `{"args": args}` | **może mutować** `output["args"]`, zwrócić nowy dict z args, lub **deny** przez rzucenie wyjątku |
+| `tool.execute.before` | przed każdym wywołaniem toola (przed `tool_call_start`) | `{directory, worktree, sessionID, tool, args}` | `{"args": args}` | **chaining**: każdy hook widzi efektywne args poprzedniego hooka. Szczegóły precedencji, walidacji i łańcucha poniżej. |
 | `tool.execute.after` | po wykonaniu toola | `{directory, worktree, sessionID, tool, ok}` | `{"title", "output", "metadata"}` | info-only |
 | `chat.message` | dla każdej nowej wiadomości użytkownika (przed promptem) | `{directory, worktree, sessionID, message}` | `{}` | info-only |
 | `experimental.session.compacting` | przed wygenerowaniem streszczenia kompakcji | `{directory, worktree, sessionID}` | `{"context": [], "prompt": None}` | pushuje itemy do `context` (dykty z `content`), `prompt` może nadpisać instrukcje kompakcji |
 | `dispose` | przy `session.dispose()` | — | — | cleanup |
+
+#### Precedencja, chaining i walidacja
+
+- **Precedencja** (ten sam hook): zwrócony dict **nadpisuje** przypisanie do
+  `output["args"]` z *tego samego* hooka.  Jeśli hook zwraca dict,
+  `output["args"]` (czy ustawione, czy nie) nie jest walidowany — zwrócony
+  dict staje się efektywnymi args bezpośrednio.
+- **Chaining**: następny hook w łańcuchu widzi efektywne args (wynik bieżącego
+  hooka) w `input["args"]` i `output["args"]`.
+- **Walidacja**: gdy hook zwraca `None`, `output["args"]` musi istnieć i być
+  prawidłowym `dict`; brak klucza lub wartość nie-`dict` rzuca `TypeError` →
+  deny.
+- **Wartości dozwolone**: tylko `None` lub `dict`. Każda inna wartość (np.
+  `42`, `"string"`) jest błędem — rzuca `TypeError` → deny i przerywa łańcuch.
 
 ### Semantyka deny (`tool.execute.before`)
 
@@ -103,7 +117,39 @@ def before(input, output):
         raise ExtensionDenied(f"{input['tool']} is blocked by policy")
 ```
 
-### 2. Mutacja argumentów (wymuszenie limitu czasu)
+### 2. Łańcuch hooków i precedencja zwracanego dict
+
+Każdy hook w `tool.execute.before` widzi efektywne argumenty poprzedniego
+hooka (w `input["args"]` i `output["args"]`).
+
+**Precedencja — ten sam hook**: zwrócenie dict **wygrywa** z przypisaniem do
+`output["args"]` z *tego samego* hooka. Każdy wynik jest walidowany przed
+uruchomieniem następnego hooka — stan nieprawidłowy nie przepływa między
+hookami.
+
+**Przykład — ten sam hook ustawia nieprawidłowy output, ale zwraca prawidłowy
+`dict`;
+następny hook obserwuje zwrotny dict:**
+
+```python
+# Rozszerzenie A — output["args"] = "string" (niepoprawne), ale zwraca dict
+def register(ctx):
+    return {"tool.execute.before": hook_a}
+
+def hook_a(input, output):
+    output["args"] = "invalid-string"  # ustawione, ale nadpisane przez return
+    return {"path": "b.txt", "encoding": "utf-8"}  # wygrywa (ten sam hook)
+
+# Rozszerzenie B — widzi zwrotny dict od hook_a (chaining)
+def register(ctx):
+    return {"tool.execute.before": hook_b}
+
+def hook_b(input, output):
+    # input["args"] == {"path": "b.txt", "encoding": "utf-8"}
+    output["args"] = {**input["args"], "chained": True}
+```
+
+### 3. Mutacja argumentów (wymuszenie limitu czasu)
 
 ```python
 def register(ctx):
@@ -114,7 +160,7 @@ def before(input, output):
         output["args"] = {**output["args"], "timeoutSec": 30}
 ```
 
-### 3. Logowanie wykonanych tooli (info-only)
+### 4. Logowanie wykonanych tooli (info-only)
 
 ```python
 def register(ctx):
@@ -124,7 +170,7 @@ def after(input, output):
     print(f"[ext:{ctx_worktree(input)}] {input['tool']} ok={input['ok']}")
 ```
 
-### 4. Kontekst i instrukcje do kompakcji
+### 5. Kontekst i instrukcje do kompakcji
 
 ```python
 def register(ctx):

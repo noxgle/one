@@ -7,9 +7,16 @@ async). ``hooks`` is a dict mapping hook names to callables (sync or async).
 
 Supported hooks (opencode parity):
 
-- ``tool.execute.before (input, output)`` — mutate ``output["args"]`` or
-  return a new args dict; raise ``ExtensionDenied`` (or any exception) to
-  deny the tool call.
+- ``tool.execute.before (input, output)`` — chained hooks: each hook sees the
+  previous hook's effective args via ``input["args"]`` and ``output["args"]``.
+  Mutate ``output["args"]`` **or** return a dict (returned dict takes precedence
+  and overrides the ``output["args"]`` assignment from the **same** hook only).
+  Allowed returns: ``None`` (pass-through / use ``output["args"]``) or ``dict``
+  (effective replacement).  Any other non-None return raises ``TypeError`` and
+  denies.  When the return is a dict, ``output["args"]`` (whether set or not) is
+  deliberately not validated.  When the return is ``None``, ``output["args"]``
+  must exist and be a dict; missing ``output["args"]`` or a non-dict assigned to
+  it raises ``TypeError``.  First error short-circuits.
 - ``tool.execute.after (input, output)`` — info-only, runs after a tool call
   produced a result.
 - ``chat.message (input, output)`` — info-only, runs for each new user message.
@@ -206,20 +213,60 @@ class ExtensionRuntime:
     ) -> tuple[dict[str, Any], str | None]:
         """Run ``tool.execute.before`` hooks.
 
-        Returns ``(args, None)`` on success (args may have been mutated or
-        replaced by a returned dict) or ``(args, reason)`` when a hook denied
-        the call. The first raising hook denies and short-circuits.
+        Returns ``(args, None)`` on success or ``(args, reason)`` when a hook
+        denied the call.  The first raising hook denies and short-circuits.
+
+        Chaining contract — each hook sees the previous hook's effective args
+        via ``input["args"]`` and ``output["args"]`` built from the current
+        ``out_args`` so that the next hook observes the previous hook's result.
+
+        Precedence — a hook may assign ``output["args"]`` (in-place mutation)
+        **or** return a dict.  When the *same* hook returns a dict, that dict
+        overrides its own ``output["args"]`` assignment (the *same* hook only;
+        each hook's result is validated before the next hook runs, so invalid
+        state cannot flow between hooks).
+
+        Allowed return values — ``None`` (pass-through / use ``output["args"]``)
+        or a ``dict`` (effective replacement).  Any other non-None return
+        raises ``TypeError`` which short-circuits the remaining hooks and
+        produces a deny.
+
+        Validation — when the return is a ``dict``, ``output["args"]``
+        (whether set or not) is deliberately not validated; the returned dict
+        becomes the effective args directly.  When the return is ``None``,
+        ``output["args"]`` must exist and be a dict — missing ``output["args"]``
+        or a non-dict assigned to it raises an actionable ``TypeError``.  The
+        first such error short-circuits and denies.
         """
-        out_args = args
+        out_args: dict[str, Any] = args
         for path, fn in self.hooks_for("tool.execute.before"):
-            input_payload = {**self._base_input(), "tool": tool_name, "args": args}
-            output: dict[str, Any] = {"args": args}
+            input_payload = {**self._base_input(), "tool": tool_name, "args": out_args}
+            output: dict[str, Any] = {"args": out_args}
             try:
                 ret = fn(input_payload, output)
                 if inspect.isawaitable(ret):
                     ret = await ret
                 if isinstance(ret, dict):
-                    out_args = ret
+                    candidate = ret
+                elif ret is not None:
+                    raise TypeError(
+                        f"Hook returned {type(ret).__name__} — "
+                        f"only None or dict are allowed."
+                    )
+                else:
+                    # ret is None — require literal key 'args' in output
+                    if "args" not in output:
+                        raise TypeError(
+                            'output["args"] missing — '
+                            'set output["args"] or return a dict.'
+                        )
+                    candidate = output["args"]
+                if not isinstance(candidate, dict):
+                    raise TypeError(
+                        f'output["args"] is {type(candidate).__name__}, expected dict '
+                        f"— assign a dict or return a dict from the hook."
+                    )
+                out_args = candidate
             except Exception as e:  # noqa: BLE001 - opencode parity: any throw denies
                 reason = str(e).strip() or e.__class__.__name__
                 emit_error(path, "tool.execute.before", e)
