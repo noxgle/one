@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import textwrap
 from typing import Any
 
+from rich.markup import escape as rich_escape
 from rich.text import Text
 
 from one.core.oauth import OAuthError
@@ -577,6 +578,16 @@ if TEXTUAL_AVAILABLE:
                         self._stream_lines.pop(i - 1)
                     break
             self._thinking_active = False
+
+        def _finalize_thinking_block(self) -> None:
+            """Close/reset the thinking-text block so the next turn starts clean.
+
+            Resets only the thinking-block flags; does NOT touch the animated
+            spinner (that is handled by _remove_thinking_line / _tick_waiting).
+            """
+            self._thinking_label_shown = False
+            self._thinking_buffer = ""
+            self._thinking_line_idx = None
 
         def _tick_waiting(self) -> None:
             """Animate the in-stream spinner while the model is working."""
@@ -1966,14 +1977,21 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_buffer = ""
             elif et == "thinking_delta":
                 delta = event.get("delta", "")
-                if delta and delta.strip():
+                # Ignore exact empty string; whitespace-only allowed once block is open.
+                if not delta:
+                    pass  # skip empty
+                elif not delta.strip() and not self._thinking_label_shown:
+                    pass  # whitespace-only with no block open → skip
+                else:
+                    # Substantive delta or whitespace within an open block.
                     if not self._thinking_label_shown:
                         self._write("Thinking:")
                         self._thinking_label_shown = True
                         self._thinking_buffer = ""
                         self._thinking_line_idx = None
                     self._thinking_buffer += sanitize_display_text(delta)
-                    line_text = f"{_THINKING_TEXT_MARK}[{self._theme.info}]{self._thinking_buffer}[/]"
+                    escaped = rich_escape(self._thinking_buffer)
+                    line_text = f"{_THINKING_TEXT_MARK}[{self._theme.info}]{escaped}[/]"
                     if self._thinking_line_idx is not None and 0 <= self._thinking_line_idx < len(self._stream_lines) and self._stream_lines[self._thinking_line_idx].startswith(_THINKING_TEXT_MARK):
                         self._stream_lines[self._thinking_line_idx] = line_text
                     else:
@@ -1987,12 +2005,11 @@ if TEXTUAL_AVAILABLE:
                 # drained after the previous turn), which never pass through
                 # on_input_submitted.
                 self._turn_active = True
-                self._thinking_label_shown = False
-                self._thinking_buffer = ""
-                self._thinking_line_idx = None
+                self._finalize_thinking_block()
             elif et == "tool_call_start":
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
+                self._finalize_thinking_block()
                 self._write_tool_block(f"tool start: {tool_name} {args_text}")
             elif et == "tool_approval_rejected":
                 self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
@@ -2038,6 +2055,7 @@ if TEXTUAL_AVAILABLE:
             elif et == "tool_call_end":
                 status = "ok" if event.get("ok") else "err"
                 tool_name = str(event.get("tool") or "tool")
+                self._finalize_thinking_block()
                 self._write_tool_block(f"tool {status}: {tool_name}")
                 if tool_name != "finish" and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)():
                     payload = event.get("result") or {}
@@ -2047,12 +2065,12 @@ if TEXTUAL_AVAILABLE:
                         out = str(payload.get("error") or "").rstrip()
                     if out:
                         self._write_tool_block(out)
+            elif et == "tool_call_nudge_start":
+                self._finalize_thinking_block()
             elif et == "turn_end":
                 self._retry_state = "idle"
                 self._turn_active = False
-                self._thinking_label_shown = False
-                self._thinking_buffer = ""
-                self._thinking_line_idx = None
+                self._finalize_thinking_block()
                 self._remove_thinking_line()
                 self._render_stream()
                 if event.get("ok") is False:

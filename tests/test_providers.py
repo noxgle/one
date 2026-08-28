@@ -410,3 +410,176 @@ async def test_on_thinking_delta_fallback_to_on_delta(adapter: OpenAICompatibleA
     assert content_text in captured_deltas
     assert reasoning_text in result.text
     assert content_text in result.text
+
+
+# ── Phase 30.7: raw reasoning content streaming ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_raw_reasoning_chunks_exact_callbacks(adapter: OpenAICompatibleAdapter):
+    """Exact raw reasoning chunks: callbacks fire with each chunk exactly, join matches."""
+
+    chunks = ["rea", "son", ",", " ", "can", "'", "t", " ", "**", "bold", "**", " [x]"]
+
+    sse_lines = _sse(
+        *[{"choices": [{"delta": {"reasoning_content": c, "role": "assistant"}}]} for c in chunks],
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )
+
+    captured: list[str] = []
+
+    def on_thinking_delta(piece: str) -> None:
+        captured.append(piece)
+
+    stream_ctx = _StreamContext(sse_lines)
+
+    with patch.object(httpx, "AsyncClient") as MockClient:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.stream = lambda *a, **k: stream_ctx
+        MockClient.return_value = mock_client
+
+        result = await adapter.chat(
+            api_key="key",
+            model="qwen-test",
+            messages=[{"role": "user", "content": "hello"}],
+            thinking_level="high",
+            on_delta=on_thinking_delta,
+            on_thinking_delta=on_thinking_delta,
+        )
+
+    # Each callback receives exactly the raw chunk
+    assert captured == chunks
+    # Joined value is exact
+    assert "".join(captured) == "reason, can't **bold** [x]"
+    # ChatResult raw join unchanged
+    assert result.text == "reason, can't **bold** [x]"
+
+
+@pytest.mark.asyncio
+async def test_empty_vs_whitespace_reasoning_callbacks(adapter: OpenAICompatibleAdapter):
+    """Empty and whitespace-only chunks: empty strings skip callback, whitespace-only passes."""
+
+    # Build SSE lines manually: empty reasoning_content (falsy, so delta won't enter `if piece_reasoning`)
+    # then "A", " ", "B", then another empty.
+    # Note: reasoning_content="" is falsy, so the `if piece_reasoning:` branch is skipped.
+    # reasoning_content=" " is truthy (non-empty), so it enters and fires callback.
+    sse_lines = [
+        "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "", "role": "assistant"}}]}),
+        "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "A"}}]}),
+        "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": " "}}]}),
+        "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "B"}}]}),
+        "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": ""}}]}),
+        "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+    ]
+
+    captured: list[str] = []
+
+    def on_thinking_delta(piece: str) -> None:
+        captured.append(piece)
+
+    stream_ctx = _StreamContext(sse_lines)
+
+    with patch.object(httpx, "AsyncClient") as MockClient:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.stream = lambda *a, **k: stream_ctx
+        MockClient.return_value = mock_client
+
+        result = await adapter.chat(
+            api_key="key",
+            model="qwen-test",
+            messages=[{"role": "user", "content": "hello"}],
+            thinking_level="high",
+            on_delta=on_thinking_delta,
+            on_thinking_delta=on_thinking_delta,
+        )
+
+    # Empty strings are falsy → skipped; whitespace-only " " and substantive "A","B" pass
+    assert captured == ["A", " ", "B"]
+    # Join preserves whitespace
+    assert "".join(captured) == "A B"
+    assert result.text == "A B"
+
+
+@pytest.mark.asyncio
+async def test_raw_reasoning_fallback_on_delta_only(adapter: OpenAICompatibleAdapter):
+    """When on_thinking_delta is absent, reasoning chunks go to on_delta exactly."""
+
+    chunks = ["thi", "nk"]
+
+    sse_lines = _sse(
+        *[{"choices": [{"delta": {"reasoning_content": c, "role": "assistant"}}]} for c in chunks],
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )
+
+    captured: list[str] = []
+
+    def on_delta(piece: str) -> None:
+        captured.append(piece)
+
+    stream_ctx = _StreamContext(sse_lines)
+
+    with patch.object(httpx, "AsyncClient") as MockClient:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.stream = lambda *a, **k: stream_ctx
+        MockClient.return_value = mock_client
+
+        result = await adapter.chat(
+            api_key="key",
+            model="qwen-test",
+            messages=[{"role": "user", "content": "hello"}],
+            thinking_level="high",
+            on_delta=on_delta,
+            # no on_thinking_delta
+        )
+
+    assert captured == chunks
+    assert result.text == "think"
+
+
+@pytest.mark.asyncio
+async def test_raw_reasoning_callback_raises_still_finishes(adapter: OpenAICompatibleAdapter):
+    """If on_thinking_delta raises, provider streaming continues and ChatResult is complete."""
+
+    call_count = 0
+    chunks = ["A", "B", "C"]
+
+    def on_thinking_delta(piece: str) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise ValueError("boom")
+        # first and third chunks still fire
+
+    sse_lines = _sse(
+        *[{"choices": [{"delta": {"reasoning_content": c, "role": "assistant"}}]} for c in chunks],
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )
+
+    stream_ctx = _StreamContext(sse_lines)
+
+    with patch.object(httpx, "AsyncClient") as MockClient:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.stream = lambda *a, **k: stream_ctx
+        MockClient.return_value = mock_client
+
+        result = await adapter.chat(
+            api_key="key",
+            model="qwen-test",
+            messages=[{"role": "user", "content": "hello"}],
+            thinking_level="high",
+            on_delta=lambda p: None,
+            on_thinking_delta=on_thinking_delta,
+        )
+
+    # Provider finished despite exception on chunk 2
+    assert result.text == "ABC"
+    # All 3 chunks were attempted; chunk 2 raised but was swallowed
+    assert call_count == 3

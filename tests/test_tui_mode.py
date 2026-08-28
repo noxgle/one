@@ -2467,3 +2467,372 @@ async def test_tui_welcome_includes_logo(tmp_path: Path):
         stream = "\n".join(app._stream_lines)
         assert "██╗" in stream
         assert "one TUI v2 ready. /help" in stream
+
+
+# ---------------------------------------------------------------------------
+# Phase 30.7: TUI thinking block rendering determinism.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
+    """A->tool1 start/end->B->answer: exactly 2 Thinking: labels and 2 _THINKING_TEXT_MARK lines."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Turn A thinking
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+        session._emit({"type": "thinking_delta", "delta": "A"})
+        await pilot.pause()
+
+        # Capture first marked A line IMMEDIATELY after A and before tool_call_start
+        thinking_after_a = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_after_a) == 1
+        assert "A" in thinking_after_a[0]
+        a_line = thinking_after_a[0]
+
+        # Tool call 1
+        session._emit({"type": "tool_call_start", "tool": "read", "args": {"path": "a.txt"}})
+        await pilot.pause()
+        session._emit({"type": "tool_call_end", "tool": "read", "ok": True, "result": {"outputText": "result1"}})
+        await pilot.pause()
+
+        # Turn B thinking
+        session._emit({"type": "thinking_delta", "delta": "B"})
+        await pilot.pause()
+
+        # Answer
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        session._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "answer"}})
+        await pilot.pause()
+        session._emit({"type": "message_end", "message": {"role": "assistant", "content": "answer"}})
+        await pilot.pause()
+        session._emit({"type": "turn_end", "ok": True})
+        await pilot.pause()
+
+        # Count Thinking: labels
+        thinking_labels = [l for l in app._stream_lines if l == "Thinking:"]
+        assert len(thinking_labels) == 2, f"Expected 2 Thinking: labels, got {len(thinking_labels)}"
+
+        # Count _THINKING_TEXT_MARK lines
+        thinking_text_lines = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_text_lines) == 2, f"Expected 2 _THINKING_TEXT_MARK lines, got {len(thinking_text_lines)}"
+
+        # First thinking line unchanged after B/answer appended
+        assert thinking_text_lines[0] == a_line
+
+        # Strict indices on full _stream_lines
+        a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A" in l)
+        tool_start_idx = next(i for i, l in enumerate(app._stream_lines) if "tool start: read" in l)
+        tool_end_idx = next(i for i, l in enumerate(app._stream_lines) if "tool ok: read" in l)
+        b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B" in l)
+        answer_idx = next(i for i, l in enumerate(app._stream_lines) if "answer" in l)
+        assert a_idx < tool_start_idx < tool_end_idx < b_idx < answer_idx
+
+
+@pytest.mark.asyncio
+async def test_tui_three_segments_two_tools_strict_chronology(tmp_path: Path):
+    """Three thinking segments / two tools: exactly one turn_start, strict chronological order."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Exactly one turn_start before A, then A→tool1→B→tool2→C→answer
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+
+        # Segment A
+        for ch in "A-seg":
+            session._emit({"type": "thinking_delta", "delta": ch})
+            await pilot.pause()
+
+        # Tool 1: read
+        session._emit({"type": "tool_call_start", "tool": "read", "args": {"pattern": "x"}})
+        await pilot.pause()
+        session._emit({"type": "tool_call_end", "tool": "read", "ok": True, "result": {"outputText": "out1"}})
+        await pilot.pause()
+
+        # Segment B
+        for ch in "B-seg":
+            session._emit({"type": "thinking_delta", "delta": ch})
+            await pilot.pause()
+
+        # Tool 2: grep
+        session._emit({"type": "tool_call_start", "tool": "grep", "args": {"pattern": "x"}})
+        await pilot.pause()
+        session._emit({"type": "tool_call_end", "tool": "grep", "ok": True, "result": {"outputText": "out2"}})
+        await pilot.pause()
+
+        # Segment C
+        for ch in "C-seg":
+            session._emit({"type": "thinking_delta", "delta": ch})
+            await pilot.pause()
+
+        # Final answer
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        session._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "FINAL"}})
+        await pilot.pause()
+        session._emit({"type": "message_end", "message": {"role": "assistant", "content": "FINAL"}})
+        await pilot.pause()
+        session._emit({"type": "turn_end", "ok": True})
+        await pilot.pause()
+
+        thinking_text_lines = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_text_lines) == 3, f"Expected 3 _THINKING_TEXT_MARK lines, got {len(thinking_text_lines)}"
+
+        # Strict chronological order: A < tool1_start < tool1_end < B < tool2_start < tool2_end < C < final
+        a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A-seg" in l)
+        tool1_start = next(i for i, l in enumerate(app._stream_lines) if "tool start: read" in l)
+        tool1_end = next(i for i, l in enumerate(app._stream_lines) if "tool ok: read" in l)
+        b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B-seg" in l)
+        tool2_start = next(i for i, l in enumerate(app._stream_lines) if "tool start: grep" in l)
+        tool2_end = next(i for i, l in enumerate(app._stream_lines) if "tool ok: grep" in l)
+        c_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "C-seg" in l)
+        final_idx = next(i for i, l in enumerate(app._stream_lines) if "FINAL" in l)
+
+        assert a_idx < tool1_start < tool1_end < b_idx < tool2_start < tool2_end < c_idx < final_idx
+
+
+@pytest.mark.asyncio
+async def test_tui_many_deltas_same_segment_one_marked_line(tmp_path: Path):
+    """Many deltas in one segment produce exactly one _THINKING_TEXT_MARK line."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+
+        # 20 deltas
+        for i in range(20):
+            session._emit({"type": "thinking_delta", "delta": f"x{i}"})
+            await pilot.pause()
+
+        session._emit({"type": "message_start"})
+        await pilot.pause()
+        session._emit({"type": "message_end"})
+        await pilot.pause()
+        session._emit({"type": "turn_end", "ok": True})
+        await pilot.pause()
+
+        thinking_text_lines = [line for line in app._stream_lines if line.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_text_lines) == 1, f"Expected 1 _THINKING_TEXT_MARK line, got {len(thinking_text_lines)}"
+
+        # All deltas should be in the single line
+        assert all(f"x{i}" in thinking_text_lines[0] for i in range(20))
+
+
+@pytest.mark.asyncio
+async def test_tui_leading_empty_whitespace_no_label_then_block(tmp_path: Path):
+    """Leading '', ' ', '\\t' before substantive => no label; then A, space, B => one block."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+
+        # Leading empty and whitespace-only deltas should NOT open the block
+        session._emit({"type": "thinking_delta", "delta": ""})
+        await pilot.pause()
+        session._emit({"type": "thinking_delta", "delta": " "})
+        await pilot.pause()
+        session._emit({"type": "thinking_delta", "delta": "\t"})
+        await pilot.pause()
+
+        # Substantive content opens the block
+        session._emit({"type": "thinking_delta", "delta": "A"})
+        await pilot.pause()
+        session._emit({"type": "thinking_delta", "delta": " "})
+        await pilot.pause()
+        session._emit({"type": "thinking_delta", "delta": "B"})
+        await pilot.pause()
+
+        session._emit({"type": "message_start"})
+        await pilot.pause()
+        session._emit({"type": "message_end"})
+        await pilot.pause()
+        session._emit({"type": "turn_end", "ok": True})
+        await pilot.pause()
+
+        # Exactly one Thinking: label
+        thinking_labels = [l for l in app._stream_lines if l == "Thinking:"]
+        assert len(thinking_labels) == 1, f"Expected 1 Thinking: label, got {len(thinking_labels)}"
+
+        # Inspect rendered Static content and assert literal "A B"
+        widget = app.query_one("#stream", Static)
+        rendered = str(widget.content)
+        assert "A B" in rendered, f"Expected 'A B' in rendered content, got: {rendered!r}"
+
+        # One _THINKING_TEXT_MARK line
+        thinking_text_lines = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_text_lines) == 1
+        assert "A" in thinking_text_lines[0]
+        assert "B" in thinking_text_lines[0]
+
+
+@pytest.mark.asyncio
+async def test_tui_literal_chunks_no_markup_error(tmp_path: Path):
+    """Chunks with brackets, code, bold markers render literal without MarkupError."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+
+        # Literal chunks with markup-breaking characters
+        chunks = ["rea", "son", ",", " ", "can", "'", "t", " ", "[", "bold", "]", " ", "x", "[/]"]
+        for ch in chunks:
+            session._emit({"type": "thinking_delta", "delta": ch})
+            await pilot.pause()
+
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        session._emit({"type": "message_end", "message": {"role": "assistant", "content": "reason, can't [bold] x[/]"}})
+        await pilot.pause()
+        session._emit({"type": "turn_end", "ok": True})
+        await pilot.pause()
+
+        # No MarkupError raised; inspect rendered Static content
+        widget = app.query_one("#stream", Static)
+        rendered = str(widget.content)
+        # Exact literal joined chunk string — brackets not interpreted as markup
+        expected_literal = "reason, can't [bold] x[/]"
+        assert expected_literal in rendered, f"Expected {expected_literal!r} in content, got: {rendered!r}"
+
+        # One _THINKING_TEXT_MARK line
+        thinking_text_lines = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_text_lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_end_without_start_separates_thinking(tmp_path: Path):
+    """tool_call_end without preceding tool_call_start separates A and B thinking blocks."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # A thinking
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+        session._emit({"type": "thinking_delta", "delta": "A"})
+        await pilot.pause()
+
+        # tool_call_end without tool_call_start
+        session._emit({"type": "tool_call_end", "tool": "read", "ok": True, "result": {"outputText": "x"}})
+        await pilot.pause()
+
+        # B thinking
+        session._emit({"type": "thinking_delta", "delta": "B"})
+        await pilot.pause()
+
+        session._emit({"type": "message_start"})
+        await pilot.pause()
+        session._emit({"type": "message_end"})
+        await pilot.pause()
+        session._emit({"type": "turn_end", "ok": True})
+        await pilot.pause()
+
+        thinking_text_lines = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_text_lines) == 2, f"Expected 2 _THINKING_TEXT_MARK lines, got {len(thinking_text_lines)}"
+
+        # Strict stream order: A line < tool end < B line (by full stream index)
+        a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A" in l)
+        tool_end_idx = next(i for i, l in enumerate(app._stream_lines) if "tool ok: read" in l)
+        b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B" in l)
+        assert a_idx < tool_end_idx < b_idx, f"Expected A({a_idx}) < tool_end({tool_end_idx}) < B({b_idx})"
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_nudge_start_boundary(tmp_path: Path):
+    """A, nudge_start, B => two thinking blocks; no new event schema."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+        session._emit({"type": "thinking_delta", "delta": "A"})
+        await pilot.pause()
+
+        # nudge_start resets thinking block
+        session._emit({"type": "tool_call_nudge_start"})
+        await pilot.pause()
+
+        session._emit({"type": "thinking_delta", "delta": "B"})
+        await pilot.pause()
+
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        session._emit({"type": "message_end", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        session._emit({"type": "turn_end", "ok": True})
+        await pilot.pause()
+
+        thinking_text_lines = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_text_lines) == 2, f"Expected 2 _THINKING_TEXT_MARK lines, got {len(thinking_text_lines)}"
+
+        # A and B in separate lines
+        a_idx = next(i for i, l in enumerate(thinking_text_lines) if "A" in l)
+        b_idx = next(i for i, l in enumerate(thinking_text_lines) if "B" in l)
+        assert a_idx != b_idx
+
+
+@pytest.mark.asyncio
+async def test_tui_no_thinking_events_no_label(tmp_path: Path):
+    """No thinking events => no Thinking: label in stream."""
+    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+
+        # Skip all thinking, go directly to answer
+        session._emit({"type": "message_start"})
+        await pilot.pause()
+        session._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "answer"}})
+        await pilot.pause()
+        session._emit({"type": "message_end"})
+        await pilot.pause()
+        session._emit({"type": "turn_end", "ok": True})
+        await pilot.pause()
+
+        thinking_labels = [line for line in app._stream_lines if line == "Thinking:"]
+        assert len(thinking_labels) == 0, f"Expected 0 Thinking: labels, got {len(thinking_labels)}"
+
+        thinking_text_lines = [line for line in app._stream_lines if line.startswith(_THINKING_TEXT_MARK)]
+        assert len(thinking_text_lines) == 0, f"Expected 0 _THINKING_TEXT_MARK lines, got {len(thinking_text_lines)}"

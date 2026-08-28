@@ -363,3 +363,141 @@ async def test_thinking_delta_event_emitted(tmp_path: Path):
     # The full text should contain both thinking and content
     message_updates = [e for e in events if e.get("type") == "message_update"]
     assert any("answer" in str(e) for e in message_updates)
+
+
+# ── Phase 30.7: multi-invocation reasoning/tool sequencing ───────────────────
+
+class _ProviderWithThinkingAndTools:
+    """Three-invocation provider: THINK_A→read, THINK_B→grep, THINK_C→answer.
+
+    Each invocation fires thinking_delta callbacks for every chunk (including "" for A).
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        on_delta: Any = None,
+        on_thinking_delta: Any = None,
+        max_tokens: int | None = None,
+    ) -> Any:
+        from one.providers.base import ChatResult
+
+        self.calls += 1
+
+        if self.calls == 1:
+            chunks = ["THINK", " ", "A", ""]
+            content = '{"tool":"read","args":{"path":"a.txt"}}'
+            if on_thinking_delta:
+                for c in chunks:
+                    on_thinking_delta(c)
+            if on_delta:
+                on_delta(content)
+            return ChatResult(text="THINK A\n\n" + content, raw={}, usage={}, stop_reason="stop")
+
+        elif self.calls == 2:
+            chunks = ["THINK", " ", "B"]
+            content = '{"tool":"grep","args":{"pattern":"foo"}}'
+            if on_thinking_delta:
+                for c in chunks:
+                    on_thinking_delta(c)
+            if on_delta:
+                on_delta(content)
+            return ChatResult(text="THINK B\n\n" + content, raw={}, usage={}, stop_reason="stop")
+
+        else:
+            chunks = ["THINK", " ", "C"]
+            content = "DONE"
+            if on_thinking_delta:
+                for c in chunks:
+                    on_thinking_delta(c)
+            if on_delta:
+                on_delta(content)
+            return ChatResult(text="THINK C\n\nDONE", raw={}, usage={}, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_multi_invocation_reasoning_tool_sequencing(tmp_path: Path):
+    """Three provider invocations: THINK_A→read, THINK_B→grep, THINK_C→answer."""
+    # Create read source file so first tool succeeds; grep can succeed on tmp_path
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry(auth, str(tmp_path / "models.json"))
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 6, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["read", "grep"])
+    agent.providers = {"openai": _ProviderWithThinkingAndTools()}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("go")
+
+    # Exactly ONE turn_start in the whole prompt/tool loop
+    turn_starts = [e for e in events if e.get("type") == "turn_start"]
+    assert len(turn_starts) == 1
+
+    # Filter out lifecycle events (agent_start, agent_end) to get the meaningful sequence
+    meaningful = [e for e in events if e.get("type") not in ("agent_start", "agent_end")]
+
+    # Assert exact filtered sequence of existing meaningful events
+    expected_types = [
+        "message_start",  # pre-turn preamble
+        "message_end",
+        "turn_start",
+        # THINK_A deltas (empty "" filtered by agent_session._on_thinking_delta)
+        "thinking_delta",  # "THINK"
+        "thinking_delta",  # " "
+        "thinking_delta",  # "A"
+        # tool read (succeeds — a.txt exists)
+        "tool_call_start",
+        "tool_call_end",
+        # THINK_B deltas
+        "thinking_delta",  # "THINK"
+        "thinking_delta",  # " "
+        "thinking_delta",  # "B"
+        # tool grep (succeeds)
+        "tool_call_start",
+        "tool_call_end",
+        # THINK_C deltas
+        "thinking_delta",  # "THINK"
+        "thinking_delta",  # " "
+        "thinking_delta",  # "C"
+        # final answer
+        "message_start",
+        "message_update",
+        "message_end",
+        "turn_end",
+    ]
+    actual_types = [e.get("type") for e in meaningful]
+    assert actual_types == expected_types, f"Types mismatch: {actual_types}"
+
+    # A segment deltas include exact " " but no ""
+    think_deltas = [e for e in events if e.get("type") == "thinking_delta"]
+    assert all(e.get("delta") != "" for e in think_deltas)
+    assert any(e.get("delta") == " " for e in think_deltas)
+
+    # Final message_update delta includes thinking + content (provider returns full text)
+    msg_updates = [e for e in events if e.get("type") == "message_update"]
+    assert msg_updates[-1].get("assistantMessageEvent", {}).get("delta") == "THINK C\n\nDONE"
+
+    # Strict chronological order: A < read_start < read_end < B < grep_start < grep_end < C < final_msg
+    first_a = next(i for i, e in enumerate(events) if e.get("delta") == "A" and e.get("type") == "thinking_delta")
+    read_start = next(i for i, e in enumerate(events) if e.get("type") == "tool_call_start" and e.get("tool") == "read")
+    read_end = next(i for i, e in enumerate(events) if e.get("type") == "tool_call_end" and e.get("tool") == "read")
+    first_b = next(i for i, e in enumerate(events) if e.get("delta") == "B" and e.get("type") == "thinking_delta")
+    grep_start = next(i for i, e in enumerate(events) if e.get("type") == "tool_call_start" and e.get("tool") == "grep")
+    grep_end = next(i for i, e in enumerate(events) if e.get("type") == "tool_call_end" and e.get("tool") == "grep")
+    first_c = next(i for i, e in enumerate(events) if e.get("delta") == "C" and e.get("type") == "thinking_delta")
+    final_msg = next(i for i, e in enumerate(events) if e.get("type") == "message_start" and i > 1)
+    assert first_a < read_start < read_end < first_b < grep_start < grep_end < first_c < final_msg

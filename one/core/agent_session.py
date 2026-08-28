@@ -1137,9 +1137,9 @@ class AgentSession:
             )
 
         def _on_thinking_delta(delta: str) -> None:
-            if not delta or not delta.strip():
+            if not delta:  # only skip None or exact empty ""; whitespace-only passes through
                 return
-            # Emit original delta (preserve whitespace) — only the empty-check strips.
+            # Emit exact original delta — no whitespace stripping.
             self._emit({"type": "thinking_delta", "delta": delta})
 
         chat_kwargs = {
