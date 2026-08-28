@@ -1648,7 +1648,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - `.venv/bin/python -m pytest -q tests/test_providers.py tests/test_event_snapshots.py tests/test_tui_mode.py`
   - **Delivered:** raw reasoning deltas without synthetic spacing; whitespace-preserving AgentSession events; immutable per-tool-loop TUI thinking blocks; Rich-safe literal rendering; 134 focused tests.
 
-- [ ] **Task 30.8: honor SDK `agentDir` for all default state**
+- [x] **Task 30.8: honor SDK `agentDir` for all default state**
   - **Description:** Construct default auth, model, settings, and session paths from `options["agentDir"]` rather than global environment resolution. Keep dependency injection precedence unchanged and prevent SDK calls from mutating the user's global configuration when a custom agent directory is supplied.
   - **Files:** `one/core/sdk.py`, `one/core/auth_storage.py`, `one/core/model_registry.py`, `one/core/session_manager.py`, `tests/test_sdk_smoke.py`, `tests/test_config_paths.py`
   - **Dependencies:** Task 30.2
@@ -1658,6 +1658,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - Explicit injected managers continue to win over defaults.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_sdk_smoke.py tests/test_config_paths.py`
+  - **Delivered:** explicit custom auth/models/settings/session defaults for SDK and direct runtime, preserved explicit dependency precedence, reports/custom global sentinel isolation coverage, 24 focused tests, full suite 720 passed.
 
 - [ ] **Task 30.9: implement the documented extension args-mutation contract**
   - **Description:** After each `tool.execute.before` hook, accept a returned args dict or a replacement assigned to `output["args"]`; validate that the final value is a dict and pass the result into subsequent hooks. Define precedence when both mechanisms are used and update docs/tests accordingly.
@@ -1781,7 +1782,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 - [x] RPC login validates before storage and refreshes models consistently.
 - [x] `apply_patch` rejects collisions and restores state after apply failure.
 - [x] TUI preserves chronological `thinking → tool → thinking → answer` history.
-- [ ] SDK custom `agentDir` isolates all default state.
+- [x] SDK custom `agentDir` isolates all default state.
 - [ ] OAuth/Codex is disabled by default and clearly marked experimental.
 - [ ] Workspace extension/MCP auto-load risk is prominently documented.
 - [ ] MIT license, complete package metadata, public docs, and CI are present.
