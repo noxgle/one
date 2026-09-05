@@ -1,8 +1,13 @@
-"""ChatGPT/Codex subscription backend (Phase 18).
+"""ChatGPT/Codex subscription backend.
 
-Talks to the Codex backend used by ChatGPT Plus/Pro subscriptions. This is a
-reverse-engineered, UNDOCUMENTED endpoint — it speaks the **Responses API**
-(not chat/completions) with several mandatory quirks:
+Talks to the Codex Responses API used by ChatGPT Plus/Pro subscriptions.
+This endpoint is not part of the public OpenAI API — it is externally controlled
+by OpenAI and may change without notice.  Third-party use of subscription
+credentials against this backend is at the user's own risk and may violate the
+ChatGPT Terms of Service.
+
+The API speaks the **Responses API** (not chat/completions) with several
+mandatory quirks:
 
 - input items use content type ``input_text`` (``text`` is rejected)
 - ``store: false`` is mandatory
@@ -16,7 +21,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -190,7 +196,9 @@ class CodexResponsesAdapter(ProviderAdapter):
         detailed = await self.list_models_detailed(api_key, headers)
         return [d["id"] for d in (detailed or [])]
 
-    async def list_models_detailed(self, api_key: str, headers: dict[str, str] | None = None) -> list[dict[str, Any]] | None:
+    async def list_models_detailed(
+        self, api_key: str, headers: dict[str, str] | None = None
+    ) -> list[dict[str, Any]] | None:
         """Non-standard schema: {"models": [{"slug": ...}, ...]}."""
         url = f"{BASE_URL}/models?client_version={CLIENT_VERSION}"
         req_headers = self._headers(api_key, extra=headers)

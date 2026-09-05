@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import difflib
 import os
 import stat
 import tempfile
-import difflib
 from pathlib import Path
 from typing import Any
 
@@ -235,7 +235,7 @@ def _check_no_symlink_or_non_dir(path: Path, cwd_path: Path, *, check_leaf: bool
 # ---------------------------------------------------------------------------
 
 
-def _before_commit(plans: list["_OpPlan"]) -> None:
+def _before_commit(plans: list[_OpPlan]) -> None:
     """Narrow no-op hook called after staging and immediately before backups.
 
     Tests can monkey-patch this function to inject pre-commit failures.

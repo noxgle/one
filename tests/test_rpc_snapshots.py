@@ -14,7 +14,6 @@ from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 
-
 # ---------------------------------------------------------------------------
 # Helpers copied from tests/test_rpc_mode.py
 # ---------------------------------------------------------------------------

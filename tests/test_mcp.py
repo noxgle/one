@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
-import pytest
 import httpx
+import pytest
 
 from one.cli.args import parse_args
 from one.core.agent_session import AgentSession
@@ -14,7 +13,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
-from one.mcp import McpClient, McpManager, McpServerConfig, McpTool, HttpMcpClient
+from one.mcp import HttpMcpClient, McpManager, McpServerConfig, McpTool
 
 FAKE_SERVER_SRC = '''\
 import asyncio

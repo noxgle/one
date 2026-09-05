@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -325,3 +326,141 @@ async def test_auto_compaction_not_below_threshold(tmp_path):
     await agent.prompt("a" * 40)
     assert not any(e["type"] == "compaction_start" for e in events)
     assert not any(m.get("customType") == "compaction_summary" for m in agent.messages)
+
+
+# ── Fix 1: compact busy guard ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_compact_busy_when_streaming(tmp_path):
+    """Manual compact() during an active prompt must return busy, not mutate state."""
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}})
+    _seed(agent, count=10)
+    total_before = len(agent.messages)
+
+    # Pretend streaming is active (simulates a prompt in flight).
+    agent._is_streaming = True
+    result = await agent.compact()
+    assert result["busy"] is True
+    assert result["skipped"] is True
+    assert len(agent.messages) == total_before  # no mutation
+    assert agent.session_manager.get_last_compaction() is None
+
+
+# ── Fix 2: context-limit compaction during retry ─────────────────────────────
+
+class _ContextLimitProvider:
+    """Provider that fails with a context-limit error on first call, succeeds on second."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        from one.providers.base import ChatResult
+
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("openrouter API error 400: maximum context length exceeded")
+        return ChatResult(text="Task completed successfully.\n\nThe previous conversation history was summarized during compaction, reducing the context so the model can respond. This is the final answer with no tool calls needed.", raw={}, usage={}, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_retry_context_limit_triggers_compaction(tmp_path):
+    """A context-length error should compact before retrying, not just retry blindly."""
+    provider = _ContextLimitProvider()
+    agent = _mk_agent(
+        tmp_path,
+        {
+            "compaction": {"summarizeWithModel": False, "recentTokens": 30, "minKeptMessages": 1},
+            "retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 1, "maxDelayMs": 1},
+            "tools": {"maxSteps": 2, "timeoutSec": 5},
+        },
+        provider=provider,
+    )
+    _seed(agent, count=10)
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("go")
+    # Provider should have been called twice: fail → compact → success.
+    assert provider.calls == 2
+    # The retry should include a compaction_start with reason "context_limit_retry".
+    assert any(e["type"] == "compaction_start" and e["reason"] == "context_limit_retry" for e in events)
+    # The final turn should succeed.
+    assert any(e["type"] == "turn_end" and e.get("ok") is True for e in events)
+    assert not agent.is_streaming
+
+
+# ── Fix 3: _is_compacting resets in finally + abort check after auto-compaction ─
+
+
+@pytest.mark.asyncio
+async def test_compaction_resets_flag_on_error(tmp_path):
+    """If compaction raises (e.g. summarizer error), _is_compacting must be False."""
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": True, "recentTokens": 4, "minKeptMessages": 1}},
+        provider=_FailProvider(),
+    )
+    _seed(agent, count=10)
+    assert agent.is_compacting is False
+
+    result = await agent.compact()
+    assert result["skipped"] is False
+    assert agent.is_compacting is False  # must be reset even on summarizer failure
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_abort_check_before_followup(tmp_path):
+    """After auto-compaction the session must check abort before draining queued messages."""
+    provider = _Provider(["DONE"])
+    agent = _mk_agent(
+        tmp_path,
+        {
+            "compaction": {"enabled": True, "thresholdPercent": 0.0, "recentTokens": 4, "minKeptMessages": 1, "summarizeWithModel": False},
+            "retry": {"enabled": False},
+            "tools": {"maxSteps": 2, "timeoutSec": 5},
+        },
+        provider=provider,
+    )
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    # Start a prompt, queue a steer+followup, then abort.
+    task = asyncio.create_task(agent.prompt("first"))
+    await asyncio.sleep(0.01)
+    await agent.steer("queued-steer")
+    await agent.follow_up("queued-follow")
+    await agent.abort()
+    await task
+
+    # Queues must be preserved (not drained).
+    assert agent.get_pending_queues() == {"steering": ["queued-steer"], "followUp": ["queued-follow"]}
+
+
+@pytest.mark.asyncio
+async def test_wait_for_idle_waits_for_compaction(tmp_path):
+    """wait_for_idle should not return while compacting."""
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}})
+    _seed(agent, count=10)
+
+    agent._is_compacting = True
+    done = asyncio.Event()
+
+    async def _wait():
+        await agent.wait_for_idle()
+        done.set()
+
+    task = asyncio.create_task(_wait())
+    await asyncio.sleep(0.05)
+    assert not done.is_set()  # should still be waiting
+    agent._is_compacting = False
+    await task
+    assert done.is_set()

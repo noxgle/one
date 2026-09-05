@@ -1,65 +1,68 @@
-# TODO — Roadmapa autonomicznego agenta `one`
+# TODO — Roadmap for the autonomous agent `one`
 
-Celem projektu jest **autonomiczny agent terminalowy** wykonujący zlecone zadania
-(shell / pliki / kod) z **opcjonalnym trybem kooperacji** z człowiekiem (bramki
-zatwierdzania narzędzi, sterowanie w trakcie, docelowo pytania agenta).
+The project goal is an **autonomous terminal agent** that executes assigned tasks
+(shell / files / code) with an **optional cooperation mode** for human interaction (tool
+approval gates, mid-task steering, and eventually agent-initiated questions).
 
-Projekt powstał jako re-implementacja agenta `pi` i rozwija się samodzielnie —
-parity 1:1 z `pi` nie jest już celem (patrz „Poza zakresem").
+The project originated as a re-implementation of the `pi` agent and now evolves independently —
+1:1 parity with `pi` is no longer a goal (see "Out of scope").
 
-## Fundament (zrealizowane)
+## Foundation (completed)
 
-- [x] Tryby interfejsu: print (one-shot), interactive, TUI (Textual), RPC (JSON-RPC)
-- [x] Sesje `.jsonl` z branchingiem/forkiem (drzewo sesji, `parentSession` — baza pod subagentów) + compaction
-- [x] Pętla model -> tool -> model z eventami `turn_*`, `tool_*`, `retry_*` i live streamingiem
-- [x] Auto-retry, abort (także w trakcie requestu), kolejki steer/follow_up
-- [x] Limity bezpieczeństwa (`tools.maxSteps`, `tools.timeoutSec`), cap payloadu `toolResult`
-- [x] Kooperacja: bramki zatwierdzania `bash`/`write`/`edit` (`--cooperation`, `/cooperation`, Ctrl+A)
-- [x] Providerzy: `openai`, `anthropic`, `gemini`, `openrouter`, `ollama-cloud`, `llama.cpp` (lokalny, bez klucza)
-- [x] Rozszerzenia/skille/prompty/themes (loader + runtime hooków opencode-style)
-- [x] RPC: sesje, model, komendy, streaming eventów, extension UI, `wait_for_idle`
+- [x] Interface modes: print (one-shot), interactive, TUI (Textual), RPC (JSON-RPC)
+- [x] `.jsonl` sessions with branching/forking (session tree, `parentSession` — foundation for subagents) + compaction
+- [x] Model → tool → model loop with `turn_*`, `tool_*`, `retry_*` events and live streaming
+- [x] Auto-retry, abort (also mid-request), steer/follow-up queues
+- [x] Safety limits (`tools.maxSteps`, `tools.timeoutSec`), `toolResult` payload cap
+- [x] Cooperation: approval gates for `bash`/`write`/`edit` (`--cooperation`, `/cooperation`, Ctrl+A)
+- [x] Providers: `openai`, `anthropic`, `gemini`, `openrouter`, `ollama-cloud`, `llama.cpp` (local, no key)
+- [x] Extensions/skills/prompts/themes (loader + opencode-style hook runtime)
+- [x] RPC: sessions, model, commands, event streaming, extension UI, `wait_for_idle`
 
-## P0 — Autonomia
+## P0 — Autonomy
 
-- [x] Headless tryb zadania (`one run "zadanie"`): pełna pętla do `finish`, kontrakt wyniku
-      (summary + exit code 0/1), limity kroków, auto-retry, resume po przerwaniu;
-      `--json`/`--answer-file`/`--steer-file`, raport `reports.jsonl` w agent dir
-- [x] Subagenci — delegowanie podzadań: tool `spawn_subagent` (osobne sesje z `parentSession`,
-      izolowany kontekst, równoległe wykonanie, scalanie wyników) zarejestrowany
-      w `tools/index.py`; limity równoległości (`subagents.maxConcurrent`) i głębokości
-      zagnieżdżenia (`subagents.maxDepth`)
-- [x] Eskalacja agent→człowiek: tool `ask_user` — agent pauzuje zadanie i pyta; odpowiedź
-      wraca do kontekstu; kanały: interactive, TUI, RPC (`answer_question`), headless
+- [x] Headless task mode (`one run "task"`): full loop to `finish`, result contract
+      (summary + exit code 0/1), step limits, auto-retry, resume after interruption;
+      `--json`/`--answer-file`/`--steer-file`, `reports.jsonl` report in agent dir
+- [x] Subagents — task delegation: `spawn_subagent` tool (separate sessions with `parentSession`,
+       isolated context, concurrent execution, result merging) registered in
+       `tools/index.py`; concurrency limits (`subagents.maxConcurrent`) and nesting
+       depth (`subagents.maxDepth`)
+- [x] Subagent failure diagnostics: preserve non-empty, sanitized errors and child summaries in
+      failed `toolResult` payloads; aggregate parallel child status correctly; validate child
+      task/tool input and ensure explicit tool sets can complete with `finish`
+- [x] Agent→human escalation: `ask_user` tool — agent pauses the task and asks a question; the response
+      is fed back into context; channels: interactive, TUI, RPC (`answer_question`), headless
       (`--answer-file`/canned fallback), timeout + abort
-- [x] Polityka kooperacji w trybie autonomicznym: bramki `--cooperation` opt-in per run;
-      domyślnie agent działa bez pytań
+- [x] Cooperation policy in autonomous mode: `--cooperation` gates opt-in per run;
+      by default the agent runs without questions
 
-## P1 — Integracje i operacje
+## P1 — Integrations and operations
 
-- [x] Intake zadań: zadanie z pliku/spec, `@file`, parametryzacja
-- [x] Provider lokalnego Ollamy: adapter OpenAI-compatible (domyślnie `http://localhost:11434/v1`,
-      env `OLLAMA_BASE_URL`), obsługa lokalnych modeli; wzorzec jak `llama.cpp` (bez klucza API)
-- [x] `/new` w TUI i interactive: tworzenie nowej sesji (RPC `new_session` już istnieje)
-      + przebindowanie eventów; alias `/ns`
-- [x] TUI: autouzupełnianie komend slash w polu input wg listy komend z `/help`
-      (sugestie na `Tab` z cyklem, uzupełnianie prefiksu `/`)
-- [x] Klient MCP: podłączanie zewnętrznych serwerów MCP jako źródła narzędzi
-      (stdio, własny protokół JSON-RPC, bez nowych zależności); konfiguracja serwerów
-      w settings.json (`mcpServers`), narzędzia MCP dostępne jak narzędzia sesji
-- [x] Limity budżetu: tokens/czas z konfiguracją (`budget.maxTokens`/`budget.maxTimeSec`); kroki: `tools.maxSteps`
-- [x] Raport końca zadania (log `reports.jsonl` w agent dir) + utrzymanie RPC (`wait_for_idle` istnieje; steer w headless przez `--steer-file`)
-- [x] Podpięcie extension widgets/overlays do warstwy TUI (dedykowany panel dla widgetów, panel-overlay dla overlay; odpowiedzi przez istniejący input, reset przy /new i /fork)
-- [x] Snapshot/regression testy renderingu TUI (3 deterministyczne pełnoekranowe snapshoty SVG: baza, widget, overlay; goldeny w tests/snapshots/tui)
+- [x] Task intake: task from file/spec, `@file`, parametrization
+- [x] Local Ollama provider: OpenAI-compatible adapter (default `http://localhost:11434/v1`,
+      env `OLLAMA_BASE_URL`), local model support; pattern mirrors `llama.cpp` (no API key)
+- [x] `/new` in TUI and interactive: create a new session (RPC `new_session` already exists)
+      + replay events; alias `/ns`
+- [x] TUI: slash-command autocomplete in the input field based on the `/help` command list
+      (suggestions on `Tab` cycling, prefix completion for `/`)
+- [x] MCP client: connect external MCP servers as tool sources
+      (stdio, own JSON-RPC protocol, no new dependencies); server configuration
+      in `settings.json` (`mcpServers`), MCP tools available as session tools
+- [x] Budget limits: tokens/time with configuration (`budget.maxTokens`/`budget.maxTimeSec`); steps via `tools.maxSteps`
+- [x] Task-end report (log `reports.jsonl` in agent dir) + RPC support (`wait_for_idle` exists; steer in headless via `--steer-file`)
+- [x] Wire extension widgets/overlays to the TUI layer (dedicated panel for widgets, panel-overlay for overlays; responses via existing input, reset on /new and /fork)
+- [x] TUI rendering snapshot/regression tests (3 deterministic full-screen SVG snapshots: base, widget, overlay; goldens in tests/snapshots/tui)
 
-## P2 — Jakość i zgodność
+## P2 — Quality and compatibility
 
-- [x] Testy integracyjne headless (E2E subprocess: CLI -> lokalny OpenAI-compatible HTTP -> finish -> wynik/exit code 0/1 + reports.jsonl)
-- [x] Snapshot tests dla RPC (deterministyczne JSONL: sukces i błąd, goldeny w tests/snapshots/rpc)
-- [x] Testy auth precedence + provider fallback (runtime > auth file > env, placeholder keys, fallback wyboru modelu)
-- [x] Cross-platform smoke (portable ścieżki/sanitizacja + POSIX smoke cwd/quoting/pipeline/prefix/exit code; testy shellowe skip na Windows)
-- [x] Providerzy OpenAI-compatible: xAI (Grok), DeepSeek, Mistral, Groq — registry, env keys, builtin modele i testy
+- [x] Headless integration tests (E2E subprocess: CLI → local OpenAI-compatible HTTP → finish → result/exit code 0/1 + reports.jsonl)
+- [x] RPC snapshot tests (deterministic JSONL: success and error, goldens in tests/snapshots/rpc)
+- [x] Auth precedence + provider fallback tests (runtime > auth file > env, placeholder keys, model selection fallback)
+- [x] Cross-platform smoke (portable paths/sanitization + POSIX smoke cwd/quoting/pipeline/prefix/exit code; shell tests skip on Windows)
+- [x] OpenAI-compatible providers: xAI (Grok), DeepSeek, Mistral, Groq — registry, env keys, builtin models and tests
 
-## Poza zakresem
+## Out of scope
 
-- Parity 1:1 z `pi` (np. `/login` OAuth/subskrypcja, event payloady 1:1, golden tests z TS)
-- Package manager npm/git jak w `pi` (rozszerzenia działają wg własnego kontraktu)
+- 1:1 parity with `pi` internals (exact event payloads, golden tests from TypeScript). Subscription OAuth (`/login … subscription`) is **in scope** and shipped as a supported feature.
+- npm/git package manager like in `pi` (extensions follow their own contract)

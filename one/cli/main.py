@@ -14,8 +14,8 @@ from one.core.model_registry import ModelRegistry
 from one.core.persistence import ensure_private_dir
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
-from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode, run_run_mode
 from one.mcp import McpManager
+from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode, run_run_mode
 from one.resources.resource_loader import DefaultResourceLoader
 from one.tools.index import DEFAULT_TOOL_NAMES, all_tools
 

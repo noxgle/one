@@ -12,9 +12,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from one.providers.base import ChatResult
 from one.providers.openai_compatible import OpenAICompatibleAdapter
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -30,7 +28,7 @@ class _StreamContext:
         self._lines = lines
         self.is_error = False
 
-    async def __aenter__(self) -> "_StreamContext":
+    async def __aenter__(self) -> _StreamContext:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:

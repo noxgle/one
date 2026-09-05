@@ -5,14 +5,15 @@ import json
 import os
 import select
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from one.config import get_agent_dir
 from one.core.oauth import OAuthError, oauth_login_hint
 from one.core.provider_login import entry_id as fetched_entry_id
 from one.core.provider_login import run_oauth_login, validate_and_fetch
 from one.core.types import ModelInfo
-from one.config import get_agent_dir
 
 try:
     import readline  # type: ignore
@@ -35,11 +36,7 @@ def _read_input_line(prompt: str, on_ctrl_a: Callable[[], None]) -> str:
     3. Non-tty stdin (pipes, tests): plain input(); the caller then receives a
        raw "\\x01" line and handles the toggle itself.
     """
-    if (
-        readline is not None
-        and sys.stdin.isatty()
-        and hasattr(readline, "callback_handler_install")
-    ):
+    if readline is not None and sys.stdin.isatty() and hasattr(readline, "callback_handler_install"):
         result: dict[str, str] = {}
 
         def _handler(line: str) -> None:
@@ -101,10 +98,7 @@ def _raw_readline(prompt: str, on_ctrl_a: Callable[[], None]) -> str:
     history: list[str] = []
     if readline is not None:
         try:
-            history = [
-                readline.get_history_item(i)
-                for i in range(1, readline.get_current_history_length() + 1)
-            ]
+            history = [readline.get_history_item(i) for i in range(1, readline.get_current_history_length() + 1)]
         except Exception:
             history = []
 
@@ -298,10 +292,7 @@ class InteractiveMode:
             history_path = Path(get_agent_dir()) / "interactive.history"
             history_path.parent.mkdir(parents=True, exist_ok=True)
             readline.set_history_length(self._HISTORY_MAX_LINES)
-            if (
-                history_path.exists()
-                and history_path.stat().st_size <= self._HISTORY_MAX_FILE_BYTES
-            ):
+            if history_path.exists() and history_path.stat().st_size <= self._HISTORY_MAX_FILE_BYTES:
                 readline.read_history_file(str(history_path))
             readline.parse_and_bind("set editing-mode emacs")
             readline.parse_and_bind("tab: complete")
@@ -309,6 +300,7 @@ class InteractiveMode:
             # Let Ctrl+A reach Python so the main loop can toggle cooperation
             # mode. Without this, readline consumes it as beginning-of-line.
             readline.parse_and_bind('"\\C-a": self-insert')
+
             def _save_history() -> None:
                 try:
                     # set_history_length caps this to the last _HISTORY_MAX_LINES.
@@ -324,7 +316,10 @@ class InteractiveMode:
     async def run(self) -> None:
         self._setup_readline()
         session = self.runtime_host.session
-        if bool(self.options.get("cooperation")) or getattr(session.settings_manager, "get_tool_approval", lambda: False)():
+        if (
+            bool(self.options.get("cooperation"))
+            or getattr(session.settings_manager, "get_tool_approval", lambda: False)()
+        ):
             session.approval_callback = self._prompt_approval
             print("[Cooperation] tool approval enabled (mutating tools ask before running)", flush=True)
         assistant_streamed = False
@@ -376,10 +371,10 @@ class InteractiveMode:
                     print("", flush=True)
                 elif not assistant_streamed:
                     print("", flush=True)
-                    print("[Brak treści odpowiedzi modelu]", flush=True)
+                    print("[No model response content]", flush=True)
             if et == "turn_end" and event.get("ok") is False:
                 err = (event.get("error") or "Unknown error").strip()
-                print(f"[Błąd] {err}", flush=True)
+                print(f"[Error] {err}", flush=True)
             if et == "tool_call_start":
                 print(f"[Tool] {event.get('tool')} {json.dumps(event.get('args', {}), ensure_ascii=False)}", flush=True)
             if et == "tool_approval_rejected":
@@ -388,7 +383,10 @@ class InteractiveMode:
                 ok = bool(event.get("ok"))
                 status = "OK" if ok else "ERR"
                 print(f"[Tool:{status}] {event.get('tool')}", flush=True)
-                if event.get("tool") != "finish" and getattr(session.settings_manager, "get_bash_show_output", lambda: True)():
+                if (
+                    event.get("tool") != "finish"
+                    and getattr(session.settings_manager, "get_bash_show_output", lambda: True)()
+                ):
                     payload = event.get("result") or {}
                     if ok:
                         out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
@@ -397,9 +395,9 @@ class InteractiveMode:
                     if out:
                         print(out, flush=True)
             if et == "ask_user":
-                print(f"\n[Agent pyta] {event.get('question')}", flush=True)
+                print(f"\n[Agent asks] {event.get('question')}", flush=True)
                 try:
-                    answer = input("Odpowiedź: ").strip()
+                    answer = input("Answer: ").strip()
                 except (EOFError, KeyboardInterrupt):
                     answer = "(no answer)"
                 try:
@@ -415,7 +413,7 @@ class InteractiveMode:
             if et == "auto_retry_start":
                 retry_state = f"retry-{event.get('attempt')}"
                 print(
-                    f"[Retry] próba {event.get('attempt')}/{event.get('maxAttempts')} za {event.get('delayMs')}ms: {event.get('errorMessage')}",
+                    f"[Retry] attempt {event.get('attempt')}/{event.get('maxAttempts')} in {event.get('delayMs')}ms: {event.get('errorMessage')}",
                     flush=True,
                 )
             if et == "auto_retry_end":
@@ -457,7 +455,9 @@ class InteractiveMode:
             print(
                 f"[{model_label} | thinking:{session.thinking_level}{usage_text} | tokens:{tokens_total} | retry:{retry_state} | coop:{cooperation_state} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
             )
-            print("[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /theme [name] | /abort | /exit]")
+            print(
+                "[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /theme [name] | /abort | /exit]"
+            )
             print("Ctrl+A toggles cooperation mode (ask before running mutating tools: bash/write/edit).")
             try:
                 line = _read_input_line("\n> ", _toggle_cooperation)
@@ -504,7 +504,7 @@ class InteractiveMode:
                         print(f"{i}. {entry}")
                 continue
             if stripped.startswith("/history "):
-                arg = stripped[len("/history "):].strip()
+                arg = stripped[len("/history ") :].strip()
                 try:
                     idx = int(arg)
                 except ValueError:
@@ -538,7 +538,9 @@ class InteractiveMode:
                 print(
                     json.dumps(
                         {
-                            "model": {"provider": session.model.provider, "id": session.model.id} if session.model else None,
+                            "model": {"provider": session.model.provider, "id": session.model.id}
+                            if session.model
+                            else None,
                             "thinkingLevel": session.thinking_level,
                             "isStreaming": session.is_streaming,
                             "pendingMessageCount": session.pending_message_count,
@@ -667,7 +669,9 @@ class InteractiveMode:
                         marker = "* " if p == current_provider else "  "
                         cur = f"   (current: {session.model.id})" if p == current_provider and session.model else ""
                         print(f"{marker}{i}. {p}   {count} models{cur}")
-                    print("Usage: /providers <number|name> lists its models; /providers <number|name> <model-number|id> switches")
+                    print(
+                        "Usage: /providers <number|name> lists its models; /providers <number|name> <model-number|id> switches"
+                    )
                     continue
                 parts = rest.split(None, 1)
                 prov_arg = parts[0]
@@ -829,7 +833,9 @@ class InteractiveMode:
                         print(key_info.get("error") or f"No API key for {provider}.")
                         continue
                     api_key = key_info.get("apiKey", "")
-                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider, headers=key_info.get("headers") or None)
+                    ok, error, fetched = await validate_and_fetch(
+                        adapter, api_key, provider, headers=key_info.get("headers") or None
+                    )
                     if not ok:
                         print(f"Authorization failed for {provider}: {error}")
                         continue
@@ -933,7 +939,14 @@ class InteractiveMode:
                 session.settings_manager.set_default_provider(provider)
                 if selected_model:
                     session.settings_manager.set_default_model(selected_model.id)
-                    await session.set_model(ModelInfo(provider=selected_model.provider, id=selected_model.id, reasoning=selected_model.reasoning, context_window=selected_model.context_window))
+                    await session.set_model(
+                        ModelInfo(
+                            provider=selected_model.provider,
+                            id=selected_model.id,
+                            reasoning=selected_model.reasoning,
+                            context_window=selected_model.context_window,
+                        )
+                    )
                 print(
                     (f"Stored key for {provider}." if api_key else f"Configured provider {provider}.")
                     + (f" Default model set to {selected_model.id}." if selected_model else "")
@@ -1061,7 +1074,9 @@ class InteractiveMode:
                     server_name = parts[1]
                     cfg = session.settings_manager.get_mcp_servers().get(server_name)
                     if not cfg or (not cfg.get("command") and not cfg.get("url")):
-                        print(f"No MCP config for '{server_name}'. Add mcpServers.<name> to settings.json (see README).")
+                        print(
+                            f"No MCP config for '{server_name}'. Add mcpServers.<name> to settings.json (see README)."
+                        )
                         continue
                     manager = getattr(session, "_mcp_manager", None)
                     if manager is None:
@@ -1118,7 +1133,11 @@ class InteractiveMode:
                         error_msg = result.get("error", "(timeout)")
                         if result.get("timedOut") and output.lower().endswith("command timed out"):
                             print(f"[bash] {error_msg}")
-                            print(output[:-len("Command timed out")].rstrip() if output[:-len("Command timed out")].rstrip() else "")
+                            print(
+                                output[: -len("Command timed out")].rstrip()
+                                if output[: -len("Command timed out")].rstrip()
+                                else ""
+                            )
                         else:
                             print(f"[bash] {error_msg}")
                             if output:

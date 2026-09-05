@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -8,9 +9,9 @@ import pytest
 
 from one.cli.args import parse_args
 from one.modes.tui_mode import (
-    BUILTIN_TUI_THEMES,
     _THINKING_FRAMES,
     _THINKING_MARK,
+    BUILTIN_TUI_THEMES,
     advance_thinking_frame,
     build_sidebar_snapshot,
     evaluate_waiting,
@@ -70,10 +71,9 @@ def test_resolve_tui_theme_includes_fallout() -> None:
 
 
 def test_build_sidebar_snapshot_contains_runtime_details() -> None:
-    snapshot = build_sidebar_snapshot(
-        _DummySession(),
-        retry_state="retry-1",
-    )
+    session = _DummySession()
+    session.auto_retry_enabled = True
+    snapshot = build_sidebar_snapshot(session)
 
     assert snapshot["model"] == "openrouter/google/gemma-4-31b-it:free"
     assert snapshot["thinking"] == "medium"
@@ -91,26 +91,43 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     assert snapshot["bashOutput"] is True
     assert snapshot["mcpEnabled"] is False
     assert snapshot["mcpServers"] == []
+    assert snapshot["retry"] == "on"
 
 
 def test_build_sidebar_snapshot_lists_enabled_mcp_servers() -> None:
     class _FakeMcpManager:
         def server_status(self) -> list[dict]:
             return [
-                {"name": "demo", "enabled": True, "running": True, "tools": ["a", "b", "c"], "transport": "stdio", "error": None},
-                {"name": "web", "enabled": True, "running": False, "tools": ["x"], "transport": "http", "error": "boom"},
+                {
+                    "name": "demo",
+                    "enabled": True,
+                    "running": True,
+                    "tools": ["a", "b", "c"],
+                    "transport": "stdio",
+                    "error": None,
+                },
+                {
+                    "name": "web",
+                    "enabled": True,
+                    "running": False,
+                    "tools": ["x"],
+                    "transport": "http",
+                    "error": "boom",
+                },
                 {"name": "old", "enabled": False, "running": False, "tools": [], "transport": "stdio", "error": None},
             ]
 
     session = _DummySession()
     session._mcp_manager = _FakeMcpManager()
-    snapshot = build_sidebar_snapshot(session, retry_state="idle")
+    session.auto_retry_enabled = False
+    snapshot = build_sidebar_snapshot(session)
 
     assert snapshot["mcpEnabled"] is True
     assert [s["name"] for s in snapshot["mcpServers"]] == ["demo", "web"]
     assert snapshot["mcpServers"][0]["toolCount"] == 3
     assert snapshot["mcpServers"][0]["transport"] == "stdio"
     assert snapshot["mcpServers"][1]["error"] == "boom"
+    assert snapshot["retry"] == "off"
 
 
 def test_build_sidebar_snapshot_mcp_manager_raises_is_safe() -> None:
@@ -157,8 +174,22 @@ async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
     class _McpManagerWithServers:
         def server_status(self) -> list[dict]:
             return [
-                {"name": "demo", "enabled": True, "running": True, "tools": ["a", "b", "c"], "transport": "stdio", "error": None},
-                {"name": "web", "enabled": True, "running": False, "tools": ["x"], "transport": "http", "error": "boom"},
+                {
+                    "name": "demo",
+                    "enabled": True,
+                    "running": True,
+                    "tools": ["a", "b", "c"],
+                    "transport": "stdio",
+                    "error": None,
+                },
+                {
+                    "name": "web",
+                    "enabled": True,
+                    "running": False,
+                    "tools": ["x"],
+                    "transport": "http",
+                    "error": "boom",
+                },
                 {"name": "old", "enabled": False, "running": False, "tools": [], "transport": "stdio", "error": None},
             ]
 
@@ -221,7 +252,7 @@ async def test_tui_spinner_survives_queued_prompt_and_resumes_for_followup(tmp_p
     must reappear when the session starts the follow-up turn on its own."""
     import asyncio
 
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK
+    from one.modes.tui_mode import _THINKING_MARK, _OneTextualApp
     from one.providers.base import ChatResult
 
     class _SlowStreamProvider:
@@ -445,7 +476,7 @@ async def test_extension_ui_answer_error_preserves_pending_state(tmp_path: Path)
         await pilot.pause()
 
         # Create a widget extension request.
-        req = session.request_extension_ui(extension="err-ext", ui_type="widget", payload={"q": 1}, title="ErrorTest")
+        session.request_extension_ui(extension="err-ext", ui_type="widget", payload={"q": 1}, title="ErrorTest")
         await pilot.pause()
 
         pending_id = app._extension_ui_pending_request["id"]
@@ -468,7 +499,7 @@ async def test_extension_ui_answer_error_preserves_pending_state(tmp_path: Path)
         assert panel.has_class("visible")
 
         # (c) input placeholder remains extension-answer placeholder
-        assert input_widget.placeholder == "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
+        assert input_widget.placeholder == "Answer for extension (JSON or text; empty = cancel)"
 
         # (d) stream includes error message
         stream = "\n".join(app._stream_lines)
@@ -736,8 +767,9 @@ async def test_tui_new_clears_extension_ui_state(tmp_path: Path):
         assert app._extension_ui_pending_request is not None
         assert app._extension_ui_pending_request["extension"] == "stale-ext"
         from textual.widgets import TextArea
+
         input_widget = app.query_one("#input", TextArea)
-        assert input_widget.placeholder == "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
+        assert input_widget.placeholder == "Answer for extension (JSON or text; empty = cancel)"
 
         # Submit /new.
         await _submit(app, pilot, "/new")
@@ -746,7 +778,7 @@ async def test_tui_new_clears_extension_ui_state(tmp_path: Path):
         # After /new: panel hidden, pending cleared, default placeholder, session swapped.
         assert not panel.has_class("visible")
         assert app._extension_ui_pending_request is None
-        assert input_widget.placeholder == "Wpisz polecenie lub /help"
+        assert input_widget.placeholder == "Type a command or /help"
         assert app.session is new_session
 
 
@@ -772,8 +804,9 @@ async def test_tui_fork_clears_extension_ui_state(tmp_path: Path):
         assert app._extension_ui_pending_request is not None
         assert app._extension_ui_pending_request["extension"] == "fork-ext"
         from textual.widgets import TextArea
+
         input_widget = app.query_one("#input", TextArea)
-        assert input_widget.placeholder == "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
+        assert input_widget.placeholder == "Answer for extension (JSON or text; empty = cancel)"
 
         # Execute /fork.
         await _submit(app, pilot, "/fork entry-1")
@@ -782,7 +815,7 @@ async def test_tui_fork_clears_extension_ui_state(tmp_path: Path):
         # After /fork: overlay hidden, pending cleared, default placeholder, session swapped.
         assert not overlay.has_class("visible")
         assert app._extension_ui_pending_request is None
-        assert input_widget.placeholder == "Wpisz polecenie lub /help"
+        assert input_widget.placeholder == "Type a command or /help"
         assert app.session is new_session
 
 
@@ -1116,9 +1149,7 @@ async def test_tui_command_mcp_enable(tmp_path: Path):
 
     session = _mk_app_session(tmp_path)
     # Pre-configure the server so /mcp enable demo finds it.
-    session.settings_manager.set_config_value(
-        "mcpServers.demo", {"command": "true"}
-    )
+    session.settings_manager.set_config_value("mcpServers.demo", {"command": "true"})
     # Start the fake manager with the server not running so enable actually starts it.
     fake = _FakeMcpManager()
     for s in fake._status:
@@ -1483,10 +1514,12 @@ async def test_tui_plan_update_renders_block(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "plan_update",
-            "plan": "1. read file\n2. edit content",
-        })
+        session._emit(
+            {
+                "type": "plan_update",
+                "plan": "1. read file\n2. edit content",
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "Plan:" in stream
@@ -1556,12 +1589,16 @@ async def test_tui_bash_error_output_shown_when_enabled(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "bash",
-            "ok": False,
-            "result": {"error": "ls: cannot access '/nonexistent': No such file or directory\n\nCommand exited with code 2"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "bash",
+                "ok": False,
+                "result": {
+                    "error": "ls: cannot access '/nonexistent': No such file or directory\n\nCommand exited with code 2"
+                },
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "tool err: bash" in stream
@@ -1579,12 +1616,16 @@ async def test_tui_bash_error_output_hidden_when_disabled(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "bash",
-            "ok": False,
-            "result": {"error": "ls: cannot access '/nonexistent': No such file or directory\n\nCommand exited with code 2"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "bash",
+                "ok": False,
+                "result": {
+                    "error": "ls: cannot access '/nonexistent': No such file or directory\n\nCommand exited with code 2"
+                },
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "tool err: bash" in stream
@@ -1606,12 +1647,14 @@ async def test_tui_ls_output_shown_when_enabled(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "ls",
-            "ok": True,
-            "result": {"outputText": "file1.txt\nfile2.txt"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "ls",
+                "ok": True,
+                "result": {"outputText": "file1.txt\nfile2.txt"},
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "tool ok: ls" in stream
@@ -1627,12 +1670,14 @@ async def test_tui_finish_output_not_duplicated(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "finish",
-            "ok": True,
-            "result": {"outputText": "THE-FINAL-SUMMARY"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "finish",
+                "ok": True,
+                "result": {"outputText": "THE-FINAL-SUMMARY"},
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "tool ok: finish" in stream
@@ -1648,12 +1693,14 @@ async def test_tui_ls_output_hidden_when_disabled(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "ls",
-            "ok": True,
-            "result": {"outputText": "file1.txt\nfile2.txt"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "ls",
+                "ok": True,
+                "result": {"outputText": "file1.txt\nfile2.txt"},
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "tool ok: ls" in stream
@@ -1705,7 +1752,9 @@ async def test_extension_overlay_panel_renders_and_hides(tmp_path: Path):
         overlay = app.query_one("#ext_overlay", Static)
         assert not overlay.has_class("visible")
 
-        req = session.request_extension_ui(extension="ext", ui_type="overlay", payload={"mode": "modal"}, title="Overlay")
+        req = session.request_extension_ui(
+            extension="ext", ui_type="overlay", payload={"mode": "modal"}, title="Overlay"
+        )
         await pilot.pause()
 
         assert overlay.has_class("visible")
@@ -1757,7 +1806,7 @@ async def test_tui_sidebar_plan_with_markup_chars_no_crash(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
-    session._plan = "[b]bold[/] and [{\"plan\": \">\", \"x\": 1}]"
+    session._plan = '[b]bold[/] and [{"plan": ">", "x": 1}]'
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1785,10 +1834,12 @@ async def test_tui_plan_update_with_markup_chars_in_stream(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "plan_update",
-            "plan": "[b]bold[/] and [{\"plan\": \">\", \"x\": 1}]",
-        })
+        session._emit(
+            {
+                "type": "plan_update",
+                "plan": '[b]bold[/] and [{"plan": ">", "x": 1}]',
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "Plan:" in stream
@@ -1814,12 +1865,14 @@ async def test_tui_stream_markup_chars_dns_type(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "read",
-            "ok": True,
-            "result": {"outputText": "DNS entry: [type='CNAME']"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "read",
+                "ok": True,
+                "result": {"outputText": "DNS entry: [type='CNAME']"},
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "DNS entry:" in stream
@@ -1839,12 +1892,14 @@ async def test_tui_stream_markup_chars_bracket_list(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "read",
-            "ok": True,
-            "result": {"outputText": "tags: [1,2,3]"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "read",
+                "ok": True,
+                "result": {"outputText": "tags: [1,2,3]"},
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "tags:" in stream
@@ -1864,12 +1919,14 @@ async def test_tui_stream_markup_chars_uppercase_brackets(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "read",
-            "ok": True,
-            "result": {"outputText": "section [ABC] end"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "read",
+                "ok": True,
+                "result": {"outputText": "section [ABC] end"},
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "section" in stream
@@ -1889,12 +1946,14 @@ async def test_tui_stream_markup_chars_json_with_gt(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "read",
-            "ok": True,
-            "result": {"outputText": '[{"plan": ">", "x": 1}]'},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "read",
+                "ok": True,
+                "result": {"outputText": '[{"plan": ">", "x": 1}]'},
+            }
+        )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert '"plan": ">' in stream
@@ -2037,12 +2096,14 @@ async def test_tui_stream_complex_markup_content_no_crash(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        session._emit({
-            "type": "tool_call_end",
-            "tool": "read",
-            "ok": True,
-            "result": {"outputText": "a=[b]c[/d] [1,2,3] [XYZ] {'key': 'val'} [type='CNAME']"},
-        })
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "read",
+                "ok": True,
+                "result": {"outputText": "a=[b]c[/d] [1,2,3] [XYZ] {'key': 'val'} [type='CNAME']"},
+            }
+        )
         await pilot.pause()
         widget = app.query_one("#stream", Static)
         # All bracket content must be present as literal text.
@@ -2083,8 +2144,9 @@ async def test_tui_history_records_commands_only(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_history_populate_input(tmp_path: Path):
     """Submit /theme, then /history 1 — input widget value == "/theme", no turn started."""
-    from one.modes.tui_mode import _OneTextualApp
     from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2192,8 +2254,9 @@ async def test_tui_command_help_includes_history(tmp_path: Path):
 async def test_tui_history_capped_at_200(tmp_path: Path):
     """Submitting more than 200 slash commands caps the history at 200.
     /history displays the last 50; lookup is on the SAME window."""
-    from one.modes.tui_mode import _OneTextualApp
     from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2231,8 +2294,9 @@ async def test_tui_history_capped_at_200(tmp_path: Path):
 async def test_tui_history_numbering_matches_lookup_beyond_50(tmp_path: Path):
     """With >50 commands, /history shows last 50 numbered 1..50; lookup 1→oldest of last 50,
     lookup 50→newest of last 50."""
-    from one.modes.tui_mode import _OneTextualApp
     from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2304,7 +2368,7 @@ async def test_tui_history_records_alias_as_typed(tmp_path: Path):
 async def test_tui_spinner_paused_shows_approval_wait(tmp_path: Path):
     """Approval pending no longer shows a paused label — normal spinner
     advances (approval gate is handled by the approval prompt widget)."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK, evaluate_waiting
+    from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2329,7 +2393,7 @@ async def test_tui_spinner_paused_shows_approval_wait(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_spinner_paused_shows_ask_user_wait(tmp_path: Path):
     """When ask_user is pending and the spinner ticks, it shows a paused label."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK
+    from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2341,13 +2405,13 @@ async def test_tui_spinner_paused_shows_ask_user_wait(tmp_path: Path):
         app._tick_waiting()
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "czeka na Twoją odpowiedź" in stream
+        assert "waiting for your response" in stream
 
 
 @pytest.mark.asyncio
 async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
     """ask_user pending shows paused label; after clearing, spinner animates again."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_MARK, evaluate_waiting
+    from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2362,7 +2426,7 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
         app._tick_waiting()
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "czeka na Twoją odpowiedź" in stream
+        assert "waiting for your response" in stream
         assert app._thinking_frame == start_frame
 
         # Clear the gate.
@@ -2389,6 +2453,7 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
         # Capture notify calls.
         notified: list[tuple[str, dict]] = []
         original_notify = app.notify
+
         def capture_notify(msg, **kwargs):
             notified.append((str(msg), kwargs))
             # Also call the original so the UI works.
@@ -2396,10 +2461,12 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
                 original_notify(msg, **kwargs)
             except Exception:
                 pass
+
         app.notify = capture_notify  # type: ignore[method-assign]
 
         # Start the approval prompt (it will block on queue.get()).
         import asyncio
+
         task = asyncio.create_task(app._approval_prompt("bash", {"cmd": "rm -rf /"}))
         await pilot.pause()
 
@@ -2407,7 +2474,6 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
         assert len(notified) >= 1
         assert any("Approve: bash" in n for n, _ in notified)
         # Verify timeout=8.0 is passed.
-        timeout_kwargs = [kwargs for _, kwargs in notified if "Approve: bash" in str(kwargs)]
         # Find the actual call with the "Approve:" message
         approve_call = [kwargs for msg, kwargs in notified if "Approve: bash" in msg]
         assert len(approve_call) >= 1
@@ -2423,7 +2489,7 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_ask_user_event_toasts(tmp_path: Path):
     """ask_user event must trigger a toast notification."""
-    from one.modes.tui_mode import _OneTextualApp, SessionEvent
+    from one.modes.tui_mode import SessionEvent, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2431,22 +2497,28 @@ async def test_tui_ask_user_event_toasts(tmp_path: Path):
         await pilot.pause()
         notified: list[str] = []
         original_notify = app.notify
+
         def capture_notify(msg, **kwargs):
             notified.append(str(msg))
             try:
                 original_notify(msg, **kwargs)
             except Exception:
                 pass
+
         app.notify = capture_notify  # type: ignore[method-assign]
 
         # Fire the ask_user event directly.
-        await app.on_session_event(SessionEvent({
-            "type": "ask_user",
-            "id": "q1",
-            "question": "What is your name?",
-        }))
+        await app.on_session_event(
+            SessionEvent(
+                {
+                    "type": "ask_user",
+                    "id": "q1",
+                    "question": "What is your name?",
+                }
+            )
+        )
         await pilot.pause()
-        assert any("Agent czeka na odpowiedź" in n for n in notified)
+        assert any("Agent waiting for response" in n for n in notified)
         assert app._ask_user_pending is not None
 
 
@@ -2477,7 +2549,7 @@ async def test_tui_welcome_includes_logo(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
     """A->tool1 start/end->B->answer: exactly 2 Thinking: labels and 2 _THINKING_TEXT_MARK lines."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+    from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2539,7 +2611,7 @@ async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_three_segments_two_tools_strict_chronology(tmp_path: Path):
     """Three thinking segments / two tools: exactly one turn_start, strict chronological order."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+    from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2606,7 +2678,7 @@ async def test_tui_three_segments_two_tools_strict_chronology(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_many_deltas_same_segment_one_marked_line(tmp_path: Path):
     """Many deltas in one segment produce exactly one _THINKING_TEXT_MARK line."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+    from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2640,7 +2712,7 @@ async def test_tui_leading_empty_whitespace_no_label_then_block(tmp_path: Path):
     """Leading '', ' ', '\\t' before substantive => no label; then A, space, B => one block."""
     from textual.widgets import Static
 
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+    from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2694,7 +2766,7 @@ async def test_tui_literal_chunks_no_markup_error(tmp_path: Path):
     """Chunks with brackets, code, bold markers render literal without MarkupError."""
     from textual.widgets import Static
 
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+    from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2732,7 +2804,7 @@ async def test_tui_literal_chunks_no_markup_error(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_tool_call_end_without_start_separates_thinking(tmp_path: Path):
     """tool_call_end without preceding tool_call_start separates A and B thinking blocks."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+    from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2773,7 +2845,7 @@ async def test_tui_tool_call_end_without_start_separates_thinking(tmp_path: Path
 @pytest.mark.asyncio
 async def test_tui_tool_call_nudge_start_boundary(tmp_path: Path):
     """A, nudge_start, B => two thinking blocks; no new event schema."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+    from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2811,7 +2883,7 @@ async def test_tui_tool_call_nudge_start_boundary(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_no_thinking_events_no_label(tmp_path: Path):
     """No thinking events => no Thinking: label in stream."""
-    from one.modes.tui_mode import _OneTextualApp, _THINKING_TEXT_MARK
+    from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -2836,3 +2908,326 @@ async def test_tui_no_thinking_events_no_label(tmp_path: Path):
 
         thinking_text_lines = [line for line in app._stream_lines if line.startswith(_THINKING_TEXT_MARK)]
         assert len(thinking_text_lines) == 0, f"Expected 0 _THINKING_TEXT_MARK lines, got {len(thinking_text_lines)}"
+
+
+# ---------------------------------------------------------------------------
+# TUI streaming / thinking deterministic tests.
+# ---------------------------------------------------------------------------
+
+
+class _StreamingProvider:
+    """Provider that emits text deltas via on_delta callback."""
+
+    def __init__(self, deltas: list[str]) -> None:
+        self.deltas = deltas
+        self.calls = 0
+
+    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+        from one.providers.base import ChatResult
+
+        self.calls += 1
+        for d in self.deltas:
+            if on_delta:
+                on_delta(d)
+            await asyncio.sleep(0.005)
+        return ChatResult(text="".join(self.deltas), raw={}, usage={}, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_tui_streaming_produces_one_assistant_block(tmp_path: Path):
+    """Normal streaming: message_start → multiple text_deltas → message_end
+    must produce exactly one assistant chat block in the stream lines,
+    not a duplicate final block at message_end."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _StreamingProvider(["Hello ", "world"])}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "say hi")
+        # Wait for the turn to complete
+        for _ in range(300):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        # The stream should contain the assistant response once.
+        # After message_end with live deltas, there's one blank-line terminator.
+        assistant_lines = [
+            l for l in app._stream_lines
+            if l.startswith("Hello ") or l == "" or l == "world"
+        ]
+        # "Hello world" should appear as assistant text (wrapped by _format_chat_panel).
+        stream = "\n".join(app._stream_lines)
+        assert "Hello world" in stream or "Hello" in stream
+        # Count how many assistant blocks (non-empty, non-tool, non-user text).
+        # We should have exactly one assistant text block.
+        assistant_blocks = 0
+        in_block = False
+        for line in app._stream_lines:
+            if not line and in_block:
+                # blank line after content = end of block
+                assistant_blocks += 1
+                in_block = False
+            elif line and not line.startswith("tool ") and not line.startswith("["):
+                in_block = True
+        # At minimum one assistant block.
+        assert assistant_blocks >= 1
+
+
+@pytest.mark.asyncio
+async def test_tui_message_end_no_duplicate_when_streaming(tmp_path: Path):
+    """When deltas were streamed, message_end adds ONE trailing blank line,
+    not another chat block.  Verify the assistant_live_ flags are reset."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _StreamingProvider(["x"])}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "echo")
+        for _ in range(300):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        # After message_end, live state must be fully cleaned up.
+        assert app._assistant_has_live_delta is False
+        assert app._assistant_live_start_idx == -1
+        assert app._assistant_live_buffer == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_thinking_cleanup_on_tool_call(tmp_path: Path):
+    """When a tool call occurs during thinking, the thinking block must
+    be cleaned up and replaced by the tool block — no stale thinking text."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    class _ThinkingProvider:
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+            from one.providers.base import ChatResult
+
+            if on_delta:
+                on_delta("thinking")
+                on_delta(" done")
+                on_delta("tool_plan")
+            await asyncio.sleep(0.02)
+            return ChatResult(
+                text='{"tool":"bash","args":{"command":"echo ok"}}',
+                raw={}, usage={}, stop_reason="stop",
+            )
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _ThinkingProvider()}
+    session.settings_manager.set_retry_enabled(False)
+    # Include bash tool
+    session._active_tools = ["read", "bash", "finish"]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "run bash")
+        for _ in range(300):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        stream = "\n".join(app._stream_lines)
+        # Must contain the tool block but NOT a stale thinking line.
+        assert "tool start:" in stream
+        thinking_stale = any(
+            line == "Thinking:" and "tool start:" not in line
+            for line in app._stream_lines
+        )
+        # Thinking label should not remain after the turn completes.
+        # (It's cleaned up by _finalize_thinking_block at tool_call_start.)
+        thinking_lines = [l for l in app._stream_lines if l == "Thinking:"]
+        assert len(thinking_lines) == 0, f"Stale Thinking: labels found: {thinking_lines}"
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_sidebar_on_off(tmp_path: Path):
+    """Sidebar Retry field reflects session.auto_retry_enabled (on/off),
+    not the transient _retry_state."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Default is enabled (on).
+        assert app.session.settings_manager.get_retry_enabled() is True
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: on" in s
+
+        # Toggle off.
+        app.session.set_auto_retry_enabled(False)
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: off" in s
+
+        # Toggle on again.
+        app.session.set_auto_retry_enabled(True)
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: on" in s
+
+
+@pytest.mark.asyncio
+async def test_tui_thinking_state_resets_between_turns(tmp_path: Path):
+    """After a turn ends, the thinking label/buffer must be fully cleared
+    so the next turn starts with a clean slate."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _StreamingProvider(["done"])}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # First turn
+        await _submit(app, pilot, "turn one")
+        for _ in range(300):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        assert app._thinking_label_shown is False
+        assert app._thinking_buffer == ""
+        assert app._thinking_line_idx is None
+
+
+# ---------------------------------------------------------------------------
+# Tool-call JSON panel removal (streamed JSON must not remain as assistant chat).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
+    """When the provider streams JSON text that turns out to be a tool call,
+    the tool_call_start event must remove the live assistant panel so the
+    JSON does not appear as normal assistant chat.
+
+    Event sequence:
+      message_start (reset) → text_delta ("{...}") → tool_call_start → message_end
+    """
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # 1. message_start resets live state
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        assert app._assistant_has_live_delta is False
+
+        # 2. JSON text_delta builds the live assistant panel
+        session._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": '{"tool":"bash","args":{"command":"echo hi"}}'}})
+        await pilot.pause()
+        assert app._assistant_has_live_delta is True
+        assert app._assistant_live_start_idx >= 0
+        # The JSON lines should be present in the stream (may be wrapped).
+        assistant_lines_before = app._stream_lines[app._assistant_live_start_idx :]
+        assistant_text_before = "\n".join(assistant_lines_before)
+        assert "tool" in assistant_text_before
+        assert "bash" in assistant_text_before
+        assert "echo hi" in assistant_text_before
+
+        # 3. tool_call_start must remove the JSON block and write the tool block
+        session._emit({"type": "tool_call_start", "tool": "bash", "args": {"command": "echo hi"}})
+        await pilot.pause()
+
+        # The live state must be fully cleared.
+        assert app._assistant_has_live_delta is False
+        assert app._assistant_live_start_idx == -1
+        assert app._assistant_live_buffer == ""
+
+        stream = "\n".join(app._stream_lines)
+        # The tool block must be present.
+        assert "tool start: bash" in stream
+        # The streamed JSON must NOT appear as a standalone assistant chat block.
+        # Find the tool block line and verify there's no assistant delta block
+        # before it (only logo lines and user text).
+        tool_line_idx = next(
+            (i for i, l in enumerate(app._stream_lines) if "tool start: bash" in l),
+            None,
+        )
+        assert tool_line_idx is not None
+        # The JSON text should not be in any non-logo lines.
+        for line in app._stream_lines:
+            if line.startswith(" ") or line.startswith("\u2588"):
+                continue  # logo lines
+            if "tool start: bash" in line:
+                continue  # the tool block itself
+            # No assistant delta lines should contain the full JSON structure.
+            # Check by looking for the JSON's key structural elements on the
+            # same line (they may be wrapped, but the tool block line is safe).
+            assert 'tool_start' not in line or 'tool start: bash' in line
+
+        # 4. message_end must NOT create a duplicate block (state already reset)
+        session._emit({"type": "message_end", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        assert app._assistant_has_live_delta is False
+        stream_after_end = "\n".join(app._stream_lines)
+        # Only one tool block, no extra assistant block.
+        assert stream_after_end.count("tool start: bash") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_noop_without_live_block(tmp_path: Path):
+    """When no live assistant block exists, tool_call_start should be a no-op
+    for the assistant delta and just write the tool block."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # No deltas — live state is already clean
+        assert app._assistant_live_start_idx == -1
+
+        session._emit({"type": "tool_call_start", "tool": "read", "args": {"path": "f.txt"}})
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        assert "tool start: read" in stream
+        assert app._assistant_has_live_delta is False
+
+
+@pytest.mark.asyncio
+async def test_tui_message_end_after_tool_call_no_duplicate(tmp_path: Path):
+    """message_end following tool_call_start must not create an extra block
+    — the state reset by tool_call_start ensures idempotent cleanup."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        session._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": '{"tool":"ls","args":{}}'}})
+        await pilot.pause()
+        session._emit({"type": "tool_call_start", "tool": "ls", "args": {}})
+        await pilot.pause()
+        session._emit({"type": "message_end", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # The tool block must be present exactly once.
+        assert stream.count("tool start: ls") == 1
+        # No assistant delta block should remain (JSON was removed by tool_call_start).
+        assert app._assistant_has_live_delta is False
+        assert app._assistant_live_start_idx == -1

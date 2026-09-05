@@ -26,7 +26,6 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.types import ModelInfo
 
-
 # ---------------------------------------------------------------------------
 # AuthStorage: remove_provider_credentials
 # ---------------------------------------------------------------------------
@@ -401,12 +400,10 @@ def test_registry_remove_provider_credentials_delegates():
 @pytest.mark.asyncio
 async def test_tui_logout_clears_all_and_wording(tmp_path: Path):
     """TUI /logout uses remove_provider_credentials and says 'locally'."""
-    from one.core.session_manager import SessionManager
-    from one.core.settings_manager import SettingsManager
-    from one.modes.tui_mode import _OneTextualApp
-
     # Import test helpers via sys.path so we can access _mk_app_session, _submit
     import sys
+
+    from one.modes.tui_mode import _OneTextualApp
     _test_pkg_dir = str(Path(__file__).parent)
     if _test_pkg_dir not in sys.path:
         sys.path.insert(0, _test_pkg_dir)
@@ -441,7 +438,6 @@ async def test_rpc_logout_clears_all_and_schema(tmp_path: Path, monkeypatch, cap
     from one.core.agent_session import AgentSession
     from one.core.session_manager import SessionManager
     from one.core.settings_manager import SettingsManager
-    from one.modes.rpc_mode import run_rpc_mode
 
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "sk-secret-key")
@@ -494,9 +490,9 @@ async def test_rpc_logout_clears_all_and_schema(tmp_path: Path, monkeypatch, cap
 
 async def _run_rpc_test(monkeypatch, capsys, session, lines):
     """Feed JSON-lines to run_rpc_mode and return parsed responses."""
-    from one.modes.rpc_mode import run_rpc_mode
-
     import builtins
+
+    from one.modes.rpc_mode import run_rpc_mode
 
     feed = iter(lines + [None])
 

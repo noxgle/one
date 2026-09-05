@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -218,6 +217,67 @@ async def test_plan_cleared_on_finish_and_restored_as_none(tmp_path: Path):
 
     # Call finish to clear the plan
     await agent1._run_tool_call("finish", {"summary": "done", "goal_success": True})
+    assert agent1._plan is None
+
+    # Verify a cleared marker was written
+    entries = agent1.session_manager.get_entries()
+    plan_entries = _plan_entries(entries)
+    assert plan_entries[-1]["content"] == ""
+
+    # Reload - _plan should be None
+    agent2 = AgentSession(session, settings, registry, loader, model, "medium")
+    assert agent2._plan is None
+
+
+@pytest.mark.asyncio
+async def test_plan_finish_goal_success_false_clears_plan_and_preserves_flag(tmp_path: Path):
+    """finish(goal_success=false) is terminal: clears plan, emits empty plan_update,
+    and the final assistant message carries goalSuccess=False."""
+    agent = _make_agent(
+        tmp_path,
+        [
+            '{"tool":"plan","args":{"plan":"step one"}}',
+            '{"tool":"finish","args":{"summary":"failed task","goal_success":false}}',
+        ],
+    )
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("Plan and finish (fail).")
+
+    # finish cleared the plan
+    assert agent._plan is None
+
+    # last plan_update event has empty plan
+    plan_events = [e for e in events if e.get("type") == "plan_update"]
+    assert len(plan_events) >= 2
+    assert plan_events[-1]["plan"] == ""
+
+    # Final assistant message contains goalSuccess=false
+    assistant_events = [e for e in events if e.get("type") == "message_end"]
+    assert len(assistant_events) >= 1
+    # The last assistant message is the finish summary
+    last_assistant = assistant_events[-1].get("message", {})
+    assert last_assistant.get("goalSuccess") is False
+
+
+@pytest.mark.asyncio
+async def test_plan_finish_goal_success_false_restored_none(tmp_path: Path):
+    """After finish(goal_success=false) clears the plan, reloading restores _plan as None."""
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 6, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    loader = _Loader()
+
+    agent1 = AgentSession(session, settings, registry, loader, model, "medium", tools=["read", "plan", "finish"])
+    await agent1._run_tool_call("plan", {"plan": "will be cleared"})
+    assert agent1._plan == "will be cleared"
+
+    await agent1._run_tool_call("finish", {"summary": "failed", "goal_success": False})
     assert agent1._plan is None
 
     # Verify a cleared marker was written

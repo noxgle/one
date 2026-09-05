@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from .common import truncate_head, resolve_to_cwd
+from .common import resolve_to_cwd, truncate_head
 
 
 def read_tool(cwd: str, path: str, offset: int | None = None, limit: int | None = None) -> dict:

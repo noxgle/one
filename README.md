@@ -1,62 +1,182 @@
 # one
 
+[![CI](https://github.com/picon/one/actions/workflows/ci.yml/badge.svg)](https://github.com/picon/one/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
+
 Autonomous terminal agent written in Python: it executes assigned tasks on its own
 (shell / files / code) — plan, run tools, verify, report — and can optionally work
 in a **cooperation mode** where a human approves mutating tools, steers or aborts
 mid-task, and answers agent questions.
 
 The project started as a re-implementation of the `pi` coding agent and is now an
-independent project with its own roadmap — see `TODO.md`.
+independent project with its own roadmap — see `TODO.md`. The detailed implementation
+diary is `todo.md` (tracked together with the code).
 
-## Modes
+> **Maturity:** Alpha (`0.1.x`). The public API, tool contract, and storage formats may
+> change in `0.1` releases. See `CHANGELOG.md` and `TODO.md` for the roadmap.
 
-- `--mode text|json` / `-p` — one-shot task execution (prints the stream, JSON for automation)
-- interactive — REPL with slash commands, cooperation toggle (Ctrl+A), steer/abort
-- `--mode tui` — Textual TUI with live streaming, themes, sidebar
-- `--mode rpc` — JSON-RPC over stdin/stdout for external orchestration (sessions, events, extension UI)
+## ⚠️ Workspace trust warning
 
-## Quick start
+Running `one` inside a repository can execute arbitrary Python code from
+`.one/extensions/*.py` and can launch shell commands from MCP server
+configurations in `.one/settings.json`. **Only start `one` in repositories you
+trust.** If you need to inspect an untrusted repository, use the safe startup:
 
 ```bash
+one --no-extensions --no-mcp
+```
+
+Extensions and MCP servers are **not sandboxed** — they run with the same
+permissions as `one` itself. Cooperation mode is **not** a security boundary or
+sandbox; it is an approval gate only.
+
+## Installation
+
+### From source (recommended for development)
+
+```bash
+git clone https://github.com/picon/one.git
+cd one
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 one --help
+# also works as a module:
+python -m one --help
 ```
 
-Run TUI mode (Textual v2):
+### From PyPI (when published)
+
+```bash
+pip install one-agent
+one --help
+```
+
+> The distribution name is `one-agent` (PyPI), the import name and console script
+> remain `one`. The single version source is `one/config.py:VERSION` (`0.1.0`).
+
+### Verify installation
+
+```bash
+one --version
+one --help
+python -m one --help
+python -c "import one; print(one.VERSION)"
+```
+
+## Configure a provider
+
+`one` supports OpenAI-compatible providers, Anthropic, Gemini, and the local
+`llama.cpp`/`Ollama` backends. Three ways to provide credentials (highest
+precedence first):
+
+1. **CLI flag** — `--api-key` / `--provider` / `--model`
+2. **Environment variable** — `<PROVIDER>_API_KEY` (e.g. `OPENAI_API_KEY`,
+   `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
+   `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`,
+   `OLLAMA_CLOUD_API_KEY`)
+3. **Stored key via `/login`** — interactive/TUI or RPC login that validates the
+   key before persisting it
+
+**Quick start with an API key:**
+
+```bash
+# via environment (recommended for CI/headless)
+export OPENAI_API_KEY=sk-...
+one run "summarize README.md" --provider openai --model gpt-4o-mini
+
+# via /login (interactive or TUI) — validates and fetches the model list:
+one
+# then in the REPL/TUI:
+/login openai sk-... gpt-4o-mini
+/login status
+```
+
+`/login` validates the key before storing it (`401/403` → `Authorization failed`,
+key is **not** stored). On success it fetches the provider's model list
+(`GET {base}/v1/models` for OpenAI-compatible, `GET /v1beta/models?key=…` for
+Gemini, probe chat for Anthropic which has no public list endpoint), registers
+models in-memory and persists them to `models.json`.
+
+For local models no key is needed:
+
+```bash
+# llama.cpp (OpenAI-compatible, default http://127.0.0.1:8080)
+LLAMA_CPP_BASE_URL=http://127.0.0.1:8080 one --provider llama.cpp --model local
+# or per-model url in models.json — see "Local llama.cpp provider" below
+```
+
+Subscription login (OAuth) for Anthropic and ChatGPT/Codex is documented in
+"Subscription login (OAuth)" below. It is a supported production feature, but
+the underlying provider endpoints are externally controlled and may change.
+
+## Run a task
+
+### Headless one-shot (`one run`)
+
+```bash
+one run "fix the failing tests and summarize the changes"
+one run "refactor the auth module" --provider openai --model gpt-4o --json
+one run "implement feature X" --answer-file /tmp/answer.txt --steer-file /tmp/steer.txt
+```
+
+- `one run "<task>"` runs the full autonomy loop to `finish` (result summary +
+  exit code `0` success / `1` failure, token/time/budget limits respected).
+- `--json` prints the structured result `{summary, goalSuccess, finished}`.
+- `--answer-file` / `--steer-file` enable headless `ask_user` and steering while
+  the run is active (polled files).
+- Other useful flags: `--thinking`, `--models`, `--tools`, `--cooperation`,
+  `--no-subagents`, `--continue`/`--resume`/`--fork`.
+
+In headless mode the task can also come from a file: `one run @task.txt` or
+`@file` arguments are expanded and templated via `--param name=value`.
+
+### Interactive REPL
+
+```bash
+one
+# or explicitly:
+one --mode text
+```
+
+### TUI (Textual)
 
 ```bash
 one --mode tui
 ```
 
-Built-in TUI themes:
-- `default`
-- `light`
-- `hacker`
-- `solarized`
-- `fallout`
-
-Switch theme in TUI:
-
-```text
-/theme solarized
-```
+Built-in TUI themes: `default`, `light`, `hacker`, `solarized`, `fallout`.
+Switch in-app: `/theme solarized`.
 
 TUI highlights:
+
 - live response streaming (provider-dependent; OpenAI-compatible/Anthropic/Gemini/Codex supported)
-- scrollable main stream with scrollbar
-- simplified main stream view (`> ...` for user messages)
+- scrollable main stream with scrollbar, simplified view (`> ...` for user messages)
 - tool lifecycle visible in stream (`tool start`, `tool ok/err`)
-- subscription-login via `/login chatgpt subscription` / `/login anthropic subscription` (OAuth loopback/paste)
-- cooperation approval / ask_user pauses the spinner and shows "⏸ czeka na zatwierdzenie" plus a toast notification instead of the animated indicator
+- subscription login via `/login chatgpt subscription` / `/login anthropic subscription` (OAuth loopback/paste)
+- cooperation approval / `ask_user` pauses the spinner and shows a waiting indicator plus a toast notification
+
+### JSON-RPC (`--mode rpc`)
+
+JSON-RPC over stdin/stdout for external orchestration (sessions, events,
+extension UI). See `one/modes/rpc_mode.py` and `tests/snapshots/rpc/*.jsonl`.
+
+## Modes summary
+
+- `--mode text|json` / `-p` — one-shot task execution (prints the stream, JSON for automation)
+- interactive — REPL with slash commands, cooperation toggle (Ctrl+A), steer/abort
+- `--mode tui` — Textual TUI with live streaming, themes, sidebar
+- `--mode rpc` — JSON-RPC over stdin/stdout
 
 ## Cooperation mode
 
 By default `one` works autonomously. With `--cooperation` (or `/cooperation`, Ctrl+A
 in the TUI/interactive mode) it asks before running mutating tools (`bash`, `write`,
-`edit`, `plan`, `apply_patch`); rejections require a reason that is fed back to the model. Mid-task steering
-(`/steer`, `/follow`) and abort (Ctrl+C) work in every interactive mode.
+`edit`, `plan`, `apply_patch`); rejections require a reason that is fed back to the model.
+Mid-task steering (`/steer`, `/follow`) and abort (Ctrl+C) work in every interactive mode.
+
+`--cooperation` is an approval gate, not a sandbox. See the trust warning above.
 
 ## Apply patch safety
 
@@ -124,27 +244,32 @@ CLI flags: `--no-subagents` disables subagents, `--no-bash-output` hides bash ou
 OAuth. No API keys required — just your account credentials.
 
 **Anthropic subscription login:**
-1. Run `/login anthropic subscription` (TUI/interactive) or `/login anthropic sk-ant-oat...` for API keys.
+
+1. Run `/login anthropic subscription` (TUI/interactive).
 2. The app opens your browser to `console.anthropic.com` for authorization (loopback flow)
    or shows a paste code for manual authorization (paste flow).
 3. On success the access token and refresh token are stored in `auth.json` under the
    `oauth.anthropic` key with `type: "oauth"`.
-4. Models are fetched from `api.anthropic.com/v1/models` and registered in the local
-   registry + persisted to `models.json`.
+   For plain API keys (`/login anthropic sk-ant-...`) the key is stored under
+   `apiKeys.anthropic`. Anthropic API keys have **no public `GET /v1/models` endpoint** —
+   validation uses a minimal chat probe (`max_tokens=1`) instead.
+4. Models are fetched from `api.anthropic.com/v1/models` **only for OAuth tokens**
+   and registered in the local registry + persisted to `models.json`.
 5. Use `/logout anthropic` to remove the stored OAuth token locally.
 
 **ChatGPT/Codex subscription login:**
+
 1. Run `/login chatgpt subscription` — the app opens your browser to `chatgpt.com` for
-    OAuth authorization (loopback flow).
+   OAuth authorization (loopback flow).
 2. The access token is stored in `auth.json` under the `oauth.chatgpt` key; the `accountId`
-    (required for the Codex backend) is extracted from the JWT claims.
+   (required for the Codex backend) is extracted from the JWT claims.
 3. Models are fetched from `chatgpt.com/backend-api/codex/models` (Responses API) and
-    registered in the local registry. If the endpoint returns zero models the server may
-    be gating the list behind a newer `client_version` header.
+   registered in the local registry. If the endpoint returns zero models the server may
+   be gating the list behind a newer `client_version` header.
 4. Run `/login refresh chatgpt` to re-fetch the live model list without re-entering
-    credentials.
+   credentials.
 5. Fallback seed models (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) are used when
-    no models have been fetched yet.
+   no models have been fetched yet.
 6. Use `/logout chatgpt` to remove the stored OAuth token locally.
 
 `/logout <provider>` removes one-managed runtime API key, stored API key, and stored
@@ -156,9 +281,22 @@ OAuth tokens are automatically refreshed before expiry. The provider name in `au
 maps to the Responses API backend for ChatGPT and the Anthropic Messages API for
 Anthropic.
 
+> **Provider-controlled endpoints:** the OAuth flows for Anthropic and ChatGPT/Codex
+> use reverse-engineered endpoints that are not part of a public API. They may change
+> without notice and third-party use may be subject to the provider's Terms of Service.
+> See `SECURITY.md` for details.
+
 ## MCP servers
 
-`one` can connect to Model Context Protocol (MCP) servers and expose their tools to the agent. Configure servers in `settings.json` (in the agent dir, `~/.config/one/settings.json`):
+`one` can connect to Model Context Protocol (MCP) servers and expose their tools to the agent.
+Configure servers in `settings.json`:
+
+- **Agent dir** — global: `~/.config/one/settings.json` (or `ONE_CODING_AGENT_DIR`)
+- **Project dir** — per-project: `.one/settings.json` (checked after the agent dir)
+
+The agent-dir file is the canonical location shown in examples; the project file
+is useful for per-repository MCP setup and is merged with the same `mcpServers`
+shape. Use `one --no-mcp` to disable all MCP servers for a run.
 
 **stdio transport** (spawns the server per session):
 
@@ -190,7 +328,21 @@ Anthropic.
 - Manage servers at runtime: `/mcp list`, `/mcp enable <name>`, `/mcp disable <name>` (TUI and interactive mode). Changes take effect immediately and persist to settings.json.
 - MCP tools are documented automatically in the agent's system prompt.
 
+## Extensions
+
+`one` discovers extensions, skills, prompts, and themes via `one/resources/resource_loader.py`.
+See [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) for the full extension contract:
+
+- discovery paths (`<agent_dir>/extensions/`, `<cwd>/.one/extensions/`, `--extensions <path>`)
+- package manager (`one install/remove/update/list`)
+- hook contract (`tool.execute.before/after`, `chat.message`, `experimental.session.compacting`, `dispose`)
+
+Project extensions in `.one/extensions/` are not sandboxed — see the trust warning.
+
 ## Global install (run `one` from any directory)
+
+The installer is Unix-specific (Linux, macOS). On Windows use `pip install one-agent`
+or `pipx install one-agent`.
 
 ```bash
 chmod +x scripts/install.sh
@@ -198,6 +350,7 @@ chmod +x scripts/install.sh
 ```
 
 Installer creates:
+
 - virtualenv in `~/.one/venv`
 - launcher in `~/.local/bin/one`
 - config in `~/.config/one` (or legacy `~/.one/agent` if already present)
@@ -209,6 +362,19 @@ You can override config location with:
 ```bash
 export ONE_CODING_AGENT_DIR=/custom/path
 ```
+
+### Configuration files
+
+- **Agent dir** (default `~/.config/one`, override via `ONE_CODING_AGENT_DIR`):
+  `auth.json`, `models.json`, `settings.json`, `sessions/*.jsonl`, `reports.jsonl`,
+  `extensions/`. One-time auto-migration from legacy `~/.one/agent`.
+- **Project dir** (`.one/` in the current working directory): per-project MCP
+  and extension configuration. Ignored by git (`.gitignore` covers `.one/`).
+- If the global agent dir is not writable (e.g. read-only home), `one` falls back
+  to `<cwd>/.one/agent` for that run and sets `ONE_CODING_AGENT_DIR` accordingly.
+- All sensitive files are written atomically with restrictive permissions (`0700` for
+  directories, `0600` for `auth.json`/`settings.json`/`models.json`/`sessions/*.jsonl`
+  on POSIX).
 
 ## Local llama.cpp provider
 
@@ -226,7 +392,7 @@ export LLAMA_CPP_BASE_URL=http://127.0.0.1:8080
 ```bash
 one --provider llama.cpp --model local
 # custom endpoint:
-one --provider llama.cpp --model local --llama-cpp-url http://192.168.200.38:8089
+one --provider llama.cpp --model local --llama-cpp-url http://127.0.0.1:8089
 # or in interactive mode:
 # /model llama.cpp/local
 ```
@@ -243,7 +409,7 @@ You can also set endpoint per model in `models.json`:
         "id": "local",
         "reasoning": false,
         "contextWindow": 32768,
-        "url": "http://192.168.200.38:8089",
+        "url": "http://127.0.0.1:8089",
         "toolParser": [
           { "type": "raw-function-call" },
           { "type": "json" }
@@ -253,3 +419,51 @@ You can also set endpoint per model in `models.json`:
   }
 }
 ```
+
+### Ollama
+
+Same pattern as `llama.cpp`, default `http://localhost:11434/v1`, override via
+`OLLAMA_BASE_URL` or `--ollama-url`. No API key required for local Ollama.
+
+## Upgrade and uninstall
+
+```bash
+# upgrade from source
+cd one && git pull && .venv/bin/pip install -e .[dev]
+
+# upgrade from PyPI
+pip install --upgrade one-agent
+
+# upgrade global install
+./scripts/install.sh   # re-creates ~/.one/venv from the current checkout
+
+# uninstall (pip)
+pip uninstall one-agent
+
+# uninstall global install
+rm -rf ~/.one/venv ~/.local/bin/one
+# config/data remain in ~/.config/one — remove manually if desired:
+# rm -rf ~/.config/one
+```
+
+The version is defined once in `one/config.py:VERSION` and drives both the
+package metadata (`pyproject.toml` dynamic version) and `one --version`.
+
+## Platform support
+
+- **Linux and macOS** — fully supported (CI runs on `ubuntu-latest` and `macos-latest`
+  for Python 3.12 and 3.13).
+- **Windows** — best-effort: core agent, TUI, and file tools work; shell-dependent
+  features (`bash` quoting, pipelines, `command_prefix`, process groups) are POSIX-oriented
+  and some tests skip on Windows. Windows is declared in package classifiers but treated as
+  experimental until shell behavior is fully validated on Windows CI.
+
+## Documentation
+
+- `TODO.md` — roadmap (high-level milestones)
+- `todo.md` — detailed implementation diary (tracked together with code)
+- `docs/EXTENSIONS.md` — extension hook contract
+- `CONTRIBUTING.md` — development setup, testing, conventions
+- `SECURITY.md` — supported versions, reporting, trust boundaries
+- `CHANGELOG.md` — release notes
+- `CODE_OF_CONDUCT.md` — community guidelines

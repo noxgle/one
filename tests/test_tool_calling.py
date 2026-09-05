@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from pathlib import Path
 from typing import Any
 
@@ -165,7 +164,7 @@ async def test_tool_calling_step_limit_message(tmp_path: Path):
     agent.providers = {"openai": _FakeProvider(['{"tool":"ls","args":{"path":"."}}'])}
 
     await agent.prompt("Loop tools forever")
-    assert "limit kroków" in (agent.get_last_assistant_text() or "")
+    assert "reached the step limit" in (agent.get_last_assistant_text() or "")
 
 
 @pytest.mark.asyncio

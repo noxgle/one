@@ -128,7 +128,7 @@ async def test_token_budget_stops_turn(tmp_path: Path) -> None:
     last_assistant = assistant_msgs[-1]
     assert last_assistant.get("stopReason") == "budget_exceeded"
     last_text = last_assistant.get("content", [{}])[0].get("text", "") if isinstance(last_assistant.get("content"), list) else ""
-    assert "Osiągnięto limit tokenów" in last_text
+    assert "Token budget reached" in last_text
 
     # A budget_exceeded event was emitted.
     budget_events = [e for e in events if e.get("type") == "budget_exceeded"]
@@ -165,7 +165,7 @@ async def test_time_budget_stops_turn(tmp_path: Path) -> None:
     last_assistant = assistant_msgs[-1]
     assert last_assistant.get("stopReason") == "budget_exceeded"
     last_text = last_assistant.get("content", [{}])[0].get("text", "") if isinstance(last_assistant.get("content"), list) else ""
-    assert "Osiągnięto limit czasu" in last_text
+    assert "Time budget reached" in last_text
 
     # A budget_exceeded event was emitted.
     budget_events = [e for e in events if e.get("type") == "budget_exceeded"]

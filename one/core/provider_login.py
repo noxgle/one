@@ -10,7 +10,6 @@ from one.core.oauth import (
     run_login,
 )
 
-
 # ---------------------------------------------------------------------------
 # Credential sanitizer
 # ---------------------------------------------------------------------------
@@ -99,7 +98,7 @@ def _entry_ids(entries: list[dict[str, Any]] | None) -> list[str] | None:
     return [e["id"] for e in entries] if entries is not None else None
 
 
-def entry_id(entry: "str | dict[str, Any]") -> str:
+def entry_id(entry: str | dict[str, Any]) -> str:
     """Model id of a fetched entry (dict) or the id itself (plain string)."""
     return entry["id"] if isinstance(entry, dict) else entry
 
@@ -217,7 +216,7 @@ async def run_oauth_login(
     """
     spec = OAUTH_FLOWS.get(provider)
     if spec is None:
-        return False, f"no subscription login available for {provider}", None
+        return False, f"OAuth login not available for {provider}", None
     if open_url is None:
         open_url = webbrowser.open
     if read_line is None:

@@ -389,5 +389,5 @@ class ModelRegistry:
         return
 
     @classmethod
-    def create(cls, auth_storage: AuthStorage, models_path: str | None = None) -> "ModelRegistry":
+    def create(cls, auth_storage: AuthStorage, models_path: str | None = None) -> ModelRegistry:
         return cls(auth_storage, models_path)

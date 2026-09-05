@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from one.config import VERSION as _ONE_VERSION
+
 
 def _ensure_url(config: McpServerConfig) -> str:
     """Return config.url, raising if None (caller should only use this for HTTP transport)."""
@@ -58,11 +60,14 @@ class McpClient:
         )
         # Drain stderr in the background (bounded tail kept for diagnostics).
         asyncio.create_task(self._drain_stderr())
-        await self._request("initialize", {
-            "protocolVersion": self.PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "one", "version": "0.1"},
-        })
+        await self._request(
+            "initialize",
+            {
+                "protocolVersion": self.PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "one", "version": _ONE_VERSION},
+            },
+        )
         await self._notify("notifications/initialized")
 
     async def _drain_stderr(self) -> None:
@@ -150,9 +155,7 @@ class HttpMcpClient:
 
     def __init__(self, config: McpServerConfig, client: httpx.AsyncClient | None = None) -> None:
         self.config = config
-        self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0), follow_redirects=True
-        )
+        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(120.0), follow_redirects=True)
         self._owns_client = client is None
         self._session_id: str | None = None
         self._next_id = 0
@@ -180,19 +183,17 @@ class HttpMcpClient:
             if line.startswith(":"):
                 continue  # comment / keepalive
             if line.startswith("event:"):
-                event_name = line[len("event:"):].strip()
+                event_name = line[len("event:") :].strip()
                 continue
             if line.startswith("data:"):
-                data_lines.append(line[len("data:"):])
+                data_lines.append(line[len("data:") :])
                 continue
             if line == "":
                 _flush()
         _flush()  # flush trailing event at EOF
         return messages
 
-    async def _post(
-        self, payload: dict[str, Any], timeout: float = 15.0
-    ) -> tuple[list[dict[str, Any]], httpx.Headers]:
+    async def _post(self, payload: dict[str, Any], timeout: float = 15.0) -> tuple[list[dict[str, Any]], httpx.Headers]:
         url = _ensure_url(self.config)
         headers: dict[str, str] = {
             "Content-Type": "application/json",
@@ -201,14 +202,10 @@ class HttpMcpClient:
         }
         if self._session_id is not None:
             headers["Mcp-Session-Id"] = self._session_id
-        resp = await self._client.post(
-            url, headers=headers, json=payload, timeout=timeout
-        )
+        resp = await self._client.post(url, headers=headers, json=payload, timeout=timeout)
         if resp.status_code >= 400:
             body = resp.text[:300] if resp.text else ""
-            raise RuntimeError(
-                f"MCP server '{self.config.name}' HTTP {resp.status_code}: {body}"
-            )
+            raise RuntimeError(f"MCP server '{self.config.name}' HTTP {resp.status_code}: {body}")
         content_type = resp.headers.get("content-type", "")
         if "text/event-stream" in content_type:
             return self._parse_sse(resp.text), resp.headers
@@ -217,9 +214,7 @@ class HttpMcpClient:
             return [resp.json()], resp.headers
         return [], resp.headers
 
-    async def _request(
-        self, method: str, params: dict[str, Any], timeout: float = 15.0
-    ) -> dict[str, Any]:
+    async def _request(self, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
         self._next_id += 1
         req_id = self._next_id
         payload = {
@@ -237,9 +232,7 @@ class HttpMcpClient:
                 continue
             if "error" in msg:
                 err = msg["error"]
-                raise RuntimeError(
-                    f"MCP server '{self.config.name}' error {err.get('code')}: {err.get('message')}"
-                )
+                raise RuntimeError(f"MCP server '{self.config.name}' error {err.get('code')}: {err.get('message')}")
             return msg.get("result") or {}
         raise RuntimeError(f"MCP server '{self.config.name}' did not respond to '{method}'")
 
@@ -250,11 +243,15 @@ class HttpMcpClient:
         await self._post(payload)
 
     async def start(self) -> None:
-        await self._request("initialize", {
-            "protocolVersion": self.PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "one", "version": "0.1"},
-        }, timeout=15.0)
+        await self._request(
+            "initialize",
+            {
+                "protocolVersion": self.PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "one", "version": _ONE_VERSION},
+            },
+            timeout=15.0,
+        )
         try:
             await self._notify("notifications/initialized")
         except Exception:
@@ -264,12 +261,8 @@ class HttpMcpClient:
         result = await self._request("tools/list", {}, timeout=timeout)
         return result.get("tools") or []
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any], timeout: float = 120.0
-    ) -> dict[str, Any]:
-        return await self._request(
-            "tools/call", {"name": name, "arguments": arguments}, timeout=timeout
-        )
+    async def call_tool(self, name: str, arguments: dict[str, Any], timeout: float = 120.0) -> dict[str, Any]:
+        return await self._request("tools/call", {"name": name, "arguments": arguments}, timeout=timeout)
 
     async def close(self) -> None:
         if self._owns_client:
@@ -289,7 +282,7 @@ class McpManager:
         self._errors: list[str] = []
 
     @classmethod
-    def create(cls, settings_manager: Any) -> "McpManager":
+    def create(cls, settings_manager: Any) -> McpManager:
         servers: list[McpServerConfig] = []
         raw = settings_manager.get_mcp_servers() or {}
         for name, cfg in raw.items():
@@ -347,9 +340,7 @@ class McpManager:
     def errors(self) -> list[str]:
         return list(self._errors)
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any], timeout: float | None = None
-    ) -> dict[str, Any]:
+    async def call_tool(self, name: str, arguments: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
         tool = next((t for t in self._tools if t.name == name), None)
         if tool is None:
             raise RuntimeError(f"Unknown MCP tool: {name}")
@@ -452,13 +443,15 @@ class McpManager:
             tools = [t.name for t in self._tools if t.server == config.name]
             error = next((e for e in self._errors if config.name in e), None)
             transport = "http" if config.url else "stdio"
-            statuses.append({
-                "name": config.name,
-                "command": config.command,
-                "enabled": config.enabled,
-                "running": running,
-                "tools": tools,
-                "error": error,
-                "transport": transport,
-            })
+            statuses.append(
+                {
+                    "name": config.name,
+                    "command": config.command,
+                    "enabled": config.enabled,
+                    "running": running,
+                    "tools": tools,
+                    "error": error,
+                    "transport": transport,
+                }
+            )
         return statuses

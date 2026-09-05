@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 
-from one.providers.base import ChatResult
 from one.core.agent_session import AgentSession
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.providers.base import ChatResult
 
 
 class _Loader:

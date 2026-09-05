@@ -15,14 +15,12 @@ Distinct from tests/test_auth_and_cli.py:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
-
 
 # ---------------------------------------------------------------------------
 # 1. Stored key persists across AuthStorage instances (file round-trip)

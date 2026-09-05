@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Do not allow publishing from arbitrary PRs — only triggered by tag pushes.
+# Publishing is disabled by default. Enable trusted publishing when ready.
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Uncomment the environment line below when ready for protected publishing:
+    # environment: publish
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install build twine
+
+      - name: Build wheel and sdist
+        run: |
+          . .venv/bin/activate
+          python -m build
+
+      - name: Check package metadata
+        run: |
+          . .venv/bin/activate
+          twine check dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+      # Publishing is intentionally disabled until the first GitHub release is validated.
+      # To enable, uncomment the following and configure trusted publishing
+      # via PyPI's trusted publishers (OIDC). The release tag must be semver (v0.1.0)
+      # and the GitHub environment `publish` must be protected.
+      #
+      # - name: Publish to PyPI
+      #   env:
+      #     TWINE_USERNAME: __token__
+      #     TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      #   run: |
+      #     . .venv/bin/activate
+      #     twine upload dist/*

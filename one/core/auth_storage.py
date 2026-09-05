@@ -187,9 +187,9 @@ class AuthStorage:
         return PROVIDER_ENV_MAP.get(provider) or self._default_env_var(provider)
 
     @classmethod
-    def create(cls, path: str | None = None) -> "AuthStorage":
+    def create(cls, path: str | None = None) -> AuthStorage:
         return cls(path=path)
 
     @classmethod
-    def in_memory(cls) -> "AuthStorage":
+    def in_memory(cls) -> AuthStorage:
         return cls(in_memory=True)

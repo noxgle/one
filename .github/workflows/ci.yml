@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint with ruff
+        run: ruff check .
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -e .[dev]
+
+      - name: Run tests
+        env:
+          ONE_CODING_AGENT_DIR: ${{ runner.temp }}/one-agent-dir
+        run: |
+          . .venv/bin/activate
+          python -m pytest -q -p no:cacheprovider
+
+      - name: Run cross-platform smoke test
+        env:
+          ONE_CODING_AGENT_DIR: ${{ runner.temp }}/one-agent-dir
+        run: |
+          . .venv/bin/activate
+          python -m pytest -q tests/test_cross_platform_smoke.py
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install build twine
+
+      - name: Build wheel and sdist
+        run: |
+          . .venv/bin/activate
+          python -m build
+
+      - name: Check package metadata
+        run: |
+          . .venv/bin/activate
+          twine check dist/*
+
+      - name: Smoke test — fresh venv from wheel
+        run: |
+          python -m venv /tmp/one-wheel-test
+          /tmp/one-wheel-test/bin/pip install dist/*.whl
+          /tmp/one-wheel-test/bin/one --version
+          /tmp/one-wheel-test/bin/one --help
+          /tmp/one-wheel-test/bin/python -c "import one; print('one imported OK')"
+          /tmp/one-wheel-test/bin/python -m one --help
+
+      - name: Smoke test — CLI via module
+        run: |
+          . .venv/bin/activate
+          python -m one.cli.main --version
+          python -m one.cli.main --help

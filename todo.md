@@ -31,7 +31,7 @@
 ## Context
 
 - `one/tools/bash.py::bash_tool` has its own `timeout` param (from model args) producing a clear `"Command timed out"` result (`cancelled: False`).
-- `one/core/agent_session.py::_execute_tool_by_name` additionally wraps every tool call in `asyncio.wait_for(task, timeout=tool_timeout_sec)` (settings `tools.timeoutSec`, default 30). When that outer timeout fires, `wait_for` cancels the task; `bash_tool` catches `CancelledError` and returns `{"cancelled": True, "content": "(cancelled)"}`; because the task suppresses the cancellation and returns a dict, `wait_for` returns it instead of raising `TimeoutError`. The model sees only `(cancelled)` and its explicit `timeout` arg (e.g. 120) is ignored. Reproduced in `/tmp/opencode/repro_timeout.py`.
+- `one/core/agent_session.py::_execute_tool_by_name` additionally wraps every tool call in `asyncio.wait_for(task, timeout=tool_timeout_sec)` (settings `tools.timeoutSec`, default 30). When that outer timeout fires, `wait_for` cancels the task; `bash_tool` catches `CancelledError` and returns `{"cancelled": True, "content": "(cancelled)"}`; because the task suppresses the cancellation and returns a dict, `wait_for` returns it instead of raising `TimeoutError`. The model sees only `(cancelled)` and its explicit `timeout` arg (e.g. 120) is ignored. Reproduced locally with a minimal timeout script.
 - The system prompt hardcodes `"Default timeout 30s if not specified."` (`one/resources/resource_loader.py`) and does not reflect the actual `tools.timeoutSec`; the bash schema `{command, timeout?}` has no semantics hint.
 - MCP calls go through the same outer `wait_for` (30 s cap) even though `McpClient.call_tool` already has its own 120 s timeout — same bug class.
 - TUI sidebar (`one/modes/tui_mode.py`): `#sidebar` CSS has `width: 42` but **no `height`** → Textual sizes it to content (≈ half screen). `build_sidebar_snapshot()` + `_refresh_sidebar()` render the info panel; `session._mcp_manager.server_status()` already exposes per-server `name/enabled/running/tools/transport/error`.
@@ -1391,7 +1391,7 @@ All subprocess calls wrapped in try/except with 5s timeout. Import subprocess la
    - `CLIENT_VERSION = "1.0.0"` (+ comment: /models gates on client_version; stale → silent empty list).
    - `list_models_detailed`: after the shape check, if no entry has a truthy `slug` → raise `RuntimeError("chatgpt models endpoint returned 0 models — server gates the list on client_version; try updating CLIENT_VERSION")`.
 2. `one/core/model_registry.py` BUILTIN_MODELS chatgpt seeds → replaced with:
-   ```python
+    ```python
    ModelInfo("chatgpt", "gpt-5.6-sol", reasoning=True, context_window=None),
    ModelInfo("chatgpt", "gpt-5.6-terra", reasoning=True, context_window=None),
    ModelInfo("chatgpt", "gpt-5.6-luna", reasoning=True, context_window=None),
@@ -1479,7 +1479,7 @@ The received keys are OUR RECORD shape (`access`/`refresh`/`expires`/`accountId`
 
 **Observation:** after the fix, the TUI still prints `chatgpt token response missing access_token` WITHOUT the new `(HTTP ...: ...)` suffix. The fixed `_token_request` ALWAYS appends diagnostics, so a process printing the bare message is running PRE-FIX code.
 
-**CONFIRMED root cause:** `which -a one` resolves to `/home/picon/.local/bin/one` — a FROZEN user-site copy (`~/.local/lib/python3.x/site-packages/one`) snapshot from between commits `00a33a4` (feat OAuth) and `82e9019` (hotfix). It has the login feature but not the fix. Earlier changes "worked automatically" because testing went through `.venv/bin/one` / `python -m one.cli.main`, which always use live repo sources. A frozen `~/.local` copy updates ONLY on explicit `pip install --user`.
+**CONFIRMED root cause:** `which -a one` resolves to `~/.local/bin/one` — a FROZEN user-site copy (`~/.local/lib/python3.x/site-packages/one`) snapshot from between commits `00a33a4` (feat OAuth) and `82e9019` (hotfix). It has the login feature but not the fix. Earlier changes "worked automatically" because testing went through `.venv/bin/one` / `python -m one.cli.main`, which always use live repo sources. A frozen `~/.local` copy updates ONLY on explicit `pip install --user`.
 
 **⚠️ USER ACTION REQUIRED — reinstall `one` to the latest version after code changes:**
 
@@ -1489,7 +1489,7 @@ python3 -m pip uninstall -y one
 rm -f ~/.local/bin/one
 
 # 2) reinstall EDITABLY so bare `one` always tracks repo sources
-python3 -m pip install --user -e /home/picon/workspace/one
+python3 -m pip install --user -e .
 hash -r
 
 # 3) verify
@@ -1528,7 +1528,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 
 **Prerequisites:** Phases 1–29 complete; Phase 29 commits `cc56276` and `3a7834b`; user decisions recorded below.
 
-**Expected outcome:** Cooperation mode cannot be bypassed, sensitive local state is protected, mutating tools report failures correctly, authentication behavior is consistent, release artifacts install cleanly, OAuth/Codex is explicitly experimental opt-in, and the public repository has a license, CI, security policy, and accurate documentation.
+**Expected outcome:** Cooperation mode cannot be bypassed, sensitive local state is protected, mutating tools report failures correctly, authentication behavior is consistent, release artifacts install cleanly, OAuth/Codex is production-supported by default, all application user-facing text and public documentation is in English, and the public repository has a license, CI, security policy, and accurate documentation.
 
 **Estimated effort:** 4–7 implementation sessions plus CI/platform follow-up.
 
@@ -1538,7 +1538,8 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 
 - **License:** MIT.
 - **Workspace trust:** keep automatic loading of project `.one/extensions` and `.one/settings.json` MCP configuration. This is an explicitly accepted risk; documentation must warn that `one` must only be started in trusted repositories and show the safe command `one --no-extensions --no-mcp`.
-- **OAuth/Codex:** retain subscription OAuth and the Codex backend only as an experimental, explicit opt-in; disable them by default.
+- **OAuth/Codex:** ship subscription OAuth and the Codex backend as production-supported, enabled-by-default functionality. Do not label the normal user-facing flow or public documentation as experimental. Keep provider endpoint and terms-of-service limitations explicit in English.
+- **Language:** all application user-facing text, CLI/TUI/RPC messages, warnings, help text, README content, SECURITY.md content, and related public documentation must be written in English.
 - **Release target:** public GitHub repository first; prepare packaging metadata and clean-install checks so PyPI publishing can follow without redesign.
 
 #### Review findings
@@ -1673,17 +1674,58 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - `.venv/bin/python -m pytest -q tests/test_extension_runtime.py`
   - **Delivered:** per-hook output/return args-mutation, same-hook returned-dict precedence, validated multi-hook chaining, safe TypeError deny for invalid/missing values, updated EXTENSIONS docs, 16 focused tests, full suite 727 passed.
 
-- [ ] **Task 30.10: gate subscription OAuth/Codex behind experimental opt-in**
-  - **Description:** Add an explicit experimental feature gate, disabled by default, for subscription OAuth and the undocumented Codex backend. Do not expose subscription login commands/providers as generally supported unless enabled. Display a concise warning covering unofficial endpoints, instability, and provider terms. Keep ordinary API-key providers unaffected.
+- [ ] **Task 30.10: promote subscription OAuth/Codex to production support**
+  - **Description:** Make subscription OAuth for Anthropic and ChatGPT/Codex available by default as a supported production feature. Remove the experimental opt-in gate and experimental labels from normal CLI, interactive, TUI, RPC, README, and security/documentation paths. Preserve ordinary API-key providers, credential isolation, token redaction, expiry/refresh handling, and clear English disclosure that provider endpoints and terms remain externally controlled.
   - **Files:** `one/core/settings_manager.py`, `one/core/oauth.py`, `one/providers/codex_responses.py`, `one/providers/registry.py`, `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `one/cli/args.py`, `README.md`, `SECURITY.md`, `tests/test_oauth.py`, `tests/test_auth_and_cli.py`, `tests/test_interactive_mode.py`, `tests/test_tui_mode.py`, `tests/test_rpc_mode.py`
   - **Dependencies:** Tasks 30.4 and 30.5
   - **Acceptance Criteria:**
-    - Fresh/default installs do not initiate or advertise subscription OAuth/Codex as stable functionality.
-    - Explicit opt-in enables the existing flow and shows the experimental warning.
+    - Fresh/default installs advertise and allow the supported subscription OAuth/Codex login flow without an opt-in setting.
+    - CLI, interactive mode, TUI, and RPC expose consistent English login/status/error/help messages without experimental wording.
+    - README and SECURITY.md describe OAuth/Codex as supported production functionality while clearly disclosing provider-controlled endpoints, availability limits, and terms-of-service risk.
     - API-key login remains unchanged.
     - No access/refresh token appears in logs, exceptions, RPC responses, or reports.
+    - Expired credentials refresh correctly; refresh failures produce actionable English errors without exposing token material.
   - **Verification:**
     - `.venv/bin/python -m pytest -q tests/test_oauth.py tests/test_auth_and_cli.py tests/test_interactive_mode.py tests/test_tui_mode.py tests/test_rpc_mode.py`
+    - Manual review confirms every changed application message and related public-documentation section is English and contains no stale experimental opt-in instructions.
+
+- [ ] **Task 30.10a: harden `spawn_subagent` tool-call failures and fallback behavior**
+  - **Description:** Diagnose and fix tool-call parsing/execution paths that report `spawn_subagent` as unavailable and then attempt an invalid fallback to `bash`. Keep `spawn_subagent` dispatched through `AgentSession._spawn_subagent`; never replace it automatically with `bash`. Ensure fallback or recovery payloads are valid JSON, and report unavailable/disabled subagents as actionable English tool errors.
+  - **Files:** `one/core/agent_session.py`, provider tool-call parser/serializer modules as applicable, `one/tools/spawn_subagent.py`, `tests/test_subagents.py`, `tests/test_tool_calling.py`, `tests/test_event_snapshots.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:**
+    - Valid `spawn_subagent` calls reach `AgentSession._spawn_subagent` and return the existing structured result.
+    - A disabled or unavailable subagent returns a structured actionable error without executing `bash`.
+    - Any generated fallback tool arguments are valid JSON with correctly quoted string values.
+    - `spawn_subagent` is never silently remapped to `bash`.
+    - Tool errors do not expose private task content, credentials, or internal exception traces.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_subagents.py tests/test_tool_calling.py tests/test_event_snapshots.py`
+
+- [x] **Task 30.10b: preserve actionable subagent failure diagnostics and aggregate status**
+  - **Context:** A real `spawn_subagent` call can return `ok: false` with no useful `error` or `result`. `_run_subagent()` keeps a child failure in `summary`/`output` but omits `error`; failed-tool serialization then persists `error: null` and drops the useful diagnostic. Parallel aggregation can also omit top-level `ok`, making failed children appear successful.
+  - **Description:**
+    - In `AgentSession._run_subagent`, always return `sessionId`, `summary`, `output`, `finished`, `goalSuccess`, and `ok`. For failures return a non-empty sanitized `error` and stable `errorType`, preserving the final child summary as output.
+    - Preserve failed-tool diagnostics in `_run_tool_call` / `_build_tool_result_message_payload`: use `error or result or outputText or "Tool failed without details"` for the model-visible error, without credentials, task secrets, or traceback internals.
+    - For parallel `tasks`, return `ok = all(child.ok)` and an aggregate error if any child fails, while retaining individual results.
+    - Enrich the additive `subagent_end` failure event with `summary`, `error`, `errorType`, `finished`, and `goalSuccess`.
+    - Require `tasks` to be `list[str]`. Make explicit child tool sets completion-safe: add `finish` automatically or reject a set without it with an actionable English error. Distinguish `tools=[]` from omitted `tools`.
+    - Keep `spawn_subagent` dispatched only through `AgentSession._spawn_subagent`; never remap it to `bash`.
+  - **Files:** `one/core/agent_session.py`, `tests/test_subagents.py`, `tests/test_spawn_subagent_errors.py`, `tests/test_tool_calling.py`, `tests/test_event_snapshots.py` (only if additive event fields affect snapshots)
+  - **Dependencies:** Task 30.10a
+  - **Acceptance Criteria:**
+    - Child provider errors, unsuccessful finishes, and limits produce a parent `tool_call_end.ok: false` with a non-empty sanitized error and retained output.
+    - Persisted/model-visible failed `toolResult` contains useful diagnostics rather than `error: null`.
+    - Any failed parallel child fails the aggregate call and is identifiable in its results.
+    - Invalid `tasks` and non-completable explicit tool sets fail early with clear English errors.
+    - No failed or unavailable subagent triggers a `bash` call.
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q tests/test_subagents.py tests/test_spawn_subagent_errors.py tests/test_tool_calling.py tests/test_event_snapshots.py`
+    - `.venv/bin/python -m pytest -q`
+
+- [ ] **Future follow-up: normalize provider-native tool calls**
+  - **Description:** Evaluate normalizing native function/tool-call payloads from OpenAI-compatible, Anthropic, and Gemini adapters. The current JSON-in-text parser remains the immediate contract; this is a separately scoped reliability improvement.
+  - **Dependencies:** Task 30.10b
 
 - [ ] **Task 30.11: document the accepted workspace auto-load trust boundary**
   - **Description:** Because project extension/MCP auto-load remains enabled by user decision, add a prominent warning before setup examples: running `one` in a repository can execute `.one/extensions/*.py` and MCP commands from `.one/settings.json`. State that only trusted repositories are supported and provide `one --no-extensions --no-mcp` as the restricted startup command. Document extensions/MCP as unsandboxed, arbitrary-code trust boundaries.
@@ -1711,7 +1753,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - `.venv/bin/one --version`
 
 - [ ] **Task 30.13: add public repository documentation and governance files**
-  - **Description:** Add SECURITY.md, CONTRIBUTING.md, CHANGELOG.md, and optionally CODE_OF_CONDUCT.md. Rewrite README installation for public users, document `one run`, supported modes/platforms, configuration paths, credential/session privacy, safe startup, OAuth experimental opt-in, release maturity, and uninstall/upgrade. Remove private LAN addresses and stale claims. Decide whether the internal `todo.md` implementation diary belongs in the public repository; redact machine-specific paths and sensitive operational history if retained.
+  - **Description:** Add SECURITY.md, CONTRIBUTING.md, CHANGELOG.md, and optionally CODE_OF_CONDUCT.md. Rewrite README installation for public users, document `one run`, supported modes/platforms, configuration paths, credential/session privacy, safe startup, production OAuth/Codex limitations, release maturity, and uninstall/upgrade. Convert all user-facing application descriptions and public documentation to English. Remove private LAN addresses and stale claims. Decide whether the internal `todo.md` implementation diary belongs in the public repository; redact machine-specific paths and sensitive operational history if retained.
   - **Files:** `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md` (optional), `TODO.md`, `todo.md`, `docs/EXTENSIONS.md`, `.gitignore`
   - **Dependencies:** Tasks 30.1–30.12 for accurate behavior
   - **Acceptance Criteria:**
@@ -1745,7 +1787,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
     - Full suite, build, clean install, metadata, secret scan, and dependency audit pass.
     - `git status --short` is clean and no private artifact is tracked.
     - GitHub repository has branch protection, security reporting, CI badges, license, and release notes.
-    - First public tag remains pre-1.0/alpha and OAuth/Codex is visibly experimental opt-in.
+    - First public tag remains pre-1.0/alpha; OAuth/Codex is described as production-supported, with explicit English disclosure of provider endpoint and terms-of-service risks.
   - **Verification:**
     - `.venv/bin/python -m pytest -q`
     - `git diff --check && git fsck --full`
@@ -1757,7 +1799,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 #### Phase 30 rollout and rollback
 
 - Land security/correctness fixes before documentation claims or public push.
-- Keep changes in reviewable commits grouped by trust boundary, persistence/auth, tool correctness, OAuth gating, and release infrastructure.
+- Keep changes in reviewable commits grouped by trust boundary, persistence/auth, tool correctness, OAuth/Codex production support, and release infrastructure.
 - Roll back individual behavior changes by commit; persistence migrations must be backward-compatible and never delete existing credentials/sessions without explicit user action.
 - Do not publish to PyPI in the same step as first making the GitHub repository public; observe CI and installation feedback first.
 
@@ -1769,7 +1811,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 | Approval propagation deadlocks parallel subagents | Session hang | Medium | Central approval queue; concurrency tests; abort coverage |
 | Permission tightening breaks Windows or existing installs | Startup/config failure | Medium | POSIX-only chmod path; migration tests; preserve backups and surface errors |
 | Transactional patch rollback itself fails | Partial workspace mutation | Low–Medium | Same-filesystem staging; backups; collision preflight; explicit recovery diagnostics |
-| OAuth/Codex undocumented API changes | Login/chat failure or provider-policy risk | High | Experimental opt-in, isolated adapter, explicit warning, no stable compatibility promise |
+| OAuth/Codex provider endpoint changes | Login/chat failure or provider-policy risk | High | Isolated adapter, compatibility tests, actionable English errors, monitoring, and explicit disclosure that provider endpoints/terms are externally controlled |
 | Reasoning whitespace normalization damages output | Incorrect TUI transcript | Medium | Preserve raw deltas; boundary-specific tests for punctuation/code/subwords |
 | Public history exposes personal data | Privacy incident | Low but high impact | Full-history secret scan and manual review before remote push |
 | PyPI/distribution name unavailable | Release delay | Medium | Resolve distribution name before URLs/badges/workflow are finalized |
@@ -1784,7 +1826,7 @@ grep -c _describe_response ~/.local/lib/python3*/site-packages/one/core/oauth.py
 - [x] `apply_patch` rejects collisions and restores state after apply failure.
 - [x] TUI preserves chronological `thinking → tool → thinking → answer` history.
 - [x] SDK custom `agentDir` isolates all default state.
-- [ ] OAuth/Codex is disabled by default and clearly marked experimental.
+- [ ] OAuth/Codex is enabled by default, production-supported, and consistently documented in English with provider-risk disclosures.
 - [ ] Workspace extension/MCP auto-load risk is prominently documented.
 - [ ] MIT license, complete package metadata, public docs, and CI are present.
 - [ ] Full isolated tests, package build, clean install, secret scan, and dependency audit pass.

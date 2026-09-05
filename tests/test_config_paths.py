@@ -16,7 +16,6 @@ from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
 from one.modes.run_mode import run_run_mode
 
-
 # ======================================================================
 # Helpers
 # ======================================================================

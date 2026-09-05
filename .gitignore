@@ -2,10 +2,15 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
 
 .one/
 .codex
+.config/one/
 one.egg-info/
+dist/
+build/
+*.egg-info/
 
 *.log
 *.tmp

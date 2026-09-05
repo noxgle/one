@@ -33,7 +33,6 @@ from one.core.persistence import (
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 
-
 # ---------------------------------------------------------------------------
 # ensure_private_dir
 # ---------------------------------------------------------------------------
@@ -683,7 +682,7 @@ def test_run_mode_report_dir_and_file_mode(tmp_path: Path, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_migration_tightens_agent_dir(tmp_path: Path):
+def test_legacy_migration_tightens_agent_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Legacy migration creates and tightens the XDG agent dir to 0700."""
     from one.config import get_agent_dir
 
@@ -693,6 +692,9 @@ def test_legacy_migration_tightens_agent_dir(tmp_path: Path):
     legacy.mkdir(parents=True)
     (legacy / "auth.json").write_text("{}", encoding="utf-8")
     (legacy / "settings.json").write_text("{}", encoding="utf-8")
+
+    # Remove global override so get_agent_dir() actually evaluates HOME/XDG.
+    monkeypatch.delenv("ONE_CODING_AGENT_DIR", raising=False)
 
     old_home = os.environ.get("HOME")
     old_xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -716,7 +718,9 @@ def test_legacy_migration_tightens_agent_dir(tmp_path: Path):
             os.environ["XDG_CONFIG_HOME"] = old_xdg
 
 
-def test_legacy_migration_tightens_session_and_report_jsonl(tmp_path: Path):
+def test_legacy_migration_tightens_session_and_report_jsonl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Legacy migration also tightens session JSONL and report files to 0600."""
     from one.config import get_agent_dir
 
@@ -733,6 +737,9 @@ def test_legacy_migration_tightens_session_and_report_jsonl(tmp_path: Path):
     (legacy / "reports.jsonl").write_text("{}", encoding="utf-8")
     if os.name == "posix":
         (legacy / "reports.jsonl").chmod(0o644)
+
+    # Remove global override so get_agent_dir() actually evaluates HOME/XDG.
+    monkeypatch.delenv("ONE_CODING_AGENT_DIR", raising=False)
 
     old_home = os.environ.get("HOME")
     old_xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -766,6 +773,9 @@ def test_legacy_migration_chmod_failure_returns_xdg(tmp_path: Path, monkeypatch)
     legacy.mkdir(parents=True)
     (legacy / "auth.json").write_text("{}", encoding="utf-8")
 
+    # Remove global override so get_agent_dir() actually evaluates HOME/XDG.
+    monkeypatch.delenv("ONE_CODING_AGENT_DIR", raising=False)
+
     old_home = os.environ.get("HOME")
     old_xdg = os.environ.get("XDG_CONFIG_HOME")
     try:
@@ -798,7 +808,7 @@ def test_legacy_migration_chmod_failure_returns_xdg(tmp_path: Path, monkeypatch)
             os.environ["XDG_CONFIG_HOME"] = old_xdg
 
 
-def test_legacy_migration_nested_sessions_tightened(tmp_path: Path):
+def test_legacy_migration_nested_sessions_tightened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Nested session directories and JSONL files are recursively tightened."""
     from one.config import get_agent_dir
 
@@ -822,6 +832,9 @@ def test_legacy_migration_nested_sessions_tightened(tmp_path: Path):
     if os.name == "posix":
         top_sessions.chmod(0o755)
         (top_sessions / "top.jsonl").chmod(0o644)
+
+    # Remove global override so get_agent_dir() actually evaluates HOME/XDG.
+    monkeypatch.delenv("ONE_CODING_AGENT_DIR", raising=False)
 
     old_home = os.environ.get("HOME")
     old_xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -857,7 +870,6 @@ def test_legacy_migration_nested_sessions_tightened(tmp_path: Path):
 def test_cli_startup_stderr_warning(tmp_path: Path, monkeypatch):
     """CLI emits load errors to stderr, not stdout."""
     import subprocess
-    import sys
 
     env = os.environ.copy()
     agent_dir = str(tmp_path / ".one" / "agent")

@@ -7,19 +7,20 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 from one.core.types import ModelInfo
+from one.mcp import McpManager
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
 from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, find_worktree
-from one.mcp import McpManager
 from one.tools.index import all_tools
 from one.tools.plan import plan_tool
 
@@ -497,6 +498,16 @@ class AgentSession:
                 msg_payload["fullOutputPath"] = payload.get("fullOutputPath")
         else:
             msg_payload["error"] = payload.get("error")
+            # Preserve diagnostic text from the raw payload even when error is
+            # None — e.g. a failed subagent carries summary / output / content.
+            if msg_payload["error"] is None:
+                fallback = (
+                    str(payload.get("result") or payload.get("outputText") or "")
+                ).strip()
+                if fallback:
+                    msg_payload["error"] = fallback
+                else:
+                    msg_payload["error"] = "Tool failed without details"
             if payload.get("errorType"):
                 msg_payload["errorType"] = payload.get("errorType")
             if payload.get("timedOut") is True:
@@ -505,6 +516,13 @@ class AgentSession:
                 msg_payload["cancelled"] = True
             if payload.get("exitCode") is not None:
                 msg_payload["exitCode"] = payload.get("exitCode")
+            # Keep useful per-child diagnostic fields (spawn_subagent failures).
+            if payload.get("summary"):
+                msg_payload["summary"] = payload["summary"]
+            if payload.get("finished") is not None:
+                msg_payload["finished"] = payload["finished"]
+            if payload.get("goalSuccess") is not None:
+                msg_payload["goalSuccess"] = payload["goalSuccess"]
         return msg_payload
 
     def _abort_assistant_message(self) -> dict[str, Any]:
@@ -779,8 +797,17 @@ class AgentSession:
             raise RuntimeError("Subagents disabled (enable with /subagents on or 'one config subagents.enabled true')")
         task = str(args.get("task") or "").strip()
         tasks = args.get("tasks")
-        if isinstance(tasks, list):
-            tasks = [str(t).strip() for t in tasks if str(t).strip()]
+        if tasks is not None:
+            if not isinstance(tasks, list):
+                raise RuntimeError("'tasks' must be a list of task strings")
+            validated: list[str] = []
+            for idx, item in enumerate(tasks):
+                if not isinstance(item, str):
+                    raise RuntimeError(f"tasks[{idx}] must be a string, got {item.__class__.__name__}")
+                stripped = item.strip()
+                if stripped:
+                    validated.append(stripped)
+            tasks = validated
         if task and tasks:
             raise RuntimeError("Provide either 'task' or 'tasks', not both")
         if not task and not tasks:
@@ -813,22 +840,53 @@ class AgentSession:
             if not sub_model:
                 raise RuntimeError(f"Unknown model: {model_spec}")
 
-        sub_tools = tool_names or self._active_tools
+        # Validate and normalise explicit tools.
+        sub_tools = tool_names or list(self._active_tools)
+        if tool_names is not None:
+            # Distinguish omitted (None) from explicit empty list.
+            if len(tool_names) == 0:
+                raise RuntimeError(
+                    "The 'tools' parameter must not be an empty list — "
+                    "omit it to inherit the parent's tools, or include at "
+                    "least 'finish' to allow the subagent to complete."
+                )
+            # Ensure the explicit tool set can actually complete — at minimum
+            # the 'finish' terminal tool must be present.
+            if "finish" not in tool_names:
+                raise RuntimeError(
+                    "The explicit 'tools' list must include 'finish' to allow "
+                    "the subagent to complete; add 'finish' to the list or omit "
+                    "'tools' to use the parent's default tools."
+                )
+
         if task:
             return await self._run_subagent(task, sub_model, sub_tools, depth)
         results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth) for t in tasks))
-        combined = "\n".join(f"- {r['summary']}" for r in results)
+        # Aggregate: per-child results + top-level ok + error when any fails.
+        all_ok = all(r.get("ok") for r in results)
+        combined = "\n".join(f"- {r.get('summary', '(no summary)')}" for r in results)
+        aggregate_error: str | None = None
+        if not all_ok:
+            fail_details = [
+                f"Child '{r.get('sessionId', '?')}': {r.get('error', r.get('summary', 'unknown error'))}"
+                for r in results
+                if not r.get("ok")
+            ]
+            aggregate_error = "; ".join(fail_details) if fail_details else "One or more children failed"
         return {
+            "ok": all_ok,
+            "goalSuccess": all_ok,
             "results": list(results),
             "output": combined,
             "content": [{"type": "text", "text": combined}],
+            "error": aggregate_error,
         }
 
     async def _run_subagent(self, task: str, sub_model: Any, sub_tools: list[str], depth: int) -> dict[str, Any]:
         # Use the parent's session_dir so subagent files go to the same directory.
         # Use __init__ directly to bypass SessionManager.create()'s "session_dir or
         # get_default_session_dir()" fallback (empty string would be treated as falsy).
-        persist = not self.session_manager.session_file is None
+        persist = self.session_manager.session_file is not None
         manager = SessionManager(
             self.session_manager.cwd,
             self.session_manager.session_dir,
@@ -863,37 +921,72 @@ class AgentSession:
 
         sub_id = sub.session_id
         ok = False
+        error_text: str | None = None
+        error_type: str | None = None
         self._emit({"type": "subagent_start", "sessionId": sub_id, "task": task})
         try:
             await sub.prompt(task)
             result = sub.get_last_finish_result()
-            summary = result["summary"] or sub.get_last_assistant_text() or "(no output)"
-            ok = bool(result["finished"] and result["goalSuccess"])
+            assistant_text = sub.get_last_assistant_text() or ""
+            summary = result.get("summary") or assistant_text or "(no output)"
+            ok = bool(result.get("finished") and result.get("goalSuccess"))
+            # When ok is False the subagent didn't complete successfully.
+            # Add a diagnostic so the parent never sees {ok:false, error:null}.
+            if not ok:
+                if not result.get("finished"):
+                    error_text = "Subagent did not complete (no finish call)"
+                    error_type = "IncompleteExecution"
+                    # Enrich with the subagent's last assistant text (may contain
+                    # error context from a crashed provider or step-limit message).
+                    enriched = assistant_text.strip()
+                    if enriched:
+                        error_text = f"{error_text}: {enriched}"
+                else:
+                    error_text = "Subagent finished but goal was not successful"
+                    error_type = "GoalNotSatisfied"
+                # Sanitise: strip anything that looks like an API key / secret.
+                error_text = re.sub(
+                    r"(sk-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9\._\-~+/=]+)",
+                    "REDACTED",
+                    error_text,
+                )
+                error_text = error_text[:512]
+                summary = f"{error_text}" if not summary.startswith(("Subagent ", "Incompl")) else summary
             return {
                 "sessionId": sub_id,
                 "summary": summary,
-                "goalSuccess": bool(result["goalSuccess"]),
-                "finished": bool(result["finished"]),
+                "goalSuccess": bool(result.get("goalSuccess")),
+                "finished": bool(result.get("finished")),
                 "ok": ok,
                 "output": summary,
                 "content": [{"type": "text", "text": summary}],
+                "error": error_text,
+                "errorType": error_type,
             }
         except Exception as e:
+            error_text = str(e).strip() or e.__class__.__name__
+            error_type = e.__class__.__name__
+            # Sanitise: strip anything that looks like an API key / secret to avoid
+            # leaking credentials into the session jsonl.
+            error_text = re.sub(r"(sk-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9\._\-~+/=]+)", "REDACTED", error_text)
+            error_text = error_text[:512]  # cap diagnostic text
             return {
                 "sessionId": sub_id,
-                "summary": f"Subagent error: {e}",
+                "summary": f"Subagent error: {error_text}",
                 "goalSuccess": False,
                 "finished": False,
                 "ok": False,
-                "output": f"Subagent error: {e}",
-                "content": [{"type": "text", "text": f"Subagent error: {e}"}],
+                "output": f"Subagent error: {error_text}",
+                "content": [{"type": "text", "text": f"Subagent error: {error_text}"}],
+                "error": error_text,
+                "errorType": error_type,
             }
         finally:
             try:
                 await sub.dispose()
             except Exception:
                 pass
-            self._emit({"type": "subagent_end", "sessionId": sub_id, "ok": ok})
+            self._emit({"type": "subagent_end", "sessionId": sub_id, "ok": ok, "error": error_text, "errorType": error_type})
 
     def _ask_user_timeout_sec(self, args: dict[str, Any]) -> int:
         try:
@@ -924,7 +1017,7 @@ class AgentSession:
                 await asyncio.wait_for(entry["event"].wait(), timeout=timeout)
             else:
                 await entry["event"].wait()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending_questions.pop(qid, None)
             raise RuntimeError(f"No answer received within timeout ({timeout}s)") from None
         # Check abort after receiving answer.
@@ -1182,6 +1275,7 @@ class AgentSession:
             "timestamp": int(time.time() * 1000),
             "_streamedStart": streamed_started,
             "_streamedMessage": streamed_msg,
+            "_streamedSuppressed": streamed_suppressed,
         }
 
     @staticmethod
@@ -1342,11 +1436,8 @@ class AgentSession:
                         if tool_call["tool"] == "finish" and tool_payload.get("ok"):
                             # Terminal tool: end the turn with the summary as the
                             # final assistant message; no further provider calls.
+                            # (Plan cleanup is handled inside _execute_tool_by_name.)
                             final_assistant = self._finish_assistant_message(tool_payload)
-                            if self._plan:
-                                self._plan = None
-                                self._emit({"type": "plan_update", "plan": ""})
-                                self.session_manager.append_message({"role": "user", "customType": "plan", "content": "", "timestamp": int(time.time() * 1000)})
                             break
                         if self._abort_requested:
                             final_assistant = self._abort_assistant_message()
@@ -1362,7 +1453,7 @@ class AgentSession:
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Wykonałem narzędzia, ale osiągnięto limit kroków. Doprecyzuj proszę kolejne polecenie.",
+                                "text": "I ran tools but reached the step limit. Please refine your next instruction.",
                             }
                         ],
                         "provider": self.model.provider if self.model else None,
@@ -1377,7 +1468,7 @@ class AgentSession:
                         final_assistant["content"] = [
                             {
                                 "type": "text",
-                                "text": "Model zwrócił pustą odpowiedź. Spróbuj ponownie lub zmień model.",
+                                "text": "The model returned an empty response. Please try again or change the model.",
                             }
                         ]
                         final_assistant["stopReason"] = final_assistant.get("stopReason") or "empty_response"
@@ -1386,10 +1477,17 @@ class AgentSession:
                     self.messages.append(final_assistant)
                 self.session_manager.append_message(final_assistant)
                 streamed_started = bool(final_assistant.pop("_streamedStart", False))
+                streamed_suppressed = bool(final_assistant.pop("_streamedSuppressed", False))
                 streamed_msg = final_assistant.pop("_streamedMessage", None)
                 if streamed_started and isinstance(streamed_msg, dict):
-                    self._emit({"type": "message_end", "message": final_assistant})
-                else:
+                    event: dict[str, Any] = {"type": "message_end", "message": final_assistant}
+                    if streamed_suppressed:
+                        event["suppressed"] = True
+                    self._emit(event)
+                elif not streamed_suppressed:
+                    # Only emit message events when content was NOT suppressed.
+                    # Suppressed content (tool JSON detected early) is rendered
+                    # via tool_call_start / tool_call_end, not as assistant text.
                     self._emit({"type": "message_start", "message": final_assistant})
                     for chunk in final_assistant.get("content", []):
                         if chunk.get("type") == "text":
@@ -1400,6 +1498,10 @@ class AgentSession:
                                 }
                             )
                     self._emit({"type": "message_end", "message": final_assistant})
+                else:
+                    # Suppressed — emit only message_end with suppressed=True so
+                    # the TUI knows to skip creating an assistant block.
+                    self._emit({"type": "message_end", "message": final_assistant, "suppressed": True})
                 self._emit(
                     {
                         "type": "turn_end",
@@ -1417,6 +1519,7 @@ class AgentSession:
                 retries_enabled = bool(retry_cfg.get("enabled", True))
                 max_retries = int(retry_cfg.get("maxRetries", 3))
                 error_text = str(e).strip() or e.__class__.__name__
+                is_ctx_limit = self._is_context_limit_error(error_text)
                 will_retry = retries_enabled and attempt < max_retries
                 self._emit(
                     {
@@ -1450,6 +1553,14 @@ class AgentSession:
                     self._emit({"type": "message_end", "message": error_msg})
                     self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
                     break
+                # Context-limit error: compact *before* retrying so the same
+                # logical turn/retry uses a smaller context without duplicating
+                # the user message (user_msg was already added at prompt start).
+                if is_ctx_limit:
+                    try:
+                        await self.compact(reason="context_limit_retry", allow_during_prompt=True)
+                    except Exception:
+                        pass  # compaction failure → fall through to normal retry
                 attempt += 1
                 delay_ms = min(int(retry_cfg.get("baseDelayMs", 1500)) * (2 ** (attempt - 1)), int(retry_cfg.get("maxDelayMs", 20000)))
                 self._retrying = True
@@ -1529,6 +1640,13 @@ class AgentSession:
             if usage and usage["percent"] >= self.settings_manager.get_compaction_threshold_percent():
                 await self.compact(reason="auto")
 
+        # After compaction (or not), check abort before draining queued
+        # steering / follow-up messages — prevents processing steering
+        # that arrived while compaction was in flight.
+        if self._abort_requested:
+            self._abort_requested = False
+            return
+
         if self._steering:
             msg = self._steering.pop(0)
             self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
@@ -1567,98 +1685,114 @@ class AgentSession:
         self._emit({"type": "queue_update", **snapshot})
         return snapshot
 
-    async def compact(self, custom_instructions: str | None = None, reason: str = "manual") -> dict[str, Any]:
+    async def compact(
+        self,
+        custom_instructions: str | None = None,
+        reason: str = "manual",
+        *,
+        allow_during_prompt: bool = False,
+    ) -> dict[str, Any]:
+        # Guard: refuse to compact while a prompt/stream is in flight to avoid
+        # mutating messages concurrently with the provider loop.
+        # The `allow_during_prompt` flag bypasses this guard for internal
+        # error-recovery paths (e.g. context-limit) where the provider call has
+        # already failed and the prompt loop is paused — safe to compact.
+        if self._is_streaming and not allow_during_prompt:
+            return {
+                "aborted": False, "summary": "", "tokensBefore": 0,
+                "kept": 0, "skipped": True, "busy": True,
+            }
         self._is_compacting = True
         self._emit({"type": "compaction_start", "reason": reason})
-        if not self.messages:
-            self._is_compacting = False
-            result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": 0, "skipped": True}
-            self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
-            return result
+        try:
+            if not self.messages:
+                result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": 0, "skipped": True}
+                self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
+                return result
 
-        total = len(self.messages)
-        min_kept = max(1, self.settings_manager.get_compaction_min_kept_messages())
-        budget = self.settings_manager.get_compaction_recent_tokens()
+            total = len(self.messages)
+            min_kept = max(1, self.settings_manager.get_compaction_min_kept_messages())
+            budget = self.settings_manager.get_compaction_recent_tokens()
 
-        # Raw window: keep the most recent messages that fit within the token
-        # budget, but always keep at least `min_kept` messages (never drop the last one).
-        max_keep_start = max(0, total - min_kept)
-        keep_start = 0
-        acc = 0
-        for i in range(total - 1, -1, -1):
-            acc += self._approx_message_tokens(self.messages[i])
-            if acc > budget and (total - i) >= min_kept:
-                keep_start = min(i + 1, max_keep_start)
-                break
+            # Raw window: keep the most recent messages that fit within the token
+            # budget, but always keep at least `min_kept` messages (never drop the last one).
+            max_keep_start = max(0, total - min_kept)
+            keep_start = 0
+            acc = 0
+            for i in range(total - 1, -1, -1):
+                acc += self._approx_message_tokens(self.messages[i])
+                if acc > budget and (total - i) >= min_kept:
+                    keep_start = min(i + 1, max_keep_start)
+                    break
 
-        if keep_start == 0:
-            # Nothing to drop: there is no meaningful compaction to perform.
-            self._is_compacting = False
-            result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total, "skipped": True}
-            self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
-            return result
+            if keep_start == 0:
+                # Nothing to drop: there is no meaningful compaction to perform.
+                result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total, "skipped": True}
+                self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
+                return result
 
-        dropped = self.messages[:keep_start]
-        tokens_before = sum(self._approx_message_tokens(m) for m in dropped)
+            dropped = self.messages[:keep_start]
+            tokens_before = sum(self._approx_message_tokens(m) for m in dropped)
 
-        # Extension hooks: experimental.session.compacting (opencode contract).
-        context_items: list[dict[str, Any]] = []
-        if self._extension_runtime is not None and self._extension_runtime.has_hooks("experimental.session.compacting"):
-            context_items, prompt_override = await self._invoke_extension_compacting()
-            if prompt_override and not custom_instructions:
-                custom_instructions = prompt_override
+            # Extension hooks: experimental.session.compacting (opencode contract).
+            context_items: list[dict[str, Any]] = []
+            if self._extension_runtime is not None and self._extension_runtime.has_hooks("experimental.session.compacting"):
+                context_items, prompt_override = await self._invoke_extension_compacting()
+                if prompt_override and not custom_instructions:
+                    custom_instructions = prompt_override
 
-        if custom_instructions:
-            summary_text = custom_instructions.strip() or f"Compacted previous {len(dropped)} messages."
-        elif self.settings_manager.get_compaction_summarize_with_model():
-            summary_text = await self._summarize_context(dropped)
-            if not summary_text:
+            if custom_instructions:
+                summary_text = custom_instructions.strip() or f"Compacted previous {len(dropped)} messages."
+            elif self.settings_manager.get_compaction_summarize_with_model():
+                summary_text = await self._summarize_context(dropped)
+                if not summary_text:
+                    summary_text = f"Compacted previous {len(dropped)} messages."
+            else:
                 summary_text = f"Compacted previous {len(dropped)} messages."
-        else:
-            summary_text = f"Compacted previous {len(dropped)} messages."
 
-        if context_items:
-            extra = [str(c.get("content", "")).strip() for c in context_items if c.get("content")]
-            if extra:
-                joined = "\n".join(e for e in extra if e)
-                summary_text = f"{summary_text}\n{joined}".strip() if summary_text else joined
+            if context_items:
+                extra = [str(c.get("content", "")).strip() for c in context_items if c.get("content")]
+                if extra:
+                    joined = "\n".join(e for e in extra if e)
+                    summary_text = f"{summary_text}\n{joined}".strip() if summary_text else joined
 
-        # Map the first kept message back to its session-tree entry id. Message
-        # indexes in self.messages are aligned with message-producing entries
-        # except for the synthetic compaction summary (at most one, at index 0).
-        entry_ids = self.session_manager.get_message_entry_ids()
-        offset = len(entry_ids) - total
-        first_kept_id = "root"
-        idx = keep_start + offset
-        if 0 <= idx < len(entry_ids):
-            first_kept_id = entry_ids[idx]
-        elif entry_ids:
-            first_kept_id = entry_ids[0]
+            # Map the first kept message back to its session-tree entry id. Message
+            # indexes in self.messages are aligned with message-producing entries
+            # except for the synthetic compaction summary (at most one, at index 0).
+            entry_ids = self.session_manager.get_message_entry_ids()
+            offset = len(entry_ids) - total
+            first_kept_id = "root"
+            idx = keep_start + offset
+            if 0 <= idx < len(entry_ids):
+                first_kept_id = entry_ids[idx]
+            elif entry_ids:
+                first_kept_id = entry_ids[0]
 
-        self.session_manager.append_compaction(summary_text, first_kept_id, tokens_before=tokens_before)
-        self.messages = self.messages[keep_start:]
-        # Keep the summary in the live context (rolling two-tier schema):
-        # new_summary + last ~recentTokens raw messages.
-        self.messages.insert(
-            0,
-            {
-                "role": "custom",
-                "customType": "compaction_summary",
-                "content": summary_text,
+            self.session_manager.append_compaction(summary_text, first_kept_id, tokens_before=tokens_before)
+            self.messages = self.messages[keep_start:]
+            # Keep the summary in the live context (rolling two-tier schema):
+            # new_summary + last ~recentTokens raw messages.
+            self.messages.insert(
+                0,
+                {
+                    "role": "custom",
+                    "customType": "compaction_summary",
+                    "content": summary_text,
+                    "tokensBefore": tokens_before,
+                    "timestamp": int(time.time() * 1000),
+                },
+            )
+            result = {
+                "aborted": False,
+                "summary": summary_text,
                 "tokensBefore": tokens_before,
-                "timestamp": int(time.time() * 1000),
-            },
-        )
-        self._is_compacting = False
-        result = {
-            "aborted": False,
-            "summary": summary_text,
-            "tokensBefore": tokens_before,
-            "kept": len(self.messages),
-            "skipped": False,
-        }
-        self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
-        return result
+                "kept": len(self.messages),
+                "skipped": False,
+            }
+            self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
+            return result
+        finally:
+            self._is_compacting = False
 
     async def _summarize_context(self, dropped: list[dict[str, Any]]) -> str | None:
         """Rolling summary: previous summary + context since last compaction -> new summary."""
@@ -1865,12 +1999,28 @@ class AgentSession:
             stats = self.get_session_stats()
             total = int((stats.get("tokens") or {}).get("total") or 0)
             if total >= max_tokens:
-                return ("token_budget", f"Osiągnięto limit tokenów ({total}/{max_tokens}).")
+                return ("token_budget", f"Token budget reached ({total}/{max_tokens}).")
         if max_time > 0:
             elapsed = int(time.monotonic() - self._session_started_at)
             if elapsed >= max_time:
-                return ("time_budget", f"Osiągnięto limit czasu ({elapsed}s/{max_time}s).")
+                return ("time_budget", f"Time budget reached ({elapsed}s/{max_time}s).")
         return None
+
+    @staticmethod
+    def _is_context_limit_error(error_text: str) -> bool:
+        """Detect common context-length / token-limit errors from any provider.
+
+        Provider adapters wrap HTTP errors as ``RuntimeError("name API error
+        N: body")`` – the body is provider JSON.  We use generic case-insensitive
+        patterns that cover OpenAI, Anthropic, OpenRouter, Gemini, llama.cpp,
+        and other OpenAI-compatible back-ends.
+        """
+        lower = error_text.lower()
+        return (
+            "context" in lower and ("length" in lower or "limit" in lower or "window" in lower)
+            or "maximum" in lower and "context" in lower
+            or "too many" in lower and "token" in lower
+        )
 
     def get_session_stats(self) -> dict[str, Any]:
         user_messages = sum(1 for m in self.messages if m.get("role") == "user")

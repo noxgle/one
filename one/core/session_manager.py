@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,7 @@ CURRENT_SESSION_VERSION = 4
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _id() -> str:
@@ -75,7 +74,7 @@ class SessionManager:
         self._by_id = {}
         self._leaf_id = None
         if self._persist:
-            ts = datetime.utcnow().isoformat().replace(":", "-").replace(".", "-")
+            ts = datetime.now(UTC).isoformat().replace(":", "-").replace(".", "-")
             self._session_file = str(Path(self._session_dir) / f"{ts}_{sid}.jsonl")
 
     def _load(self, path: str) -> None:
@@ -160,9 +159,7 @@ class SessionManager:
         path = Path(self._session_file)
         if not path.exists():
             # First write: write the full session header + entries atomically.
-            atomic_write_text(
-                path, "\n".join(json.dumps(x) for x in self._entries) + "\n"
-            )
+            atomic_write_text(path, "\n".join(json.dumps(x) for x in self._entries) + "\n")
             return
         # Append-only for subsequent entries.
         append_private_text(path, json.dumps(entry) + "\n")
@@ -334,7 +331,9 @@ class SessionManager:
     def reset_leaf(self) -> None:
         self._leaf_id = None
 
-    def branch_with_summary(self, branch_from_id: str | None, summary: str, details: Any = None, from_hook: bool = False) -> str:
+    def branch_with_summary(
+        self, branch_from_id: str | None, summary: str, details: Any = None, from_hook: bool = False
+    ) -> str:
         self._leaf_id = branch_from_id
         return self.append_branch_summary(branch_from_id, summary, details, from_hook)
 
@@ -394,22 +393,26 @@ class SessionManager:
             if t == "message":
                 messages.append(ent["message"])
             elif t == "custom_message":
-                messages.append({
-                    "role": "custom",
-                    "customType": ent.get("customType"),
-                    "content": ent.get("content"),
-                    "display": ent.get("display"),
-                    "details": ent.get("details"),
-                    "timestamp": ent.get("timestamp"),
-                })
+                messages.append(
+                    {
+                        "role": "custom",
+                        "customType": ent.get("customType"),
+                        "content": ent.get("content"),
+                        "display": ent.get("display"),
+                        "details": ent.get("details"),
+                        "timestamp": ent.get("timestamp"),
+                    }
+                )
             elif t == "branch_summary":
-                messages.append({
-                    "role": "custom",
-                    "customType": "branch_summary",
-                    "content": ent.get("summary", ""),
-                    "timestamp": ent.get("timestamp"),
-                    "fromId": ent.get("fromId"),
-                })
+                messages.append(
+                    {
+                        "role": "custom",
+                        "customType": "branch_summary",
+                        "content": ent.get("summary", ""),
+                        "timestamp": ent.get("timestamp"),
+                        "fromId": ent.get("fromId"),
+                    }
+                )
 
         if compaction:
             messages.append(
@@ -470,7 +473,9 @@ class SessionManager:
         return None
 
     def export_to_jsonl(self, output_path: str | None = None) -> str:
-        p = Path(output_path or f"session-{datetime.utcnow().isoformat().replace(':','-').replace('.','-')}.jsonl").resolve()
+        p = Path(
+            output_path or f"session-{datetime.now(UTC).isoformat().replace(':', '-').replace('.', '-')}.jsonl"
+        ).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("\n".join(json.dumps(e) for e in self._entries) + "\n", encoding="utf-8")
         return str(p)
@@ -492,11 +497,11 @@ class SessionManager:
         return self._session_dir
 
     @classmethod
-    def create(cls, cwd: str, session_dir: str | None = None) -> "SessionManager":
+    def create(cls, cwd: str, session_dir: str | None = None) -> SessionManager:
         return cls(cwd, session_dir or get_default_session_dir(cwd), None, True)
 
     @classmethod
-    def open(cls, path: str, session_dir: str | None = None) -> "SessionManager":
+    def open(cls, path: str, session_dir: str | None = None) -> SessionManager:
         p = Path(path).resolve()
         lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
         cwd = None
@@ -509,7 +514,7 @@ class SessionManager:
         return cls(cwd or str(Path.cwd()), session_dir or str(p.parent), str(p), True)
 
     @classmethod
-    def continue_recent(cls, cwd: str, session_dir: str | None = None) -> "SessionManager":
+    def continue_recent(cls, cwd: str, session_dir: str | None = None) -> SessionManager:
         d = Path(session_dir or get_default_session_dir(cwd))
         ensure_private_dir(d)
         files = sorted(d.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)
@@ -518,11 +523,11 @@ class SessionManager:
         return cls.create(cwd, str(d))
 
     @classmethod
-    def in_memory(cls, cwd: str | None = None) -> "SessionManager":
+    def in_memory(cls, cwd: str | None = None) -> SessionManager:
         return cls(cwd or str(Path.cwd()), "", None, False)
 
     @classmethod
-    def fork_from(cls, source_path: str, target_cwd: str, session_dir: str | None = None) -> "SessionManager":
+    def fork_from(cls, source_path: str, target_cwd: str, session_dir: str | None = None) -> SessionManager:
         source = cls.open(source_path)
         target = cls.create(target_cwd, session_dir or get_default_session_dir(target_cwd))
         target._entries = [
@@ -564,7 +569,7 @@ class SessionManager:
                         cwd=h.get("cwd", ""),
                         name=name,
                         created=datetime.fromisoformat(h.get("timestamp", _now_iso()).replace("Z", "")),
-                        modified=datetime.utcfromtimestamp(p.stat().st_mtime),
+                        modified=datetime.fromtimestamp(p.stat().st_mtime, tz=UTC),
                         message_count=sum(1 for e in entries if e.get("type") == "message"),
                     )
                 )

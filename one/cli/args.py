@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
-from typing import Any
 
 from one.config import APP_NAME
 
@@ -145,7 +144,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument(
         "--cooperation",
         action="store_true",
-        help="Cooperation mode: ask the user before running mutating tools (bash/write/edit); "
+        help="Cooperation mode: ask the user before running mutating tools (bash/write/edit/plan/apply_patch); "
         "rejections require a reason that is fed back to the model.",
     )
     parser.add_argument("--no-subagents", action="store_true", help="Disable subagents: the spawn_subagent tool is not registered.")

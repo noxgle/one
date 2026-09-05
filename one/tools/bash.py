@@ -78,14 +78,14 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
             "error": "(cancelled)",
             "errorType": "CancelledError",
         }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         _kill_process_group(proc.pid)
         proc.kill()
         timed_out = True
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=1)
             output += out or b""
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Avoid hanging forever on buggy shell/process states.
             pass
         output += b"\n\nCommand timed out"

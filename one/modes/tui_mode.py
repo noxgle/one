@@ -5,9 +5,9 @@ import json
 import re
 import shutil
 import subprocess
+import textwrap
 import time
 from dataclasses import dataclass
-import textwrap
 from typing import Any
 
 from rich.markup import escape as rich_escape
@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
 
 def build_sidebar_snapshot(
     session: Any,
-    retry_state: str,
+    retry_state: str = "idle",
 ) -> dict[str, Any]:
     usage = session.get_context_usage() or {}
     queues = session.get_pending_queues() or {"steering": [], "followUp": []}
@@ -55,13 +55,22 @@ def build_sidebar_snapshot(
         for s in statuses:
             if not s.get("enabled"):
                 continue
-            mcp_servers.append({
-                "name": str(s.get("name") or ""),
-                "transport": str(s.get("transport") or ""),
-                "toolCount": len(s.get("tools") or []),
-                "running": bool(s.get("running")),
-                "error": s.get("error"),
-            })
+            mcp_servers.append(
+                {
+                    "name": str(s.get("name") or ""),
+                    "transport": str(s.get("transport") or ""),
+                    "toolCount": len(s.get("tools") or []),
+                    "running": bool(s.get("running")),
+                    "error": s.get("error"),
+                }
+            )
+
+    # Retry: show on/off based on the persistent session setting (not the
+    # transient _retry_state which only reflects the current in-flight retry).
+    auto_retry = getattr(session, "auto_retry_enabled", True)
+    if not callable(auto_retry):
+        auto_retry = bool(auto_retry)
+    retry_display = "on" if auto_retry else "off"
 
     return {
         "model": f"{session.model.provider}/{session.model.id}" if session.model else "none",
@@ -70,7 +79,7 @@ def build_sidebar_snapshot(
         "sessionId": getattr(session, "session_id", "-"),
         "streaming": bool(getattr(session, "is_streaming", False)),
         "compacting": bool(getattr(session, "is_compacting", False)),
-        "retry": retry_state,
+        "retry": retry_display,
         "coop": "on" if getattr(session, "approval_callback", None) is not None else "off",
         "contextPercent": float(usage.get("percent") or 0.0),
         "queueSteer": steer_count,
@@ -144,11 +153,106 @@ class TuiPalette:
 
 
 BUILTIN_TUI_THEMES: dict[str, TuiPalette] = {
-    "default": TuiPalette("default", "#0b1220", "#dbe7ff", "#0f1a2e", "#2f466e", "#152441", "#456ca8", "#e7f0ff", "#101a30", "#8fd3ff", "#ffd479", "#ff8a8a", "#9ff0c4", "#8fd3ff", "#ffd479", "#133a2b", "#15324a", "#3a3016"),
-    "light": TuiPalette("light", "#f5f7fb", "#1b2433", "#ffffff", "#b8c6df", "#f1f5ff", "#8ea4d5", "#1d2a44", "#f8fbff", "#2f5ea8", "#a96a00", "#b22b2b", "#146c43", "#2f5ea8", "#946200", "#d7f4e7", "#dfe9ff", "#fff0d9"),
-    "hacker": TuiPalette("hacker", "#020902", "#7cff7c", "#031003", "#1f6f1f", "#041804", "#2da62d", "#a5ff9e", "#031203", "#7cff7c", "#f0ff8c", "#ff7070", "#9bffb3", "#7cff7c", "#f0ff8c", "#0a2a0a", "#092209", "#2b2b08"),
-    "solarized": TuiPalette("solarized", "#002b36", "#93a1a1", "#073642", "#2aa198", "#0a3b47", "#268bd2", "#eee8d5", "#0a3742", "#268bd2", "#b58900", "#dc322f", "#2aa198", "#268bd2", "#b58900", "#08453f", "#0b4050", "#4a4309"),
-    "fallout": TuiPalette("fallout", "#12100b", "#ffd77a", "#1a170f", "#8f7b3f", "#211c12", "#b89a4d", "#ffe8a6", "#18140d", "#f4c96c", "#ffb347", "#ff7a62", "#ffd77a", "#f4c96c", "#ffb347", "#3b2f14", "#332811", "#4a3716"),
+    "default": TuiPalette(
+        "default",
+        "#0b1220",
+        "#dbe7ff",
+        "#0f1a2e",
+        "#2f466e",
+        "#152441",
+        "#456ca8",
+        "#e7f0ff",
+        "#101a30",
+        "#8fd3ff",
+        "#ffd479",
+        "#ff8a8a",
+        "#9ff0c4",
+        "#8fd3ff",
+        "#ffd479",
+        "#133a2b",
+        "#15324a",
+        "#3a3016",
+    ),
+    "light": TuiPalette(
+        "light",
+        "#f5f7fb",
+        "#1b2433",
+        "#ffffff",
+        "#b8c6df",
+        "#f1f5ff",
+        "#8ea4d5",
+        "#1d2a44",
+        "#f8fbff",
+        "#2f5ea8",
+        "#a96a00",
+        "#b22b2b",
+        "#146c43",
+        "#2f5ea8",
+        "#946200",
+        "#d7f4e7",
+        "#dfe9ff",
+        "#fff0d9",
+    ),
+    "hacker": TuiPalette(
+        "hacker",
+        "#020902",
+        "#7cff7c",
+        "#031003",
+        "#1f6f1f",
+        "#041804",
+        "#2da62d",
+        "#a5ff9e",
+        "#031203",
+        "#7cff7c",
+        "#f0ff8c",
+        "#ff7070",
+        "#9bffb3",
+        "#7cff7c",
+        "#f0ff8c",
+        "#0a2a0a",
+        "#092209",
+        "#2b2b08",
+    ),
+    "solarized": TuiPalette(
+        "solarized",
+        "#002b36",
+        "#93a1a1",
+        "#073642",
+        "#2aa198",
+        "#0a3b47",
+        "#268bd2",
+        "#eee8d5",
+        "#0a3742",
+        "#268bd2",
+        "#b58900",
+        "#dc322f",
+        "#2aa198",
+        "#268bd2",
+        "#b58900",
+        "#08453f",
+        "#0b4050",
+        "#4a4309",
+    ),
+    "fallout": TuiPalette(
+        "fallout",
+        "#12100b",
+        "#ffd77a",
+        "#1a170f",
+        "#8f7b3f",
+        "#211c12",
+        "#b89a4d",
+        "#ffe8a6",
+        "#18140d",
+        "#f4c96c",
+        "#ffb347",
+        "#ff7a62",
+        "#ffd77a",
+        "#f4c96c",
+        "#ffb347",
+        "#3b2f14",
+        "#332811",
+        "#4a3716",
+    ),
 }
 
 
@@ -195,11 +299,39 @@ def _paste_from_system_clipboard() -> str | None:
 
 
 _SLASH_COMMANDS: tuple[str, ...] = (
-    "/exit", "/quit", "/help", "/stats", "/state", "/status", "/queue", "/tools",
-    "/clear", "/abort", "/model", "/model-cycle", "/providers", "/thinking", "/thinking-cycle",
-    "/theme", "/steer", "/follow", "/compact", "/tree", "/navigate", "/fork",
-    "/new", "/login", "/logout", "/retry", "/config", "/extui", "/cooperation",
-    "/subagents", "/bash-show", "/mcp", "/history",
+    "/exit",
+    "/quit",
+    "/help",
+    "/stats",
+    "/state",
+    "/status",
+    "/queue",
+    "/tools",
+    "/clear",
+    "/abort",
+    "/model",
+    "/model-cycle",
+    "/providers",
+    "/thinking",
+    "/thinking-cycle",
+    "/theme",
+    "/steer",
+    "/follow",
+    "/compact",
+    "/tree",
+    "/navigate",
+    "/fork",
+    "/new",
+    "/login",
+    "/logout",
+    "/retry",
+    "/config",
+    "/extui",
+    "/cooperation",
+    "/subagents",
+    "/bash-show",
+    "/mcp",
+    "/history",
     "/bash",
 )
 
@@ -311,9 +443,7 @@ if TEXTUAL_AVAILABLE:
             prefix = word[1:]
             if not self._completion_locked:
                 # First press for this word — find the initial match set.
-                self._completion_matches = [
-                    c for c in _SLASH_COMMANDS if c.startswith("/" + prefix)
-                ]
+                self._completion_matches = [c for c in _SLASH_COMMANDS if c.startswith("/" + prefix)]
                 self._completion_index = -1
                 self._completion_prefix = prefix
                 # Lock the match set so that subsequent Tab presses cycle
@@ -345,7 +475,6 @@ if TEXTUAL_AVAILABLE:
                 text = text[: self._PASTE_MAX_CHARS]
             if result := self._replace_via_keyboard(text, *self.selection):
                 self.move_cursor(result.end_location)
-
 
     class _OneTextualApp(App[None]):
         CSS = """
@@ -440,12 +569,16 @@ if TEXTUAL_AVAILABLE:
             ("f1", "help", "Help"),
         ]
 
-        def __init__(self, session: Any, options: dict[str, Any] | None = None, runtime_host: Any | None = None) -> None:
+        def __init__(
+            self, session: Any, options: dict[str, Any] | None = None, runtime_host: Any | None = None
+        ) -> None:
             super().__init__()
             self.session = session
             self.options = options or {}
             self.runtime_host = runtime_host
-            self._theme = resolve_tui_theme(self.options.get("theme") or getattr(session.settings_manager, "get_theme", lambda: "default")())
+            self._theme = resolve_tui_theme(
+                self.options.get("theme") or getattr(session.settings_manager, "get_theme", lambda: "default")()
+            )
             self._off_listener = None
             self._assistant_stream = ""
             self._stream_lines: list[str] = []
@@ -475,7 +608,7 @@ if TEXTUAL_AVAILABLE:
                         yield Static("", id="stream")
                     yield Static("", id="ext_panel")
                     yield Static("", id="ext_overlay")
-                    yield _CommandTextArea(placeholder="Wpisz polecenie lub /help", id="input", soft_wrap=True)
+                    yield _CommandTextArea(placeholder="Type a command or /help", id="input", soft_wrap=True)
                 yield Static(id="sidebar")
 
         def on_mount(self) -> None:
@@ -550,10 +683,10 @@ if TEXTUAL_AVAILABLE:
             for line in self._stream_lines:
                 if line.startswith(_THINKING_MARK):
                     # Intentional markup (colour + spinner frame).
-                    text.append_text(Text.from_markup(line[len(_THINKING_MARK):]))
+                    text.append_text(Text.from_markup(line[len(_THINKING_MARK) :]))
                 elif line.startswith(_THINKING_TEXT_MARK):
                     # Thinking text with intentional markup (theme colour).
-                    text.append_text(Text.from_markup(line[len(_THINKING_TEXT_MARK):]))
+                    text.append_text(Text.from_markup(line[len(_THINKING_TEXT_MARK) :]))
                 else:
                     # Literal text — never parsed by Textual's markup parser.
                     text.append(line + "\n")
@@ -602,7 +735,7 @@ if TEXTUAL_AVAILABLE:
             # — the approval prompt widget handles that instead).
             pending_label = ""
             if self._ask_user_pending is not None:
-                pending_label = "czeka na Twoją odpowiedź"
+                pending_label = "waiting for your response"
             if pending_label:
                 line = f"{_THINKING_MARK}[{self._theme.warn}]⏸ {pending_label}[/]"
             else:
@@ -802,7 +935,9 @@ if TEXTUAL_AVAILABLE:
                 if shutil.which(cmd[0]) is None:
                     continue
                 try:
-                    subprocess.run(cmd, input=payload, text=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(
+                        cmd, input=payload, text=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
                     return ("copied", cmd[0])
                 except Exception:
                     continue
@@ -824,10 +959,7 @@ if TEXTUAL_AVAILABLE:
             return ("failed", "no clipboard backend")
 
         def _refresh_sidebar(self) -> None:
-            s = build_sidebar_snapshot(
-                self.session,
-                retry_state=self._retry_state,
-            )
+            s = build_sidebar_snapshot(self.session)
             if s["compacting"]:
                 status = "compacting…"
             elif self._retry_state != "idle":
@@ -861,11 +993,7 @@ if TEXTUAL_AVAILABLE:
 
             plan_block = Text()
             if plan_text:
-                display = (
-                    plan_text[: _PLAN_SIDEBAR_MAX] + "…"
-                    if len(plan_text) > _PLAN_SIDEBAR_MAX
-                    else plan_text
-                )
+                display = plan_text[:_PLAN_SIDEBAR_MAX] + "…" if len(plan_text) > _PLAN_SIDEBAR_MAX else plan_text
                 display = sanitize_display_text(display)
                 plan_block.append_text(Text.from_markup(f"[b {self._theme.info}]Plan[/]"))
                 plan_block.append("\n")
@@ -879,7 +1007,9 @@ if TEXTUAL_AVAILABLE:
             keys_block = Text()
             keys_block.append_text(Text.from_markup(f"[b {self._theme.info}]Keys[/]"))
             keys_block.append("\n")
-            keys_block.append("Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+O bash-show\nCtrl+V paste\n")
+            keys_block.append(
+                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+O bash-show\nCtrl+V paste\n"
+            )
 
             sidebar = Text()
             sidebar.append_text(info_block)
@@ -948,7 +1078,7 @@ if TEXTUAL_AVAILABLE:
                         self._write(f"{i}. {entry}", "info")
                 return
             if cmd.startswith("/history "):
-                arg = cmd[len("/history "):].strip()
+                arg = cmd[len("/history ") :].strip()
                 try:
                     idx = int(arg)
                 except ValueError:
@@ -978,8 +1108,13 @@ if TEXTUAL_AVAILABLE:
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|refresh <provider>|provider [apiKey] [model]] | /logout <provider>",
                     "info",
                 )
-                self._write("/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info")
-                self._write("/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>", "info")
+                self._write(
+                    "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
+                )
+                self._write(
+                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>",
+                    "info",
+                )
                 return
             if cmd == "/clear":
                 stream_widget = self.query_one("#stream")
@@ -1000,7 +1135,7 @@ if TEXTUAL_AVAILABLE:
                 self._write("[abort requested]", "warn")
                 return
             if cmd == "/status":
-                s = build_sidebar_snapshot(session, self._retry_state)
+                s = build_sidebar_snapshot(session)
                 self._write(json.dumps(s, ensure_ascii=False), "info")
                 return
             if cmd == "/stats":
@@ -1010,7 +1145,9 @@ if TEXTUAL_AVAILABLE:
                 self._write(
                     json.dumps(
                         {
-                            "model": {"provider": session.model.provider, "id": session.model.id} if session.model else None,
+                            "model": {"provider": session.model.provider, "id": session.model.id}
+                            if session.model
+                            else None,
                             "thinkingLevel": session.thinking_level,
                             "isStreaming": session.is_streaming,
                             "pendingMessageCount": session.pending_message_count,
@@ -1031,7 +1168,10 @@ if TEXTUAL_AVAILABLE:
                 current = f"{session.model.provider}/{session.model.id}" if session.model else "none"
                 providers = session.model_registry.providers()
                 self._write(
-                    json.dumps({"current": current, "providers": providers, "usage": "/model <provider>/<model-id>"}, ensure_ascii=False),
+                    json.dumps(
+                        {"current": current, "providers": providers, "usage": "/model <provider>/<model-id>"},
+                        ensure_ascii=False,
+                    ),
                     "info",
                 )
                 return
@@ -1059,7 +1199,9 @@ if TEXTUAL_AVAILABLE:
                         marker = "* " if p == current_provider else "  "
                         cur = f"   (current: {session.model.id})" if p == current_provider and session.model else ""
                         lines.append(f"{marker}{i}. {p}   {count} models{cur}")
-                    lines.append("Usage: /providers <number|name> lists its models; /providers <number|name> <model-number|id> switches")
+                    lines.append(
+                        "Usage: /providers <number|name> lists its models; /providers <number|name> <model-number|id> switches"
+                    )
                     self._write("\n".join(lines), "info")
                     return
                 parts = rest.split(None, 1)
@@ -1278,7 +1420,10 @@ if TEXTUAL_AVAILABLE:
                 parts = rest.split() if rest else []
                 if parts and parts[0] == "status":
                     if len(parts) == 2:
-                        self._write(json.dumps(session.model_registry.get_provider_auth_status(parts[1]), ensure_ascii=False), "info")
+                        self._write(
+                            json.dumps(session.model_registry.get_provider_auth_status(parts[1]), ensure_ascii=False),
+                            "info",
+                        )
                     else:
                         providers = session.model_registry.providers()
                         statuses = [session.model_registry.get_provider_auth_status(p) for p in providers]
@@ -1299,7 +1444,9 @@ if TEXTUAL_AVAILABLE:
                         self._write(key_info.get("error") or f"No API key for {provider}.", "error")
                         return
                     api_key = key_info.get("apiKey", "")
-                    ok, error, fetched = await validate_and_fetch(adapter, api_key, provider, headers=key_info.get("headers") or None)
+                    ok, error, fetched = await validate_and_fetch(
+                        adapter, api_key, provider, headers=key_info.get("headers") or None
+                    )
                     if not ok:
                         self._write(f"Authorization failed for {provider}: {error}", "error")
                         return
@@ -1465,7 +1612,10 @@ if TEXTUAL_AVAILABLE:
                     server_name = parts[1]
                     cfg = session.settings_manager.get_mcp_servers().get(server_name)
                     if not cfg or (not cfg.get("command") and not cfg.get("url")):
-                        self._write(f"No MCP config for '{server_name}'. Add mcpServers.<name> to settings.json (see README).", "error")
+                        self._write(
+                            f"No MCP config for '{server_name}'. Add mcpServers.<name> to settings.json (see README).",
+                            "error",
+                        )
                         return
                     manager = getattr(session, "_mcp_manager", None)
                     if manager is None:
@@ -1581,7 +1731,9 @@ if TEXTUAL_AVAILABLE:
                             self._write("Invalid JSON payload for /extui respond", "error")
                             return
                     try:
-                        resp = session.respond_extension_ui(request_id=request_id, payload=payload, cancelled=sub == "cancel")
+                        resp = session.respond_extension_ui(
+                            request_id=request_id, payload=payload, cancelled=sub == "cancel"
+                        )
                     except ValueError as e:
                         self._write(str(e), "error")
                         return
@@ -1591,7 +1743,10 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd.strip() == "/cooperation":
                 enabled = session.approval_callback is not None
-                self._write(json.dumps({"enabled": enabled, "tools": sorted(session._approval_tools)}, ensure_ascii=False), "info")
+                self._write(
+                    json.dumps({"enabled": enabled, "tools": sorted(session._approval_tools)}, ensure_ascii=False),
+                    "info",
+                )
                 return
             if cmd.startswith("/cooperation "):
                 mode = cmd[len("/cooperation ") :].strip().lower()
@@ -1619,7 +1774,7 @@ if TEXTUAL_AVAILABLE:
                         error_msg = result.get("error", "(timeout)")
                         if result.get("timedOut") and output.lower().endswith("command timed out"):
                             self._write(f"[bash] {error_msg}", "warn")
-                            stripped = output[:-len("Command timed out")].rstrip()
+                            stripped = output[: -len("Command timed out")].rstrip()
                             if stripped:
                                 self._write_tool_block(stripped)
                         else:
@@ -1699,7 +1854,7 @@ if TEXTUAL_AVAILABLE:
             low = text.lower()
             if pending.get("stage") == "reason":
                 if not text:
-                    self._write("[Approve] powód jest wymagany — wpisz powód lub 'y' aby zatwierdzić", "warn")
+                    self._write("[Approve] reason is required — enter a reason or 'y' to approve", "warn")
                     return
                 queue.put_nowait(("no", text))
                 return
@@ -1713,10 +1868,10 @@ if TEXTUAL_AVAILABLE:
                     return
                 pending["stage"] = "reason"
                 try:
-                    self.query_one("#input", TextArea).placeholder = "Powód odrzucenia:"
+                    self.query_one("#input", TextArea).placeholder = "Rejection reason:"
                 except Exception:
                     pass
-                self._write("[Approve] podaj powód odrzucenia", "warn")
+                self._write("[Approve] provide a rejection reason", "warn")
                 return
             # Any other non-empty text is treated as the rejection reason.
             queue.put_nowait(("no", text))
@@ -1752,7 +1907,7 @@ if TEXTUAL_AVAILABLE:
             self._login_pending = None
             try:
                 input_widget = self.query_one("#input", TextArea)
-                input_widget.placeholder = "Wpisz polecenie lub /help"
+                input_widget.placeholder = "Type a command or /help"
             except Exception:
                 pass
             api_key = text.strip()
@@ -1771,7 +1926,7 @@ if TEXTUAL_AVAILABLE:
             self._ask_user_pending = None
             try:
                 input_widget = self.query_one("#input", TextArea)
-                input_widget.placeholder = "Wpisz polecenie lub /help"
+                input_widget.placeholder = "Type a command or /help"
             except Exception:
                 pass
             answer = text.strip() or "(no answer)"
@@ -1798,7 +1953,9 @@ if TEXTUAL_AVAILABLE:
                 if fetched:
                     added = session.model_registry.register_models(provider, fetched)
                     session.model_registry.persist_models(provider, fetched)
-                    preview = ", ".join(fetched_entry_id(m) for m in fetched[:20]) + ("..." if len(fetched) > 20 else "")
+                    preview = ", ".join(fetched_entry_id(m) for m in fetched[:20]) + (
+                        "..." if len(fetched) > 20 else ""
+                    )
                     self._write(f"Authorized. Fetched {len(fetched)} models ({added} new): {preview}", "info")
             selected_model = None
             if model_input:
@@ -1834,7 +1991,7 @@ if TEXTUAL_AVAILABLE:
             self._toast(f"Approve: {tool_name}", severity="warning", timeout=8.0)
             try:
                 input_widget = self.query_one("#input", TextArea)
-                input_widget.placeholder = "Akceptuj (Enter) / n + powód"
+                input_widget.placeholder = "Accept (Enter) / n + reason"
                 input_widget.focus()
             except Exception:
                 pass
@@ -1847,7 +2004,7 @@ if TEXTUAL_AVAILABLE:
                 self._approval_pending = None
                 self._approval_queue = None
                 try:
-                    self.query_one("#input", TextArea).placeholder = "Wpisz polecenie lub /help"
+                    self.query_one("#input", TextArea).placeholder = "Type a command or /help"
                 except Exception:
                     pass
                 self._refresh_sidebar()
@@ -1898,7 +2055,10 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer = ""
 
         def action_help(self) -> None:
-            self._write("/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit", "info")
+            self._write(
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
+                "info",
+            )
 
         def _show_extension_panel(self, req: dict[str, Any]) -> None:
             """Render an extension widget/overlay payload as a TUI component."""
@@ -1932,7 +2092,7 @@ if TEXTUAL_AVAILABLE:
             self._extension_ui_pending_request = None
             self._hide_extension_panels()
             try:
-                self.query_one("#input", TextArea).placeholder = "Wpisz polecenie lub /help"
+                self.query_one("#input", TextArea).placeholder = "Type a command or /help"
             except Exception:
                 pass
 
@@ -1956,21 +2116,28 @@ if TEXTUAL_AVAILABLE:
             elif et == "message_end":
                 msg = event.get("message", {})
                 if msg.get("role") == "assistant":
-                    text = self._assistant_stream.strip()
-                    if not text:
-                        content = msg.get("content", "")
-                        if isinstance(content, list):
-                            text = "".join(x.get("text", "") for x in content if x.get("type") == "text").strip()
+                    # When the provider suppressed streamed content (tool JSON
+                    # detected early), the message_end carries suppressed=True.
+                    # Skip creating an assistant block — the tool call events
+                    # below will render the response correctly.
+                    suppressed = event.get("suppressed", False)
+                    if not suppressed:
+                        text = self._assistant_stream.strip()
+                        if not text:
+                            content = msg.get("content", "")
+                            if isinstance(content, list):
+                                text = "".join(x.get("text", "") for x in content if x.get("type") == "text").strip()
+                            else:
+                                text = str(content).strip()
+                        final_text = text or "[empty response]"
+                        if not self._assistant_has_live_delta:
+                            self._write_chat_block("assistant", final_text)
                         else:
-                            text = str(content).strip()
-                    final_text = text or "[empty response]"
-                    if not self._assistant_has_live_delta:
-                        self._write_chat_block("assistant", final_text)
-                    else:
-                        self._stream_lines.append("")
-                        if len(self._stream_lines) > 500:
-                            self._stream_lines = self._stream_lines[-500:]
-                        self._render_stream()
+                            self._stream_lines.append("")
+                            if len(self._stream_lines) > 500:
+                                self._stream_lines = self._stream_lines[-500:]
+                            self._render_stream()
+                    # Always reset live state regardless of suppression.
                     self._assistant_stream = ""
                     self._assistant_has_live_delta = False
                     self._assistant_live_start_idx = -1
@@ -1992,7 +2159,11 @@ if TEXTUAL_AVAILABLE:
                     self._thinking_buffer += sanitize_display_text(delta)
                     escaped = rich_escape(self._thinking_buffer)
                     line_text = f"{_THINKING_TEXT_MARK}[{self._theme.info}]{escaped}[/]"
-                    if self._thinking_line_idx is not None and 0 <= self._thinking_line_idx < len(self._stream_lines) and self._stream_lines[self._thinking_line_idx].startswith(_THINKING_TEXT_MARK):
+                    if (
+                        self._thinking_line_idx is not None
+                        and 0 <= self._thinking_line_idx < len(self._stream_lines)
+                        and self._stream_lines[self._thinking_line_idx].startswith(_THINKING_TEXT_MARK)
+                    ):
                         self._stream_lines[self._thinking_line_idx] = line_text
                     else:
                         self._stream_lines.append("")
@@ -2010,33 +2181,42 @@ if TEXTUAL_AVAILABLE:
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
                 self._finalize_thinking_block()
+                # Remove any partially-rendered assistant delta so that
+                # subsequent nudge/recovery attempts don't stack duplicate
+                # blocks (the JSON that was streamed as assistant text is
+                # actually a tool-call payload).
+                if self._assistant_live_start_idx >= 0:
+                    del self._stream_lines[self._assistant_live_start_idx :]
+                    self._assistant_live_start_idx = -1
+                self._assistant_has_live_delta = False
+                self._assistant_live_buffer = ""
                 self._write_tool_block(f"tool start: {tool_name} {args_text}")
             elif et == "tool_approval_rejected":
                 self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
             elif et == "ask_user":
                 self._ask_user_pending = {"id": str(event.get("id") or "")}
-                self._write_tool_block(f"agent pyta: {event.get('question')}")
-                self._toast("Agent czeka na odpowiedź", severity="warning")
+                self._write_tool_block(f"agent asks: {event.get('question')}")
+                self._toast("Agent waiting for response", severity="warning")
                 try:
                     input_widget = self.query_one("#input", TextArea)
-                    input_widget.placeholder = "Odpowiedź dla agenta:"
+                    input_widget.placeholder = "Answer for agent:"
                     input_widget.focus()
                 except Exception:
                     pass
             elif et == "ask_user_answered":
-                self._write(f"[AskUser] odpowiedź: {event.get('answer')}", "info")
+                self._write(f"[AskUser] answer: {event.get('answer')}", "info")
             elif et == "extension_ui_request":
                 ext = str(event.get("extension") or "unknown")
                 ui_type = str(event.get("uiType") or "widget")
                 title = str(event.get("title") or "")
-                req_id = str(event.get("id") or "")
+                _req_id = str(event.get("id") or "")
                 heading = f"[ExtUI] {ext} ({ui_type})" + (f" - {title}" if title else "")
                 self._write_tool_block(heading)
                 self._write(json.dumps(event.get("payload") or {}, ensure_ascii=False, indent=2), "info")
                 self._extension_ui_pending_request = dict(event)
                 try:
                     input_widget = self.query_one("#input", TextArea)
-                    input_widget.placeholder = "Odpowiedź dla rozszerzenia (JSON lub tekst; puste = anuluj)"
+                    input_widget.placeholder = "Answer for extension (JSON or text; empty = cancel)"
                     input_widget.focus()
                 except Exception:
                     pass
@@ -2046,18 +2226,23 @@ if TEXTUAL_AVAILABLE:
                 cancelled = bool(event.get("cancelled"))
                 resp_payload = event.get("payload") or {}
                 self._write(
-                    f"[ExtUI] response {rid} cancelled={cancelled} "
-                    + json.dumps(resp_payload, ensure_ascii=False),
+                    f"[ExtUI] response {rid} cancelled={cancelled} " + json.dumps(resp_payload, ensure_ascii=False),
                     "info",
                 )
-                if self._extension_ui_pending_request is not None and str(self._extension_ui_pending_request.get("id") or "") == rid:
+                if (
+                    self._extension_ui_pending_request is not None
+                    and str(self._extension_ui_pending_request.get("id") or "") == rid
+                ):
                     self._clear_extension_ui_state()
             elif et == "tool_call_end":
                 status = "ok" if event.get("ok") else "err"
                 tool_name = str(event.get("tool") or "tool")
                 self._finalize_thinking_block()
                 self._write_tool_block(f"tool {status}: {tool_name}")
-                if tool_name != "finish" and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)():
+                if (
+                    tool_name != "finish"
+                    and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)()
+                ):
                     payload = event.get("result") or {}
                     if event.get("ok"):
                         out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
@@ -2107,6 +2292,9 @@ class TuiMode:
             raise RuntimeError("TUI mode requires 'textual'. Install dependencies: pip install -e .")
         session = self.runtime_host.session
         app = _OneTextualApp(session, self.options, self.runtime_host)
-        if bool(self.options.get("cooperation")) or getattr(session.settings_manager, "get_tool_approval", lambda: False)():
+        if (
+            bool(self.options.get("cooperation"))
+            or getattr(session.settings_manager, "get_tool_approval", lambda: False)()
+        ):
             session.approval_callback = app._approval_prompt
         await app.run_async()

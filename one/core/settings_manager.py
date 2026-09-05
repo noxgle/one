@@ -364,13 +364,13 @@ class SettingsManager:
         self._save_global()
 
     @classmethod
-    def create(cls, cwd: str | None = None, agent_dir: str | None = None) -> "SettingsManager":
+    def create(cls, cwd: str | None = None, agent_dir: str | None = None) -> SettingsManager:
         from pathlib import Path
 
         return cls(str(Path(cwd or Path.cwd()).resolve()), agent_dir or get_agent_dir())
 
     @classmethod
-    def in_memory(cls, initial: dict[str, Any] | None = None) -> "SettingsManager":
+    def in_memory(cls, initial: dict[str, Any] | None = None) -> SettingsManager:
         from pathlib import Path
 
         return cls(str(Path.cwd()), get_agent_dir(), in_memory=True, initial=initial)

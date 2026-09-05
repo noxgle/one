@@ -1,8 +1,10 @@
-"""Subscription OAuth login for providers (Phase 18).
+"""Subscription OAuth login for providers.
 
-Implements the reverse-engineered flows used by Claude Code (Claude Pro/Max)
-and Codex CLI (ChatGPT Plus/Pro). These endpoints are UNDOCUMENTED and may
-change without notice; third-party subscription use is at the user's own risk.
+Implements the flows used by Claude Code (Claude Pro/Max) and Codex CLI
+(ChatGPT Plus/Pro).  These endpoints are not part of public provider APIs and
+are externally controlled by the respective providers — they may change without
+notice.  Third-party subscription use is at the user's own risk and may violate
+the provider's Terms of Service.
 
 Two flow styles:
 
@@ -26,9 +28,10 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -58,7 +61,7 @@ class OAuthFlowSpec:
     scope: str
     extra_authorize_params: dict[str, str] = field(default_factory=dict)
     token_content_type: str = "form"  # "form" | "json"
-    paste_flow: bool = False          # True → user pastes CODE[#STATE] back
+    paste_flow: bool = False  # True → user pastes CODE[#STATE] back
 
 
 ANTHROPIC_OAUTH = OAuthFlowSpec(
@@ -101,9 +104,7 @@ def is_oauth_provider(provider: str) -> bool:
 
 def is_oauth_access_token(api_key: str | None) -> bool:
     """True when the credential looks like a subscription OAuth access token."""
-    return bool(api_key) and any(
-        api_key.startswith(prefix) for prefix in ("sk-ant-oat01", "sk-ant-oat")
-    )
+    return bool(api_key) and any(api_key.startswith(prefix) for prefix in ("sk-ant-oat01", "sk-ant-oat"))
 
 
 def oauth_login_hint(provider: str) -> str | None:
@@ -166,7 +167,7 @@ def _describe_response(resp: Any) -> str:
     for _key in ("code", "access_token", "refresh_token", "id_token", "code_verifier"):
         snippet = re.sub(
             r'("(?:' + _key + r')"\s*:\s*")[^"]*(")',
-            r'\1[REDACTED]\2',
+            r"\1[REDACTED]\2",
             snippet,
             flags=re.IGNORECASE,
         )
@@ -192,9 +193,7 @@ async def _token_request(spec: OAuthFlowSpec, body: dict[str, str]) -> dict[str,
         if isinstance(data, dict):
             err = str(data.get("error_description") or data.get("error") or "")
         suffix = f": {err}" if err else ""
-        raise OAuthError(
-            f"{spec.provider} token response missing access_token{suffix} ({_describe_response(resp)})"
-        )
+        raise OAuthError(f"{spec.provider} token response missing access_token{suffix} ({_describe_response(resp)})")
     return data
 
 
@@ -267,8 +266,7 @@ def build_oauth_record(spec: OAuthFlowSpec, token_resp: dict[str, Any]) -> dict[
     access = token_resp.get("access_token")
     if not access:
         raise OAuthError(
-            f"{spec.provider} token response missing access_token "
-            f"(received keys: {sorted(token_resp) or '[]'})"
+            f"{spec.provider} token response missing access_token (received keys: {sorted(token_resp) or '[]'})"
         )
     now_ms = int(time.time() * 1000)
     expires_in = token_resp.get("expires_in")
@@ -290,9 +288,7 @@ def build_oauth_record(spec: OAuthFlowSpec, token_resp: dict[str, Any]) -> dict[
     return record
 
 
-async def ensure_fresh_token(
-    auth: AuthStorage, provider: str, *, margin_ms: int = REFRESH_MARGIN_MS
-) -> str | None:
+async def ensure_fresh_token(auth: AuthStorage, provider: str, *, margin_ms: int = REFRESH_MARGIN_MS) -> str | None:
     """Return a live OAuth access token for the provider.
 
     Returns ``None`` when the provider has no OAuth record (API-key auth is
@@ -313,8 +309,7 @@ async def ensure_fresh_token(
     refresh_token = str(record.get("refresh") or "")
     if not refresh_token:
         raise OAuthError(
-            f"{provider}: OAuth token expired and no refresh token stored; "
-            f"log in again (/login {provider})."
+            f"{provider}: OAuth token expired and no refresh token stored; log in again (/login {provider})."
         )
     resp = await refresh_access_token(spec, refresh_token)
     new_record = build_oauth_record(spec, resp)
@@ -343,7 +338,7 @@ async def run_paste_flow(
     if "#" in raw:
         code, state = raw.split("#", 1)
     else:
-        code, state = raw, verifier
+        code = raw
     if not code:
         raise OAuthError("No authorization code entered.")
     token_resp = await exchange_authorization_code(spec, code=code, verifier=verifier)

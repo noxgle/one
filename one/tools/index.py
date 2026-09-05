@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .apply_patch import apply_patch_tool
 from .ask_user import ask_user_tool

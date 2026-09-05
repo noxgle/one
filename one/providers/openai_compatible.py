@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -35,7 +36,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             payload["reasoning_effort"] = "high" if thinking_level in {"high", "xhigh"} else "medium"
         return payload
 
-    def with_base_url(self, base_url: str) -> "OpenAICompatibleAdapter":
+    def with_base_url(self, base_url: str) -> OpenAICompatibleAdapter:
         return OpenAICompatibleAdapter(
             self.name,
             base_url,

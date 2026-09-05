@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -152,7 +152,7 @@ async def run_run_mode(runtime_host: Any, options: dict[str, Any]) -> int:
             ensure_private_dir(report_dir)
             report_path = report_dir / "reports.jsonl"
             entry = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "task": task,
                 "summary": summary,
                 "goalSuccess": result["goalSuccess"],

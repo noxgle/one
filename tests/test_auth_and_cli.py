@@ -88,7 +88,7 @@ def test_models_json_url_overrides_builtin_llama_cpp_base_url(tmp_path: Path) ->
                             "id": "local",
                             "reasoning": False,
                             "contextWindow": 32768,
-                            "url": "http://192.168.200.20:8089",
+                            "url": "http://192.0.2.20:8089",
                         }
                     ]
                 }
@@ -101,7 +101,7 @@ def test_models_json_url_overrides_builtin_llama_cpp_base_url(tmp_path: Path) ->
     model = registry.find("llama.cpp", "local")
     assert model is not None
     # models.json url must override the builtin (previously hardcoded) URL.
-    assert model.base_url == "http://192.168.200.20:8089"
+    assert model.base_url == "http://192.0.2.20:8089"
 
 
 def test_placeholder_api_key_not_configured(tmp_path: Path) -> None:
@@ -157,7 +157,7 @@ def test_model_registry_reads_llama_cpp_url_from_models_json(tmp_path: Path) -> 
                             "id": "local",
                             "reasoning": False,
                             "contextWindow": 32768,
-                            "url": "http://192.168.200.38:8089",
+                            "url": "http://192.0.2.38:8089",
                             "toolParser": [{"type": "raw-function-call"}, {"type": "json"}],
                         }
                     ]
@@ -170,7 +170,7 @@ def test_model_registry_reads_llama_cpp_url_from_models_json(tmp_path: Path) -> 
     registry = ModelRegistry.create(auth, str(models_path))
     model = registry.find("llama.cpp", "local")
     assert model is not None
-    assert model.base_url == "http://192.168.200.38:8089"
+    assert model.base_url == "http://192.0.2.38:8089"
     assert model.tool_parser == [{"type": "raw-function-call"}, {"type": "json"}]
 
 
@@ -346,7 +346,7 @@ def test_cli_accepts_llama_cpp_url_flag(tmp_path: Path):
             "-m",
             "one.cli.main",
             "--llama-cpp-url",
-            "http://192.168.200.38:8089",
+            "http://192.0.2.38:8089",
             "--list-models",
             "llama.cpp",
         ],

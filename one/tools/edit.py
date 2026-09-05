@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import difflib
-from typing import Any
 
 from .common import resolve_to_cwd
 

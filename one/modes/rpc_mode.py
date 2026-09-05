@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from typing import Any
 
 from one.core.provider_login import _redact_credentials, validate_and_fetch

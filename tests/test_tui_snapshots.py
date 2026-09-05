@@ -68,6 +68,7 @@ class _DummySession:
         self.settings_manager = _DummySettingsManager()
         self._subscribers: list[Any] = []
         self._unsubscribe: Any = None
+        self.auto_retry_enabled: bool = True
 
     def subscribe(self, fn: Any) -> Any:
         """Register a listener; return a callable that unsubscribes."""

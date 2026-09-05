@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from one.core.settings_manager import SettingsManager
 
 

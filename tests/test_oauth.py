@@ -23,7 +23,6 @@ from one.core.model_registry import ModelRegistry
 from one.core.oauth import (
     ANTHROPIC_OAUTH,
     CHATGPT_OAUTH,
-    OAUTH_FLOWS,
     OAuthError,
     build_authorize_url,
     build_oauth_record,
@@ -685,7 +684,6 @@ async def test_anthropic_adapter_headers_oauth_vs_api_key(monkeypatch):
             return {"output": [{"content": [{"type": "text", "text": "ok"}]}], "usage": {}, "stop_reason": "end_turn"}
 
     def handler(method: str, url: str, kwargs: dict[str, Any]) -> _Resp:
-        from one.providers import anthropic as mod
 
         captured["headers"] = kwargs["headers"]
         captured["url"] = url
@@ -992,7 +990,7 @@ async def test_run_oauth_login_does_not_double_convert(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_oauth_login_unknown_provider():
     ok, error, fetched = await run_oauth_login("openai", _FakeAdapter(), _RecordingRegistry())
-    assert not ok and "no subscription login" in (error or "")
+    assert not ok and "OAuth login not available" in (error or "")
     assert fetched is None
 
 
