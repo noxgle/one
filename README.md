@@ -10,8 +10,8 @@ in a **cooperation mode** where a human approves mutating tools, steers or abort
 mid-task, and answers agent questions.
 
 The project started as a re-implementation of the `pi` coding agent and is now an
-independent project with its own roadmap — see `TODO.md`. The detailed implementation
-diary is `todo.md` (tracked together with the code).
+independent project with its own roadmap — see `TODO.md`. Completed work is
+recorded in `DONE.md`.
 
 > **Maturity:** Alpha (`0.1.x`). The public API, tool contract, and storage formats may
 > change in `0.1` releases. See `CHANGELOG.md` and `TODO.md` for the roadmap.
@@ -460,8 +460,8 @@ package metadata (`pyproject.toml` dynamic version) and `one --version`.
 
 ## Documentation
 
-- `TODO.md` — roadmap (high-level milestones)
-- `todo.md` — detailed implementation diary (tracked together with code)
+- `TODO.md` — open roadmap items
+- `DONE.md` — delivered functionality and release-preparation record
 - `docs/EXTENSIONS.md` — extension hook contract
 - `CONTRIBUTING.md` — development setup, testing, conventions
 - `SECURITY.md` — supported versions, reporting, trust boundaries

@@ -2,7 +2,7 @@
 
 ## Project
 
-Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (shell/file/code) headless or via CLI/TUI/RPC, with an **optional cooperation mode** — approval gates for mutating tools (`--cooperation`), mid-task steering/abort, and agent-initiated questions (`ask_user` tool). Started as a re-implementation of the `pi` coding agent but now independent — `pi` parity is explicitly out of scope. Roadmap: `TODO.md` (the active implementation plan, committed together with the feature work). Package name: `one`, source in `one/`.
+Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (shell/file/code) headless or via CLI/TUI/RPC, with an **optional cooperation mode** — approval gates for mutating tools (`--cooperation`), mid-task steering/abort, and agent-initiated questions (`ask_user` tool). Started as a re-implementation of the `pi` coding agent but now independent — `pi` parity is explicitly out of scope. Open work lives in `TODO.md`; delivered work is summarized in `DONE.md`. Package name: `one`, source in `one/`.
 
 ## Commands
 
