@@ -109,6 +109,27 @@ _THINKING_TEXT_MARK = "__MK_THINK__: "
 # Maximum characters for the plan section in the sidebar (truncated with …).
 _PLAN_SIDEBAR_MAX = 200
 
+# One source of truth for user-visible keyboard shortcuts. Textual itself
+# provides many widget/editor bindings, but these are the application-level
+# actions users can rely on in the TUI.
+TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
+    ("Ctrl+P", "command palette"),
+    ("Ctrl+C", "abort"),
+    ("Ctrl+L", "clear stream"),
+    ("Ctrl+Q", "quit"),
+    ("Ctrl+A", "toggle cooperation"),
+    ("Ctrl+S", "toggle subagents"),
+    ("Ctrl+O", "toggle bash output"),
+    ("Ctrl+V", "paste from the system clipboard"),
+    ("Ctrl+F1", "show slash-command help"),
+    ("Esc", "close the shortcuts panel"),
+)
+
+
+def format_tui_shortcuts() -> str:
+    """Render the current application shortcuts for the sidebar and overlay."""
+    return "\n".join(f"{key} {description}" for key, description in TUI_SHORTCUTS)
+
 
 def evaluate_waiting(
     turn_active: bool,
@@ -370,6 +391,8 @@ if TEXTUAL_AVAILABLE:
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
+            # Keep the insertion cursor visible without the distracting blink.
+            self.cursor_blink = False
             self._completion_prefix = ""
             self._completion_matches: list[str] = []
             self._completion_index = -1
@@ -553,7 +576,21 @@ if TEXTUAL_AVAILABLE:
             layer: above;
         }
 
-        #ext_panel.visible, #ext_overlay.visible {
+        #shortcuts_overlay {
+            display: none;
+            position: absolute;
+            offset: 20% 20%;
+            width: 60%;
+            height: auto;
+            max-height: 60%;
+            border: heavy #456ca8;
+            background: #0d1424;
+            color: #e7f0ff;
+            padding: 1 2;
+            layer: above;
+        }
+
+        #ext_panel.visible, #ext_overlay.visible, #shortcuts_overlay.visible {
             display: block;
         }
         """
@@ -566,7 +603,10 @@ if TEXTUAL_AVAILABLE:
             Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle bash output", priority=True),
-            ("f1", "help", "Help"),
+            ("ctrl+f1", "help", "Help"),
+            # Keep this non-priority: the CommandPalette must retain Esc to
+            # close itself while this action closes one's shortcuts overlay.
+            ("escape", "close_shortcuts", "Close shortcuts"),
         ]
 
         def __init__(
@@ -587,6 +627,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._active_tool_block: tuple[str, int, int, str] | None = None
             self._turn_active = False
             self._last_delta_ts = 0.0
             self._thinking_frame = 0
@@ -608,8 +649,35 @@ if TEXTUAL_AVAILABLE:
                         yield Static("", id="stream")
                     yield Static("", id="ext_panel")
                     yield Static("", id="ext_overlay")
+                    yield Static("", id="shortcuts_overlay")
                     yield _CommandTextArea(placeholder="Type a command or /help", id="input", soft_wrap=True)
                 yield Static(id="sidebar")
+
+        def get_system_commands(self, screen: Any) -> list[tuple[str, str, Any, bool]]:  # noqa: ARG002
+            """Expose only current one commands in Textual's Ctrl+P palette.
+
+            Textual's default Theme and Keys commands use its own theme registry
+            and merged widget bindings, both of which differ from one.
+            """
+            commands: list[tuple[str, str, Any, bool]] = [
+                ("Show one keyboard shortcuts", "Show the current one TUI shortcuts", self.action_show_shortcuts, True),
+                ("Show one slash-command help", "Show the current slash-command reference", self.action_help, True),
+                ("Clear conversation stream", "Clear the visible conversation stream", self.action_clear_stream, True),
+                ("Toggle cooperation", "Require approval for mutating tools", self.action_toggle_cooperation, True),
+                ("Toggle subagents", "Enable or disable subagent tools", self.action_toggle_subagents, True),
+                ("Toggle bash output", "Show or hide bash output", self.action_toggle_bash_show, True),
+                ("Quit one", "Quit the application", self.exit, True),
+            ]
+            for theme_name in sorted(BUILTIN_TUI_THEMES):
+                commands.append(
+                    (
+                        f"Theme: {theme_name}",
+                        f"Set the one theme to {theme_name}",
+                        lambda name=theme_name: self._set_theme(name),
+                        True,
+                    )
+                )
+            return commands
 
         def on_mount(self) -> None:
             self.query_one("#input", TextArea).focus()
@@ -846,14 +914,30 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines = self._stream_lines[-500:]
             self._render_stream()
 
-        def _write_tool_block(self, text: str) -> None:
+        def _write_tool_block(self, text: str) -> tuple[int, int]:
             self._remove_thinking_line()
             self._stream_lines.append("")
+            start = len(self._stream_lines)
             self._stream_lines.extend(self._format_chat_panel("tool", text, pad_y=0))
+            end = len(self._stream_lines)
             self._stream_lines.append("")
             if len(self._stream_lines) > 500:
                 self._stream_lines = self._stream_lines[-500:]
             self._render_stream()
+            return start, end
+
+        def _finish_tool_block(self, tool_name: str, status: str) -> bool:
+            """Append a completed status to the matching active tool block."""
+            active = self._active_tool_block
+            if active is None:
+                return False
+            active_name, start, end, text = active
+            if active_name != tool_name or not (0 <= start <= end <= len(self._stream_lines)):
+                return False
+            self._stream_lines[start:end] = self._format_chat_panel("tool", f"{text} [{status}]", pad_y=0)
+            self._active_tool_block = None
+            self._render_stream()
+            return True
 
         def _apply_theme(self, theme_name: str) -> bool:
             theme = BUILTIN_TUI_THEMES.get((theme_name or "").strip().lower())
@@ -901,6 +985,22 @@ if TEXTUAL_AVAILABLE:
                 ext_overlay.styles.color = theme.screen_fg
             except Exception:
                 pass
+            try:
+                shortcuts_overlay = self.query_one("#shortcuts_overlay", Static)
+                shortcuts_overlay.styles.background = theme.panel_bg
+                shortcuts_overlay.styles.border = ("heavy", theme.input_border)
+                shortcuts_overlay.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            return True
+
+        def _set_theme(self, theme_name: str) -> bool:
+            """Apply and persist a theme for both /theme and Ctrl+P callers."""
+            if not self._apply_theme(theme_name):
+                return False
+            self.session.settings_manager.set_theme(theme_name)
+            self._refresh_sidebar()
+            self._write(f"Theme set to {theme_name}", "info")
             return True
 
         def _toast(self, message: str, severity: str = "information", timeout: float = 1.8) -> None:
@@ -1007,9 +1107,7 @@ if TEXTUAL_AVAILABLE:
             keys_block = Text()
             keys_block.append_text(Text.from_markup(f"[b {self._theme.info}]Keys[/]"))
             keys_block.append("\n")
-            keys_block.append(
-                "Ctrl+C abort\nCtrl+L clear\nCtrl+Q quit\nCtrl+A coop\nCtrl+S subagents\nCtrl+O bash-show\nCtrl+V paste\n"
-            )
+            keys_block.append(format_tui_shortcuts() + "\n")
 
             sidebar = Text()
             sidebar.append_text(info_block)
@@ -1316,12 +1414,9 @@ if TEXTUAL_AVAILABLE:
                 if not name:
                     self._write("Usage: /theme <name>", "error")
                     return
-                if not self._apply_theme(name):
+                if not self._set_theme(name):
                     self._write("Unknown theme. Available: " + ", ".join(sorted(BUILTIN_TUI_THEMES.keys())), "error")
                     return
-                session.settings_manager.set_theme(name)
-                self._write(f"Theme set to {name}", "info")
-                self._refresh_sidebar()
                 return
             if cmd.startswith("/steer "):
                 await session.steer(cmd[len("/steer ") :].strip())
@@ -2028,7 +2123,7 @@ if TEXTUAL_AVAILABLE:
             """
             if self.session.approval_callback is None:
                 self.session.approval_callback = self._approval_prompt
-                self._write("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", "info")
+                self._write("[Cooperation] enabled: mutating tools (bash/write/edit/plan/apply_patch) ask first", "info")
             else:
                 self.session.approval_callback = None
                 self._write("[Cooperation] disabled: all tools run freely", "info")
@@ -2054,9 +2149,29 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
 
+        def action_show_shortcuts(self) -> None:
+            """Show one-owned shortcuts rather than Textual's merged key panel."""
+            content = Text()
+            content.append_text(Text.from_markup(f"[b {self._theme.info}]one keyboard shortcuts[/]"))
+            content.append("\n\n")
+            content.append(format_tui_shortcuts())
+            content.append("\n\nPress Esc to close.")
+            try:
+                overlay = self.query_one("#shortcuts_overlay", Static)
+                overlay.update(content)
+                overlay.add_class("visible")
+            except Exception:
+                pass
+
+        def action_close_shortcuts(self) -> None:
+            try:
+                self.query_one("#shortcuts_overlay", Static).remove_class("visible")
+            except Exception:
+                pass
+
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login /logout /retry /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|<provider> subscription (OAuth)|<provider> [apiKey] [model]] /logout /retry /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
                 "info",
             )
 
@@ -2190,7 +2305,9 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_start_idx = -1
                 self._assistant_has_live_delta = False
                 self._assistant_live_buffer = ""
-                self._write_tool_block(f"tool start: {tool_name} {args_text}")
+                text = f"tool start: {tool_name} {args_text}"
+                start, end = self._write_tool_block(text)
+                self._active_tool_block = (tool_name, start, end, text)
             elif et == "tool_approval_rejected":
                 self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
             elif et == "ask_user":
@@ -2238,7 +2355,8 @@ if TEXTUAL_AVAILABLE:
                 status = "ok" if event.get("ok") else "err"
                 tool_name = str(event.get("tool") or "tool")
                 self._finalize_thinking_block()
-                self._write_tool_block(f"tool {status}: {tool_name}")
+                if not self._finish_tool_block(tool_name, status):
+                    self._write_tool_block(f"tool {status}: {tool_name}")
                 if (
                     tool_name != "finish"
                     and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)()

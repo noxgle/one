@@ -9,7 +9,8 @@ ChatGPT Terms of Service.
 The API speaks the **Responses API** (not chat/completions) with several
 mandatory quirks:
 
-- input items use content type ``input_text`` (``text`` is rejected)
+- replayed user items use ``input_text`` and assistant items use
+  ``output_text`` (plain ``text`` is rejected)
 - ``store: false`` is mandatory
 - ``instructions`` (system prompt) is required; stateless — full history
   every request
@@ -88,11 +89,16 @@ class CodexResponsesAdapter(ProviderAdapter):
             if role == "system":
                 instructions = str(content)
                 continue
+            input_role = "user" if role == "user" else "assistant"
             input_items.append(
                 {
                     "type": "message",
-                    "role": "user" if role == "user" else "assistant",
-                    "content": [{"type": "input_text", "text": str(content)}],
+                    "role": input_role,
+                    # The Responses API accepts input_text only for user
+                    # messages; replayed assistant turns must be output_text.
+                    "content": [
+                        {"type": "input_text" if input_role == "user" else "output_text", "text": str(content)}
+                    ],
                 }
             )
         payload: dict[str, Any] = {

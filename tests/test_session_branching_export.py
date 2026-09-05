@@ -147,6 +147,24 @@ async def test_runtime_host_fork_creates_new_session(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runtime_host_new_session_uses_model_changed_during_session(tmp_path):
+    """A /model change persisted as default must survive /new."""
+    host, _sm = await _make_host(tmp_path)
+    selected = host.session.model_registry.find("openai", "gpt-4o")
+    assert selected is not None
+
+    await host.session.set_model(selected)
+    host.session.settings_manager.set_default_provider(selected.provider)
+    host.session.settings_manager.set_default_model(selected.id)
+
+    await host.new_session()
+
+    model = host.session.model
+    assert model is not None
+    assert (model.provider, model.id) == ("openai", "gpt-4o")
+
+
+@pytest.mark.asyncio
 async def test_runtime_host_fork_returns_user_text(tmp_path):
     host, sm = await _make_host(tmp_path)
     sm.append_message({"role": "user", "content": "u1"})

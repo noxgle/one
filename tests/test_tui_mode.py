@@ -12,9 +12,11 @@ from one.modes.tui_mode import (
     _THINKING_FRAMES,
     _THINKING_MARK,
     BUILTIN_TUI_THEMES,
+    TUI_SHORTCUTS,
     advance_thinking_frame,
     build_sidebar_snapshot,
     evaluate_waiting,
+    format_tui_shortcuts,
     resolve_tui_theme,
 )
 
@@ -68,6 +70,26 @@ def test_resolve_tui_theme_includes_fallout() -> None:
     assert fallout.name == "fallout"
     assert "fallout" in BUILTIN_TUI_THEMES
     assert resolve_tui_theme("no-such-theme").name == "default"
+
+
+def test_tui_shortcuts_are_single_source_of_truth() -> None:
+    rendered = format_tui_shortcuts()
+
+    assert ("Ctrl+P", "command palette") in TUI_SHORTCUTS
+    assert "Ctrl+P command palette" in rendered
+    assert "Ctrl+V paste from the system clipboard" in rendered
+    assert "Ctrl+F1 show slash-command help" in rendered
+
+
+@pytest.mark.asyncio
+async def test_tui_command_input_has_static_cursor(tmp_path: Path) -> None:
+    """The prompt cursor stays visible but does not blink."""
+    from one.modes import tui_mode
+
+    app = tui_mode._OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query_one("#input").cursor_blink is False
 
 
 def test_build_sidebar_snapshot_contains_runtime_details() -> None:
@@ -1067,6 +1089,61 @@ async def test_tui_action_help_lists_providers(tmp_path: Path):
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "/providers" in stream
+        assert "/login [status|refresh <provider>|<provider> subscription (OAuth)|<provider> [apiKey] [model]]" in stream
+
+
+@pytest.mark.asyncio
+async def test_ctrl_p_palette_lists_only_current_one_commands(tmp_path: Path):
+    from textual.command import CommandPalette
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        commands = app.get_system_commands(app.screen)
+        names = [name for name, _help, _callback, _discover in commands]
+
+        assert names.count("Theme") == 0
+        assert "Keys" not in names
+        assert "Show one keyboard shortcuts" in names
+        assert {name.removeprefix("Theme: ") for name in names if name.startswith("Theme: ")} == set(
+            BUILTIN_TUI_THEMES
+        )
+
+        # Textual owns the Ctrl+P binding; invoking the bound action directly
+        # keeps this regression test independent of TextArea key handling.
+        app.action_command_palette()
+        await pilot.pause()
+        assert isinstance(app.screen, CommandPalette)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, CommandPalette)
+
+
+@pytest.mark.asyncio
+async def test_tui_shortcuts_panel_and_palette_theme_use_one_state(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_show_shortcuts()
+        overlay = app.query_one("#shortcuts_overlay")
+        assert overlay.has_class("visible")
+        assert "Ctrl+P command palette" in str(overlay.content)
+
+        await pilot.press("escape")
+        assert not overlay.has_class("visible")
+
+        commands = app.get_system_commands(app.screen)
+        callback = next(callback for name, _help, callback, _discover in commands if name == "Theme: fallout")
+        callback()
+        await pilot.pause()
+        assert app._theme.name == "fallout"
+        assert session.settings_manager.get_theme() == "fallout"
 
 
 @pytest.mark.asyncio
@@ -2602,9 +2679,10 @@ async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
         # Strict indices on full _stream_lines
         a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A" in l)
         tool_start_idx = next(i for i, l in enumerate(app._stream_lines) if "tool start: read" in l)
-        tool_end_idx = next(i for i, l in enumerate(app._stream_lines) if "tool ok: read" in l)
+        tool_end_idx = next(i for i, l in enumerate(app._stream_lines) if "result1" in l)
         b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B" in l)
         answer_idx = next(i for i, l in enumerate(app._stream_lines) if "answer" in l)
+        assert "[ok]" in "\n".join(app._stream_lines[tool_start_idx:tool_end_idx])
         assert a_idx < tool_start_idx < tool_end_idx < b_idx < answer_idx
 
 
@@ -2665,13 +2743,15 @@ async def test_tui_three_segments_two_tools_strict_chronology(tmp_path: Path):
         # Strict chronological order: A < tool1_start < tool1_end < B < tool2_start < tool2_end < C < final
         a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A-seg" in l)
         tool1_start = next(i for i, l in enumerate(app._stream_lines) if "tool start: read" in l)
-        tool1_end = next(i for i, l in enumerate(app._stream_lines) if "tool ok: read" in l)
+        tool1_end = next(i for i, l in enumerate(app._stream_lines) if "out1" in l)
         b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B-seg" in l)
         tool2_start = next(i for i, l in enumerate(app._stream_lines) if "tool start: grep" in l)
-        tool2_end = next(i for i, l in enumerate(app._stream_lines) if "tool ok: grep" in l)
+        tool2_end = next(i for i, l in enumerate(app._stream_lines) if "out2" in l)
         c_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "C-seg" in l)
         final_idx = next(i for i, l in enumerate(app._stream_lines) if "FINAL" in l)
 
+        assert "[ok]" in "\n".join(app._stream_lines[tool1_start:tool1_end])
+        assert "[ok]" in "\n".join(app._stream_lines[tool2_start:tool2_end])
         assert a_idx < tool1_start < tool1_end < b_idx < tool2_start < tool2_end < c_idx < final_idx
 
 

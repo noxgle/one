@@ -155,6 +155,15 @@ class AgentSessionRuntimeHost:
         options = options or {}
         cwd = self._runtime.session_manager.cwd
         session_dir = self._runtime.session_manager.session_dir
+        # ``bootstrap["model"]`` is the startup selection. A user may change
+        # the model during the session, which persists a new default; don't
+        # let that stale startup model override the new default after /new.
+        current_model = self.session.model
+        bootstrap_model = self._bootstrap.get("model")
+        if bootstrap_model and (
+            getattr(bootstrap_model, "provider", None), getattr(bootstrap_model, "id", None)
+        ) != (getattr(current_model, "provider", None), getattr(current_model, "id", None)):
+            self._bootstrap["model"] = None
         manager = SessionManager.create(cwd, session_dir)
         if options.get("parentSession"):
             manager.get_header()["parentSession"] = options["parentSession"]

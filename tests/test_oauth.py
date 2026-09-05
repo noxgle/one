@@ -758,7 +758,7 @@ def test_codex_payload_building():
     assert p["reasoning"] == {"effort": "high"}
     # HOTFIX-5: backend requires Responses message items with explicit type.
     assert all(i["type"] == "message" for i in p["input"])
-    assert all(i["content"][0]["type"] == "input_text" for i in p["input"])
+    assert [i["content"][0]["type"] for i in p["input"]] == ["input_text", "output_text"]
     assert [i["role"] for i in p["input"]] == ["user", "assistant"]
     # xhigh clamps to high; off omits reasoning entirely.
     p2 = ad._build_payload("m", messages, "xhigh", stream=True)
