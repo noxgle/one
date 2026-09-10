@@ -447,7 +447,10 @@ def test_model_registry_persist_creates_file_with_mode_and_contents(tmp_path: Pa
     data = json.loads(models_path.read_text(encoding="utf-8"))
     assert data == {
         "providers": {
-            "test": [{"id": "m1", "reasoning": True}, {"id": "m2", "reasoning": True}]
+            "test": [
+                {"id": "m1", "reasoning": True, "inputImage": False},
+                {"id": "m2", "reasoning": True, "inputImage": False},
+            ]
         }
     }
 
@@ -644,7 +647,7 @@ def test_run_mode_report_dir_and_file_mode(tmp_path: Path, capsys):
             return "test"
 
     class _Provider:
-        async def chat(self, api_key, model, messages, thinking_level, headers=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             from one.providers.base import ChatResult
             return ChatResult(text='{"tool":"finish","args":{"summary":"done","goal_success":true}}', raw={}, usage={}, stop_reason="stop")
 

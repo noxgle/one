@@ -1070,7 +1070,7 @@ async def test_validate_and_fetch_forwards_headers(monkeypatch):
             seen_headers.append(headers)
             return [{"id": "gpt-5.1-codex-max", "contextWindow": None}]
 
-        async def chat(self, api_key, model, messages, thinking_level, headers=None, max_tokens=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             seen_headers.append(headers)
             # Pretend validation succeeded
             raise RuntimeError("400 probe model rejected (key is valid)")
@@ -1099,7 +1099,7 @@ async def test_validate_and_fetch_headers_none_by_default(monkeypatch):
             seen_headers.append(headers)
             return [{"id": "m1", "contextWindow": None}]
 
-        async def chat(self, api_key, model, messages, thinking_level, headers=None, max_tokens=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             seen_headers.append(headers)
             raise RuntimeError("400 probe model rejected (key is valid)")
 
@@ -1121,7 +1121,7 @@ async def test_validate_and_fetch_codex_validation_error_with_headers(monkeypatc
         async def list_models_detailed(self, key, headers=None):
             return [{"id": "gpt-5.1-codex", "contextWindow": None}]
 
-        async def chat(self, api_key, model, messages, thinking_level, headers=None, max_tokens=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             raise RuntimeError("chatgpt API error 400: The 'gpt-5.1-codex' model is not supported")
 
     headers = {"ChatGPT-Account-Id": "acc-99"}

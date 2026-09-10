@@ -10,13 +10,13 @@ from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_p
 from one.core.types import ModelInfo
 
 BUILTIN_MODELS: list[ModelInfo] = [
-    ModelInfo("openai", "gpt-4.1", reasoning=True, context_window=1_000_000),
-    ModelInfo("openai", "gpt-4o", reasoning=True, context_window=128_000),
-    ModelInfo("anthropic", "claude-3-7-sonnet-latest", reasoning=True, context_window=200_000),
+    ModelInfo("openai", "gpt-4.1", reasoning=True, context_window=1_000_000, input_image=True),
+    ModelInfo("openai", "gpt-4o", reasoning=True, context_window=128_000, input_image=True),
+    ModelInfo("anthropic", "claude-3-7-sonnet-latest", reasoning=True, context_window=200_000, input_image=True),
     ModelInfo("anthropic", "claude-3-5-haiku-latest", reasoning=True, context_window=200_000),
-    ModelInfo("gemini", "gemini-2.5-pro", reasoning=True, context_window=1_000_000),
-    ModelInfo("gemini", "gemini-2.5-flash", reasoning=True, context_window=1_000_000),
-    ModelInfo("openrouter", "openai/gpt-4.1", reasoning=True, context_window=1_000_000),
+    ModelInfo("gemini", "gemini-2.5-pro", reasoning=True, context_window=1_000_000, input_image=True),
+    ModelInfo("gemini", "gemini-2.5-flash", reasoning=True, context_window=1_000_000, input_image=True),
+    ModelInfo("openrouter", "openai/gpt-4.1", reasoning=True, context_window=1_000_000, input_image=True),
     ModelInfo("ollama-cloud", "glm-5:cloud", reasoning=True, context_window=128_000),
     ModelInfo(
         "llama.cpp",
@@ -108,14 +108,15 @@ class ModelRegistry:
                         for model in models:
                             if isinstance(model, dict) and model.get("id"):
                                 self._models.append(
-                                    ModelInfo(
-                                        provider=provider,
-                                        id=model["id"],
-                                        reasoning=model.get("reasoning", True),
-                                        context_window=model.get("contextWindow"),
-                                        base_url=model.get("url") or model.get("baseUrl"),
-                                        tool_parser=model.get("toolParser"),
-                                    )
+                                ModelInfo(
+                                    provider=provider,
+                                    id=model["id"],
+                                    reasoning=model.get("reasoning", True),
+                                    context_window=model.get("contextWindow"),
+                                    base_url=model.get("url") or model.get("baseUrl"),
+                                    tool_parser=model.get("toolParser"),
+                                    input_image=bool(model.get("inputImage") or model.get("input_image")),
+                                )
                                 )
             else:
                 # Valid JSON but not a dict.
@@ -175,6 +176,7 @@ class ModelRegistry:
                 context_window=None,
                 base_url=None,
                 tool_parser=None,
+                input_image=False,  # conservative: unknown models default to unsupported
             )
         return None
 
@@ -307,6 +309,7 @@ class ModelRegistry:
                     context_window=window,
                     base_url=None,
                     tool_parser=None,
+                    input_image=False,
                 )
             )
             added += 1
@@ -356,7 +359,7 @@ class ModelRegistry:
             if isinstance(m, dict) and m.get("id"):
                 existing[m["id"]] = m
         for mid, window in self._normalize_entries(model_ids):
-            entry = existing.setdefault(mid, {"id": mid, "reasoning": True})
+            entry = existing.setdefault(mid, {"id": mid, "reasoning": True, "inputImage": False})
             if window and not entry.get("contextWindow"):
                 entry["contextWindow"] = window
         providers[provider] = list(existing.values())

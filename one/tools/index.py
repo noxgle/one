@@ -13,6 +13,7 @@ from .grep import grep_tool
 from .ls import ls_tool
 from .plan import plan_tool
 from .read import read_tool
+from .read_image import read_image_tool
 from .spawn_subagent import spawn_subagent_tool
 from .write import write_tool
 
@@ -27,11 +28,16 @@ class ToolDef:
 
 
 DEFAULT_TOOL_NAMES: list[str] = [
-    "read", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "spawn_subagent", "ask_user", "apply_patch",
+    "read", "read_image", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "spawn_subagent", "ask_user", "apply_patch",
 ]
 
 all_tools: dict[str, ToolDef] = {
     "read": ToolDef("read", "Read file contents", read_tool),
+    "read_image": ToolDef(
+        "read_image",
+        "Load a local PNG/JPEG/WebP image for vision inspection. Args: 'path' (absolute or workspace-relative). Returns metadata; the image is sent to the vision model on the next step.",
+        read_image_tool,
+    ),
     "bash": ToolDef("bash", "Execute bash commands", bash_tool),
     "edit": ToolDef("edit", "Edit files with exact replacement", edit_tool),
     "write": ToolDef("write", "Write files", write_tool),
@@ -53,5 +59,5 @@ all_tools: dict[str, ToolDef] = {
     "apply_patch": ToolDef("apply_patch", "Apply a unified-diff patch to files (opencode format: *** Begin Patch / *** End Patch; Add/Update/Delete/Move; staged, backup/rollback-protected; Add/Move targets must be absent; conflicts and symlinks rejected)", apply_patch_tool),
 }
 
-coding_tools = [all_tools["read"], all_tools["bash"], all_tools["edit"], all_tools["write"], all_tools["apply_patch"]]
-read_only_tools = [all_tools["read"], all_tools["grep"], all_tools["find"], all_tools["ls"]]
+coding_tools = [all_tools["read"], all_tools["read_image"], all_tools["bash"], all_tools["edit"], all_tools["write"], all_tools["apply_patch"]]
+read_only_tools = [all_tools["read"], all_tools["read_image"], all_tools["grep"], all_tools["find"], all_tools["ls"]]

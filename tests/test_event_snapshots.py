@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,11 @@ class _Provider:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> Any:
         from one.providers.base import ChatResult
 
@@ -51,6 +57,11 @@ class _FlakyProvider:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> Any:
         from one.providers.base import ChatResult
 
@@ -68,6 +79,11 @@ class _SlowProvider:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> Any:
         from one.providers.base import ChatResult
 
@@ -86,6 +102,11 @@ class _AlwaysFailProvider:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> Any:
         self.calls += 1
         raise RuntimeError("always-fail")
@@ -242,13 +263,18 @@ async def test_abort_cancels_in_flight_provider_call(tmp_path: Path):
 
     class _CancelAwareProvider:
         async def chat(
-            self,
-            api_key: str,
-            model: str,
-            messages: list[dict[str, Any]],
-            thinking_level: str,
-            headers: dict[str, str] | None = None,
-        ) -> Any:
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
+    ) -> Any:
             try:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:

@@ -138,6 +138,8 @@ class CodexResponsesAdapter(ProviderAdapter):
         on_delta: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> ChatResult:
         url = f"{BASE_URL}/responses"
         use_stream = callable(on_delta)

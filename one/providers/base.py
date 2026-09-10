@@ -26,6 +26,8 @@ class ProviderAdapter:
         on_delta: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> ChatResult:
         raise NotImplementedError
 

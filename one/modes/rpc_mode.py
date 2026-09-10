@@ -9,8 +9,12 @@ from one.core.provider_login import _redact_credentials, validate_and_fetch
 from .rpc_types import RpcResponse
 
 
-async def run_rpc_mode(runtime_host: Any) -> None:
+async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] | None = None) -> None:
     session = runtime_host.session
+    # Store initial images on the session for the first prompt.
+    if initial_images:
+        session._images = initial_images  # noqa: SLF001
+        session._tool_images = []  # noqa: SLF001
 
     def output(obj: dict[str, Any]) -> None:
         print(json.dumps(obj, ensure_ascii=False), flush=True)
@@ -53,7 +57,52 @@ async def run_rpc_mode(runtime_host: Any) -> None:
                 if session.is_streaming and not cmd.get("streamingBehavior"):
                     output(error(cid, ctype, "streamingBehavior is required while streaming"))
                     continue
-                asyncio.create_task(session.prompt(cmd.get("message", ""), {"streamingBehavior": cmd.get("streamingBehavior")}))
+                # Attachments: import image paths into content-addressed blobs.
+                # Atomic: if any import fails, roll back previously imported blobs.
+                image_refs: list[dict[str, Any]] | None = None
+                attachment_paths: list[str] | None = cmd.get("attachments")
+                if attachment_paths:
+                    storage_dir = session._storage_dir if hasattr(session, "_storage_dir") else ""
+                    imported_hashes: list[str] = []
+                    try:
+                        from one.core.attachments import (
+                            AttachmentInput,
+                            AttachmentValidationError,
+                            count_attachments,
+                            import_image,
+                        )
+                        # Count check before importing any.
+                        count_attachments([AttachmentInput(path=p) for p in attachment_paths])
+                        image_refs = []
+                        for p in attachment_paths:
+                            ref = import_image(storage_dir, str(p))
+                            imported_hashes.append(ref.blob_hash)
+                            image_refs.append(ref.__dict__)
+                    except AttachmentValidationError as e:
+                        # Rollback: remove only the blobs imported during this
+                        # failed batch (never touch pre-existing blobs).
+                        if storage_dir and imported_hashes:
+                            try:
+                                from one.core.attachments import remove_blob as _rb
+                                for h in imported_hashes:
+                                    _rb(storage_dir, h)
+                            except Exception:
+                                pass
+                        output(error(cid, ctype, f"Invalid attachment: {e}"))
+                        continue
+                    except Exception as e:  # noqa: BLE001
+                        # Rollback: remove only the blobs imported during this
+                        # failed batch (never touch pre-existing blobs).
+                        if storage_dir and imported_hashes:
+                            try:
+                                from one.core.attachments import remove_blob as _rb
+                                for h in imported_hashes:
+                                    _rb(storage_dir, h)
+                            except Exception:
+                                pass
+                        output(error(cid, ctype, f"Attachment error: {e}"))
+                        continue
+                asyncio.create_task(session.prompt(cmd.get("message", ""), {"streamingBehavior": cmd.get("streamingBehavior")}, images=image_refs))
                 output(success(cid, ctype))
             elif ctype == "steer":
                 await session.steer(cmd.get("message", ""))

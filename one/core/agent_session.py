@@ -5,11 +5,13 @@ import inspect
 import json
 import os
 import re
+import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from one.core.model_registry import ModelRegistry
@@ -30,6 +32,46 @@ _TOOL_TIMEOUT_GRACE_SEC = 5
 # Fallback context window used when a model has no known context_window
 # (dynamic models resolved at runtime). Keeps the ctx gauge/compaction working.
 FALLBACK_CONTEXT_WINDOW = 128_000
+
+
+# ---------------------------------------------------------------------------
+# read_image path sanitisation helpers (module-level — used before class defs).
+# ---------------------------------------------------------------------------
+
+def _sanitise_read_image_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *args* with read_image source paths replaced by basenames."""
+    out = dict(args)
+    for key in ("path", "file"):
+        val = out.get(key)
+        if isinstance(val, str):
+            out[key] = str(Path(val).name) or "image"
+    return out
+
+
+def _sanitise_read_image_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *payload* with read_image args sanitised."""
+    out = dict(payload)
+    args = out.get("args")
+    if isinstance(args, dict):
+        out["args"] = _sanitise_read_image_args(args)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Capability-error exceptions (image input gate).
+# ---------------------------------------------------------------------------
+
+class _CapabilityError(RuntimeError):
+    """Raised when the selected model lacks a required capability (e.g. image input)."""
+
+
+class _CapabilityErrorCooperative(_CapabilityError):
+    """Raised in cooperation mode — the caller must decide what to do.
+
+    In cooperative mode no assistant message is cached because the provider
+    call was never attempted; the caller (TUI / RPC / CLI) can render the
+    error itself and offer the user a way to switch models.
+    """
 
 
 def _with_fallback_context(model: ModelInfo | None) -> ModelInfo | None:
@@ -65,6 +107,7 @@ class AgentSession:
         tools: list[str] | None = None,
         approval_callback: Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]] | None = None,
         mcp_manager: McpManager | None = None,
+        storage_dir: str = "",
     ) -> None:
         self.session_manager = session_manager
         self.settings_manager = settings_manager
@@ -93,6 +136,15 @@ class AgentSession:
             self._active_tools = list(dict.fromkeys(self._active_tools + mcp_names))
         self._abort_requested = False
         self._session_started_at = time.monotonic()
+        # In-memory sessions have no session dir; use a transient temp dir
+        # for image blobs so --no-session vision still works without
+        # creating a ./blobs directory in the workspace.
+        if storage_dir:
+            self._storage_dir = storage_dir
+        else:
+            self._storage_dir = tempfile.mkdtemp(prefix="one-blobs-")
+        self._images: list[dict[str, Any]] | None = None
+        self._tool_images: list[dict[str, Any]] = []
         self._active_chat_tasks: set[asyncio.Task] = set()
         self._active_bash_tasks: set[asyncio.Task] = set()
         self._active_tool_tasks: set[asyncio.Task] = set()
@@ -478,6 +530,15 @@ class AgentSession:
             "tool": payload.get("tool"),
             "args": payload.get("args", {}),
         }
+        # Sanitise read_image path arguments: replace full source paths with
+        # just the basename so the absolute path never leaks into JSONL /
+        # toolResult messages / summaries / event payloads.
+        if msg_payload.get("tool") == "read_image":
+            args = msg_payload.setdefault("args", {})
+            for key in ("path", "file"):
+                val = args.get(key)
+                if isinstance(val, str):
+                    args[key] = str(Path(val).name) or "image"
         if msg_payload["ok"]:
             text = str(payload.get("result") or payload.get("outputText") or "")
             if len(text) > self._TOOL_RESULT_MAX_CHARS:
@@ -566,6 +627,8 @@ class AgentSession:
         path_arg = args.get("path") or args.get("file")
         if tool_name == "read":
             result = fn(cwd, path_arg or "", args.get("offset"), args.get("limit"))
+        elif tool_name == "read_image":
+            result = fn(cwd, path_arg or "", self._storage_dir or "")
         elif tool_name == "write":
             content_arg = args.get("content")
             if content_arg is None:
@@ -652,7 +715,11 @@ class AgentSession:
                 self.messages.append(msg)
                 self.session_manager.append_message(msg)
                 self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": args, "reason": reason})
-                self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": payload})
+                # Sanitise read_image paths in tool_call_end event.
+                end_result = payload
+                if tool_name == "read_image":
+                    end_result = _sanitise_read_image_payload(payload)
+                self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": end_result})
                 return payload
         # Extension hooks: tool.execute.before (opencode contract). A raising
         # hook denies the call using the same contract as a user rejection.
@@ -675,10 +742,26 @@ class AgentSession:
                 }
                 self.messages.append(msg)
                 self.session_manager.append_message(msg)
-                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": args, "reason": denied})
-                self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": payload})
+                # Sanitise read_image paths in both rejection events.
+                rej_args = args
+                if tool_name == "read_image":
+                    rej_args = _sanitise_read_image_args(args)
+                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": rej_args, "reason": denied})
+                end_result = payload
+                if tool_name == "read_image":
+                    end_result = _sanitise_read_image_payload(payload)
+                self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": end_result})
                 return payload
-        self._emit({"type": "tool_call_start", "tool": tool_name, "args": args})
+        # Sanitise read_image path arguments before emitting events — the
+        # full source path must not appear in tool_call_start / JSONL / logs.
+        emit_args = args
+        if tool_name == "read_image":
+            emit_args = dict(args)
+            for key in ("path", "file"):
+                val = emit_args.get(key)
+                if isinstance(val, str):
+                    emit_args[key] = str(Path(val).name) or "image"
+        self._emit({"type": "tool_call_start", "tool": tool_name, "args": emit_args})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)
             if result.get("ok", True) is True:
@@ -706,6 +789,12 @@ class AgentSession:
                     payload["timedOut"] = result.get("timedOut", False)
                 if "cancelled" in result:
                     payload["cancelled"] = result.get("cancelled", False)
+                # read_image: retain the transient image ref for the current turn.
+                if tool_name == "read_image" and isinstance(result, dict) and isinstance(result.get("image"), dict):
+                    try:
+                        self._remember_tool_image(result.get("image"))
+                    except Exception as e:
+                        raise RuntimeError(str(e)) from e
             else:
                 # Tool returned a structured failure (e.g. bash timeout/cancel).
                 text = ""
@@ -779,7 +868,19 @@ class AgentSession:
             str(payload.get("result") or payload.get("error") or ""),
             metadata={"exitCode": payload.get("exitCode"), "errorType": payload.get("errorType")},
         )
-        tool_call_end: dict[str, Any] = {"type": "tool_call_end", "tool": tool_name, "ok": payload.get("ok", False), "result": payload}
+        # Sanitise read_image path in tool_call_end event (payload still has
+        # the raw args — _build_tool_result_message_payload sanitises the
+        # message_payload, but the event result dict does not).
+        event_result = payload
+        if tool_name == "read_image":
+            event_result = dict(payload)
+            event_args = event_result.get("args", {})
+            if isinstance(event_args, dict):
+                for key in ("path", "file"):
+                    val = event_args.get(key)
+                    if isinstance(val, str):
+                        event_args[key] = str(Path(val).name) or "image"
+        tool_call_end: dict[str, Any] = {"type": "tool_call_end", "tool": tool_name, "ok": payload.get("ok", False), "result": event_result}
         if payload.get("aborted"):
             tool_call_end["aborted"] = True
         self._emit(tool_call_end)
@@ -881,6 +982,35 @@ class AgentSession:
             "content": [{"type": "text", "text": combined}],
             "error": aggregate_error,
         }
+
+    def _all_images(self) -> list[dict[str, Any]] | None:
+        """Combined prompt + tool-loaded images (transient, never persisted)."""
+        combined: list[dict[str, Any]] = []
+        if getattr(self, "_images", None):
+            combined.extend(self._images or [])
+        if getattr(self, "_tool_images", None):
+            combined.extend(self._tool_images or [])
+        return combined or None
+
+    def _remember_tool_image(self, image: dict[str, Any] | None) -> None:
+        """Retain a ``read_image`` result for the current turn."""
+        if not isinstance(image, dict):
+            return
+        if not image.get("blob_hash") and not image.get("blobHash"):
+            return
+        try:
+            from one.core.attachments import _MAX_IMAGES_PER_PROMPT
+        except Exception:
+            _MAX_IMAGES_PER_PROMPT = 4
+        current = len(getattr(self, "_images", None) or []) + len(getattr(self, "_tool_images", None) or [])
+        if current >= _MAX_IMAGES_PER_PROMPT:
+            raise ValueError(f"Too many images: {current + 1} > {_MAX_IMAGES_PER_PROMPT}")
+        # Deduplicate by blob hash.
+        new_hash = image.get("blob_hash") or image.get("blobHash")
+        for existing in self._tool_images:
+            if (existing.get("blob_hash") or existing.get("blobHash")) == new_hash:
+                return
+        self._tool_images.append(image)
 
     async def _run_subagent(self, task: str, sub_model: Any, sub_tools: list[str], depth: int) -> dict[str, Any]:
         # Use the parent's session_dir so subagent files go to the same directory.
@@ -1242,7 +1372,15 @@ class AgentSession:
             "thinking_level": self.thinking_level,
             "headers": auth.get("headers"),
         }
+        # Images are transient — stored on the session, not in message history.
+        # Combines explicit prompt images and `read_image` tool results.
+        images = self._all_images()
         sig = inspect.signature(provider.chat)
+        if images and "images" in sig.parameters:
+            chat_kwargs["images"] = images
+        # Pass storage_dir so providers can resolve blobs without leaking paths.
+        if self._storage_dir and "storage_dir" in sig.parameters:
+            chat_kwargs["storage_dir"] = self._storage_dir
         if allow_live_stream and "on_delta" in sig.parameters:
             chat_kwargs["on_delta"] = _on_delta
         if "on_thinking_delta" in sig.parameters:
@@ -1313,6 +1451,7 @@ class AgentSession:
         self,
         text: str,
         options: dict[str, Any] | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> None:
         options = options or {}
         if self._is_streaming:
@@ -1330,6 +1469,10 @@ class AgentSession:
         self._is_streaming = True
         self._abort_requested = False
         self._emit({"type": "agent_start"})
+        # Images are transient — stored on the session, never persisted
+        # to JSONL or emitted in events (no internal refs / paths leak).
+        self._images = images
+        self._tool_images = []
         user_msg = {"role": "user", "content": text, "timestamp": int(time.time() * 1000)}
         self.messages.append(user_msg)
         self.session_manager.append_message(user_msg)
@@ -1366,6 +1509,17 @@ class AgentSession:
                         }
                         break
                     try:
+                        # Capability gate: if images are present but the model does not
+                        # support image input, fail immediately (no provider call).
+                        images = self._all_images()
+                        if images and self.model and not self.model.input_image:
+                            if self.approval_callback is not None:
+                                raise _CapabilityErrorCooperative(
+                                    f"Model '{self.model.id}' does not support image input"
+                                )
+                            raise _CapabilityError(
+                                f"Model '{self.model.id}' does not support image input"
+                            )
                         assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
                     except _AbortSignal:
                         self._abort_requested = True
@@ -1376,6 +1530,10 @@ class AgentSession:
                         break
                     self.messages.append(assistant)
                     assistant_text = self._assistant_text(assistant)
+                    # Consume tool-loaded images after the first provider call
+                    # in the tool loop — they were attached to the prompt and
+                    # should not be re-sent on subsequent provider calls.
+                    self._tool_images = []
                     tool_call = self._try_parse_tool_call(assistant_text)
                     if tool_call is None and self._should_tool_nudge(assistant_text, step=step, tool_results=tool_results):
                         self._emit({"type": "tool_call_nudge_start"})
@@ -1514,6 +1672,41 @@ class AgentSession:
                     }
                 )
                 self._emit({"type": "agent_end", "messages": [user_msg, final_assistant]})
+                break
+            except _CapabilityError as e:
+                # Capability errors: emit turn_end, then either raise
+                # _CapabilityErrorCooperative (cooperation) or emit a
+                # controlled assistant message (autonomous).  No retry.
+                self._emit(
+                    {
+                        "type": "turn_end",
+                        "ok": False,
+                        "attempt": attempt + 1,
+                        "reason": "error",
+                        "error": str(e),
+                        "willRetry": False,
+                    }
+                )
+                if self.approval_callback is not None:
+                    # Cooperation mode: do NOT cache an assistant error message.
+                    # The caller (TUI / RPC / CLI) renders the error and offers
+                    # the user a way to switch models.
+                    raise _CapabilityErrorCooperative(str(e)) from e
+                # Autonomous mode: emit a controlled assistant message.
+                error_msg = {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": str(e)}],
+                    "provider": self.model.provider if self.model else None,
+                    "model": self.model.id if self.model else None,
+                    "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                    "stopReason": "unsupported_vision",
+                    "timestamp": int(time.time() * 1000),
+                }
+                self.messages.append(error_msg)
+                self.session_manager.append_message(error_msg)
+                self._emit({"type": "message_start", "message": error_msg})
+                self._emit({"type": "message_end", "message": error_msg})
+                self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
                 break
             except Exception as e:
                 retries_enabled = bool(retry_cfg.get("enabled", True))
@@ -1656,11 +1849,13 @@ class AgentSession:
             self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
             await self.prompt(msg)
 
-    async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> None:
+    async def steer(self, text: str) -> None:
+        """Queue a steering message. Text-only; images are not supported."""
         self._steering.append(text)
         self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
 
-    async def follow_up(self, text: str, images: list[dict[str, Any]] | None = None) -> None:
+    async def follow_up(self, text: str) -> None:
+        """Queue a follow-up message. Text-only; images are not supported."""
         self._follow_up.append(text)
         self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
 
@@ -2212,6 +2407,33 @@ class AgentSession:
     async def dispose(self) -> None:
         if self._extension_runtime is not None:
             await self._extension_runtime.call_dispose(self._emit_extension_error)
+
+        # Blob storage lifecycle: clean up transient blobs for in-memory
+        # sessions, and run orphan cleanup for persistent sessions.
+        storage = self._storage_dir
+        if storage:
+            # In-memory / transient sessions create a temp dir under /tmp.
+            # Remove the entire temp directory so no blob files linger.
+            if storage.startswith(tempfile.gettempdir()) and "one-blobs-" in storage:
+                try:
+                    import shutil
+                    shutil.rmtree(storage, ignore_errors=True)
+                except Exception:
+                    pass
+            else:
+                # Persistent session: defer orphan cleanup.
+                #
+                # Image refs are stored transiently in ``_images`` /
+                # ``_tool_images`` and are NEVER persisted to the JSONL
+                # session file.  Because of this, we cannot reliably
+                # reconstruct the set of blob hashes still referenced by
+                # earlier turns — so running ``orphan_cleanup`` here would
+                # delete valid blobs from prior prompts.
+                #
+                # Orphan cleanup is instead triggered by the next
+                # ``prompt(images=...)`` call which knows the full set of
+                # currently-referenced hashes.
+                pass
 
     def request_extension_ui(
         self,

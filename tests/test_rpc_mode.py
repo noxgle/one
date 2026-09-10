@@ -126,7 +126,7 @@ async def test_rpc_get_state_snapshot(tmp_path: Path, monkeypatch: pytest.Monkey
     assert data["autoCompactionEnabled"] is True
     assert data["messageCount"] == 0
     assert data["pendingMessageCount"] == 0
-    assert data["activeTools"] == ["read", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "ask_user", "spawn_subagent", "apply_patch"]
+    assert data["activeTools"] == ["read", "read_image", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "ask_user", "spawn_subagent", "apply_patch"]
     assert data["autoRetryEnabled"] == session.auto_retry_enabled
 
 

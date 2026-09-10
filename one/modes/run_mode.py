@@ -99,6 +99,7 @@ async def run_run_mode(runtime_host: Any, options: dict[str, Any]) -> int:
     resume = bool(options.get("resume"))
     answer_file = str(options.get("answer_file") or "").strip() or None
     steer_file = str(options.get("steer_file") or "").strip() or None
+    images = options.get("images")
 
     if resume and not task:
         task = session.get_last_user_text() or ""
@@ -112,7 +113,7 @@ async def run_run_mode(runtime_host: Any, options: dict[str, Any]) -> int:
     steer_task = asyncio.create_task(_steer_loop(session, steer_file)) if steer_file else None
     answer_task = asyncio.create_task(_answer_loop(session, answer_file) if answer_file else _canned_answer_loop(session))
     try:
-        await session.prompt(task)
+        await session.prompt(task, images=images)
     finally:
         if steer_task is not None:
             steer_task.cancel()

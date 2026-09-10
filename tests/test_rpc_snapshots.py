@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,11 @@ class _Provider:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> Any:
         from one.providers.base import ChatResult
 
@@ -136,6 +142,11 @@ class _AlwaysFailProvider:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> Any:
         self.calls += 1
         raise RuntimeError("boom")

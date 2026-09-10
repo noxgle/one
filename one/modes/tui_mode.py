@@ -8,6 +8,7 @@ import subprocess
 import textwrap
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from rich.markup import escape as rich_escape
@@ -357,6 +358,68 @@ _SLASH_COMMANDS: tuple[str, ...] = (
 )
 
 
+def _extract_image_paths(text: str) -> tuple[list[Path], str]:
+    """Pull image file paths out of *text* and return ``(paths, clean_text)``.
+
+    Recognised patterns (conservative — no false positives on normal prose):
+
+    1. Quoted paths: ``"path/to/img.png"``, ``'path/to/img.png'``
+    2. Angle-bracketed: ``<path/to/img.png>``
+    3. Backtick: ```path/to/img.png``
+    4. Unquoted whitespace-separated paths that look like files with
+       recognised extensions (must start with ``/`` or ``./`` or ``~/``
+       or ``~user/``).
+
+    The returned *clean_text* has all matched paths removed.
+    """
+
+    paths: list[Path] = []
+    result = text
+
+    # Pattern 1-3: quoted / bracketed paths — single pass for each.
+    for pattern in [
+        r'''(?<![\\])"([^"]*\.(?:png|jpg|jpeg|webp))"(?![^<]*>)''',
+        r"(?<![\\])'([^']*\.(?:png|jpg|jpeg|webp))'(?![^<]*>)",
+        r"(?<![\\])`([^`]*\.(?:png|jpg|jpeg|webp))`(?!`)",
+        r"<([^>]*\.(?:png|jpg|jpeg|webp))>",
+    ]:
+        for m in re.finditer(pattern, result, re.IGNORECASE):
+            p = Path(m.group(1))
+            if p.exists() and p.is_file():
+                paths.append(p)
+                # Remove the quoted/bracketed match from result.
+                result = result[: m.start()] + result[m.end() :]
+
+    # Pattern 4: unquoted paths — must start with /, ./, ~/ or ~user/.
+    # Only match paths at word boundaries that look like file paths.
+    unquoted_pat = re.compile(
+        r"""(?<![a-zA-Z0-9_./\\])"""  # not preceded by path chars
+        r"""(/(?:[^ \t\n\r\f\v<>\"'`]*\.(?:png|jpg|jpeg|webp))"""  # /...ext
+        r"""|"""
+        r"""\./(?:[^ \t\n\r\f\v<>\"'`]*\.(?:png|jpg|jpeg|webp))"""  # ./...ext
+        r"""|"""
+        r"""~(?:[^ \t\n\r\f\v<>\"'`]*/)?[^ \t\n\r\f\v<>\"'`]*\.(?:png|jpg|jpeg|webp))"""  # ~/... or ~user/...ext
+        r"""(?![a-zA-Z0-9_.])"""  # not followed by path chars
+    )
+    for m in unquoted_pat.finditer(result):
+        p = Path(m.group(1))
+        if p.exists() and p.is_file():
+            paths.append(p)
+            # Remove from result.
+            result = result[: m.start()] + result[m.end() :]
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for p in paths:
+        k = str(p.resolve())
+        if k not in seen:
+            seen.add(k)
+            unique.append(p)
+
+    return unique, result.strip()
+
+
 if TEXTUAL_AVAILABLE:
 
     class SessionEvent(Message):
@@ -603,6 +666,8 @@ if TEXTUAL_AVAILABLE:
             Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle bash output", priority=True),
+            # Ctrl+Shift+V: paste image from clipboard (queued for import).
+            Binding("ctrl+shift+v", "paste_image", "Paste image from clipboard", priority=True),
             ("ctrl+f1", "help", "Help"),
             # Keep this non-priority: the CommandPalette must retain Esc to
             # close itself while this action closes one's shortcuts overlay.
@@ -641,6 +706,7 @@ if TEXTUAL_AVAILABLE:
             self._extension_ui_pending_request: dict[str, Any] | None = None
             self._login_pending: dict[str, Any] | None = None
             self._ask_user_pending: dict[str, Any] | None = None
+            self._pending_clipboard_image_bytes: bytes | None = None
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
@@ -1894,50 +1960,185 @@ if TEXTUAL_AVAILABLE:
             if self._approval_pending is not None:
                 await self._handle_approval_answer(text)
                 return
-            # Slash commands always take priority over pending prompts so that
-            # /new, /fork, /abort etc. work even when extension UI is waiting.
-            if text.startswith("/"):
-                await self._handle_command(text)
-                return
+
+            image_paths: list[Path] = []
+            clean_text: str = ""
+            if text:
+                image_paths, clean_text = _extract_image_paths(text)
+
+            # Slash-command dispatch (only when the *clean* text starts with /
+            # and we don't have a standalone absolute image path).
+            if clean_text.startswith("/"):
+                if not (image_paths and not clean_text.lstrip("/").strip()):
+                    # Not a standalone absolute image path → real slash command.
+                    # Drop any queued clipboard image — the slash command takes
+                    # priority.
+                    self._pending_clipboard_image_bytes = None
+                    await self._handle_command(text)
+                    return
+                # Standalone absolute image path: fall through to image import.
+
+            # ------------------------------------------------------------------
+            # Pending clipboard image import runs after slash-command check.
+            # ------------------------------------------------------------------
+            clipboard_image_refs: list[dict[str, Any]] | None = None
+            if self._pending_clipboard_image_bytes is not None:
+                clipboard_image_refs = self._import_and_attach_clipboard_image()
+
             if self._extension_ui_pending_request is not None:
-                await self._handle_extension_ui_answer(text)
+                await self._handle_extension_ui_answer(clean_text)
                 return
             if self._login_pending is not None:
-                await self._handle_login_answer(text)
+                await self._handle_login_answer(clean_text)
                 return
             if self._ask_user_pending is not None:
-                await self._handle_ask_user_answer(text)
-                return
-            if not text:
+                await self._handle_ask_user_answer(clean_text)
                 return
 
-            self._write_chat_block("user", text)
-            self._turn_active = True
-            self._last_delta_ts = 0.0
+            # Combine clipboard refs (if any) with file-path-extracted refs.
+            file_image_refs: list[dict[str, Any]] = []
+            if clipboard_image_refs is not None:
+                file_image_refs.extend(clipboard_image_refs)
+            if not clean_text and not image_paths and not file_image_refs:
+                return
 
-            async def _run_prompt() -> None:
-                queued = False
+            # Import file-path-extracted images.
+            if image_paths and "one.core.attachments" in dir(__import__("sys").modules or {}):
+                from one.core.attachments import (
+                    AttachmentInput,
+                    AttachmentValidationError,
+                    count_attachments,
+                    import_image,
+                )
+
+                storage_dir = self.session._storage_dir or ""
                 try:
-                    if self.session.is_streaming:
-                        await self.session.prompt(text, {"streamingBehavior": "followUp"})
-                        self._write("Queued follow-up message.", "info")
-                        queued = True
-                    else:
-                        await self.session.prompt(text)
-                except Exception as e:
-                    self._write(f"[error] {e}", "error")
-                    self._refresh_sidebar()
-                finally:
-                    if not queued:
-                        # Only clear the turn state when this submission ran a
-                        # turn. A queued message leaves the current turn (and
-                        # its waiting spinner) in flight.
-                        self._turn_active = False
-                        self._remove_thinking_line()
-                        self._render_stream()
-                    self._refresh_sidebar()
+                    count_attachments([AttachmentInput(path=p) for p in image_paths])
+                    for p in image_paths:
+                        ref = import_image(storage_dir, str(p))
+                        file_image_refs.append(ref.__dict__)
+                except AttachmentValidationError:
+                    self._write(f"Invalid image: {image_paths[0]}", "error")
+                    return
+                except Exception as e:  # noqa: BLE001
+                    self._write(f"Failed to import image: {e}", "error")
+                    return
 
-            asyncio.create_task(_run_prompt())
+            image_refs = file_image_refs
+
+            # Write user block (with [IMG] marker if images present).
+            if clean_text or image_paths or file_image_refs:
+                has_images = bool(image_paths or file_image_refs)
+                if has_images and clean_text:
+                    first_img = str(image_paths[0]) if image_paths else (file_image_refs[0].get("blob_hash") or file_image_refs[0].get("blobPath", "")) if file_image_refs else ""
+                    self._write_chat_block("user", f"{clean_text}\n[IMG] {first_img}")
+                elif has_images:
+                    first_img = str(image_paths[0]) if image_paths else (file_image_refs[0].get("blob_hash") or file_image_refs[0].get("blobPath", "")) if file_image_refs else ""
+                    self._write_chat_block("user", f"[IMG] {first_img}")
+                else:
+                    self._write_chat_block("user", clean_text)
+                self._turn_active = True
+                self._last_delta_ts = 0.0
+
+                async def _run_prompt() -> None:
+                    queued = False
+                    try:
+                        if self.session.is_streaming:
+                            await self.session.prompt(
+                                clean_text,
+                                {"streamingBehavior": "followUp"},
+                                images=image_refs if image_refs else None,
+                            )
+                            self._write("Queued follow-up message.", "info")
+                            queued = True
+                        else:
+                            await self.session.prompt(
+                                clean_text,
+                                images=image_refs if image_refs else None,
+                            )
+                    except Exception as e:
+                        self._write(f"[error] {e}", "error")
+                        self._refresh_sidebar()
+                    finally:
+                        if not queued:
+                            self._turn_active = False
+                            self._remove_thinking_line()
+                            self._render_stream()
+                        self._refresh_sidebar()
+
+                asyncio.create_task(_run_prompt())
+            return
+
+        def _import_and_attach_clipboard_image(self) -> list[dict[str, Any]] | None:
+            """Import pending clipboard image bytes via the attachment pipeline.
+
+            Returns a list of image reference dicts (for ``images=`` in
+            ``session.prompt``) on success, ``None`` when there was nothing
+            pending, or ``[]`` on error (the error is already toast-ed).
+            """
+            from pathlib import Path
+
+            if "one.core.clipboard_image" not in dir(__import__("sys").modules or {}):
+                self._toast("Clipboard-image backend unavailable", severity="warning")
+                self._pending_clipboard_image_bytes = None
+                return None
+            from one.core.attachments import (
+                AttachmentInput,
+                AttachmentValidationError,
+                count_attachments,
+                import_image,
+            )
+            from one.core.clipboard_image import acquire_clipboard_image, clipboard_image_to_temp_path
+
+            if acquire_clipboard_image is None or import_image is None or count_attachments is None:
+                self._toast("Clipboard-image backend unavailable", severity="warning")
+                self._pending_clipboard_image_bytes = None
+                return None
+            if not self._pending_clipboard_image_bytes:
+                return None
+            raw = self._pending_clipboard_image_bytes
+            self._pending_clipboard_image_bytes = None  # consume immediately
+
+            storage_dir = getattr(self.session, "_storage_dir", "") or ""
+            tmp_path = clipboard_image_to_temp_path(storage_dir, raw)
+            if tmp_path is None:
+                self._toast("Failed to write clipboard image temp file", severity="error")
+                return None
+            try:
+                count_attachments([AttachmentInput(path=tmp_path)])
+                ref = import_image(storage_dir, tmp_path)
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return [ref.__dict__]
+            except AttachmentValidationError as exc:
+                self._pending_clipboard_image_bytes = raw  # restore for retry
+                self._toast(f"Invalid image data: {exc}", severity="error")
+                return None
+            except Exception as exc:  # noqa: BLE001
+                self._pending_clipboard_image_bytes = raw  # restore for retry
+                self._toast(f"Failed to import clipboard image: {exc}", severity="error")
+                return None
+            finally:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        def action_paste_image(self) -> None:
+            """Acquire image bytes from the system clipboard and queue for import."""
+            if "one.core.clipboard_image" not in dir(__import__("sys").modules or {}):
+                self._toast("No clipboard-image backend available", severity="warning")
+                return
+            from one.core.clipboard_image import acquire_clipboard_image
+
+            raw = acquire_clipboard_image()
+            if raw is None:
+                self._toast("No image data in clipboard", severity="warning")
+                return
+            self._pending_clipboard_image_bytes = raw
+            self._toast("Image queued — submit to attach", severity="info")
 
         async def _handle_approval_answer(self, text: str) -> None:
             """Route the input widget answer back to the pending approval prompt."""

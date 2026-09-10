@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable
 from typing import Any
@@ -11,6 +12,52 @@ from .base import ChatResult, ProviderAdapter
 
 class GeminiAdapter(ProviderAdapter):
     name = "gemini"
+
+    def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any] | None:
+        """Build a Gemini ``inline_data`` part for an image.
+
+        *storage_dir* is resolved from the session context — never from the
+        image_ref itself so that the persisted JSONL contains no internal paths.
+        """
+        blob_hash = image_ref.get("blobHash") or image_ref.get("blob_hash")
+        mime = image_ref.get("mime", "image/png")
+        if not blob_hash or not storage_dir:
+            return None
+        raw = self._read_blob(storage_dir, blob_hash)
+        if raw is None:
+            return None
+        b64 = base64.b64encode(raw).decode("ascii")
+        return {"inline_data": {"data": b64, "mime_type": mime}}
+
+    def _read_blob(self, storage_dir: str, blob_hash: str) -> bytes | None:
+        try:
+            from one.core.attachments import read_blob_bytes
+            return read_blob_bytes(storage_dir, blob_hash)
+        except Exception:
+            return None
+
+    def _resolve_message_parts(
+        self, role: str, content: Any, images: list[dict[str, Any]] | None,
+        storage_dir: str,
+    ) -> list[dict[str, Any]]:
+        """Build parts list for Gemini: text + inline_data images."""
+        parts: list[dict[str, Any]] = []
+        if isinstance(content, str) and content.strip():
+            parts.append({"text": content.strip()})
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        parts.append({"text": part.get("text", "")})
+                    # skip other types (images handled separately)
+                elif isinstance(part, str):
+                    parts.append({"text": part})
+        if images:
+            for img in images:
+                part = self._build_image_part(img, storage_dir)
+                if part:
+                    parts.append(part)
+        return parts if parts else [{"text": ""}]
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
         detailed = await self.list_models_detailed(api_key, headers)
@@ -48,13 +95,25 @@ class GeminiAdapter(ProviderAdapter):
         on_delta: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> ChatResult:
+        # Attach images to the last user message (current turn).
+        last_user_idx = -1
+        for i, m in enumerate(messages):
+            if m.get("role") == "user":
+                last_user_idx = i
         contents = []
-        for m in messages:
+        for i, m in enumerate(messages):
             if m.get("role") == "system":
                 continue
             role = "user" if m.get("role") == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": str(m.get("content", ""))}]})
+            content = m.get("content", "")
+            if role == "user" and images and i == last_user_idx:
+                parts = self._resolve_message_parts(role, content, images, storage_dir)
+            else:
+                parts = [{"text": str(content)}]
+            contents.append({"role": role, "parts": parts})
 
         generation_config: dict[str, Any] = {"temperature": 0.1}
         if max_tokens is not None:

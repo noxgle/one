@@ -240,7 +240,7 @@ async def test_tui_prompt_queued_while_streaming(tmp_path: Path) -> None:
     from one.providers.base import ChatResult
 
     class _SlowStreamProvider:
-        async def chat(self, api_key, model, messages, thinking_level, headers=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             await asyncio.sleep(1.0)
             return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
 
@@ -278,7 +278,7 @@ async def test_tui_spinner_survives_queued_prompt_and_resumes_for_followup(tmp_p
     from one.providers.base import ChatResult
 
     class _SlowStreamProvider:
-        async def chat(self, api_key, model, messages, thinking_level, headers=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             await asyncio.sleep(1.0)
             return ChatResult(text="DONE", raw={}, usage={}, stop_reason="stop")
 
@@ -398,14 +398,14 @@ class _LoginStub:
             raise self.error
         return self.models
 
-    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
         if self.chat_error is not None:
             raise self.chat_error
         return None
 
 
 class _ErrorProvider:
-    async def chat(self, api_key, model, messages, thinking_level, headers=None):
+    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
         raise RuntimeError("All connection attempts failed")
 
 
@@ -3002,7 +3002,7 @@ class _StreamingProvider:
         self.deltas = deltas
         self.calls = 0
 
-    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
         from one.providers.base import ChatResult
 
         self.calls += 1
@@ -3086,7 +3086,7 @@ async def test_tui_thinking_cleanup_on_tool_call(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     class _ThinkingProvider:
-        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             from one.providers.base import ChatResult
 
             if on_delta:

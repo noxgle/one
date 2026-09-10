@@ -278,7 +278,7 @@ async def test_abort_kills_bash_running_via_tool_loop(tmp_path: Path):
         def __init__(self) -> None:
             self.calls = 0
 
-        async def chat(self, api_key, model, messages, thinking_level, headers=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             from one.providers.base import ChatResult
 
             self.calls += 1
