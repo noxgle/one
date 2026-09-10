@@ -2003,13 +2003,17 @@ if TEXTUAL_AVAILABLE:
                 return
 
             # Import file-path-extracted images.
-            if image_paths and "one.core.attachments" in dir(__import__("sys").modules or {}):
-                from one.core.attachments import (
-                    AttachmentInput,
-                    AttachmentValidationError,
-                    count_attachments,
-                    import_image,
-                )
+            if image_paths:
+                try:
+                    from one.core.attachments import (
+                        AttachmentInput,
+                        AttachmentValidationError,
+                        count_attachments,
+                        import_image,
+                    )
+                except ImportError:
+                    self._write("Image support is unavailable", "error")
+                    return
 
                 storage_dir = self.session._storage_dir or ""
                 try:
@@ -2029,11 +2033,15 @@ if TEXTUAL_AVAILABLE:
             # Write user block (with [IMG] marker if images present).
             if clean_text or image_paths or file_image_refs:
                 has_images = bool(image_paths or file_image_refs)
+                if image_paths:
+                    first_img = str(image_paths[0])
+                elif file_image_refs:
+                    first_img = file_image_refs[0].get("blob_hash") or file_image_refs[0].get("blobPath", "")
+                else:
+                    first_img = ""
                 if has_images and clean_text:
-                    first_img = str(image_paths[0]) if image_paths else (file_image_refs[0].get("blob_hash") or file_image_refs[0].get("blobPath", "")) if file_image_refs else ""
                     self._write_chat_block("user", f"{clean_text}\n[IMG] {first_img}")
                 elif has_images:
-                    first_img = str(image_paths[0]) if image_paths else (file_image_refs[0].get("blob_hash") or file_image_refs[0].get("blobPath", "")) if file_image_refs else ""
                     self._write_chat_block("user", f"[IMG] {first_img}")
                 else:
                     self._write_chat_block("user", clean_text)
@@ -2078,19 +2086,15 @@ if TEXTUAL_AVAILABLE:
             """
             from pathlib import Path
 
-            if "one.core.clipboard_image" not in dir(__import__("sys").modules or {}):
-                self._toast("Clipboard-image backend unavailable", severity="warning")
-                self._pending_clipboard_image_bytes = None
-                return None
-            from one.core.attachments import (
-                AttachmentInput,
-                AttachmentValidationError,
-                count_attachments,
-                import_image,
-            )
-            from one.core.clipboard_image import acquire_clipboard_image, clipboard_image_to_temp_path
-
-            if acquire_clipboard_image is None or import_image is None or count_attachments is None:
+            try:
+                from one.core.attachments import (
+                    AttachmentInput,
+                    AttachmentValidationError,
+                    count_attachments,
+                    import_image,
+                )
+                from one.core.clipboard_image import clipboard_image_to_temp_path
+            except ImportError:
                 self._toast("Clipboard-image backend unavailable", severity="warning")
                 self._pending_clipboard_image_bytes = None
                 return None

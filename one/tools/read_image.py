@@ -18,13 +18,11 @@ from .common import resolve_to_cwd
 def read_image_tool(cwd: str, path: str, storage_dir: str = "") -> dict:
     """Load an image file for vision inspection.
 
-    Phase classification: **inspect** (read-only from the workspace).
     Semantically this tool only reads a file, but it *does* import the
     image bytes into the session's private content-addressed blob store.
     The blob is transient — it is never persisted to JSONL or emitted
-    in events.  This tool does **not** authorize mutations; it is an
-    inspection/verification primitive the agent may use at any time,
-    including during the verify phase after a write/edit/bash run.
+    in events. This tool only inspects workspace files; it never writes,
+    edits, or executes anything.
 
     Args:
         cwd: session working directory (relative paths resolve against it).

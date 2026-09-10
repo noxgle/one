@@ -135,10 +135,11 @@ def _extract_dimensions(raw: bytes, mime: str) -> tuple[int | None, int | None]:
                             return w, h
                 elif chunk == b"VP8L":
                     if len(raw) >= 25:
-                        b = raw[21]
-                        w = ((struct.unpack("<I", raw[21:25])[0]) & 0x3FFF) + 1
-                        b2 = raw[25]
-                        h = (((b2 << 10) | struct.unpack("<H", raw[23:25])[0]) & 0x3FFF) + 1
+                        # Lossless bitstream: 14-bit (width-1) + 14-bit
+                        # (height-1) packed little-endian from raw[21].
+                        packed = struct.unpack("<I", raw[21:25])[0]
+                        w = (packed & 0x3FFF) + 1
+                        h = ((packed >> 14) & 0x3FFF) + 1
                         if w > 0 and h > 0:
                             return w, h
                 elif chunk == b"VP8X":
@@ -219,6 +220,18 @@ def _blob_path(storage_dir: str, blob_hash: str) -> str:
     return os.path.join(_blob_dir(storage_dir), blob_hash)
 
 
+def _write_blob_once(storage_dir: str, raw: bytes) -> str:
+    """Write *raw* to its content-addressed path unless present; return hash."""
+    blob_hash = hashlib.sha256(raw).hexdigest()
+    bpath = _blob_path(storage_dir, blob_hash)
+    if not os.path.exists(bpath):
+        # Write atomically via temp file + rename.
+        tmp = bpath + ".tmp"
+        Path(tmp).write_bytes(raw)
+        Path(tmp).rename(bpath)
+    return blob_hash
+
+
 def store_blob(
     storage_dir: str,
     raw: bytes,
@@ -228,13 +241,7 @@ def store_blob(
 
     Deduplicates by SHA-256: if the blob already exists it is not rewritten.
     """
-    blob_hash = hashlib.sha256(raw).hexdigest()
-    bpath = _blob_path(storage_dir, blob_hash)
-    if not os.path.exists(bpath):
-        # Write atomically via temp file + rename.
-        tmp = bpath + ".tmp"
-        Path(tmp).write_bytes(raw)
-        Path(tmp).rename(bpath)
+    blob_hash = _write_blob_once(storage_dir, raw)
     return AttachmentRef(
         blob_hash=blob_hash,
         mime=mime or "application/octet-stream",
@@ -250,12 +257,7 @@ def store_blob_with_meta(
     height: int | None = None,
 ) -> AttachmentRef:
     """Store and return an ``AttachmentRef`` with full metadata."""
-    blob_hash = hashlib.sha256(raw).hexdigest()
-    bpath = _blob_path(storage_dir, blob_hash)
-    if not os.path.exists(bpath):
-        tmp = bpath + ".tmp"
-        Path(tmp).write_bytes(raw)
-        Path(tmp).rename(bpath)
+    blob_hash = _write_blob_once(storage_dir, raw)
     return AttachmentRef(
         blob_hash=blob_hash,
         mime=mime,
