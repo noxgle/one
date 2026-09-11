@@ -16,6 +16,163 @@ are in [`CHANGELOG.md`](CHANGELOG.md).
   equivalent reproducible vulnerability scanner) to local release checks and
   CI after selecting its lockfile/allowlist policy.
 
+## Project: TUI/UX fix batch (`fix/tui-ux-batch`)
+
+### Goal
+
+Fix seven reported UX gaps without changing agent behavior otherwise:
+Ctrl-C handling of approval prompts, version visibility, unlimited retry mode
+with shortcut, Ctrl+Shift+V shortcut listing, Codex image support, visible
+bash timeout in TUI, and the `/login` help text. Work happens on branch
+`fix/tui-ux-batch` (based on `main`); no merge/push without approval.
+
+### Scope
+
+#### In Scope
+
+- Approval-prompt cancellation via Ctrl-C (TUI + interactive/headless paths).
+- Version display in TUI and at CLI startup from `one/config.py` VERSION.
+- Third retry mode (unlimited) + TUI shortcut; existing on/off preserved.
+- Ctrl+Shift+V entry in the TUI shortcuts overlay.
+- Image serialization in `codex_responses` provider (or explicit reject).
+- Timeout display in TUI `tool start` lines for bash.
+- `/help` text: `/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]`.
+
+#### Non-Goals
+
+- Prompt/architecture redesign; phase system stays out.
+- Changing approval semantics beyond cancellation (approvalTools unchanged).
+- Enabling PyPI publishing or any remote git action.
+
+### Assumptions
+
+- `VERSION` in `one/config.py` remains the single version source.
+- Retry setting persists via existing settings conventions.
+- Codex Responses API supports image parts; if not, explicit reject is acceptable.
+- TUI golden snapshots may need regeneration for intentional text changes.
+
+### Open Questions
+
+- `maxSteps=0` means unlimited tool steps independently of retry mode; retry
+  mode only controls provider-call retry behavior.
+- Which TUI surface shows the version (header vs sidebar vs footer)?
+- Confirm the exact Codex Responses API image-part contract against the current
+  upstream/OpenCode implementation before enabling the adapter path.
+
+### Tasks
+
+- [x] **Task 1:** Ctrl-C cancels pending approval prompts.
+  - **Description:** Make Ctrl-C dismiss an open `[Approve] <tool> {...}` prompt in TUI and interactive/headless approval paths; treat as rejection with reason (e.g. "aborted by user") fed back to the model like other rejections. Must not kill the session.
+  - **Files:** `one/modes/tui_mode.py`, `one/modes/interactive_mode.py`, approval-callback wiring, related tests.
+  - **Acceptance:** Ctrl-C on a pending approval rejects the call, model receives the rejection, session stays usable.
+  - **Verification:** New fake-approval regression tests; `.venv/bin/python -m pytest -q tests/test_tui_mode.py tests/test_approval.py`.
+  - **Details:** `_on_key` override in `_OneTextualApp` intercepts `ctrl+c` when `_approval_pending` is set, puts `("no", "aborted by user")` into the approval queue and stops the event; interactive_mode already returns `(False, "aborted by user")` on Ctrl-C at line 138.
+
+- [x] **Task 2:** Show app version in TUI and at CLI startup.
+  - **Description:** Render `VERSION` from `one/config.py` in the TUI (header/sidebar/footer) and in CLI startup output (one-shot/interactive banner).
+  - **Files:** `one/modes/tui_mode.py`, `one/cli/main.py`, TUI snapshot files if changed.
+  - **Acceptance:** Version visible in TUI and CLI startup; single source of truth.
+  - **Verification:** Rendering tests; regenerate snapshots with `ONE_UPDATE_SNAPSHOTS=1` only for intentional changes and review the diff.
+  - **Details:** `one m {VERSION}` imported in both files; TUI sidebar renders `f"Version: {VERSION}"` (tui_mode.py:1193); CLI prints `one v{VERSION}` at startup (main.py:467).
+
+- [x] **Task 3:** Unlimited retry mode + TUI shortcut.
+  - **Description:** Add a third retry mode (unlimited provider-call retries) next to on/off, persisted in settings; add a TUI keyboard shortcut to cycle/switch retry mode without breaking existing bindings (incl. provider switching).
+  - **Files:** settings manager, retry logic, `one/modes/tui_mode.py` bindings/shortcuts overlay, related tests.
+  - **Acceptance:** Three modes selectable, persisted, shortcut works; tests stay bounded (fake providers, no infinite loops).
+  - **Verification:** Mode-cycling, persistence, and bounded-unlimited behavior tests.
+  - **Details:** Initial implementation added `get_retry_mode` / `set_retry_mode` and `/retry`/`/retry-cycle`; follow-up work is required only for the binding change to `Ctrl+R` (not `Ctrl+Shift+R`). `maxSteps` remains an independent setting.
+
+- [x] **Task 4:** List Ctrl+Shift+V in TUI shortcuts.
+  - **Description:** The existing paste-image binding (`action_paste_image`) is missing from the shortcuts overlay/help; add it.
+  - **Files:** `one/modes/tui_mode.py` (shortcuts overlay), TUI snapshot files if changed.
+  - **Acceptance:** Overlay lists Ctrl+Shift+V with image-paste description.
+  - **Verification:** Snapshot/command-list test update.
+  - **Details:** `TUI_SHORTCUTS` tuple extended with `("Ctrl+Shift+V", "paste image from the system clipboard")` and `("Ctrl+Shift+R", "cycle retry mode")`; bindings registered in the keymap.
+
+- [x] **Task 5:** Codex image support.
+  - **Description:** Serialize current-turn images in `codex_responses` native format; if the API cannot carry images, reject image-bearing requests with a clear unsupported-image error (never silent text-only).
+  - **Files:** `one/providers/codex_responses.py`, capability/policy tests.
+  - **Acceptance:** Images delivered or explicit error; no silent omission.
+  - **Verification:** Fake-transport wire-payload tests (or explicit-reject tests).
+  - **Details:** Current implementation still rejects all Codex images and `gpt-5.6-sol` is not marked vision-capable, producing `Model 'gpt-5.6-sol' does not support image input`. Replace the rejection with a tested Responses API multimodal payload, preserving explicit failures for invalid/missing attachments.
+
+- [x] **Task 6:** Visible bash timeout in TUI tool lines.
+  - **Description:** Include the effective timeout in TUI `tool start` lines, e.g. `tool start (timeout 30s): bash {"command": ...}` (use per-call timeout when the model overrides it).
+  - **Files:** `one/modes/tui_mode.py`, TUI snapshot files if changed.
+  - **Acceptance:** Timeout shown for bash (and only where meaningful).
+  - **Verification:** Snapshot/unit tests for the rendered line.
+  - **Details:** `agent_session.py` emits `effectiveTimeout`, but the TUI currently discards it at `tool_call_start`; implement the render change and add a direct TUI event regression test.
+
+- [x] **Task 7:** Fix `/login` help text.
+  - **Description:** Change `/help` login line to `/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]`.
+  - **Files:** help-text source in TUI/interactive mode, related tests.
+  - **Acceptance:** Help shows the `[subscription]` argument.
+  - **Verification:** Help-text assertion test.
+  - **Details:** Login help string updated in TUI slash-help (tui_mode.py:1318), TUI action_help (tui_mode.py:2490), and interactive_mode (interactive_mode.py:528) — all now include `[subscription]`; tests assert the string in `test_tui_mode.py:632`, `test_tui_mode.py:1095`, and `test_interactive_mode.py:392`.
+
+### Follow-up corrections requested
+
+- [x] **Task 8:** Support unlimited tool steps with `maxSteps=0`.
+  - **Description:** Make `maxSteps=0` mean unlimited tool steps, independently of retry mode. Keep abort handling, budget enforcement, `finish`, and ordinary no-tool model completion as termination conditions. Preserve bounded behavior for positive `maxSteps` values and do not create unbounded live tests.
+  - **Files:** `one/core/agent_session.py`, `one/core/settings_manager.py` if normalization is needed, retry/tool-loop tests.
+  - **Dependencies:** None; independent of Task 3.
+  - **Acceptance Criteria:** With `maxSteps=0`, a fake provider can execute more than the default step limit; no `tool_step_limit` is emitted; abort and budget limits still terminate the loop. With `maxSteps>0`, existing bounded behavior remains unchanged regardless of retry mode.
+   - **Verification:** Add `maxSteps=0` and positive-limit fake-provider tests with deterministic success/abort endpoints; run the relevant agent-session and event-snapshot tests.
+  - **Details:** `maxSteps=0` open-ended loop via `itertools.count`, no `tool_step_limit`; 12 tests in `tests/test_unlimited_steps.py`.
+
+- [x] **Task 9:** Change retry-cycle shortcut to Ctrl+R.
+  - **Description:** Replace every user-visible and Textual binding occurrence of Ctrl+Shift+R with Ctrl+R, without changing the cycle action or provider-switching bindings.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`, `tests/snapshots/tui/base.txt`, `tests/snapshots/tui/overlay.txt`, `tests/snapshots/tui/widget_panel.txt`.
+  - **Dependencies:** Task 3.
+  - **Acceptance Criteria:** `ctrl+r` invokes `action_cycle_retry_mode`; overlay shows `Ctrl+R`; `ctrl+shift+r` is not registered for this action.
+   - **Verification:** Textual pilot keypress test, binding assertions, and reviewed regenerated snapshots.
+  - **Details:** `ctrl+r` binding; pilot keypress test cycles off→on→unlimited→off; no conflicts.
+
+- [x] **Task 10:** Enable Codex image input using the Responses API.
+  - **Description:** Mark supported Codex models, including `gpt-5.6-sol`, as image-capable; prevent stale persisted capability metadata from downgrading known built-in support; replace the unconditional `UnsupportedImageError` with validated `input_text` + `input_image` content using attachment data URLs/base64 and the native Codex Responses payload. Preserve explicit errors for unsupported models and invalid/missing blobs.
+  - **Files:** `one/core/model_registry.py`, `one/providers/codex_responses.py`, `one/core/agent_session.py` if capability normalization is needed, `tests/test_capability_error_policy.py`, `tests/test_image_attachments.py`, `tests/test_provider_payloads.py` or the existing provider-payload test module.
+  - **Dependencies:** Existing attachment storage/security work; confirm current upstream/OpenCode payload contract before implementation.
+  - **Acceptance Criteria:** A fake Codex transport receives the image bytes as a Responses API image part; `gpt-5.6-sol` no longer fails the local capability gate; no image is silently converted to filename-only text; invalid attachments make no HTTP request.
+   - **Verification:** Non-stream and stream fake-HTTP wire-payload tests, model-registry persistence round trip, capability-policy tests, and full image attachment suite.
+  - **Details:** `input_image` parts in Codex payload, vision-protected registry merge, fake-transport wire tests.
+
+- [x] **Task 11:** Render effective tool timeout in the TUI.
+  - **Description:** Include `event["effectiveTimeout"]` in the `tool_call_start` line, e.g. `tool start (timeout 30s): bash {...}`, using the per-call timeout when overridden. Keep non-time-limited tools readable and preserve existing tool output/error rendering.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`, TUI snapshots if the rendered fixtures change.
+  - **Dependencies:** Existing `effectiveTimeout` event field.
+  - **Acceptance Criteria:** A TUI event containing `effectiveTimeout` visibly renders the timeout; timeout overrides show the override value; tools with no timeout do not show a misleading value.
+   - **Verification:** Direct TUI event/render test plus targeted snapshot tests.
+  - **Details:** `tool start (timeout Ns)` rendering, plain format when timeout None.
+
+- [x] **Task 12:** Prevent duplicated multiline assistant/tool responses.
+  - **Description:** Trace and fix duplicate rendering in both paths: suppress repeated final assistant content after streamed/thinking deltas, and make active tool-block tracking resilient when the 500-line TUI history is trimmed so `tool_call_end` cannot append a second status block. Preserve legitimate separate tool output blocks.
+  - **Files:** `one/modes/tui_mode.py`, possibly `one/core/agent_session.py` for event semantics, `tests/test_tui_mode.py`, `tests/test_event_snapshots.py` only if the event contract must change.
+  - **Dependencies:** None; coordinate with Task 11 when updating the same TUI event renderer.
+  - **Acceptance Criteria:** A multiline streamed response appears once; reasoning/final content is not duplicated; after more than 500 rendered lines, a tool has exactly one status block; genuine tool output still appears once.
+   - **Verification:** TUI regression with streamed multiline events, reasoning plus final text, and a tool start/end sequence crossing the trim boundary; targeted and full test suites.
+  - **Details:** message_end live-delta suppression + `_trim_stream` invalidating stale tool-block indexes, 4 new tests, snapshots regenerated.
+
+### Risks & Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| TUI snapshot churn | Regenerate only intentional changes, review diffs |
+| Shortcut conflicts | Check existing bindings before adding |
+| Unlimited retry hangs | Keep abort, budget, `finish`, and normal completion as hard stops; bound tests with fakes |
+| Codex image payload incompatibility | Verify the exact Responses API contract with fake wire-payload tests before enabling real requests |
+| Duplicate TUI rendering | Test both streamed final-message suppression and stale tool-block indexes after history trimming |
+
+### Project Acceptance Criteria
+
+- [x] All seven fixes implemented on `fix/tui-ux-batch`, each with tests.
+- [x] Follow-up corrections Tasks 8–12 implemented and covered by regressions.
+- [ ] `ruff` clean, full `pytest` green, no unrelated behavior changes.
+- [ ] No merge/push without explicit approval.
+
+### Estimated Timeline
+
+1–2 engineering days; largest uncertainty is Ctrl-C/approval plumbing across modes.
+
 ## Publication checklist (external, intentionally deferred)
 
 ### Release readiness audit — multimodal-only branch

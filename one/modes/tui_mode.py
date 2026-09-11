@@ -15,6 +15,7 @@ from typing import Any
 from rich.markup import escape as rich_escape
 from rich.text import Text
 
+from one.config import VERSION
 from one.core.oauth import OAuthError
 from one.core.provider_login import entry_id as fetched_entry_id
 from one.core.provider_login import run_oauth_login, validate_and_fetch
@@ -67,12 +68,23 @@ def build_sidebar_snapshot(
                 }
             )
 
-    # Retry: show on/off based on the persistent session setting (not the
-    # transient _retry_state which only reflects the current in-flight retry).
-    auto_retry = getattr(session, "auto_retry_enabled", True)
-    if not callable(auto_retry):
-        auto_retry = bool(auto_retry)
-    retry_display = "on" if auto_retry else "off"
+    # Retry: show the actual retry mode string (off/on/unlimited) read from
+    # settings when available, falling back to the current on/off logic.
+    try:
+        retry_display = str(
+            getattr(
+                getattr(session, "settings_manager", None),
+                "get_retry_mode",
+                lambda: "on",
+            )(),
+        )
+    except Exception:
+        retry_display = None
+    if retry_display not in ("off", "on", "unlimited"):
+        auto_retry = getattr(session, "auto_retry_enabled", True)
+        if not callable(auto_retry):
+            auto_retry = bool(auto_retry)
+        retry_display = "on" if auto_retry else "off"
 
     return {
         "model": f"{session.model.provider}/{session.model.id}" if session.model else "none",
@@ -123,6 +135,8 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+S", "toggle subagents"),
     ("Ctrl+O", "toggle bash output"),
     ("Ctrl+V", "paste from the system clipboard"),
+    ("Ctrl+Shift+V", "paste image from the system clipboard"),
+    ("Ctrl+R", "cycle retry mode"),
     ("Ctrl+F1", "show slash-command help"),
     ("Esc", "close the shortcuts panel"),
 )
@@ -348,6 +362,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/login",
     "/logout",
     "/retry",
+    "/retry-cycle",
     "/config",
     "/extui",
     "/cooperation",
@@ -505,6 +520,16 @@ if TEXTUAL_AVAILABLE:
                 self._completion_matches = []
                 self._completion_index = -1
                 self._completion_locked = False
+            # Bound keys (shift+enter, tab) should not reach App._on_key
+            # through _OneTextualApp (would cause double fire).  Let the
+            # binding fire through the normal widget chain, then stop.
+            if event.key == "shift+enter":
+                # Let the binding action (action_newline) fire, but stop
+                # to prevent _OneTextualApp._on_key → App._on_key from
+                # processing the same binding a second time.
+                self.action_newline()
+                event.stop()
+                return
             await super()._on_key(event)
 
         async def action_submit(self) -> None:
@@ -685,6 +710,7 @@ if TEXTUAL_AVAILABLE:
             Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle bash output", priority=True),
+            Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
             # Ctrl+Shift+V: paste image from clipboard (queued for import).
             Binding("ctrl+shift+v", "paste_image", "Paste image from clipboard", priority=True),
             ("ctrl+f1", "help", "Help"),
@@ -906,21 +932,29 @@ if TEXTUAL_AVAILABLE:
                     self._stream_lines.append("")
                     self._stream_lines.append(line)
                     self._stream_lines.append("")
-                    if len(self._stream_lines) > 500:
-                        self._stream_lines = self._stream_lines[-500:]
+                    self._trim_stream()
             else:
                 self._stream_lines.append("")
                 self._stream_lines.append(line)
                 self._stream_lines.append("")
-                if len(self._stream_lines) > 500:
-                    self._stream_lines = self._stream_lines[-500:]
+                self._trim_stream()
                 self._thinking_active = True
-            self._render_stream()
 
         def _write(self, text: str, kind: str = "normal") -> None:
             self._stream_lines.append(sanitize_display_text(text))
+            self._trim_stream()
+
+        def _trim_stream(self) -> None:
+            """Trim *_stream_lines* to 500 entries and invalidate stale
+            *_active_tool_block* indexes (absolute positions shift when lines
+            are dropped from the front)."""
             if len(self._stream_lines) > 500:
                 self._stream_lines = self._stream_lines[-500:]
+            active = self._active_tool_block
+            if active is not None:
+                _name, start, end, _text = active
+                if start >= len(self._stream_lines) or end > len(self._stream_lines):
+                    self._active_tool_block = None
             self._render_stream()
 
         def _chat_panel_width(self) -> int:
@@ -983,9 +1017,7 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines = self._stream_lines[: self._assistant_live_start_idx] + panel_lines
             else:
                 self._stream_lines.extend(panel_lines)
-            if len(self._stream_lines) > 500:
-                self._stream_lines = self._stream_lines[-500:]
-            self._render_stream()
+            self._trim_stream()
 
         def _write_chat_block(self, role: str, text: str) -> None:
             self._remove_thinking_line()
@@ -995,9 +1027,7 @@ if TEXTUAL_AVAILABLE:
                 rendered_text = f"> {text}"
             self._stream_lines.extend(self._format_chat_panel(role, rendered_text))
             self._stream_lines.append("")
-            if len(self._stream_lines) > 500:
-                self._stream_lines = self._stream_lines[-500:]
-            self._render_stream()
+            self._trim_stream()
 
         def _write_tool_block(self, text: str) -> tuple[int, int]:
             self._remove_thinking_line()
@@ -1006,9 +1036,7 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.extend(self._format_chat_panel("tool", text, pad_y=0))
             end = len(self._stream_lines)
             self._stream_lines.append("")
-            if len(self._stream_lines) > 500:
-                self._stream_lines = self._stream_lines[-500:]
-            self._render_stream()
+            self._trim_stream()
             return start, end
 
         def _finish_tool_block(self, tool_name: str, status: str) -> bool:
@@ -1164,6 +1192,7 @@ if TEXTUAL_AVAILABLE:
             info_block = Text()
             info_block.append_text(Text.from_markup(f"[b {self._theme.info}]Info[/]"))
             info_block.append("\n")
+            info_block.append(f"Version: {VERSION}\n")
             info_block.append(f"Model: {sanitize_display_text(s['model'])}\n")
             info_block.append(f"Theme: {sanitize_display_text(self._theme.name)}\n")
             info_block.append(f"Thinking: {sanitize_display_text(s['thinking'])}\n")
@@ -1288,11 +1317,11 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write(
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|refresh <provider>|provider [apiKey] [model]] | /logout <provider>",
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>",
                     "info",
                 )
                 self._write(
-                    "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
+                    "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
                 )
                 self._write(
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>",
@@ -1702,11 +1731,29 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd.startswith("/retry "):
                 mode = cmd[len("/retry ") :].strip().lower()
-                if mode not in {"on", "off"}:
-                    self._write("Usage: /retry <on|off>", "error")
+                if mode not in {"on", "off", "unlimited"}:
+                    self._write("Usage: /retry <on|off|unlimited>", "error")
                     return
-                session.set_auto_retry_enabled(mode == "on")
+                session.settings_manager.set_retry_mode(mode)
+                session.set_auto_retry_enabled(mode in ("on", "unlimited"))
                 self._write(f"Auto-retry set to {mode}.", "info")
+                self._refresh_sidebar()
+                return
+            if cmd == "/retry-cycle":
+                current = getattr(
+                    getattr(session, "settings_manager", None),
+                    "get_retry_mode",
+                    lambda: "on",
+                )()
+                if current == "off":
+                    new_mode = "on"
+                elif current == "on":
+                    new_mode = "unlimited"
+                else:
+                    new_mode = "off"
+                session.settings_manager.set_retry_mode(new_mode)
+                session.set_auto_retry_enabled(new_mode in ("on", "unlimited"))
+                self._write(f"Auto-retry set to {new_mode}.", "info")
                 self._refresh_sidebar()
                 return
             if cmd == "/subagents":
@@ -2343,6 +2390,23 @@ if TEXTUAL_AVAILABLE:
                 return True, ""
             return False, reason
 
+        async def _on_key(self, event: events.Key) -> None:
+            """Catch Ctrl-C when an approval prompt is open so it rejects
+            the pending approval instead of aborting the entire session.
+
+            The ctrl-c interception path is synchronous-safe: put_nowait +
+            event.stop() + prevent_default + return — no ``await`` needed
+            because we never reach ``super()`` on that branch.
+            """
+            if event.key == "ctrl+c" and self._approval_pending is not None:
+                queue = self._approval_queue
+                if queue is not None:
+                    queue.put_nowait(("no", "aborted by user"))
+                event.stop()
+                event.prevent_default()
+                return
+            await super()._on_key(event)
+
         async def action_abort(self) -> None:
             await self.session.abort()
             self._turn_active = False
@@ -2377,6 +2441,24 @@ if TEXTUAL_AVAILABLE:
             self._write(f"Bash output: {'on' if not state else 'off'}.", "info")
             self._refresh_sidebar()
 
+        def action_cycle_retry_mode(self) -> None:
+            """Ctrl+R: cycle retry mode off → on → unlimited → off."""
+            current = getattr(
+                getattr(self.session, "settings_manager", None),
+                "get_retry_mode",
+                lambda: "on",
+            )()
+            if current == "off":
+                new_mode = "on"
+            elif current == "on":
+                new_mode = "unlimited"
+            else:
+                new_mode = "off"
+            self.session.settings_manager.set_retry_mode(new_mode)
+            self.session.set_auto_retry_enabled(new_mode in ("on", "unlimited"))
+            self._write(f"Auto-retry set to {new_mode}.", "info")
+            self._refresh_sidebar()
+
         def action_clear_stream(self) -> None:
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
@@ -2407,7 +2489,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|<provider> subscription (OAuth)|<provider> [apiKey] [model]] /logout /retry /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /retry /retry-cycle /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
                 "info",
             )
 
@@ -2473,21 +2555,21 @@ if TEXTUAL_AVAILABLE:
                     # below will render the response correctly.
                     suppressed = event.get("suppressed", False)
                     if not suppressed:
-                        text = self._assistant_stream.strip()
-                        if not text:
-                            content = msg.get("content", "")
-                            if isinstance(content, list):
-                                text = "".join(x.get("text", "") for x in content if x.get("type") == "text").strip()
-                            else:
-                                text = str(content).strip()
-                        final_text = text or "[empty response]"
-                        if not self._assistant_has_live_delta:
-                            self._write_chat_block("assistant", final_text)
-                        else:
+                        # If live deltas were already streamed, the content is
+                        # visible in the stream — don't re-render it.
+                        if self._assistant_has_live_delta:
                             self._stream_lines.append("")
-                            if len(self._stream_lines) > 500:
-                                self._stream_lines = self._stream_lines[-500:]
-                            self._render_stream()
+                            self._trim_stream()
+                        else:
+                            text = self._assistant_stream.strip()
+                            if not text:
+                                content = msg.get("content", "")
+                                if isinstance(content, list):
+                                    text = "".join(x.get("text", "") for x in content if x.get("type") == "text").strip()
+                                else:
+                                    text = str(content).strip()
+                            final_text = text or "[empty response]"
+                            self._write_chat_block("assistant", final_text)
                     # Always reset live state regardless of suppression.
                     self._assistant_stream = ""
                     self._assistant_has_live_delta = False
@@ -2541,7 +2623,13 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_start_idx = -1
                 self._assistant_has_live_delta = False
                 self._assistant_live_buffer = ""
-                text = f"tool start: {tool_name} {args_text}"
+                # Render the per-call effective timeout when it's a positive
+                # number; omit the suffix for non-time-limited tools.
+                et_val = event.get("effectiveTimeout")
+                if isinstance(et_val, (int, float)) and et_val > 0:
+                    text = f"tool start (timeout {int(et_val)}s): {tool_name} {args_text}"
+                else:
+                    text = f"tool start: {tool_name} {args_text}"
                 start, end = self._write_tool_block(text)
                 self._active_tool_block = (tool_name, start, end, text)
             elif et == "tool_approval_rejected":

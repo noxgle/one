@@ -216,7 +216,7 @@ async def test_rpc_retry_settings_and_tool_approval(tmp_path: Path, monkeypatch:
 
     retry = _resp(responses, "get_retry_settings")
     assert retry["success"] is True
-    assert "enabled" in retry["data"] and "maxRetries" in retry["data"]
+    assert "mode" in retry["data"] and "maxRetries" in retry["data"]
 
     approval = _resp(responses, "get_tool_approval")
     assert approval["success"] is True

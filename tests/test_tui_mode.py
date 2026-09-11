@@ -139,9 +139,12 @@ def test_build_sidebar_snapshot_lists_enabled_mcp_servers() -> None:
                 {"name": "old", "enabled": False, "running": False, "tools": [], "transport": "stdio", "error": None},
             ]
 
+    from one.core.settings_manager import SettingsManager
+
     session = _DummySession()
     session._mcp_manager = _FakeMcpManager()
-    session.auto_retry_enabled = False
+    session.settings_manager = SettingsManager.in_memory()
+    session.settings_manager.set_retry_mode("off")
     snapshot = build_sidebar_snapshot(session)
 
     assert snapshot["mcpEnabled"] is True
@@ -626,9 +629,9 @@ async def test_tui_command_help_lists_all_commands(tmp_path: Path):
             "/tree",
             "/navigate <id> [--summary <text>]",
             "/fork <id>",
-            "/login [status|refresh <provider>|provider [apiKey] [model]]",
+            "/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]",
             "/logout <provider>",
-            "/retry <on|off>",
+                "/retry <on|off|unlimited>",
             "/config [key] [value]",
             "/extui <list|request|respond|cancel|clear>",
             "/cooperation [on|off]",
@@ -1089,7 +1092,7 @@ async def test_tui_action_help_lists_providers(tmp_path: Path):
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "/providers" in stream
-        assert "/login [status|refresh <provider>|<provider> subscription (OAuth)|<provider> [apiKey] [model]]" in stream
+        assert "/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]" in stream
 
 
 @pytest.mark.asyncio
@@ -2678,7 +2681,7 @@ async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
 
         # Strict indices on full _stream_lines
         a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A" in l)
-        tool_start_idx = next(i for i, l in enumerate(app._stream_lines) if "tool start: read" in l)
+        tool_start_idx = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "read" in l)
         tool_end_idx = next(i for i, l in enumerate(app._stream_lines) if "result1" in l)
         b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B" in l)
         answer_idx = next(i for i, l in enumerate(app._stream_lines) if "answer" in l)
@@ -2742,10 +2745,10 @@ async def test_tui_three_segments_two_tools_strict_chronology(tmp_path: Path):
 
         # Strict chronological order: A < tool1_start < tool1_end < B < tool2_start < tool2_end < C < final
         a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A-seg" in l)
-        tool1_start = next(i for i, l in enumerate(app._stream_lines) if "tool start: read" in l)
+        tool1_start = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "read" in l)
         tool1_end = next(i for i, l in enumerate(app._stream_lines) if "out1" in l)
         b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B-seg" in l)
-        tool2_start = next(i for i, l in enumerate(app._stream_lines) if "tool start: grep" in l)
+        tool2_start = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "grep" in l)
         tool2_end = next(i for i, l in enumerate(app._stream_lines) if "out2" in l)
         c_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "C-seg" in l)
         final_idx = next(i for i, l in enumerate(app._stream_lines) if "FINAL" in l)
@@ -3114,9 +3117,9 @@ async def test_tui_thinking_cleanup_on_tool_call(tmp_path: Path):
                 break
         stream = "\n".join(app._stream_lines)
         # Must contain the tool block but NOT a stale thinking line.
-        assert "tool start:" in stream
+        assert "tool start" in stream
         thinking_stale = any(
-            line == "Thinking:" and "tool start:" not in line
+            line == "Thinking:" and "tool start" not in line
             for line in app._stream_lines
         )
         # Thinking label should not remain after the turn completes.
@@ -3234,12 +3237,12 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
 
         stream = "\n".join(app._stream_lines)
         # The tool block must be present.
-        assert "tool start: bash" in stream
+        assert "tool start" in stream and "bash" in stream
         # The streamed JSON must NOT appear as a standalone assistant chat block.
         # Find the tool block line and verify there's no assistant delta block
         # before it (only logo lines and user text).
         tool_line_idx = next(
-            (i for i, l in enumerate(app._stream_lines) if "tool start: bash" in l),
+            (i for i, l in enumerate(app._stream_lines) if "tool start" in l and "bash" in l),
             None,
         )
         assert tool_line_idx is not None
@@ -3247,12 +3250,12 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
         for line in app._stream_lines:
             if line.startswith(" ") or line.startswith("\u2588"):
                 continue  # logo lines
-            if "tool start: bash" in line:
+            if "tool start" in line and "bash" in line:
                 continue  # the tool block itself
             # No assistant delta lines should contain the full JSON structure.
             # Check by looking for the JSON's key structural elements on the
             # same line (they may be wrapped, but the tool block line is safe).
-            assert 'tool_start' not in line or 'tool start: bash' in line
+            assert 'tool_start' not in line or ('tool start ' in line and 'bash' in line)
 
         # 4. message_end must NOT create a duplicate block (state already reset)
         session._emit({"type": "message_end", "message": {"role": "assistant", "content": ""}})
@@ -3260,7 +3263,7 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
         assert app._assistant_has_live_delta is False
         stream_after_end = "\n".join(app._stream_lines)
         # Only one tool block, no extra assistant block.
-        assert stream_after_end.count("tool start: bash") == 1
+        assert sum(1 for l in stream_after_end.split("\n") if "tool start" in l and "bash" in l) == 1
 
 
 @pytest.mark.asyncio
@@ -3281,7 +3284,7 @@ async def test_tui_tool_call_start_noop_without_live_block(tmp_path: Path):
         await pilot.pause()
 
         stream = "\n".join(app._stream_lines)
-        assert "tool start: read" in stream
+        assert "tool start" in stream and "read" in stream
         assert app._assistant_has_live_delta is False
 
 
@@ -3307,7 +3310,448 @@ async def test_tui_message_end_after_tool_call_no_duplicate(tmp_path: Path):
 
         stream = "\n".join(app._stream_lines)
         # The tool block must be present exactly once.
-        assert stream.count("tool start: ls") == 1
+        assert sum(1 for l in stream.split("\n") if "tool start" in l and "ls" in l) == 1
         # No assistant delta block should remain (JSON was removed by tool_call_start).
         assert app._assistant_has_live_delta is False
         assert app._assistant_live_start_idx == -1
+
+
+# ---------------------------------------------------------------------------
+# Version line in sidebar.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_renders_version_line(tmp_path: Path):
+    """Sidebar info block must include a Version line with the package VERSION."""
+    from textual.widgets import Static
+
+    from one.config import VERSION
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        content = str(sidebar.content)
+        assert f"Version: {VERSION}" in content
+
+
+# ---------------------------------------------------------------------------
+# Cycle retry mode — action, slash commands, and shortcuts.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_cycle_retry_mode_action_transitions(tmp_path: Path):
+    """Ctrl+R (action_cycle_retry_mode) cycles off → on → unlimited → off."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Start: default is "on"
+        assert session.settings_manager.get_retry_mode() == "on"
+
+        # First cycle: on → unlimited
+        app.action_cycle_retry_mode()
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "unlimited"
+
+        # Second cycle: unlimited → off
+        app.action_cycle_retry_mode()
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "off"
+
+        # Third cycle: off → on
+        app.action_cycle_retry_mode()
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "on"
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_r_cycle_retry_mode_via_pilot(tmp_path: Path):
+    """ctrl+r keypress triggers action_cycle_retry_mode via pilot."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Start: default is "on"
+        assert session.settings_manager.get_retry_mode() == "on"
+
+        # Press ctrl+r: on → unlimited
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "unlimited"
+
+        # Press ctrl+r again: unlimited → off
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "off"
+
+        # Press ctrl+r again: off → on
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "on"
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_cycle_command(tmp_path: Path):
+    """/retry-cycle cycles through all three modes."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Start: on
+        assert session.settings_manager.get_retry_mode() == "on"
+
+        await _submit(app, pilot, "/retry-cycle")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to unlimited." in stream
+        assert session.settings_manager.get_retry_mode() == "unlimited"
+
+        await _submit(app, pilot, "/retry-cycle")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to off." in stream
+        assert session.settings_manager.get_retry_mode() == "off"
+
+        await _submit(app, pilot, "/retry-cycle")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to on." in stream
+        assert session.settings_manager.get_retry_mode() == "on"
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_unlimited_accepted(tmp_path: Path):
+    """/retry unlimited is accepted and persisted."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/retry unlimited")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to unlimited." in stream
+        assert session.settings_manager.get_retry_mode() == "unlimited"
+        assert session.settings_manager.get_retry_enabled() is True
+
+
+@pytest.mark.asyncio
+async def test_tui_shortcuts_overlay_contains_new_shortcuts(tmp_path: Path):
+    """The shortcuts panel (Ctrl+F1) must show Ctrl+Shift+V and Ctrl+R."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_show_shortcuts()
+        await pilot.pause()
+        overlay = app.query_one("#shortcuts_overlay")
+        content = str(overlay.content)
+        assert "Ctrl+Shift+V" in content
+        assert "paste image from the system clipboard" in content
+        assert "Ctrl+R" in content
+        assert "cycle retry mode" in content
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_sidebar_shows_unlimited_mode(tmp_path: Path):
+    """Sidebar Retry field reflects the actual retry mode string (off/on/unlimited)."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Start: "on"
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: on" in s
+
+        # Set to unlimited
+        session.settings_manager.set_retry_mode("unlimited")
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: unlimited" in s
+
+        # Set to off
+        session.settings_manager.set_retry_mode("off")
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: off" in s
+
+
+# ---------------------------------------------------------------------------
+# Task 11: effectiveTimeout rendering in tool_call_start TUI lines
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_with_effective_timeout(tmp_path: Path):
+    """A tool_call_start event that carries a positive effectiveTimeout must
+    render it in the block: ``tool start (timeout 30s): bash {...}``."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "echo hi"},
+                "effectiveTimeout": 30,
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # The timeout and tool name must both appear in the stream.
+        assert "tool start (timeout 30s):" in stream
+        assert '"command": "echo hi"' in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_per_call_override_shows_override(tmp_path: Path):
+    """When the agent overrides the timeout per-call, the override value must
+    appear in the TUI line."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "sleep 10"},
+                "effectiveTimeout": 5,
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        assert "tool start (timeout 5s):" in stream
+        assert '"command": "sleep 10"' in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_without_effective_timeout_plain_format(tmp_path: Path):
+    """A tool_call_start event without effectiveTimeout (or with None / 0)
+    must render the old plain format without a timeout suffix."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # No effectiveTimeout key at all
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "read",
+                "args": {"path": "a.txt"},
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # Must use the plain "tool start: read" format — no "(timeout ..." suffix.
+        assert "tool start:" in stream
+        assert "tool start (timeout" not in stream
+        assert "a.txt" in stream
+
+
+# ---------------------------------------------------------------------------
+# Task 12 (PART A): spawn_subagent / ask_user effective timeout
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_no_timeout_for_spawn_subagent(tmp_path: Path):
+    """spawn_subagent and ask_user are called with timeout_sec=None;
+    effectiveTimeout must NOT fall back to the global default (30 s)."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Simulate what agent_session emits for spawn_subagent (timeout_sec=None):
+        # effectiveTimeout = args.get("timeout") or timeout_sec  →  None
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "spawn_subagent",
+                "args": {"task": "do something"},
+                "effectiveTimeout": None,
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        assert "tool start:" in stream
+        assert "tool start (timeout" not in stream
+
+
+# ---------------------------------------------------------------------------
+# Task 12 (PART B): duplicated assistant / tool-block fixes
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_tui_streamed_multiline_response_not_duplicated(tmp_path: Path):
+    """A multiline streamed assistant response + final message_end must
+    render each visible line exactly once — no duplicate from the
+    fallback final-text path."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # message_start resets live state.
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+        await pilot.pause()
+
+        # Stream three deltas (simulating multiline output).
+        for delta in ["Hello", "\n", "World!"]:
+            session._emit(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": delta},
+                }
+            )
+            await pilot.pause()
+
+        # message_end with content that matches the streamed text.
+        session._emit(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hello\nWorld!"}],
+                },
+                "suppressed": False,
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # "Hello" and "World!" must appear exactly once.
+        assert stream.count("Hello") == 1
+        assert stream.count("World!") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_block_after_500_lines_yields_one_status(tmp_path: Path):
+    """After more than 500 rendered lines force a trim, a subsequent
+    tool_call_start + tool_call_end must produce exactly one status block."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Force _stream_lines to > 500 so the next tool call triggers a trim.
+        for i in range(510):
+            app._write(f"line {i}", "info")
+
+        assert len(app._stream_lines) == 500
+
+        # Start a tool — this writes a block and records absolute indices.
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "echo hi"},
+                "effectiveTimeout": 30,
+            }
+        )
+        await pilot.pause()
+
+        active = app._active_tool_block
+        assert active is not None, "active tool block must exist"
+        tool_name, start, end, block_text = active
+
+        # End the tool — _finish_tool_block should succeed.
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "bash",
+                "ok": True,
+                "result": {"outputText": "", "result": ""},
+            }
+        )
+        await pilot.pause()
+
+        assert app._active_tool_block is None, "tool block should be cleared"
+
+        # Count how many lines contain the tool start marker (status block).
+        # _finish_tool_block replaces the multiline block with a single-line
+        # status:  "<original> [ok]" or "<original> [err]".
+        search_sub = "tool start (timeout"
+        status_lines = [l for l in app._stream_lines if search_sub in l]
+        assert len(status_lines) == 1, f"expected exactly 1 status block, found {status_lines}"
+
+
+@pytest.mark.asyncio
+async def test_tui_separate_tool_output_appears_once(tmp_path: Path):
+    """A tool_call_start followed by tool_call_end with real output text
+    must render exactly one status block AND exactly one output block."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "echo hello"},
+                "effectiveTimeout": 5,
+            }
+        )
+        await pilot.pause()
+
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "bash",
+                "ok": True,
+                "result": {"outputText": "hello output\n", "result": "hello output\n"},
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # Status block appears once (with [ok] suffix).
+        # Note: _format_chat_panel wraps long lines, so search for the unique prefix.
+        assert stream.count("tool start (timeout 5s)") == 1
+        # Output block appears exactly once.
+        assert stream.count("hello output") == 1

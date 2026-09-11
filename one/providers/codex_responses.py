@@ -14,12 +14,14 @@ mandatory quirks:
 - ``store: false`` is mandatory
 - ``instructions`` (system prompt) is required; stateless — full history
   every request
+- images are sent as ``input_image`` content parts on the user message
 - headers: Bearer access token + ``ChatGPT-Account-Id`` (injected by the
   model registry from the stored OAuth record), ``originator``, ``session_id``
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 from collections.abc import Callable
@@ -32,8 +34,9 @@ from one.core.attachments import AttachmentStorageError
 from .base import ChatResult, ProviderAdapter
 
 
-class UnsupportedImageError(AttachmentStorageError):
-    """Raised when images are sent to an adapter that does not support them."""
+class MissingBlobError(AttachmentStorageError):
+    """Raised when a required image blob is missing or corrupt before HTTP."""
+
 
 BASE_URL = "https://chatgpt.com/backend-api/codex"
 # The /models endpoint gates on client_version: a stale/too-low value returns
@@ -79,6 +82,43 @@ class CodexResponsesAdapter(ProviderAdapter):
                     headers[k] = v
         return headers
 
+    # ------------------------------------------------------------------
+    # Image helpers (Responses API: input_image content parts)
+    # ------------------------------------------------------------------
+
+    def _read_blob(self, storage_dir: str, blob_hash: str) -> bytes | None:
+        """Read a blob from the local store (inline import to avoid circular deps)."""
+        try:
+            from one.core.attachments import read_blob_bytes
+            return read_blob_bytes(storage_dir, blob_hash)
+        except Exception:
+            return None
+
+    def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
+        """Build an ``input_image`` part from an image reference.
+
+        The Responses API uses ``input_image`` content parts with an
+        ``image_url`` field holding a data-URI (``data:<mime>;base64,<b64>``).
+
+        Raises ``MissingBlobError`` when the blob is missing, corrupt, or
+        unreadable — the provider never silently drops an image.
+        """
+        blob_hash = image_ref.get("blobHash") or image_ref.get("blob_hash")
+        mime = image_ref.get("mime", "image/png")
+        if not blob_hash or not storage_dir:
+            raise MissingBlobError(
+                f"image reference missing blob_hash/storage_dir: {image_ref}"
+            )
+        raw = self._read_blob(storage_dir, blob_hash)
+        if raw is None:
+            raise MissingBlobError(
+                f"required image blob missing or corrupt: {blob_hash}"
+            )
+        b64 = base64.b64encode(raw).decode("ascii")
+        return {"type": "input_image", "image_url": f"data:{mime};base64,{b64}"}
+
+    # ------------------------------------------------------------------
+
     def _build_payload(
         self,
         model: str,
@@ -86,25 +126,63 @@ class CodexResponsesAdapter(ProviderAdapter):
         thinking_level: str,
         stream: bool,
         max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> dict[str, Any]:
         instructions = ""
         input_items: list[dict[str, Any]] = []
-        for m in messages:
+
+        # Validate all image blobs BEFORE building the payload (no HTTP).
+        if images:
+            for img in images:
+                blob_hash = img.get("blobHash") or img.get("blob_hash")
+                if not blob_hash:
+                    raise MissingBlobError(
+                        f"image reference missing blob_hash: {img}"
+                    )
+                raw = self._read_blob(storage_dir, blob_hash)
+                if raw is None:
+                    raise MissingBlobError(
+                        f"required image blob missing or corrupt before HTTP: {blob_hash}"
+                    )
+
+        # Track which user turn gets the images (last user turn = current turn).
+        last_user_idx = -1
+        for i, m in enumerate(messages):
+            if m.get("role") == "user":
+                last_user_idx = i
+
+        for idx, m in enumerate(messages):
             role = m.get("role")
             content = m.get("content", "")
             if role == "system":
                 instructions = str(content)
                 continue
             input_role = "user" if role == "user" else "assistant"
+            if input_role == "user" and idx == last_user_idx:
+                # Build content parts for the last user turn:
+                # text parts + image parts (input_image).
+                parts: list[dict[str, Any]] = []
+                if isinstance(content, str) and content.strip():
+                    parts.append({"type": "input_text", "text": content.strip()})
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") in ("input_text", "text"):
+                            parts.append(part)
+                if images:
+                    for img in images:
+                        parts.append(self._build_image_part(img, storage_dir))
+                # Use parts list (may be just text if no images)
+                content_for_item = parts if parts else [{"type": "input_text", "text": str(content)}]
+            else:
+                content_for_item = [
+                    {"type": "input_text" if input_role == "user" else "output_text", "text": str(content)}
+                ]
             input_items.append(
                 {
                     "type": "message",
                     "role": input_role,
-                    # The Responses API accepts input_text only for user
-                    # messages; replayed assistant turns must be output_text.
-                    "content": [
-                        {"type": "input_text" if input_role == "user" else "output_text", "text": str(content)}
-                    ],
+                    "content": content_for_item,
                 }
             )
         payload: dict[str, Any] = {
@@ -147,16 +225,13 @@ class CodexResponsesAdapter(ProviderAdapter):
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
     ) -> ChatResult:
-        # Codex Responses API does NOT support inline image attachments.
-        # Fail loudly — never silently drop images.
-        if images:
-            raise UnsupportedImageError(
-                "image input is not supported by the Codex Responses API; "
-                "use a vision-capable adapter (openai, anthropic, gemini)"
-            )
         url = f"{BASE_URL}/responses"
         use_stream = callable(on_delta)
-        payload = self._build_payload(model, messages, thinking_level, stream=use_stream, max_tokens=max_tokens)
+        payload = self._build_payload(
+            model, messages, thinking_level,
+            stream=use_stream, max_tokens=max_tokens,
+            images=images, storage_dir=storage_dir,
+        )
         req_headers = self._headers(api_key, extra=headers)
 
         if not use_stream:

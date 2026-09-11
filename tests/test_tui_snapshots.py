@@ -158,7 +158,7 @@ def _check_snapshot(
 _STREAM_LINES = [
     "> hello there",
     "Sure! Here's a quick demo.",
-    "tool start: bash {\"command\": \"echo hi\"}",
+    "tool start (timeout 30s): bash {\"command\": \"echo hi\"}",
     "tool ok: bash",
     "Done with the demo.",
 ]

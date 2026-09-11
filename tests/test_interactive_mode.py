@@ -78,6 +78,18 @@ class _DummySettings:
     def set_mcp_server_enabled(self, name: str, enabled: bool) -> None:
         self._global.setdefault("mcpServers", {}).setdefault(name, {})["enabled"] = bool(enabled)
 
+    def get_retry_mode(self) -> str:
+        return str(self._global.get("retry", {}).get("mode", "on"))
+
+    def set_retry_mode(self, mode: str) -> None:
+        if mode not in ("off", "on", "unlimited"):
+            raise ValueError(f"Invalid retry mode: {mode}")
+        self._global.setdefault("retry", {})["mode"] = mode
+
+    def get_retry_enabled(self) -> bool:
+        mode = self.get_retry_mode()
+        return mode in ("on", "unlimited")
+
 
 class _DummyModelRegistry:
     def __init__(self) -> None:
@@ -376,6 +388,8 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert session.settings_manager.get_bash_show_output() is False
     assert "Abort requested." in out
     assert '"cancelled": false' in out
+    # Task 7: /login help text includes [subscription]
+    assert "/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]" in out
 
     assert session.model.id == "gpt-4.1"
     assert session.settings_manager.default_provider == "openai"
@@ -660,7 +674,7 @@ async def test_interactive_invalid_slash_inputs(monkeypatch, capsys):
     assert '"usage": "/model <provider>/<model-id>"' in out
     assert "Provider not found or has no models: nope" in out
     assert "Usage: /queue clear [all|steering|follow]" in out
-    assert "Usage: /retry <on|off>" in out
+    assert "Usage: /retry <on|off|unlimited>" in out
     assert "Configured provider llama.cpp." in out
     assert "Stored key for custom-provider." in out
     assert "Unknown command: /unknown-cmd. Use /help." in out

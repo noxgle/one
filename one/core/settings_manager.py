@@ -22,7 +22,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "summarizeWithModel": True,
         "maxSummaryInputTokens": 20000,
     },
-    "retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 1500, "maxDelayMs": 20000},
+    "retry": {"mode": "on", "maxRetries": 3, "baseDelayMs": 1500, "maxDelayMs": 20000},
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
     "theme": "default",
@@ -197,7 +197,23 @@ class SettingsManager:
         return self.merged().get("retry", {})
 
     def get_retry_enabled(self) -> bool:
-        return bool(self.get_retry_settings().get("enabled", True))
+        """Backward-compatible: True when retry mode is 'on' or 'unlimited'."""
+        mode = self.get_retry_mode()
+        return mode in ("on", "unlimited")
+
+    def get_retry_mode(self) -> str:
+        """Return the retry mode: 'off', 'on', or 'unlimited'."""
+        return str(self.get_retry_settings().get("mode", "on"))
+
+    def set_retry_mode(self, mode: str) -> None:
+        """Persist a retry mode ('off', 'on', or 'unlimited')."""
+        self._require_writable_global()
+        retry = self._global.get("retry", {})
+        if mode not in ("off", "on", "unlimited"):
+            raise ValueError(f"Invalid retry mode: {mode}")
+        retry["mode"] = mode
+        self._global["retry"] = retry
+        self._save_global()
 
     def get_compaction_settings(self) -> dict[str, Any]:
         return self.merged().get("compaction", {})
@@ -295,11 +311,13 @@ class SettingsManager:
         self._save_global()
 
     def set_retry_enabled(self, enabled: bool) -> None:
-        self._require_writable_global()
-        retry = self._global.get("retry", {})
-        retry["enabled"] = enabled
-        self._global["retry"] = retry
-        self._save_global()
+        """Backward-compatible: preserve 'unlimited' when enabling."""
+        if enabled:
+            current = self.get_retry_mode()
+            if current != "unlimited":
+                self.set_retry_mode("on")
+        else:
+            self.set_retry_mode("off")
 
     def set_steering_mode(self, mode: str) -> None:
         self._require_writable_global()
@@ -335,7 +353,10 @@ class SettingsManager:
         self._require_writable_global()
         tools = dict(self._global.get("tools", {}))
         if max_steps is not None:
-            tools["maxSteps"] = int(max_steps)
+            max_steps = int(max_steps)
+            if max_steps < 0:
+                raise ValueError(f"maxSteps must be >= 0, got {max_steps}")
+            tools["maxSteps"] = max_steps
         if timeout_sec is not None:
             tools["timeoutSec"] = int(timeout_sec)
         self._global["tools"] = tools

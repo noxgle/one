@@ -376,43 +376,24 @@ async def test_fake_adapter_without_images_param_raises_capability_error(
 
 
 # ---------------------------------------------------------------------------
-# Codex adapter rejects images
+# Codex adapter accepts images — wire-payload tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_codex_adapter_rejects_images(tmp_path: Path, png_path: Path):
-    """Codex adapter raises UnsupportedImageError when images are present."""
+async def test_codex_adapter_nonstream_payloads_images_as_input_image(tmp_path: Path, png_path: Path):
+    """Codex adapter serializes images as input_image parts in non-stream mode."""
+    import httpx
+
     from one.providers.codex_responses import (
         CodexResponsesAdapter,
-        UnsupportedImageError,
     )
 
-    adapter = CodexResponsesAdapter()
-    ref = import_image(str(tmp_path / "store"), str(png_path))
-    image_refs = [ref.__dict__]
-    with pytest.raises(UnsupportedImageError, match="not supported"):
-        await adapter.chat(
-            api_key="dummy",
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "hello"}],
-            thinking_level="medium",
-            images=image_refs,
-            storage_dir=str(tmp_path / "store"),
-        )
-
-
-@pytest.mark.asyncio
-async def test_codex_adapter_works_without_images(tmp_path: Path):
-    """Codex adapter works normally when no images are present."""
-    from one.providers.codex_responses import CodexResponsesAdapter
+    captured: dict[str, Any] = {}
 
     class _Resp:
         status_code = 200
-
-        @property
-        def is_error(self):
-            return False
+        is_error = False
 
         def json(self):
             return {
@@ -431,37 +412,228 @@ async def test_codex_adapter_works_without_images(tmp_path: Path):
         async def __aexit__(self, *args):
             pass
 
-        async def post(self, *a, **kw):
+        async def post(self, url: str, json: dict | None, **kw):
+            captured["payload"] = json
             return _Resp()
 
         async def stream(self, *a, **kw):
-            class _Ctx:
-                @property
-                def is_error(self):
-                    return False
+            raise RuntimeError("should not reach HTTP in non-stream test")
 
-                async def __aenter__(self):
-                    return self
-
-                async def __aexit__(self, *args):
-                    pass
-
-                async def aiter_lines(self):
-                    yield 'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{}}}'
-                    yield "data: [DONE]"
-            return _Ctx()
-
-    import httpx
     original_client = httpx.AsyncClient
     httpx.AsyncClient = _Client
     try:
         adapter = CodexResponsesAdapter()
+        ref = import_image(str(tmp_path / "store"), str(png_path))
+        image_refs = [ref.__dict__]
         result = await adapter.chat(
             api_key="dummy",
-            model="gpt-4o",
-            messages=[{"role": "system", "content": "test"}, {"role": "user", "content": "hello"}],
+            model="gpt-5.6-sol",
+            messages=[{"role": "system", "content": "be concise"}, {"role": "user", "content": "look at this"}],
             thinking_level="medium",
+            images=image_refs,
+            storage_dir=str(tmp_path / "store"),
         )
         assert result.text == "ok"
+        payload = captured["payload"]
+        # System message is stripped; first (and only) input item is the user message.
+        user_item = payload["input"][0]
+        assert user_item["role"] == "user"
+        content = user_item["content"]
+        assert isinstance(content, list)
+        text_parts = [p for p in content if p.get("type") == "input_text"]
+        image_parts = [p for p in content if p.get("type") == "input_image"]
+        assert len(text_parts) == 1
+        assert text_parts[0]["text"] == "look at this"
+        assert len(image_parts) == 1
+        assert image_parts[0]["image_url"].startswith("data:image/png;base64,")
+        # store:false and reasoning must still be present.
+        assert payload["store"] is False
+        assert payload["reasoning"] == {"effort": "medium"}
     finally:
         httpx.AsyncClient = original_client
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_stream_payloads_images_as_input_image(tmp_path: Path, png_path: Path):
+    """Codex adapter serializes images as input_image parts in stream mode."""
+    import httpx
+
+    from one.providers.codex_responses import CodexResponsesAdapter
+
+    captured: dict[str, Any] = {}
+
+    class _StreamResp:
+        status_code = 200
+        is_error = False
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.output_text.delta","delta":"ok"}'
+            yield 'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{}}}'
+            yield "data: [DONE]"
+
+        async def aread(self):
+            return b""
+
+    class _Ctx:
+        def __init__(self, resp):
+            self.resp = resp
+
+        async def __aenter__(self):
+            return self.resp
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *a, **kw):
+            raise RuntimeError("should not reach HTTP in stream test")
+
+        def stream(self, method: str, url: str, **kw):
+            captured["payload"] = kw.get("json")
+            return _Ctx(_StreamResp())
+
+    original_client = httpx.AsyncClient
+    httpx.AsyncClient = _Client
+    try:
+        adapter = CodexResponsesAdapter()
+        ref = import_image(str(tmp_path / "store"), str(png_path))
+        image_refs = [ref.__dict__]
+        deltas: list[str] = []
+        result = await adapter.chat(
+            api_key="dummy",
+            model="gpt-5.6-sol",
+            messages=[{"role": "user", "content": "view this"}],
+            thinking_level="off",
+            images=image_refs,
+            storage_dir=str(tmp_path / "store"),
+            on_delta=deltas.append,
+        )
+        assert result.text == "ok"
+        payload = captured["payload"]
+        user_item = payload["input"][0]
+        content = user_item["content"]
+        assert isinstance(content, list)
+        image_parts = [p for p in content if p.get("type") == "input_image"]
+        assert len(image_parts) == 1
+        assert image_parts[0]["image_url"].startswith("data:image/png;base64,")
+        assert payload["stream"] is True
+    finally:
+        httpx.AsyncClient = original_client
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_invalid_blob_no_http_request(tmp_path: Path):
+    """Missing/invalid blob raises MissingBlobError BEFORE any HTTP call."""
+    import httpx
+
+    from one.providers.codex_responses import CodexResponsesAdapter, MissingBlobError
+
+    called = {"post": False, "stream": False}
+
+    class _SpyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *a, **kw):
+            called["post"] = True
+            raise RuntimeError("should not reach HTTP")
+
+        async def stream(self, *a, **kw):
+            called["stream"] = True
+            raise RuntimeError("should not reach HTTP")
+
+    original_client = httpx.AsyncClient
+    httpx.AsyncClient = _SpyClient
+    try:
+        adapter = CodexResponsesAdapter()
+        # Image ref pointing to a non-existent blob
+        image_refs = [{"blobHash": "nonexistent_blob_hash", "mime": "image/png"}]
+        with pytest.raises(MissingBlobError, match="missing or corrupt before HTTP"):
+            await adapter.chat(
+                api_key="dummy",
+                model="gpt-5.6-sol",
+                messages=[{"role": "user", "content": "hello"}],
+                thinking_level="medium",
+                images=image_refs,
+                storage_dir=str(tmp_path / "store"),
+            )
+        assert called["post"] is False, "POST should not be called"
+        assert called["stream"] is False, "stream should not be called"
+    finally:
+        httpx.AsyncClient = original_client
+
+
+# ---------------------------------------------------------------------------
+# Registry round-trip: built-in vision flag survives persist/reload;
+# persisted false does NOT downgrade built-in.
+# ---------------------------------------------------------------------------
+
+
+def test_registry_round_trip_preserves_vision_flag(tmp_path: Path):
+    """Persist then reload: gpt-5.6-sol keeps input_image=True."""
+    auth = AuthStorage.in_memory()
+    models_path = str(tmp_path / "models.json")
+    registry = ModelRegistry.create(auth, models_path)
+    # Persist with inputImage: true (simulating a login that writes the flag)
+    registry.persist_models("chatgpt", ["gpt-5.6-sol", "gpt-5.6-terra"])
+    # Reload from the persisted file
+    registry2 = ModelRegistry.create(auth, models_path)
+    sol = registry2.find("chatgpt", "gpt-5.6-sol")
+    assert sol is not None and sol.input_image is True
+    terra = registry2.find("chatgpt", "gpt-5.6-terra")
+    assert terra is not None and terra.input_image is True
+
+
+def test_persisted_false_does_not_downgrade_builtin_vision(tmp_path: Path):
+    """When models.json has inputImage: false, the builtin input_image=True wins."""
+    import json
+
+    auth = AuthStorage.in_memory()
+    models_path = str(tmp_path / "models.json")
+    # Pre-write models.json with inputImage: false for gpt-5.6-sol
+    data = {
+        "providers": {
+            "chatgpt": [
+                {"id": "gpt-5.6-sol", "reasoning": True, "inputImage": False},
+            ]
+        }
+    }
+    (tmp_path / "models.json").write_text(json.dumps(data))
+    # Create registry — builtin vision must NOT be downgraded.
+    registry = ModelRegistry.create(auth, models_path)
+    sol = registry.find("chatgpt", "gpt-5.6-sol")
+    assert sol is not None and sol.input_image is True
+
+
+def test_persisted_true_preserved(tmp_path: Path):
+    """When models.json has inputImage: true it stays true on reload."""
+    import json
+
+    auth = AuthStorage.in_memory()
+    models_path = str(tmp_path / "models.json")
+    data = {
+        "providers": {
+            "chatgpt": [
+                {"id": "gpt-5.6-sol", "reasoning": True, "inputImage": True},
+            ]
+        }
+    }
+    (tmp_path / "models.json").write_text(json.dumps(data))
+    registry = ModelRegistry.create(auth, models_path)
+    sol = registry.find("chatgpt", "gpt-5.6-sol")
+    assert sol is not None and sol.input_image is True

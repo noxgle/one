@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import itertools
 import json
 import os
 import re
@@ -772,7 +773,16 @@ class AgentSession:
                 val = emit_args.get(key)
                 if isinstance(val, str):
                     emit_args[key] = str(Path(val).name) or "image"
-        self._emit({"type": "tool_call_start", "tool": tool_name, "args": emit_args})
+        # Compute the effective timeout for the tool-call-start event so the
+        # TUI / RPC renderers can show it (per-call override > passed timeout
+        # > global default).  Only apply the global default when *timeout_sec*
+        # is not None — tools like spawn_subagent and ask_user are invoked
+        # with timeout_sec=None and run without a timeout; the TUI would
+        # otherwise show a misleading "(timeout 30s)".
+        effective_timeout = args.get("timeout") or timeout_sec
+        if effective_timeout is None and timeout_sec is not None:
+            effective_timeout = self.settings_manager.get_tool_timeout_sec()
+        self._emit({"type": "tool_call_start", "tool": tool_name, "args": emit_args, "effectiveTimeout": effective_timeout})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)
             if result.get("ok", True) is True:
@@ -1519,10 +1529,17 @@ class AgentSession:
             try:
                 self._emit({"type": "turn_start", "attempt": attempt + 1})
                 tool_results: list[dict[str, Any]] = []
-                max_tool_steps = max(1, self.settings_manager.get_tool_max_steps())
+                tool_max = self.settings_manager.get_tool_max_steps()
+                is_unlimited = tool_max == 0
                 tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
                 final_assistant: dict[str, Any] | None = None
-                for step in range(max_tool_steps):
+                # Unlimited mode (maxSteps=0): infinite iterator → loop only
+                # exits via break (abort, budget, finish, no-tool-call).
+                # Bounded mode (maxSteps>0): finite range → exits when exhausted.
+                step_iter: Any = (
+                    itertools.count() if is_unlimited else range(max(1, tool_max))
+                )
+                for step in step_iter:
                     if self._abort_requested:
                         final_assistant = self._abort_assistant_message()
                         break
@@ -1637,7 +1654,7 @@ class AgentSession:
                     final_assistant = assistant
                     break
 
-                if final_assistant is None:
+                if final_assistant is None and not is_unlimited:
                     final_assistant = {
                         "role": "assistant",
                         "content": [

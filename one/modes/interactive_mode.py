@@ -525,7 +525,7 @@ class InteractiveMode:
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort | /new\n"
                     "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]\n"
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model]] | /logout <provider>\n"
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>\n"
                     "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
@@ -962,11 +962,22 @@ class InteractiveMode:
                 continue
             if line.startswith("/retry "):
                 mode = line[len("/retry ") :].strip().lower()
-                if mode not in {"on", "off"}:
-                    print("Usage: /retry <on|off>")
+                if mode not in {"on", "off", "unlimited"}:
+                    print("Usage: /retry <on|off|unlimited>")
                     continue
-                session.set_auto_retry_enabled(mode == "on")
+                session.settings_manager.set_retry_mode(mode)
+                enabled = mode in ("on", "unlimited")
+                session.set_auto_retry_enabled(enabled)
                 print(f"Auto-retry set to {mode}.")
+                continue
+            if line.strip() == "/retry-cycle":
+                current = session.settings_manager.get_retry_mode()
+                cycle = {"off": "on", "on": "unlimited", "unlimited": "off"}
+                new_mode = cycle[current]
+                session.settings_manager.set_retry_mode(new_mode)
+                enabled = new_mode in ("on", "unlimited")
+                session.set_auto_retry_enabled(enabled)
+                print(f"Auto-retry set to {new_mode}.")
                 continue
             if line.startswith("/config"):
                 rest = line[len("/config") :].strip()
