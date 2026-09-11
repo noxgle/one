@@ -449,9 +449,15 @@ async def _run(argv: list[str]) -> int:
             ]
         except AttachmentValidationError as e:
             print(f"Invalid image: {e}")
+            await host.dispose()
+            if mcp_manager is not None:
+                await mcp_manager.close()
             return 2
         except Exception as e:  # noqa: BLE001
             print(f"Image import error: {e}")
+            await host.dispose()
+            if mcp_manager is not None:
+                await mcp_manager.close()
             return 2
 
     try:
@@ -503,8 +509,11 @@ async def _run(argv: list[str]) -> int:
         await interactive.run()
         return 0
     finally:
+        # Dispose the session runtime and close MCP to free all resources
+        # even when the mode path returns early.
         if mcp_manager is not None:
             await mcp_manager.close()
+        await host.dispose()
 
 
 async def _headless_approval_prompt(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:

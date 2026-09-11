@@ -29,6 +29,7 @@ from one.modes.run_mode import run_run_mode
 # Test data helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_png() -> bytes:
     """Minimal valid PNG (1×1 transparent pixel)."""
     sig = b"\x89PNG\r\n\x1a\n"
@@ -56,6 +57,84 @@ def _make_jpeg() -> bytes:
         b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x7b\x40"
         b"\xff\xd9"
     )
+
+
+# ---------------------------------------------------------------------------
+# Environment-scrubbing helpers for CLI subprocess tests (R3.2 isolation)
+# ---------------------------------------------------------------------------
+
+# Provider API-key environment variable names to strip from the inherited env.
+_PROVIDER_KEY_NAMES = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "COHERE_API_KEY",
+        "REPLICATE_API_TOKEN",
+        "PERPLEXITY_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "HUGGINGFACE_API_KEY",
+        "HUGGINGFACE_TOKEN",
+        "TOGETHER_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_API_KEY",
+    }
+)
+
+
+def _scrub_env(base_env: dict[str, str], tmp_dir: Path) -> dict[str, str]:
+    """Return a copy of *base_env* with provider API keys removed and
+    scratch agent-dir / Python path injected for fully isolated, reproducible
+    CLI subprocess execution.
+
+    This is the R3.2 isolation guarantee: no ambient credentials can leak
+    into the subprocess under test.  A deterministic ``OPENAI_API_KEY``
+    value is injected so the CLI reaches dispatch (rather than failing
+    early with ``Usage:``).
+    """
+    env = {k: v for k, v in base_env.items() if k not in _PROVIDER_KEY_NAMES}
+    agent_dir = tmp_dir / ".one" / "agent"
+    env["ONE_CODING_AGENT_DIR"] = str(agent_dir)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    # Inject a dummy key so the CLI reaches dispatch instead of failing
+    # early.  The actual LLM call will fail (401) but the structured JSON
+    # output is deterministic and contains the expected keys.
+    env["OPENAI_API_KEY"] = "sk-test-dummy"
+    return env
+
+
+def _run_cli(args: list[str], tmp_dir: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Run ``one`` as a subprocess with a scrubbed environment and ``--no-mcp``.
+
+    All CLI subprocess tests should use this helper instead of calling
+    ``subprocess.run`` directly so the isolation guarantees are uniform.
+
+    Isolation guarantees (R3.2):
+      - No inherited provider API keys (all known key env vars stripped).
+      - Scratch ``ONE_CODING_AGENT_DIR`` pointing into *tmp_dir*.
+      - ``--no-mcp`` always added to avoid MCP server spawning.
+      - Deterministic ``OPENAI_API_KEY`` value injected for reproducibility.
+
+    The ``--no-mcp`` flag is appended after *args so that subcommand parsing
+    (e.g. ``run``) correctly places it among the subcommand's own flags.
+    """
+    if env is None:
+        env = _scrub_env(dict(os.environ), tmp_dir)
+    return subprocess.run(
+        [sys.executable, "-m", "one.cli.main", *args, "--no-mcp"],
+        cwd=str(tmp_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -404,31 +483,38 @@ async def test_rpc_prompt_without_attachments_works(
 # ---------------------------------------------------------------------------
 # CLI subprocess: --image flag accepted and reaches run/dispatch
 # ---------------------------------------------------------------------------
+# All CLI subprocess tests use the isolated ``_run_cli`` helper which:
+#   - removes every provider API-key env var from the inherited environment
+#     (no inherited credentials leak into the subprocess)
+#   - sets scratch ONE_CODING_AGENT_DIR + PYTHONPATH under tmp_path
+#   - injects a deterministic OPENAI_API_KEY so the CLI reaches dispatch
+#   - always passes --no-mcp
+# The LLM call will fail (401) in CI but the structured JSON output is
+# deterministic and contains the expected keys, making results reproducible.
+# ---------------------------------------------------------------------------
 
 
 def test_cli_run_with_image_flag_reaches_dispatch(tmp_path: Path, png_path: Path):
-    """--image flag in `one run` is accepted by argparse and reaches dispatch (not a usage error)."""
-    env = os.environ.copy()
-    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    """--image flag in ``one run`` is accepted by argparse and reaches dispatch.
 
-    res = subprocess.run(
+    The subprocess runs with a scrubbed environment (no inherited API keys),
+    scratch ``ONE_CODING_AGENT_DIR``, ``--no-mcp``, and a dummy API key.
+    The LLM call fails with 401 but produces structured JSON with the
+    expected keys -- proving the CLI accepted the flag and dispatched
+    without crashing.
+    """
+    res = _run_cli(
         [
-            sys.executable, "-m", "one.cli.main",
             "run", "--json", "--image", str(png_path),
             "task",
         ],
-        cwd=str(tmp_path),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+        tmp_path,
     )
-    # Not a usage error (returncode 2); dispatch reached the run mode.
-    assert res.returncode != 2
+    # Not a usage error (returncode 2); the CLI accepted the --image flag
+    # and reached dispatch.
+    assert res.returncode != 2, f"CLI crashed: {res.stderr}"
     assert "Usage:" not in res.stdout + res.stderr
-    # Must produce JSON output (even if failed at network level).
+    # Must produce JSON output with the expected keys.
     data = json.loads(res.stdout)
     assert "goalSuccess" in data
     assert "finished" in data
@@ -437,22 +523,12 @@ def test_cli_run_with_image_flag_reaches_dispatch(tmp_path: Path, png_path: Path
 
 def test_cli_run_with_image_flag_nonexistent_returns_error(tmp_path: Path, png_path: Path):
     """--image with a non-existent file returns a usage error."""
-    env = os.environ.copy()
-    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
-
-    res = subprocess.run(
+    res = _run_cli(
         [
-            sys.executable, "-m", "one.cli.main",
             "--print", "--image", "/nonexistent/image.png",
             "hello",
         ],
-        cwd=str(tmp_path),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+        tmp_path,
     )
     assert res.returncode == 2
     assert "Invalid image" in res.stdout
@@ -460,26 +536,16 @@ def test_cli_run_with_image_flag_nonexistent_returns_error(tmp_path: Path, png_p
 
 def test_cli_run_with_multiple_images_reaches_dispatch(tmp_path: Path, png_path: Path, jpg_path: Path):
     """Multiple --image flags accepted."""
-    env = os.environ.copy()
-    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
-
-    res = subprocess.run(
+    res = _run_cli(
         [
-            sys.executable, "-m", "one.cli.main",
             "run", "--json",
             "--image", str(png_path),
             "--image", str(jpg_path),
             "task",
         ],
-        cwd=str(tmp_path),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+        tmp_path,
     )
-    assert res.returncode != 2
+    assert res.returncode != 2, f"CLI crashed: {res.stderr}"
     assert "Usage:" not in res.stdout + res.stderr
     data = json.loads(res.stdout)
     assert "goalSuccess" in data
@@ -508,3 +574,109 @@ def test_no_source_path_leaked_in_attachment_ref(tmp_path: Path, png_path: Path)
     for key in d:
         assert "nonexistent" not in key
         assert "png" not in key.lower() or key == "mime"  # mime is "image/png" not path
+
+
+# ---------------------------------------------------------------------------
+# RPC batch rollback: has_blob-gated rollback preserves pre-existing blobs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rpc_batch_rollback_preserves_pre_existing_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    png_path: Path,
+):
+    """RPC prompt with [existing_blob, missing_path] preserves the pre-existing blob after failure.
+
+    The first image is imported (creating a blob), then a missing second image
+    triggers an ``AttachmentValidationError``.  The rollback must remove ONLY
+    the blob created during this transaction — not the pre-existing blob.
+    """
+    session = _mk_rpc_session(tmp_path)
+    storage_dir = str(tmp_path / "store")
+
+    # Pre-import the image so its blob already exists.
+    pre_ref = import_image(storage_dir, str(png_path))
+    pre_blob_path = os.path.join(storage_dir, "blobs", pre_ref.blob_hash)
+    assert os.path.exists(pre_blob_path), "pre-existing blob must exist"
+
+    # Now send a batch: [existing_blob_path, missing_path].
+    # The existing blob is found by has_blob, but the missing path raises.
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({
+            "type": "prompt", "id": "r1",
+            "message": "batch test",
+            "attachments": [
+                str(png_path),          # already imported → has_blob returns True
+                "/nonexistent/file.png",  # triggers AttachmentValidationError
+            ],
+        })],
+    )
+    r = _resp(responses, "prompt", "r1")
+    assert r["success"] is False
+    assert "Invalid attachment" in r["error"]
+
+    # The pre-existing blob must STILL exist after the failure.
+    assert os.path.exists(pre_blob_path), (
+        "rollback must NOT remove pre-existing (has_blob-gated) blobs"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rpc_batch_rollback_removes_newly_created_blobs_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    png_path: Path,
+):
+    """RPC prompt with [missing, missing] — no blobs remain after rollback."""
+    session = _mk_rpc_session(tmp_path)
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({
+            "type": "prompt", "id": "r2",
+            "message": "all missing",
+            "attachments": [
+                "/nonexistent/a.png",
+                "/nonexistent/b.png",
+            ],
+        })],
+    )
+    r = _resp(responses, "prompt", "r2")
+    assert r["success"] is False
+
+    # No blobs should exist in the store (dir may not even have been created
+    # if the first file failed before _ensure_blob_dir ran).
+    blob_dir = os.path.join(str(tmp_path / "store" / "blobs"))
+    if os.path.isdir(blob_dir):
+        blob_files = [f for f in os.listdir(blob_dir) if not f.endswith(".tmp")]
+        assert len(blob_files) == 0, "rollback should have removed all newly created blobs"
+
+
+# ---------------------------------------------------------------------------
+# Print mode image-only rejection (R2.1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_print_mode_image_only_returns_error(tmp_path: Path, png_path: Path, capsys):
+    """Print mode with only images (no text) must return error code 1."""
+    storage_dir = str(tmp_path / "store")
+    image_refs = [import_image(storage_dir, str(png_path)).__dict__]
+
+    responses = ['{"tool":"finish","args":{"summary":"done","goal_success":true}}', "DONE"]
+    host = _mk_image_session(tmp_path, responses)
+    code = await run_print_mode(host, {
+        "mode": "text",
+        "messages": [],
+        "initialMessage": None,
+        "images": image_refs,
+    })
+    # Should return non-zero for image-only input
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "Error" in captured.err or "Error" in captured.out

@@ -9,6 +9,23 @@ from one.core.auth_storage import AuthStorage
 from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_private_file, load_json_text_safe
 from one.core.types import ModelInfo
 
+
+def _strict_bool(value: Any) -> bool:
+    """Strictly coerce *value* to bool — no string coercion.
+
+    Native ``bool`` is returned as-is.  ``int`` 1 → True, 0 → False.
+    ``None`` → False.  Every other type (including any non-empty string
+    such as ``"false"`` or ``"true"``) → False.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value == 1
+    if value is None:
+        return False
+    # Everything else (str, list, object, etc.) → False
+    return False
+
 BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("openai", "gpt-4.1", reasoning=True, context_window=1_000_000, input_image=True),
     ModelInfo("openai", "gpt-4o", reasoning=True, context_window=128_000, input_image=True),
@@ -115,7 +132,7 @@ class ModelRegistry:
                                     context_window=model.get("contextWindow"),
                                     base_url=model.get("url") or model.get("baseUrl"),
                                     tool_parser=model.get("toolParser"),
-                                    input_image=bool(model.get("inputImage") or model.get("input_image")),
+                                    input_image=_strict_bool(model.get("inputImage") or model.get("input_image")),
                                 )
                                 )
             else:
@@ -293,6 +310,9 @@ class ModelRegistry:
         Entries may be plain ids or ``{"id", "contextWindow"}`` dicts. Existing
         registered entries without a context window get enriched when a real
         one arrives (e.g. on refresh).
+
+        When a fetched model id matches a builtin that declares
+        ``input_image=True``, the builtin capability is preserved.
         """
         added = 0
         for mid, window in self._normalize_entries(model_ids):
@@ -300,7 +320,20 @@ class ModelRegistry:
             if existing is not None:
                 if not existing.context_window and window:
                     existing.context_window = window
+                # Preserve builtin vision capability when the id matches.
+                builtin = next(
+                    (b for b in BUILTIN_MODELS if b.provider == provider and b.id == mid),
+                    None,
+                )
+                if builtin and builtin.input_image and not existing.input_image:
+                    existing.input_image = True
                 continue
+            # Check if this is a known vision model from builtins with the same id.
+            builtin = next(
+                (b for b in BUILTIN_MODELS if b.provider == provider and b.id == mid),
+                None,
+            )
+            has_vision = builtin.input_image if builtin else False
             self._models.append(
                 ModelInfo(
                     provider=provider,
@@ -309,7 +342,7 @@ class ModelRegistry:
                     context_window=window,
                     base_url=None,
                     tool_parser=None,
-                    input_image=False,
+                    input_image=has_vision,
                 )
             )
             added += 1
@@ -322,6 +355,9 @@ class ModelRegistry:
         entries keep their fields (url/toolParser/contextWindow); only missing
         ids are added with defaults, and a known contextWindow is filled in
         when the stored entry lacks one. Creates the file when absent.
+
+        When a model is known to support ``input_image`` (via builtins or
+        previously persisted), the stored entry keeps ``"inputImage": true``.
 
         Raises RuntimeError if the existing models.json is known to be malformed.
         """
@@ -362,6 +398,11 @@ class ModelRegistry:
             entry = existing.setdefault(mid, {"id": mid, "reasoning": True, "inputImage": False})
             if window and not entry.get("contextWindow"):
                 entry["contextWindow"] = window
+            # Preserve vision capability: if the in-memory model has input_image=True
+            # (from builtins or prior login), mark it in the persisted entry.
+            mem_model = self.find(provider, mid)
+            if mem_model and mem_model.input_image:
+                entry["inputImage"] = True
         providers[provider] = list(existing.values())
         atomic_write_text(self._models_path, json.dumps(data, indent=2) + "\n")
         # After a successful write the file is known-good again.

@@ -7,25 +7,38 @@ from typing import Any
 
 import httpx
 
+from one.core.attachments import AttachmentStorageError
+
 from .base import ChatResult, ProviderAdapter
+
+
+class MissingBlobError(AttachmentStorageError):
+    """Raised when a required image blob is missing or corrupt before HTTP."""
 
 
 class GeminiAdapter(ProviderAdapter):
     name = "gemini"
 
-    def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any] | None:
+    def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
         """Build a Gemini ``inline_data`` part for an image.
 
         *storage_dir* is resolved from the session context — never from the
         image_ref itself so that the persisted JSONL contains no internal paths.
+
+        Raises ``MissingBlobError`` when the blob is missing, corrupt, or
+        unreadable — the provider never silently drops an image.
         """
         blob_hash = image_ref.get("blobHash") or image_ref.get("blob_hash")
         mime = image_ref.get("mime", "image/png")
         if not blob_hash or not storage_dir:
-            return None
+            raise MissingBlobError(
+                f"image reference missing blob_hash/storage_dir: {image_ref}"
+            )
         raw = self._read_blob(storage_dir, blob_hash)
         if raw is None:
-            return None
+            raise MissingBlobError(
+                f"required image blob missing or corrupt: {blob_hash}"
+            )
         b64 = base64.b64encode(raw).decode("ascii")
         return {"inline_data": {"data": b64, "mime_type": mime}}
 
@@ -40,7 +53,11 @@ class GeminiAdapter(ProviderAdapter):
         self, role: str, content: Any, images: list[dict[str, Any]] | None,
         storage_dir: str,
     ) -> list[dict[str, Any]]:
-        """Build parts list for Gemini: text + inline_data images."""
+        """Build parts list for Gemini: text + inline_data images.
+
+        Note: _build_image_part now raises ``MissingBlobError`` on failure,
+        so this method propagates that exception when blobs are corrupt.
+        """
         parts: list[dict[str, Any]] = []
         if isinstance(content, str) and content.strip():
             parts.append({"text": content.strip()})
@@ -55,8 +72,7 @@ class GeminiAdapter(ProviderAdapter):
         if images:
             for img in images:
                 part = self._build_image_part(img, storage_dir)
-                if part:
-                    parts.append(part)
+                parts.append(part)
         return parts if parts else [{"text": ""}]
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
@@ -98,6 +114,19 @@ class GeminiAdapter(ProviderAdapter):
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
     ) -> ChatResult:
+        # Validate all image blobs are present BEFORE building payload / making HTTP.
+        if images:
+            for img in images:
+                blob_hash = img.get("blobHash") or img.get("blob_hash")
+                if not blob_hash:
+                    raise MissingBlobError(
+                        f"image reference missing blob_hash: {img}"
+                    )
+                raw = self._read_blob(storage_dir, blob_hash)
+                if raw is None:
+                    raise MissingBlobError(
+                        f"required image blob missing or corrupt before HTTP: {blob_hash}"
+                    )
         # Attach images to the last user message (current turn).
         last_user_idx = -1
         for i, m in enumerate(messages):

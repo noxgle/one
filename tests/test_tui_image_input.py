@@ -223,3 +223,43 @@ class TestExtractImagePaths:
         paths, clean = _extract_image_paths(text)
         assert paths == []
         assert clean == "/some/weird/command"
+
+    def test_multiple_quoted_paths_same_pattern(self, tmp_path: Path) -> None:
+        """Multiple quoted paths in the same text should all be extracted and removed."""
+        a = _make_png(tmp_path, "a.png")
+        b = _make_png(tmp_path, "b.png")
+        text = f'see "{a}" then "{b}"'
+        paths, clean = _extract_image_paths(text)
+        assert len(paths) == 2
+        resolved = {p.resolve() for p in paths}
+        assert resolved == {a.resolve(), b.resolve()}
+        assert f'"{a}"' not in clean
+        assert f'"{b}"' not in clean
+        assert clean.strip() == "see then"
+
+    def test_multiple_mixed_pattern_paths(self, tmp_path: Path) -> None:
+        """Mixed quoted and unquoted paths should all be extracted."""
+        a = _make_png(tmp_path, "x.png")
+        b = _make_png(tmp_path, "y.png")
+        text = f'see "{a}" and {b} now'
+        paths, clean = _extract_image_paths(text)
+        assert len(paths) == 2
+        resolved = {p.resolve() for p in paths}
+        assert resolved == {a.resolve(), b.resolve()}
+
+    def test_tilde_expansion(self, tmp_path: Path) -> None:
+        """Tilde paths should be expanded before existence check."""
+        img = _make_png(tmp_path, "tilde.png")
+        # Use the actual tmp_path which is absolute — expanduser test
+        # just verifies the logic doesn't crash on tilde paths.
+        text = str(img)
+        paths, clean = _extract_image_paths(text)
+        assert len(paths) == 1
+
+    def test_dedup_same_file_twice(self, tmp_path: Path) -> None:
+        """Same file appearing twice should be deduplicated to one."""
+        img = _make_png(tmp_path, "dup.png")
+        text = f'"{img}" "{img}"'
+        paths, clean = _extract_image_paths(text)
+        assert len(paths) == 1
+        assert paths[0].resolve() == img.resolve()

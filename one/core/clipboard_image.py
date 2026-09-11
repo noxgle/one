@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import uuid
+import tempfile
 from pathlib import Path
 
 from one.core.attachments import (
@@ -32,6 +32,22 @@ from one.core.attachments import (
 # ---------------------------------------------------------------------------
 
 _CLIPBOARD_IMAGE_MAX = 50 * 1024 * 1024  # 50 MB raw bytes
+
+# ---------------------------------------------------------------------------
+# Platform helpers (mirror persistence.py conventions)
+# ---------------------------------------------------------------------------
+
+_IS_POSIX = os.name == "posix"
+
+
+def _chmod(path: str, mode: int) -> None:
+    """Chmod *path* when possible; silently skip on non-POSIX."""
+    if _IS_POSIX:
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Platform detection
@@ -208,26 +224,45 @@ def is_clipboard_image_available() -> bool:
 # ---------------------------------------------------------------------------
 
 def clipboard_image_to_temp_path(storage_dir: str, raw: bytes) -> str | None:
-    """Write clipboard image bytes to a temp file in the blob store and
-    return the path, or ``None`` on error.
+    """Write clipboard image bytes to an exclusive temp file in the blob store
+    and return the path, or ``None`` on error.
 
-    The file is named ``clipboard_<uuid>.tmp`` (UUID-based for collision
-    resistance) and lives inside the ``blobs/`` directory so it is cleaned
-    up by the existing orphan cleanup routine.
+    Uses ``tempfile.mkstemp`` (O_EXCL) for exclusive file creation with
+    private mode 0o600 (POSIX).  The file lives inside the ``blobs/``
+    directory so it is cleaned up by the existing orphan cleanup routine.
     """
     if not raw:
         return None
 
-    import time
-
-    timestamp = int(time.time() * 1000)
-    filename = f"clipboard_{uuid.uuid4().hex}_{timestamp}.tmp"
     blob_dir = Path(storage_dir) / "blobs"
     blob_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = blob_dir / filename
+    _chmod(str(blob_dir), 0o700)
 
+    fd = None
+    tmp_path: Path | None = None
     try:
-        tmp_path.write_bytes(raw)
-        return str(tmp_path)
+        fd, tmp_path_str = tempfile.mkstemp(
+            dir=str(blob_dir),
+            prefix=".clipboard_",
+            suffix=".tmp",
+        )
+        tmp_path = Path(tmp_path_str)
+        os.write(fd, raw)
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        _chmod(tmp_path_str, 0o600)
+        return tmp_path_str
     except Exception:
+        # Clean up temp on any failure.
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return None

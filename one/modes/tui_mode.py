@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -371,27 +372,25 @@ def _extract_image_paths(text: str) -> tuple[list[Path], str]:
        or ``~user/``).
 
     The returned *clean_text* has all matched paths removed.
+
+    Matching strategy: collect all (start, end) match positions from every
+    pattern, keep only those pointing to existing files, deduplicate, then
+    rebuild the text in a single pass removing all matched character positions.
     """
+    # Collect all regex matches as (start, end, group1_text).
+    raw_matches: list[tuple[int, int, str]] = []
 
-    paths: list[Path] = []
-    result = text
-
-    # Pattern 1-3: quoted / bracketed paths — single pass for each.
+    # Pattern 1-3: quoted / bracketed paths.
     for pattern in [
         r'''(?<![\\])"([^"]*\.(?:png|jpg|jpeg|webp))"(?![^<]*>)''',
         r"(?<![\\])'([^']*\.(?:png|jpg|jpeg|webp))'(?![^<]*>)",
         r"(?<![\\])`([^`]*\.(?:png|jpg|jpeg|webp))`(?!`)",
         r"<([^>]*\.(?:png|jpg|jpeg|webp))>",
     ]:
-        for m in re.finditer(pattern, result, re.IGNORECASE):
-            p = Path(m.group(1))
-            if p.exists() and p.is_file():
-                paths.append(p)
-                # Remove the quoted/bracketed match from result.
-                result = result[: m.start()] + result[m.end() :]
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            raw_matches.append((m.start(), m.end(), m.group(1)))
 
-    # Pattern 4: unquoted paths — must start with /, ./, ~/ or ~user/.
-    # Only match paths at word boundaries that look like file paths.
+    # Pattern 4: unquoted paths.
     unquoted_pat = re.compile(
         r"""(?<![a-zA-Z0-9_./\\])"""  # not preceded by path chars
         r"""(/(?:[^ \t\n\r\f\v<>\"'`]*\.(?:png|jpg|jpeg|webp))"""  # /...ext
@@ -401,12 +400,15 @@ def _extract_image_paths(text: str) -> tuple[list[Path], str]:
         r"""~(?:[^ \t\n\r\f\v<>\"'`]*/)?[^ \t\n\r\f\v<>\"'`]*\.(?:png|jpg|jpeg|webp))"""  # ~/... or ~user/...ext
         r"""(?![a-zA-Z0-9_.])"""  # not followed by path chars
     )
-    for m in unquoted_pat.finditer(result):
-        p = Path(m.group(1))
-        if p.exists() and p.is_file():
-            paths.append(p)
-            # Remove from result.
-            result = result[: m.start()] + result[m.end() :]
+    for m in unquoted_pat.finditer(text):
+        raw_matches.append((m.start(), m.end(), m.group(1)))
+
+    # Resolve each candidate and keep only existing files, with path expansion.
+    paths: list[Path] = []
+    for _start, _end, group_text in raw_matches:
+        candidate = Path(os.path.expanduser(group_text))
+        if candidate.exists() and candidate.is_file():
+            paths.append(candidate)
 
     # Deduplicate while preserving order.
     seen: set[str] = set()
@@ -417,7 +419,24 @@ def _extract_image_paths(text: str) -> tuple[list[Path], str]:
             seen.add(k)
             unique.append(p)
 
-    return unique, result.strip()
+    # If no image paths found, return original text stripped.
+    if not unique:
+        return [], text.strip()
+
+    # Build a set of character positions to remove (handles dedup/overlap).
+    path_set = {str(p.resolve()) for p in unique}
+    to_remove: set[int] = set()
+    for _start, _end, group_text in raw_matches:
+        candidate = Path(os.path.expanduser(group_text))
+        if str(candidate.resolve()) in path_set:
+            for i in range(_start, _end):
+                to_remove.add(i)
+
+    # Rebuild clean text by skipping removed positions.
+    clean = "".join(ch for i, ch in enumerate(text) if i not in to_remove)
+    clean_text = " ".join(clean.split())
+
+    return unique, clean_text
 
 
 if TEXTUAL_AVAILABLE:
@@ -2002,6 +2021,16 @@ if TEXTUAL_AVAILABLE:
             if not clean_text and not image_paths and not file_image_refs:
                 return
 
+            # Centralized image-count validation (file + clipboard).
+            if image_paths or file_image_refs:
+                from one.core.attachments import AttachmentValidationError, validate_image_count
+
+                try:
+                    validate_image_count(len(image_paths), clipboard_count=len(file_image_refs))
+                except AttachmentValidationError as e:
+                    self._write(str(e), "error")
+                    return
+
             # Import file-path-extracted images.
             if image_paths:
                 try:
@@ -2132,7 +2161,9 @@ if TEXTUAL_AVAILABLE:
 
         def action_paste_image(self) -> None:
             """Acquire image bytes from the system clipboard and queue for import."""
-            if "one.core.clipboard_image" not in dir(__import__("sys").modules or {}):
+            try:
+                from one.core.clipboard_image import acquire_clipboard_image  # noqa: F401
+            except ImportError:
                 self._toast("No clipboard-image backend available", severity="warning")
                 return
             from one.core.clipboard_image import acquire_clipboard_image

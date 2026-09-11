@@ -226,3 +226,70 @@ def test_gemini_attaches_to_last_user_message() -> None:
     parts = adapter._resolve_message_parts("user", "current", [{"blob_hash": "abc"}], "/tmp")
     assert parts[0] == {"text": "current"}
     assert "inline_data" in parts[1]
+
+
+# ---------------------------------------------------------------------------
+# Failed read_image: path sanitisation in events + messages (regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_image_tool_error_sanitises_path_in_events_and_messages(
+    tmp_path: Path,
+) -> None:
+    """Failed ``read_image`` must not leak the full source path.
+
+    Assertions:
+    - no full source path in persisted JSONL messages
+    - ``tool_call_error`` event has sanitised ``args`` / ``error``
+    - ``tool_call_end`` result has sanitised ``args``
+    - ``turn_end.toolResults`` has sanitised ``error``
+    - only the basename appears in all of the above.
+    """
+    provider = _CaptureProvider(
+        [
+            json.dumps({"tool": "read_image", "args": {"path": "/absolute/missing.png"}}),
+        ]
+    )
+    session = _make_session(tmp_path, provider, input_image=True)
+    events: list[dict[str, Any]] = []
+    session.subscribe(events.append)
+
+    await session.prompt("describe it")
+
+    full_path = str(tmp_path / "absolute" / "missing.png")
+    basename = "missing.png"
+
+    # ── JSONL messages must not contain the full path ───────────────────────
+    all_messages_dump = json.dumps(session.messages, ensure_ascii=False)
+    assert full_path not in all_messages_dump, "full path must not appear in JSONL messages"
+
+    # ── tool_call_error event ───────────────────────────────────────────────
+    error_events = [e for e in events if e.get("type") == "tool_call_error"]
+    assert len(error_events) >= 1, "tool_call_error event must be emitted for failed read_image"
+    err_ev = error_events[0]
+    assert err_ev.get("tool") == "read_image"
+    ev_args = err_ev.get("args", {})
+    assert full_path not in json.dumps(ev_args), "tool_call_error args must be sanitised"
+    # The basename should appear in the args instead.
+    assert basename in str(ev_args.get("path", "")), "basename must replace full path in event args"
+    # Error text must also be sanitised.
+    assert full_path not in str(err_ev.get("error", "")), "tool_call_error error must not contain full path"
+
+    # ── tool_call_end event ─────────────────────────────────────────────────
+    end_events = [e for e in events if e.get("type") == "tool_call_end"]
+    assert len(end_events) >= 1, "tool_call_end event must be emitted"
+    end_result = end_events[0].get("result", {})
+    assert full_path not in json.dumps(end_result), "tool_call_end result must be sanitised"
+
+    # ── turn_end.toolResults ────────────────────────────────────────────────
+    turn_end_events = [e for e in events if e.get("type") == "turn_end"]
+    assert len(turn_end_events) >= 1, "turn_end event must be emitted"
+    turn_tool_results = turn_end_events[0].get("toolResults", [])
+    assert len(turn_tool_results) >= 1, "toolResults must contain the failed tool payload"
+    tr = turn_tool_results[0]
+    assert full_path not in json.dumps(tr), "turn_end.toolResults must not contain full path"
+    # The error in toolResults should only have the basename.
+    if tr.get("error"):
+        assert full_path not in str(tr["error"]), "toolResults error must be sanitised"
+        assert basename in str(tr.get("args", {})), "toolResults args must contain basename"

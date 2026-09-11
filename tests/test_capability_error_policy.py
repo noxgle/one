@@ -258,3 +258,210 @@ async def test_model_with_input_image_support_passes_check(tmp_path: Path, png_p
     # Should NOT raise; provider must be called.
     assert session.providers["openai"].chat_call_count >= 1
     assert session.providers["openai"].captured[0]["images"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Cooperative mode: state reset + subsequent prompt (regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cooperation_mode_capability_error_resets_state_and_allows_subsequent_prompt(
+    tmp_path: Path, png_path: Path
+):
+    """Cooperation mode: after _CapabilityErrorCooperative the session is fully reset.
+
+    Asserts:
+    - `_is_streaming` is ``False`` after the exception
+    - an ``agent_end`` event was emitted
+    - transient ``_images`` / ``_tool_images`` are cleared
+    - a subsequent ``prompt()`` with a text-only provider completes successfully.
+    """
+
+    async def dummy_approval(tool: str, args: dict[str, Any]) -> tuple[bool, str]:
+        return (True, "")
+
+    session = _make_image_disabled_session(tmp_path, approval_callback=dummy_approval)
+    events: list[dict[str, Any]] = []
+    session.subscribe(events.append)
+
+    ref = import_image(str(tmp_path / "store"), str(png_path))
+    image_refs = [ref.__dict__]
+
+    with pytest.raises(_CapabilityErrorCooperative, match="does not support image input"):
+        await session.prompt("look at this", images=image_refs)
+
+    # ── State reset assertions ──────────────────────────────────────────────
+    assert session._is_streaming is False, "streaming flag must be cleared after cooperative error"
+    assert session._images is None, "_images must be None after cooperative error"
+    assert session._tool_images == [], "_tool_images must be empty after cooperative error"
+
+    # ── agent_end event ─────────────────────────────────────────────────────
+    agent_end_events = [e for e in events if e.get("type") == "agent_end"]
+    assert len(agent_end_events) == 1, "exactly one agent_end event should be emitted"
+
+    # ── Subsequent prompt succeeds ──────────────────────────────────────────
+    session.providers = {"openai": _CaptureProvider()}
+    await session.prompt("hello from reset session")
+    assert session.providers["openai"].chat_call_count >= 1
+    # Session should be back to non-streaming.
+    assert session._is_streaming is False
+
+
+# ---------------------------------------------------------------------------
+# Fake adapter without images param → explicit capability error
+# ---------------------------------------------------------------------------
+
+
+class _NoImagesAdapter:
+    """Provider adapter whose chat() signature deliberately lacks 'images'."""
+
+    def __init__(self) -> None:
+        self.chat_call_count = 0
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        storage_dir: str = "",
+    ):
+        self.chat_call_count += 1
+        from one.providers.base import ChatResult
+        return ChatResult(text="done", raw={}, usage={}, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_fake_adapter_without_images_param_raises_capability_error(
+    tmp_path: Path, png_path: Path
+):
+    """Model with input_image=True but adapter signature lacks 'images' → explicit
+    _CapabilityError (autonomous) or _CapabilityErrorCooperative (cooperation).
+
+    This verifies the fix: images are never silently dropped — the caller gets
+    a visible capability-style error instead of a text-only request with no image.
+    """
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    # Model declares input_image=True (vision-capable model)
+    model = ModelInfo(provider="openai", id="gpt-4o", input_image=True)
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session_manager = SessionManager.in_memory(str(tmp_path))
+    session = AgentSession(
+        session_manager, settings, registry, _FakeLoader(),
+        model, "medium", storage_dir=str(tmp_path / "store"),
+    )
+
+    ref = import_image(str(tmp_path / "store"), str(png_path))
+    image_refs = [ref.__dict__]
+
+    # Replace with adapter that lacks 'images' in its chat signature
+    no_images_provider = _NoImagesAdapter()
+    session.providers = {"openai": no_images_provider}
+
+    await session.prompt("look at this", images=image_refs)
+
+    # Provider must NOT have been called — images were dropped at the capability gate
+    assert no_images_provider.chat_call_count == 0
+
+    # The session messages must contain an assistant error response.
+    assistant_msgs = [m for m in session.messages if m.get("role") == "assistant"]
+    assert len(assistant_msgs) >= 1
+    last_assistant = assistant_msgs[-1]
+    assert last_assistant.get("stopReason") == "unsupported_vision"
+    assert "does not support image input" in str(last_assistant.get("content", "")).lower()
+
+
+# ---------------------------------------------------------------------------
+# Codex adapter rejects images
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_rejects_images(tmp_path: Path, png_path: Path):
+    """Codex adapter raises UnsupportedImageError when images are present."""
+    from one.providers.codex_responses import (
+        CodexResponsesAdapter,
+        UnsupportedImageError,
+    )
+
+    adapter = CodexResponsesAdapter()
+    ref = import_image(str(tmp_path / "store"), str(png_path))
+    image_refs = [ref.__dict__]
+    with pytest.raises(UnsupportedImageError, match="not supported"):
+        await adapter.chat(
+            api_key="dummy",
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hello"}],
+            thinking_level="medium",
+            images=image_refs,
+            storage_dir=str(tmp_path / "store"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_works_without_images(tmp_path: Path):
+    """Codex adapter works normally when no images are present."""
+    from one.providers.codex_responses import CodexResponsesAdapter
+
+    class _Resp:
+        status_code = 200
+
+        @property
+        def is_error(self):
+            return False
+
+        def json(self):
+            return {
+                "status": "completed",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+                "usage": {},
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *a, **kw):
+            return _Resp()
+
+        async def stream(self, *a, **kw):
+            class _Ctx:
+                @property
+                def is_error(self):
+                    return False
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *args):
+                    pass
+
+                async def aiter_lines(self):
+                    yield 'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{}}}'
+                    yield "data: [DONE]"
+            return _Ctx()
+
+    import httpx
+    original_client = httpx.AsyncClient
+    httpx.AsyncClient = _Client
+    try:
+        adapter = CodexResponsesAdapter()
+        result = await adapter.chat(
+            api_key="dummy",
+            model="gpt-4o",
+            messages=[{"role": "system", "content": "test"}, {"role": "user", "content": "hello"}],
+            thinking_level="medium",
+        )
+        assert result.text == "ok"
+    finally:
+        httpx.AsyncClient = original_client

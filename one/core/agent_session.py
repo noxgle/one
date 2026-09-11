@@ -141,8 +141,10 @@ class AgentSession:
         # creating a ./blobs directory in the workspace.
         if storage_dir:
             self._storage_dir = storage_dir
+            self._owns_temp_dir = False
         else:
             self._storage_dir = tempfile.mkdtemp(prefix="one-blobs-")
+            self._owns_temp_dir = True
         self._images: list[dict[str, Any]] | None = None
         self._tool_images: list[dict[str, Any]] = []
         self._active_chat_tasks: set[asyncio.Task] = set()
@@ -559,6 +561,15 @@ class AgentSession:
                 msg_payload["fullOutputPath"] = payload.get("fullOutputPath")
         else:
             msg_payload["error"] = payload.get("error")
+            # Sanitise read_image source paths in error diagnostics: replace
+            # absolute paths with just the basename so the full path never
+            # leaks into JSONL / toolResult messages / events.
+            if msg_payload.get("tool") == "read_image" and isinstance(msg_payload["error"], str):
+                for key in ("path", "file"):
+                    val = payload.get("args", {}).get(key)
+                    if isinstance(val, str):
+                        basename = str(Path(val).name) or "image"
+                        msg_payload["error"] = msg_payload["error"].replace(val, basename)
             # Preserve diagnostic text from the raw payload even when error is
             # None — e.g. a failed subagent carries summary / output / content.
             if msg_payload["error"] is None:
@@ -852,7 +863,22 @@ class AgentSession:
                     "error": error_text,
                     "errorType": e.__class__.__name__,
                 }
-                self._emit({"type": "tool_call_error", "tool": tool_name, "args": args, "error": error_text})
+                # Sanitise read_image paths in tool_call_error event.
+                error_event_args = args
+                if tool_name == "read_image":
+                    error_event_args = dict(args)
+                    for k in ("path", "file"):
+                        v = error_event_args.get(k)
+                        if isinstance(v, str):
+                            error_event_args[k] = str(Path(v).name) or "image"
+                error_event_text = error_text
+                if tool_name == "read_image" and isinstance(error_event_text, str):
+                    for k in ("path", "file"):
+                        v = args.get(k)
+                        if isinstance(v, str):
+                            basename = str(Path(v).name) or "image"
+                            error_event_text = error_event_text.replace(v, basename)
+                self._emit({"type": "tool_call_error", "tool": tool_name, "args": error_event_args, "error": error_event_text})
 
         message_payload = self._build_tool_result_message_payload(payload)
         msg = {
@@ -1376,6 +1402,12 @@ class AgentSession:
         # Combines explicit prompt images and `read_image` tool results.
         images = self._all_images()
         sig = inspect.signature(provider.chat)
+        if images and "images" not in sig.parameters:
+            # Adapter cannot accept images — raise explicit capability error
+            # instead of silently dropping them.
+            raise _CapabilityError(
+                f"Model '{self.model.id}' does not support image input"
+            )
         if images and "images" in sig.parameters:
             chat_kwargs["images"] = images
         # Pass storage_dir so providers can resolve blobs without leaking paths.
@@ -1459,10 +1491,10 @@ class AgentSession:
             if not behavior:
                 raise RuntimeError("streamingBehavior is required while streaming")
             if behavior == "steer":
-                await self.steer(text)
+                await self.steer(text, images=images)
                 return
             if behavior == "followUp":
-                await self.follow_up(text)
+                await self.follow_up(text, images=images)
                 return
             raise RuntimeError("Invalid streamingBehavior")
 
@@ -1691,6 +1723,12 @@ class AgentSession:
                     # Cooperation mode: do NOT cache an assistant error message.
                     # The caller (TUI / RPC / CLI) renders the error and offers
                     # the user a way to switch models.
+                    # Reset streaming state and clear transient image refs so
+                    # the session is ready for the next prompt.
+                    self._is_streaming = False
+                    self._images = None
+                    self._tool_images = []
+                    self._emit({"type": "agent_end", "messages": [user_msg]})
                     raise _CapabilityErrorCooperative(str(e)) from e
                 # Autonomous mode: emit a controlled assistant message.
                 error_msg = {
@@ -1849,13 +1887,17 @@ class AgentSession:
             self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
             await self.prompt(msg)
 
-    async def steer(self, text: str) -> None:
+    async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> None:
         """Queue a steering message. Text-only; images are not supported."""
+        if images:
+            raise ValueError("steer does not support image attachments")
         self._steering.append(text)
         self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
 
-    async def follow_up(self, text: str) -> None:
+    async def follow_up(self, text: str, images: list[dict[str, Any]] | None = None) -> None:
         """Queue a follow-up message. Text-only; images are not supported."""
+        if images:
+            raise ValueError("follow_up does not support image attachments")
         self._follow_up.append(text)
         self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
 
@@ -2412,9 +2454,10 @@ class AgentSession:
         # sessions, and run orphan cleanup for persistent sessions.
         storage = self._storage_dir
         if storage:
-            # In-memory / transient sessions create a temp dir under /tmp.
-            # Remove the entire temp directory so no blob files linger.
-            if storage.startswith(tempfile.gettempdir()) and "one-blobs-" in storage:
+            # In-memory / transient sessions own a temp dir created by
+            # tempfile.mkdtemp.  Remove the entire temp directory so no
+            # blob files linger after the CLI exits.
+            if getattr(self, "_owns_temp_dir", False):
                 try:
                     import shutil
                     shutil.rmtree(storage, ignore_errors=True)

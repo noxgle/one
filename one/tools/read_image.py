@@ -44,10 +44,13 @@ def read_image_tool(cwd: str, path: str, storage_dir: str = "") -> dict:
 
     # Resolve relative paths against cwd; keep absolute paths as-is.
     resolved = resolve_to_cwd(cleaned, cwd)
+    # Sanitise error text: never leak absolute source paths — use just the
+    # file name so JSONL / event payloads stay private.
+    _label = str(Path(cleaned).name) or "image"
     if not resolved.exists():
-        raise FileNotFoundError(f"File not found: {path}")
+        raise FileNotFoundError(f"File not found: {_label}")
     if not resolved.is_file():
-        raise ValueError(f"Not a file: {path}")
+        raise ValueError(f"Not a file: {_label}")
 
     if not storage_dir:
         raise ValueError("Image storage is unavailable for this session")

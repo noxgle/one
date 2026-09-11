@@ -255,21 +255,16 @@ class TestClipboardImageToTempPath:
         assert "blobs" in result
 
     def test_filename_contains_uuid_for_collision_resistance(self, tmp_path: Path):
-        """Temp filenames include a UUID component to avoid collisions."""
+        """Temp filenames include a random component for collision resistance."""
 
         png_bytes = _make_png_bytes()
         storage_dir = str(tmp_path / "storage")
         result = clipboard_image.clipboard_image_to_temp_path(storage_dir, png_bytes)
         assert result is not None
         filename = Path(result).name
-        # Filename format: clipboard_<uuid>_<timestamp>.tmp
-        # Extract the uuid part (between first and last underscore-separated segments)
-        parts = filename.replace(".tmp", "").split("_")
-        assert len(parts) >= 3  # clipboard + uuid + timestamp + maybe more
-        # The UUID part should be a valid hex string (32 chars for uuid4 hex)
-        uuid_part = parts[1]
-        assert len(uuid_part) == 32
-        int(uuid_part, 16)  # should not raise — valid hex
+        # Filename format: .clipboard_<random>.tmp (mkstemp format)
+        assert filename.startswith(".clipboard_")
+        assert filename.endswith(".tmp")
 
     def test_uniqueness_across_rapid_calls(self, tmp_path: Path):
         """Rapid consecutive calls produce different filenames."""
@@ -292,11 +287,15 @@ class TestClipboardImageToTempPath:
 class TestBackendImportSafety:
     """Ensure backend read functions don't import tempfile or blob modules."""
 
-    def test_no_tempfile_import_in_backends(self):
-        """Backend read functions must not import tempfile (no local temp files)."""
+    def test_no_tempfile_in_backend_read_functions(self):
+        """Backend read functions (wayland/x11/macos) must not use tempfile."""
         source = inspect.getsource(clipboard_image)
-        assert "import tempfile" not in source
-        assert "from tempfile" not in source
+        # tempfile is imported at module level for clipboard_image_to_temp_path,
+        # but backend read functions should not import it themselves.
+        # Check that the _read_clipboard_image_* functions don't have tempfile calls.
+        for fn_name in ("_read_clipboard_image_wayland", "_read_clipboard_image_x11", "_read_clipboard_image_macos"):
+            fn_source = inspect.getsource(getattr(clipboard_image, fn_name))
+            assert "tempfile" not in fn_source, f"{fn_name} should not use tempfile"
 
     def test_no_blob_module_import_in_backends(self):
         """Backend read functions must not import blob modules (no direct blob ops)."""

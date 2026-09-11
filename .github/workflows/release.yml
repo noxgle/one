@@ -7,6 +7,12 @@ on:
 
 # Do not allow publishing from arbitrary PRs — only triggered by tag pushes.
 # Publishing is disabled by default. Enable trusted publishing when ready.
+#
+# NOTE: To enable publishing, the tagged commit must have passed CI (test gate).
+#   1. Uncomment the environment line below.
+#   2. Add a "needs: [lint, test, build]" on the publish job.
+#   3. Configure PyPI trusted publishing via GitHub environment `publish`.
+#   4. Ensure the release tag equals the VERSION in one/config.py (see "Tag == version" step).
 
 permissions:
   contents: read
@@ -30,6 +36,20 @@ jobs:
           . .venv/bin/activate
           pip install build twine
 
+      # Tag == version check: the git tag (without 'v' prefix) must match
+      # the VERSION defined in one/config.py.  This prevents publishing a
+      # release whose artifacts do not match the tag.
+      - name: Tag == version
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION=$(python -c "import one.config; print(one.config.VERSION)")
+          echo "Tag version:  $TAG_VERSION"
+          echo "Package version: $PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Version mismatch: tag=$TAG_VERSION != package=$PKG_VERSION"
+            exit 1
+          fi
+
       - name: Build wheel and sdist
         run: |
           . .venv/bin/activate
@@ -52,6 +72,7 @@ jobs:
       # and the GitHub environment `publish` must be protected.
       #
       # - name: Publish to PyPI
+      #   needs: [lint, test, build]   # test-gate: only publish if tagged commit passed CI
       #   env:
       #     TWINE_USERNAME: __token__
       #     TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}

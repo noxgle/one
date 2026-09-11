@@ -24,7 +24,7 @@ Python files from the following locations are loaded at session bind time:
 1. `<agent_dir>/extensions/` — the agent directory (default `~/.config/one/extensions`,
    overridable via `ONE_CODING_AGENT_DIR`); this is where a package manager installs packages;
 2. `<cwd>/.one/extensions/`;
-3. Paths passed via `--extensions <path>`.
+3. Paths passed via `--extension <path>` (alias `-e`; repeatable).
 
 Binding happens automatically once per session — `create_agent_session_runtime()` calls
 `bind_extensions()` (which in turn reads `resource_loader.get_extensions()`).

@@ -27,7 +27,13 @@ from typing import Any
 
 import httpx
 
+from one.core.attachments import AttachmentStorageError
+
 from .base import ChatResult, ProviderAdapter
+
+
+class UnsupportedImageError(AttachmentStorageError):
+    """Raised when images are sent to an adapter that does not support them."""
 
 BASE_URL = "https://chatgpt.com/backend-api/codex"
 # The /models endpoint gates on client_version: a stale/too-low value returns
@@ -141,6 +147,13 @@ class CodexResponsesAdapter(ProviderAdapter):
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
     ) -> ChatResult:
+        # Codex Responses API does NOT support inline image attachments.
+        # Fail loudly — never silently drop images.
+        if images:
+            raise UnsupportedImageError(
+                "image input is not supported by the Codex Responses API; "
+                "use a vision-capable adapter (openai, anthropic, gemini)"
+            )
         url = f"{BASE_URL}/responses"
         use_stream = callable(on_delta)
         payload = self._build_payload(model, messages, thinking_level, stream=use_stream, max_tokens=max_tokens)

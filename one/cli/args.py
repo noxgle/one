@@ -157,7 +157,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--json", action="store_true", dest="json_output", help="Print the run result as JSON (summary, goalSuccess, finished).")
     parser.add_argument("--answer-file", dest="answer_file", help="Headless answer channel for ask_user: questions are written to this file and answers are read back (polled).")
     parser.add_argument("--steer-file", dest="steer_file", help="Headless steering channel: write a message to this file while the run is active; it is read and cleared.")
-    parser.add_argument("--image", dest="image_paths", action="append", default=[], help="Image file path for vision input (repeatable).")
+    parser.add_argument("--image", dest="image_paths", action="append", default=[], help="Image file path for vision input (repeatable); equivalent to the read_image tool.")
     parser.add_argument("--param", "-P", action="append", default=[], help="Template parameter name=value (repeatable); {{name}} in @file content is replaced.")
 
     ns = parser.parse_args(argv)
@@ -275,7 +275,7 @@ Options:
   --session-dir <dir>
   --no-session
   --models <patterns>
-  --tools <read,bash,edit,write,grep,find,ls,finish,plan,spawn_subagent,ask_user,apply_patch>
+  --tools <read,read_image,bash,edit,write,grep,find,ls,finish,plan,spawn_subagent,ask_user,apply_patch>
   --no-tools
   --extension, -e <path>
   --no-extensions
@@ -298,7 +298,8 @@ Options:
    --answer-file <file>
    --steer-file <file>
    --param <name=value>
-  --help, -h
+   --image <path>
+   --help, -h
   --version, -v
 
 Commands:
