@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -39,8 +40,11 @@ class _StubAdapter:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
-        on_delta=None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ):
         self.chat_calls.append((api_key, model, messages, max_tokens))
         if self.chat_error is not None:
@@ -657,3 +661,139 @@ def test_redact_credentials_single_quoted_dict_like():
     assert "access_token" in result
     assert "refresh" in result
     assert "<REDACTED>" in result
+
+
+# ---------------------------------------------------------------------------
+# R2.2: Capability persistence through login/persistence/reload
+# ---------------------------------------------------------------------------
+
+
+def test_register_models_preserves_builtin_vision(tmp_path: Path):
+    """When register_models fetches a model id matching a vision builtin,
+    input_image=True is preserved."""
+    auth = AuthStorage.in_memory()
+    reg = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+
+    # Register a model that matches a builtin with input_image=True
+    added = reg.register_models("openai", ["gpt-4o"])  # builtin has input_image=True
+    assert added == 0  # already exists as builtin
+
+    # Verify the builtin entry kept input_image=True
+    model = reg.find("openai", "gpt-4o")
+    assert model is not None and model.input_image is True
+
+
+def test_register_models_new_model_inherits_vision_from_builtin(tmp_path: Path):
+    """A new model registered with an id matching a vision builtin gets input_image=True.
+
+    We use the 'openai' provider + 'gpt-4.1' builtin: register_models is called
+    for the same provider/id that exists as a builtin with input_image=True,
+    so the builtin capability is preserved (no regression to False).
+    """
+    auth = AuthStorage.in_memory()
+    models_path = tmp_path / "models.json"
+    reg = ModelRegistry.create(auth, str(models_path))
+
+    # gpt-4.1 is a builtin with input_image=True
+    model_before = reg.find("openai", "gpt-4.1")
+    assert model_before is not None and model_before.input_image is True
+
+    # Simulate login registering models — the builtin should keep input_image=True
+    added = reg.register_models("openai", ["gpt-4.1", "gpt-4o"])  # both are builtins
+    assert added == 0  # already exist as builtins
+    # Verify capabilities are preserved
+    model_after = reg.find("openai", "gpt-4.1")
+    assert model_after is not None and model_after.input_image is True
+    model_4o = reg.find("openai", "gpt-4o")
+    assert model_4o is not None and model_4o.input_image is True
+
+
+def test_persist_and_reload_preserves_input_image_true(tmp_path: Path):
+    """persist_models + reload preserves input_image=True when the model
+    supports vision."""
+    auth = AuthStorage.in_memory()
+    models_path = tmp_path / "models.json"
+    reg = ModelRegistry.create(auth, str(models_path))
+
+    # Register a vision model
+    reg.register_models("openai", ["gpt-4.1"])
+    # Persist — should store inputImage: true
+    reg.persist_models("openai", ["gpt-4.1"])
+
+    # Reload
+    reg2 = ModelRegistry.create(auth, str(models_path))
+    model = reg2.find("openai", "gpt-4.1")
+    assert model is not None and model.input_image is True
+
+
+def test_persist_and_reload_input_image_false(tmp_path: Path):
+    """persist_models + reload preserves input_image=False for non-vision models."""
+    auth = AuthStorage.in_memory()
+    models_path = tmp_path / "models.json"
+    reg = ModelRegistry.create(auth, str(models_path))
+
+    # Register a model without vision capability
+    reg.register_models("deepseek", ["deepseek-chat"])
+    reg.persist_models("deepseek", ["deepseek-chat"])
+
+    reg2 = ModelRegistry.create(auth, str(models_path))
+    model = reg2.find("deepseek", "deepseek-chat")
+    assert model is not None and model.input_image is False
+
+
+def test_strict_bool_preserves_native_bools():
+    from one.core.model_registry import _strict_bool
+
+    assert _strict_bool(True) is True
+    assert _strict_bool(False) is False
+    # int → True/False
+    assert _strict_bool(1) is True
+    assert _strict_bool(0) is False
+    assert _strict_bool(2) is False
+    # None → False
+    assert _strict_bool(None) is False
+
+
+def test_strict_bool_strings_are_always_false():
+    """Every string (including 'true', 'false', '0') maps to False."""
+    from one.core.model_registry import _strict_bool
+
+    assert _strict_bool("false") is False
+    assert _strict_bool("true") is False
+    assert _strict_bool("0") is False
+    assert _strict_bool("1") is False
+    assert _strict_bool("") is False
+    assert _strict_bool("hello") is False
+    assert _strict_bool("None") is False
+    assert _strict_bool("null") is False
+
+
+def test_strict_bool_other_types_are_false():
+    """Lists, dicts, etc. are also False — only bool/int/None are special."""
+    from one.core.model_registry import _strict_bool
+
+    assert _strict_bool([]) is False
+    assert _strict_bool([1]) is False
+    assert _strict_bool({}) is False
+    assert _strict_bool({"key": "val"}) is False
+
+
+def test_strict_bool_round_trips_builtin_vision(tmp_path: Path):
+    """Persisting input_image=True (native bool) and reloading preserves True."""
+    auth = AuthStorage.in_memory()
+    models_path = tmp_path / "models.json"
+
+    # Write a model with native bool True (what login/persist writes)
+    data = {
+        "providers": {
+            "openai": [
+                {"id": "gpt-4o", "reasoning": True, "inputImage": True},
+            ]
+        }
+    }
+    models_path.write_text(json.dumps(data))
+
+    reg2 = ModelRegistry.create(auth, str(models_path))
+    model = reg2.find("openai", "gpt-4o")
+    assert model is not None
+    assert model.input_image is True  # native bool preserved through round-trip

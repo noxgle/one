@@ -8,6 +8,21 @@ def read_tool(cwd: str, path: str, offset: int | None = None, limit: int | None 
     if not p.exists() or not p.is_file():
         raise FileNotFoundError(f"File not found: {path}")
 
+    # Images are binary: never dump decoded bytes. Direct the agent to read_image.
+    try:
+        with open(p, "rb") as f:
+            head = f.read(12)
+        if head.startswith(b"\x89PNG\r\n\x1a\n") or head.startswith(b"\xff\xd8\xff") or (
+            head.startswith(b"RIFF") and len(head) >= 12 and head[8:12] == b"WEBP"
+        ):
+            raise ValueError(
+                f"File is an image ({path}). Use the 'read_image' tool with the same path to load it for vision inspection."
+            )
+    except ValueError:
+        raise
+    except OSError:
+        pass
+
     content = p.read_text(encoding="utf-8", errors="ignore")
     lines = content.split("\n")
     start = max((offset or 1) - 1, 0)

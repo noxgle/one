@@ -557,7 +557,7 @@ class _RefreshStub:
             raise self.error
         return self.models
 
-    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+    async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
         return None
 
 
@@ -706,7 +706,7 @@ async def test_interactive_login_validates_and_fetches_models(tmp_path, monkeypa
         async def list_models(self, api_key: str, headers: dict | None = None) -> list[str]:
             return ["m1", "m2"]
 
-        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, max_tokens=None):
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, on_delta=None, on_thinking_delta=None, max_tokens=None, images=None, storage_dir=""):
             return None
 
     session.providers = {"openai": _Stub()}

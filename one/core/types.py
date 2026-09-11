@@ -14,6 +14,7 @@ class ModelInfo:
     context_window: int | None = None
     base_url: str | None = None
     tool_parser: list[dict[str, Any]] | None = None
+    input_image: bool = False  # True when the model explicitly supports image input
 
 
 @dataclass

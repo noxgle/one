@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable
 from typing import Any
 
 import httpx
 
+from one.core.attachments import AttachmentStorageError
+
 from .base import ChatResult, ProviderAdapter
+
+
+class MissingBlobError(AttachmentStorageError):
+    """Raised when a required image blob is missing or corrupt before HTTP."""
 
 
 class OpenAICompatibleAdapter(ProviderAdapter):
@@ -25,7 +32,97 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         self.supports_reasoning_effort = supports_reasoning_effort
         self.default_temperature = default_temperature
 
-    def _build_payload(self, model: str, messages: list[dict[str, Any]], thinking_level: str) -> dict[str, Any]:
+    def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
+        """Build an ``image_url`` part from an image reference.
+
+        *storage_dir* is resolved from the session context — never from the
+        image_ref itself so that the persisted JSONL contains no internal paths.
+
+        Raises ``MissingBlobError`` when the blob is missing, corrupt, or
+        unreadable — the provider never silently drops an image.
+        """
+        blob_hash = image_ref.get("blobHash") or image_ref.get("blob_hash")
+        mime = image_ref.get("mime", "image/png")
+        if not blob_hash or not storage_dir:
+            raise MissingBlobError(
+                f"image reference missing blob_hash/storage_dir: {image_ref}"
+            )
+        raw = self._read_blob(storage_dir, blob_hash)
+        if raw is None:
+            raise MissingBlobError(
+                f"required image blob missing or corrupt: {blob_hash}"
+            )
+        b64 = base64.b64encode(raw).decode("ascii")
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+    def _read_blob(self, storage_dir: str, blob_hash: str) -> bytes | None:
+        """Read a blob from the local store (inline import to avoid circular deps)."""
+        try:
+            from one.core.attachments import read_blob_bytes
+            return read_blob_bytes(storage_dir, blob_hash)
+        except Exception:
+            return None
+
+    def _resolve_message_content(
+        self, role: str, content: Any, images: list[dict[str, Any]] | None,
+        storage_dir: str,
+    ) -> list[dict[str, Any]] | str:
+        """Expand message content with inline image parts for OpenAI format.
+
+        Note: _build_image_part now raises ``MissingBlobError`` on failure,
+        so this method propagates that exception when blobs are corrupt.
+        """
+        if role != "user":
+            return content
+
+        if images:
+            parts: list[dict[str, Any]] = []
+            # Text content (may be a string or list of text parts)
+            if isinstance(content, str) and content.strip():
+                parts.append({"type": "text", "text": content.strip()})
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        parts.append(part)
+            # Add image parts (may raise MissingBlobError)
+            for img in images:
+                part = self._build_image_part(img, storage_dir)
+                parts.append(part)
+            return parts if parts else content
+
+        return content
+
+    def _build_payload(self, model: str, messages: list[dict[str, Any]], thinking_level: str,
+                       images: list[dict[str, Any]] | None = None, storage_dir: str = "") -> dict[str, Any]:
+        # Validate all image blobs are present BEFORE building payload / making HTTP.
+        if images:
+            for img in images:
+                blob_hash = img.get("blobHash") or img.get("blob_hash")
+                if not blob_hash:
+                    raise MissingBlobError(
+                        f"image reference missing blob_hash: {img}"
+                    )
+                raw = self._read_blob(storage_dir, blob_hash)
+                if raw is None:
+                    raise MissingBlobError(
+                        f"required image blob missing or corrupt before HTTP: {blob_hash}"
+                    )
+        # Attach images to the last user message (current turn), so tool-loaded
+        # images follow the tool result instead of rewriting the first prompt.
+        if images:
+            last_user = -1
+            for i, m in enumerate(messages):
+                if m.get("role", "") == "user":
+                    last_user = i
+            expanded: list[dict[str, Any]] = []
+            for i, m in enumerate(messages):
+                role = m.get("role", "")
+                content = m.get("content", "")
+                if role == "user" and i == last_user:
+                    content = self._resolve_message_content(role, content, images, storage_dir)
+                expanded.append({"role": role, "content": content})
+            messages = expanded
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -107,8 +204,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         on_delta: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> ChatResult:
-        payload = self._build_payload(model, messages, thinking_level)
+        payload = self._build_payload(model, messages, thinking_level, images=images, storage_dir=storage_dir)
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         use_stream = callable(on_delta)

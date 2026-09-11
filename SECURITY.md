@@ -14,8 +14,9 @@ when feasible.
 
 Please report security vulnerabilities privately via
 [GitHub Security Advisories](https://github.com/picon/one/security/advisories/new).
-If advisories are unavailable (e.g. in a fork), open a private issue and request a
-maintainer contact — do **not** open a public issue for security-sensitive bugs.
+If advisories are unavailable (e.g. in a fork), email **TODO-MAINTAINER:
+security@example.com** with "[SECURITY] " in the subject. Do **not** open a
+public issue for security-sensitive bugs.
 
 Include:
 
@@ -35,8 +36,11 @@ plan within 30 days for confirmed vulnerabilities.
 - Session JSONL files (`sessions/*.jsonl`) — conversation history; written atomically.
 - `ONE_CODING_AGENT_DIR` can override the default `~/.config/one`.
 
-All sensitive files are written through atomic `tempfile + os.replace` to prevent
-truncation on interruption. New directories are created with mode `0700`.
+Text configuration files and session JSONL are written through atomic
+`tempfile + os.replace` to prevent truncation on interruption, and new
+directories are created with mode `0700`. The blob store for image attachments
+uses its own dedicated 0600/0700 handling (content-addressed blobs with
+exclusive temp files and fsync).
 
 ### Code execution boundaries
 
@@ -82,6 +86,5 @@ variables take precedence over stored keys but are not persisted.
 4. **Pin dependencies** in production environments.
 5. **Review extensions** before loading untrusted custom packages.
 
-If you need to contact maintainers without using advisories, open a draft
-private issue titled "Security contact request" and a maintainer will provide a
-private channel.
+If you need to contact maintainers without using advisories, email
+**TODO-MAINTAINER: security@example.com** with "[SECURITY] " in the subject.

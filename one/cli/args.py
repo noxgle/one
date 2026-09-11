@@ -58,6 +58,7 @@ class ParsedArgs:
     params: list[str] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     file_args: list[str] = field(default_factory=list)
+    image_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -81,7 +82,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
                 "--session", "--session-dir", "--models", "--tools", "--export",
                 "--export-format", "--theme", "--prompt-template", "--skill",
                 "--extension", "-e", "--list-models", "--answer-file", "--steer-file",
-                "--param", "-P",
+                "--param", "-P", "--image",
             }
             flags: list[str] = []
             rest: list[str] = []
@@ -100,8 +101,12 @@ def parse_args(argv: list[str]) -> ParsedArgs:
                 i += 1
             argv = flags
             run_task = " ".join(rest)
+        elif command is not None:
+            # Non-run subcommand (install/remove/update/list/config): pass through.
+            argv = command_args
         else:
-            argv = []
+            # No subcommand — use argv as-is (--print, --mode, etc.).
+            pass
 
 
     parser = argparse.ArgumentParser(prog=APP_NAME, add_help=False)
@@ -152,6 +157,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--json", action="store_true", dest="json_output", help="Print the run result as JSON (summary, goalSuccess, finished).")
     parser.add_argument("--answer-file", dest="answer_file", help="Headless answer channel for ask_user: questions are written to this file and answers are read back (polled).")
     parser.add_argument("--steer-file", dest="steer_file", help="Headless steering channel: write a message to this file while the run is active; it is read and cleared.")
+    parser.add_argument("--image", dest="image_paths", action="append", default=[], help="Image file path for vision input (repeatable); equivalent to the read_image tool.")
     parser.add_argument("--param", "-P", action="append", default=[], help="Template parameter name=value (repeatable); {{name}} in @file content is replaced.")
 
     ns = parser.parse_args(argv)
@@ -241,6 +247,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         messages=plain,
         file_args=file_args,
         errors=errors,
+        image_paths=ns.image_paths or [],
     )
 
 
@@ -268,7 +275,7 @@ Options:
   --session-dir <dir>
   --no-session
   --models <patterns>
-  --tools <read,bash,edit,write,grep,find,ls,finish,plan,spawn_subagent,ask_user,apply_patch>
+  --tools <read,read_image,bash,edit,write,grep,find,ls,finish,plan,spawn_subagent,ask_user,apply_patch>
   --no-tools
   --extension, -e <path>
   --no-extensions
@@ -291,7 +298,8 @@ Options:
    --answer-file <file>
    --steer-file <file>
    --param <name=value>
-  --help, -h
+   --image <path>
+   --help, -h
   --version, -v
 
 Commands:

@@ -42,4 +42,14 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
-<!-- Add changes here as they are developed -->
+### Added
+
+- **13 tools** (was 12): added `read_image` for vision / image input alongside the existing tool set.
+- **Multimodal image input** — `--image <path>` CLI flag and `read_image` tool support PNG, JPEG, WebP
+  (up to 4 images per prompt, 10 MB source / 5 MiB Base64). Images are transient per-turn.
+
+### Changed
+
+- Auth precedence wording corrected to **runtime → stored → env** in README and docs.
+- SECURITY.md scoped atomic-storage claims to text config/session persistence (blob store
+  uses its own 0600/0700 handling).

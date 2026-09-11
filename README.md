@@ -71,13 +71,14 @@ python -c "import one; print(one.VERSION)"
 `llama.cpp`/`Ollama` backends. Three ways to provide credentials (highest
 precedence first):
 
-1. **CLI flag** — `--api-key` / `--provider` / `--model`
-2. **Environment variable** — `<PROVIDER>_API_KEY` (e.g. `OPENAI_API_KEY`,
+1. **Runtime** — CLI flag (`--api-key`), set programmatically, or via the provider
+   adapter at session start.
+2. **Stored** — key persisted by `/login` in `auth.json`.
+3. **Environment variable** — `<PROVIDER>_API_KEY` (e.g. `OPENAI_API_KEY`,
    `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
    `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`,
-   `OLLAMA_CLOUD_API_KEY`)
-3. **Stored key via `/login`** — interactive/TUI or RPC login that validates the
-   key before persisting it
+   `OLLAMA_CLOUD_API_KEY`). Environment keys cannot be removed by `/logout`
+   (they are runtime-supplied, not one-managed).
 
 **Quick start with an API key:**
 
@@ -162,12 +163,47 @@ TUI highlights:
 JSON-RPC over stdin/stdout for external orchestration (sessions, events,
 extension UI). See `one/modes/rpc_mode.py` and `tests/snapshots/rpc/*.jsonl`.
 
-## Modes summary
+## Vision / images (multimodal)
 
-- `--mode text|json` / `-p` — one-shot task execution (prints the stream, JSON for automation)
-- interactive — REPL with slash commands, cooperation toggle (Ctrl+A), steer/abort
-- `--mode tui` — Textual TUI with live streaming, themes, sidebar
-- `--mode rpc` — JSON-RPC over stdin/stdout
+`one` supports image input via the `read_image` tool or the `--image` CLI flag.
+
+### How it works
+
+- **`read_image {path}`** — loads a local PNG/JPEG/WebP file, imports it into the
+  session's private blob store, and returns a transient reference. The image is sent
+  to the vision model on the next step.
+- **`--image <path>`** — equivalent convenience flag (repeatable); same limits apply.
+
+### Supported formats & limits
+
+| format | limit |
+|--------|-------|
+| PNG, JPEG, WebP | 4 images per prompt |
+| Source file | 10 MB (decoded Base64 ≤ 5 MiB) |
+
+### Capability behavior
+
+- `input.image` on the model definition signals vision support.
+- **Cooperation mode** — if the provider lacks image support, the tool call is denied
+  *before* the HTTP request; the reason is fed back to the model.
+- **Autonomous mode** — the session catches the rejection and returns controlled
+  feedback without crashing.
+- **Retention** — image blobs are transient per-turn: they are never persisted to
+  JSONL, never emit a blob-hash reference, and are auto-collected when the turn ends.
+
+### Privacy
+
+Error messages and event payloads log only the **basename** of the source image — the
+full filesystem path is never written to JSONL or emitted in events.
+
+### Supported modes & limitations
+
+- `one run`, `--mode text`, `--mode tui`, interactive mode: `read_image` / `--image` work.
+- `--mode rpc`: images are supported when the JSON-RPC request includes an `images` array.
+- **Steer / follow-up messages** are text-only (the steer queue does not forward images).
+- **Codex provider** rejects images explicitly; it does not accept vision payloads.
+- **Print mode (`--print`)** with image-only input (no task text) is unsupported — a text
+  message is required even when images are supplied.
 
 ## Cooperation mode
 

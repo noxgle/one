@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,11 @@ class _Provider:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> Any:
         from one.providers.base import ChatResult
 
@@ -55,6 +61,11 @@ class _MessageCapturingProvider:
         messages: list[dict[str, Any]],
         thinking_level: str,
         headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> Any:
         from one.providers.base import ChatResult
 
@@ -86,7 +97,7 @@ class _SteerableSession:
         self.steered.append(text)
         self._steer_seen.set()
 
-    async def prompt(self, task: str) -> None:  # noqa: ARG002
+    async def prompt(self, task: str, images: list | None = None) -> None:  # noqa: ARG002
         await asyncio.wait_for(self._steer_seen.wait(), timeout=10)
 
     def get_last_finish_result(self) -> dict:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import Any
 
@@ -9,8 +10,12 @@ from one.core.provider_login import _redact_credentials, validate_and_fetch
 from .rpc_types import RpcResponse
 
 
-async def run_rpc_mode(runtime_host: Any) -> None:
+async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] | None = None) -> None:
     session = runtime_host.session
+    # Store initial images on the session for the first prompt.
+    if initial_images:
+        session._images = initial_images  # noqa: SLF001
+        session._tool_images = []  # noqa: SLF001
 
     def output(obj: dict[str, Any]) -> None:
         print(json.dumps(obj, ensure_ascii=False), flush=True)
@@ -53,14 +58,83 @@ async def run_rpc_mode(runtime_host: Any) -> None:
                 if session.is_streaming and not cmd.get("streamingBehavior"):
                     output(error(cid, ctype, "streamingBehavior is required while streaming"))
                     continue
-                asyncio.create_task(session.prompt(cmd.get("message", ""), {"streamingBehavior": cmd.get("streamingBehavior")}))
+                # Attachments: import image paths into content-addressed blobs.
+                # Atomic: if any import fails, roll back previously imported blobs.
+                image_refs: list[dict[str, Any]] | None = None
+                attachment_paths: list[str] | None = cmd.get("attachments")
+                if attachment_paths:
+                    storage_dir = session._storage_dir if hasattr(session, "_storage_dir") else ""
+                    # Track ONLY blobs we CREATED during this transaction so
+                    # rollback never touches pre-existing deduplicated blobs.
+                    newly_created: list[str] = []
+                    try:
+                        from one.core.attachments import (
+                            AttachmentInput,
+                            AttachmentValidationError,
+                            count_attachments,
+                            has_blob,
+                            import_image,
+                            validate_attachment_input,
+                            validate_image_count,
+                        )
+                        # Count check before importing any.
+                        count_attachments([AttachmentInput(path=p) for p in attachment_paths])
+                        validate_image_count(len(attachment_paths))
+                        image_refs = []
+                        for p in attachment_paths:
+                            # Check existence BEFORE import by computing the
+                            # hash from validated bytes (double-read is
+                            # intentional — correctness over performance).
+                            validated = validate_attachment_input(AttachmentInput(path=str(p)))
+                            blob_hash = validated[0]  # raw bytes
+                            computed_hash = hashlib.sha256(blob_hash).hexdigest()
+                            if not has_blob(storage_dir, computed_hash):
+                                # Blob does not exist yet; import will create it.
+                                ref = import_image(storage_dir, str(p))
+                                newly_created.append(ref.blob_hash)
+                            else:
+                                # Blob already exists (dedup); import is safe
+                                # and must NOT be removed on rollback.
+                                ref = import_image(storage_dir, str(p))
+                            image_refs.append(ref.__dict__)
+                    except AttachmentValidationError as e:
+                        # Rollback: remove only the blobs we created.
+                        if storage_dir and newly_created:
+                            try:
+                                from one.core.attachments import remove_blob as _rb
+                                for h in newly_created:
+                                    _rb(storage_dir, h)
+                            except Exception:
+                                pass
+                        output(error(cid, ctype, f"Invalid attachment: {e}"))
+                        continue
+                    except Exception as e:  # noqa: BLE001
+                        # Rollback: remove only the blobs we created.
+                        if storage_dir and newly_created:
+                            try:
+                                from one.core.attachments import remove_blob as _rb
+                                for h in newly_created:
+                                    _rb(storage_dir, h)
+                            except Exception:
+                                pass
+                        output(error(cid, ctype, f"Attachment error: {e}"))
+                        continue
+                asyncio.create_task(session.prompt(cmd.get("message", ""), {"streamingBehavior": cmd.get("streamingBehavior")}, images=image_refs))
                 output(success(cid, ctype))
             elif ctype == "steer":
-                await session.steer(cmd.get("message", ""))
-                output(success(cid, ctype))
+                steer_images = cmd.get("images")
+                if steer_images:
+                    output(error(cid, ctype, "steer does not support image attachments"))
+                else:
+                    await session.steer(cmd.get("message", ""))
+                    output(success(cid, ctype))
             elif ctype == "follow_up":
-                await session.follow_up(cmd.get("message", ""))
-                output(success(cid, ctype))
+                fu_images = cmd.get("images")
+                if fu_images:
+                    output(error(cid, ctype, "follow_up does not support image attachments"))
+                else:
+                    await session.follow_up(cmd.get("message", ""))
+                    output(success(cid, ctype))
             elif ctype == "abort":
                 await session.abort()
                 output(success(cid, ctype))

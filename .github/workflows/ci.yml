@@ -74,19 +74,26 @@ jobs:
           pip install build twine
 
       - name: Build wheel and sdist
+        env:
+          ONE_CODING_AGENT_DIR: ${{ runner.temp }}/one-agent-dir
         run: |
           . .venv/bin/activate
           python -m build
 
       - name: Check package metadata
+        env:
+          ONE_CODING_AGENT_DIR: ${{ runner.temp }}/one-agent-dir
         run: |
           . .venv/bin/activate
           twine check dist/*
 
       - name: Smoke test — fresh venv from wheel
+        env:
+          ONE_CODING_AGENT_DIR: ${{ runner.temp }}/one-wheel-agent-dir
+        working-directory: /tmp
         run: |
           python -m venv /tmp/one-wheel-test
-          /tmp/one-wheel-test/bin/pip install dist/*.whl
+          /tmp/one-wheel-test/bin/pip install ${{ github.workspace }}/dist/*.whl
           /tmp/one-wheel-test/bin/one --version
           /tmp/one-wheel-test/bin/one --help
           /tmp/one-wheel-test/bin/python -c "import one; print('one imported OK')"

@@ -66,3 +66,19 @@ def test_openai_compatible_with_base_url_returns_reconfigured_adapter() -> None:
     assert changed.base_url == "http://192.0.2.38:8089"
     assert changed.supports_reasoning_effort is False
     assert changed.default_temperature is None
+
+
+def test_openai_compatible_payload_without_images_works() -> None:
+    """When no images are present, payload is built normally (phase-free behavior)."""
+    adapter = OpenAICompatibleAdapter("openai", "https://api.openai.com")
+    payload = adapter._build_payload(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "hello"}],
+        thinking_level="off",
+    )
+    assert payload["model"] == "gpt-4o"
+    assert payload["messages"][0]["content"] == "hello"
+    # No image_url parts should be present
+    content = payload["messages"][0]["content"]
+    if isinstance(content, list):
+        assert all(p.get("type") == "text" for p in content)

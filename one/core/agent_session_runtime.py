@@ -118,6 +118,7 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         scoped_models=bootstrap.get("scopedModels") or [],
         tools=tool_names,
         mcp_manager=bootstrap.get("mcpManager"),
+        storage_dir=session_manager.session_dir or "",
     )
     await session.bind_extensions()
 

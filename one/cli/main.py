@@ -427,6 +427,39 @@ async def _run(argv: list[str]) -> int:
     )
     host = AgentSessionRuntimeHost(bootstrap, runtime)
 
+    # ── Import image paths into content-addressed blobs ──────────────────────
+    # Uses the session's storage dir (blobs/ subdirectory).  Only runs when
+    # image_paths are present.  Source paths are NOT persisted — only the
+    # content-addressed blob hash and MIME survive in session events.
+    image_refs: list[dict[str, Any]] | None = None
+    if parsed.image_paths:
+        try:
+            from one.core.attachments import (
+                AttachmentInput,
+                AttachmentValidationError,
+                count_attachments,
+                import_image,
+            )
+
+            count_attachments([AttachmentInput(path=p) for p in parsed.image_paths])
+            storage_dir = getattr(host.session, "_storage_dir", "") or session_manager.session_dir or ""
+            image_refs = [
+                import_image(storage_dir, p).__dict__
+                for p in parsed.image_paths
+            ]
+        except AttachmentValidationError as e:
+            print(f"Invalid image: {e}")
+            await host.dispose()
+            if mcp_manager is not None:
+                await mcp_manager.close()
+            return 2
+        except Exception as e:  # noqa: BLE001
+            print(f"Image import error: {e}")
+            await host.dispose()
+            if mcp_manager is not None:
+                await mcp_manager.close()
+            return 2
+
     try:
         if parsed.command == "run":
             if parsed.cooperation:
@@ -440,6 +473,7 @@ async def _run(argv: list[str]) -> int:
                     "answer_file": parsed.answer_file,
                     "steer_file": parsed.steer_file,
                     "agentDir": agent_dir,
+                    "images": image_refs,
                 },
             )
 
@@ -450,12 +484,13 @@ async def _run(argv: list[str]) -> int:
                     "mode": parsed.mode or "text",
                     "messages": parsed.messages,
                     "initialMessage": None,
+                    "images": image_refs,
                 },
             )
             return code
 
         if parsed.mode == "rpc":
-            await run_rpc_mode(host)
+            await run_rpc_mode(host, initial_images=image_refs)
             return 0
 
         if parsed.mode == "tui":
@@ -474,8 +509,11 @@ async def _run(argv: list[str]) -> int:
         await interactive.run()
         return 0
     finally:
+        # Dispose the session runtime and close MCP to free all resources
+        # even when the mode path returns early.
         if mcp_manager is not None:
             await mcp_manager.close()
+        await host.dispose()
 
 
 async def _headless_approval_prompt(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:

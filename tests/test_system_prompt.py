@@ -80,3 +80,15 @@ def test_env_helpers_do_not_crash() -> None:
     assert "workspace=/tmp/some/workspace" in header
     assert isinstance(_system_env(), str) and _system_env()
     assert _user_privileges() in {"root", "user", "user(sudo)", "user(sudo nopasswd)"}
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_includes_read_image_schema(tmp_path: Path):
+    """The read_image tool schema should appear when included in the tools list."""
+    loader = _mk_loader(tmp_path)
+    await loader.reload()
+    prompt = loader.get_system_prompt(["read", "read_image", "bash", "finish"])
+    assert "read_image" in prompt
+    assert "{path}" in prompt
+    # read_image schema should appear in the tools list.
+    assert "read_image {path}" in prompt

@@ -32,7 +32,7 @@ ruff check .
   `tui_mode` (Textual), `interactive_mode`.
 - **Providers**: `one/providers/` — adapters for OpenAI-compatible, Anthropic,
   Gemini, and Codex Responses API.
-- **Tools**: `one/tools/` — 12 tools registered in `tools/index.py`.
+- **Tools**: `one/tools/` — 13 tools registered in `tools/index.py`.
 - **MCP**: `one/mcp/client.py` — stdio and streamable-HTTP transport.
 - **Resources**: `one/resources/` — extension/runtime, skills, prompts, themes.
 

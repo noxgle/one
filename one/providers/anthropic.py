@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable
 from typing import Any
 
 import httpx
+
+from one.core.attachments import AttachmentStorageError
 
 from .base import ChatResult, ProviderAdapter
 
@@ -14,8 +17,83 @@ def _is_oauth_token(api_key: str | None) -> bool:
     return bool(api_key) and api_key.startswith("sk-ant-oat")
 
 
+class MissingBlobError(AttachmentStorageError):
+    """Raised when a required image blob is missing or corrupt before HTTP."""
+
+
 class AnthropicAdapter(ProviderAdapter):
     name = "anthropic"
+
+    def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
+        """Build an Anthropic ``image`` source block.
+
+        *storage_dir* is resolved from the session context — never from the
+        image_ref itself so that the persisted JSONL contains no internal paths.
+
+        Raises ``MissingBlobError`` when the blob is missing, corrupt, or
+        unreadable — the provider never silently drops an image.
+        """
+        blob_hash = image_ref.get("blobHash") or image_ref.get("blob_hash")
+        mime = image_ref.get("mime", "image/png")
+        if not blob_hash or not storage_dir:
+            raise MissingBlobError(
+                f"image reference missing blob_hash/storage_dir: {image_ref}"
+            )
+        raw = self._read_blob(storage_dir, blob_hash)
+        if raw is None:
+            raise MissingBlobError(
+                f"required image blob missing or corrupt: {blob_hash}"
+            )
+        b64 = base64.b64encode(raw).decode("ascii")
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime,
+                "data": b64,
+            },
+        }
+
+    def _read_blob(self, storage_dir: str, blob_hash: str) -> bytes | None:
+        try:
+            from one.core.attachments import read_blob_bytes
+            return read_blob_bytes(storage_dir, blob_hash)
+        except Exception:
+            return None
+
+    def _resolve_message_content(
+        self, role: str, content: Any, images: list[dict[str, Any]] | None,
+        storage_dir: str,
+    ) -> Any:
+        """Expand content with image blocks for Anthropic format.
+
+        Note: _build_image_part now raises ``MissingBlobError`` on failure,
+        so this method propagates that exception when blobs are corrupt.
+        """
+        if role != "user":
+            return content
+        if not images:
+            return content
+
+        # Anthropic requires content to be a list when mixing text and images
+        parts: list[dict[str, Any]] = []
+        if isinstance(content, str) and content.strip():
+            parts.append({"type": "text", "text": content.strip()})
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        parts.append(part)
+                    else:
+                        parts.append(part)
+                elif isinstance(part, str):
+                    parts.append({"type": "text", "text": part})
+
+        for img in images:
+            part = self._build_image_part(img, storage_dir)
+            parts.append(part)
+
+        return parts if parts else content
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
         # Only the subscription-OAuth credential may call GET /v1/models;
@@ -65,7 +143,37 @@ class AnthropicAdapter(ProviderAdapter):
         on_delta: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> ChatResult:
+        # Validate all image blobs are present BEFORE building payload / making HTTP.
+        if images:
+            for img in images:
+                blob_hash = img.get("blobHash") or img.get("blob_hash")
+                if not blob_hash:
+                    raise MissingBlobError(
+                        f"image reference missing blob_hash: {img}"
+                    )
+                raw = self._read_blob(storage_dir, blob_hash)
+                if raw is None:
+                    raise MissingBlobError(
+                        f"required image blob missing or corrupt before HTTP: {blob_hash}"
+                    )
+        # Attach images to the last user message (current turn).
+        if images:
+            last_user = -1
+            for i, m in enumerate(messages):
+                if m.get("role", "") == "user":
+                    last_user = i
+            expanded: list[dict[str, Any]] = []
+            for i, m in enumerate(messages):
+                role = m.get("role", "")
+                content = m.get("content", "")
+                if role == "user" and i == last_user:
+                    content = self._resolve_message_content(role, content, images, storage_dir)
+                expanded.append({"role": role, "content": content})
+            messages = expanded
+
         content_messages = []
         system = None
         for m in messages:
