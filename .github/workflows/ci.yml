@@ -72,6 +72,9 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           pip install build twine
+          # The "CLI via module" smoke test imports from the checkout, so the
+          # package's own runtime dependencies must be installed too.
+          pip install .
 
       - name: Build wheel and sdist
         env:

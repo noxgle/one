@@ -209,7 +209,8 @@ class TestIsClipboardImageAvailable:
 
     def test_x11_backend_available(self):
         with patch.object(shutil, "which", side_effect=lambda x: "xclip" if x == "xclip" else None):
-            assert clipboard_image.is_clipboard_image_available() is True
+            with patch.object(clipboard_image, "_is_x11", return_value=True):
+                assert clipboard_image.is_clipboard_image_available() is True
 
     def test_macos_backend_available(self):
         with patch.object(shutil, "which", side_effect=lambda x: "pngpaste" if x == "pngpaste" else None):
