@@ -520,15 +520,26 @@ if TEXTUAL_AVAILABLE:
                 self._completion_matches = []
                 self._completion_index = -1
                 self._completion_locked = False
-            # Bound keys (shift+enter, tab) should not reach App._on_key
-            # through _OneTextualApp (would cause double fire).  Let the
-            # binding fire through the normal widget chain, then stop.
+            # shift+enter and ctrl+v are handled here so they don't reach
+            # App._on_key through _OneTextualApp (would cause double fire).
+            # ctrl+v is intercepted in _on_key — it is not a
+            # _CommandTextArea binding — to prevent the app-level key handler
+            # from checking bindings a second time.  Let the binding fire
+            # through the normal widget chain, then stop.
             if event.key == "shift+enter":
                 # Let the binding action (action_newline) fire, but stop
                 # to prevent _OneTextualApp._on_key → App._on_key from
                 # processing the same binding a second time.
                 self.action_newline()
                 event.stop()
+                return
+            if event.key == "ctrl+v":
+                # Prevent double-dispatch: let the binding fire, then stop
+                # so _OneTextualApp._on_key → App._on_key doesn't check
+                # bindings a second time (which would call action_paste again).
+                self.action_paste()
+                event.stop()
+                event.prevent_default()
                 return
             await super()._on_key(event)
 
@@ -605,6 +616,36 @@ if TEXTUAL_AVAILABLE:
                 text = text[: self._PASTE_MAX_CHARS]
             if result := self._replace_via_keyboard(text, *self.selection):
                 self.move_cursor(result.end_location)
+
+        async def _on_paste(self, event: events.Paste) -> None:
+            """Handle bracketed-terminal paste events as the single insertion path.
+
+            Textual's TextArea also has a native ``_on_paste`` that would
+            double-insert on the same paste.  We override it with the same
+            guarded insert (truncation) and consume the event so the
+            superclass handler never fires for us.
+
+            Compatible with Textual >= 0.74.0 (where ``_on_paste`` exists)
+            and Textual 8.x (installed 8.2.8).
+            """
+            # Guard: read-only blocks pasting.
+            if self.read_only:
+                event.stop()
+                event.prevent_default()
+                return
+            text = event.text
+            if not text:
+                event.stop()
+                event.prevent_default()
+                return
+            if len(text) > self._PASTE_MAX_CHARS:
+                text = text[: self._PASTE_MAX_CHARS]
+            if result := self._replace_via_keyboard(text, *self.selection):
+                self.move_cursor(result.end_location)
+            # Consume the event so Textual's native _on_paste (and any
+            # subsequent handlers) do not insert a second copy.
+            event.stop()
+            event.prevent_default()
 
     class _OneTextualApp(App[None]):
         CSS = """
@@ -926,6 +967,7 @@ if TEXTUAL_AVAILABLE:
                 for i in range(len(self._stream_lines) - 1, -1, -1):
                     if self._stream_lines[i].startswith(_THINKING_MARK):
                         self._stream_lines[i] = line
+                        self._render_stream()
                         break
                 else:
                     # The line was trimmed away; re-append it.
@@ -2479,6 +2521,11 @@ if TEXTUAL_AVAILABLE:
                 event.prevent_default()
                 return
             await super()._on_key(event)
+            # Prevent MRO double-dispatch: MessagePump invokes App._on_key
+            # again after this handler (nothing set prevent_default yet),
+            # which would fire bubbled bindings (backspace/delete/arrows)
+            # a second time. Harmless no-op on older Textual single dispatch.
+            event.prevent_default()
 
         async def action_abort(self) -> None:
             await self.session.abort()

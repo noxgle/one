@@ -2545,6 +2545,95 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
+    """Every mutation of the spinner line must trigger a widget refresh.
+
+    Regression: _tick_waiting rewrote the spinner line in-place but never
+    called _render_stream, so the visible widget stayed frozen.
+    """
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Arm waiting: turn active + stale delta.
+        app._turn_active = True
+        app._last_delta_ts = 0.0
+        assert app._thinking_active is False
+
+        # --- First tick: initial append path (else branch) ---
+        app._tick_waiting()
+        await pilot.pause()
+        assert app._thinking_active is True
+        first_lines = list(app._stream_lines)
+        stream_widget = app.query_one("#stream", Static)
+        first_render = str(stream_widget.content)
+        assert any(l.startswith("__MK__:") for l in app._stream_lines), (
+            "spinner line must be present after first tick"
+        )
+
+        # --- Second tick: in-place rewrite path (if branch) ---
+        app._tick_waiting()
+        await pilot.pause()
+        second_lines = list(app._stream_lines)
+        # _stream_lines must have changed (frame advanced).
+        assert second_lines != first_lines, (
+            "_stream_lines should change when spinner frame advances"
+        )
+        second_render = str(stream_widget.content)
+        assert second_render != first_render, (
+            "rendered #stream content must change between ticks — the frozen-spinner bug"
+        )
+
+        # --- Third tick: verify continued animation ---
+        app._tick_waiting()
+        await pilot.pause()
+        third_render = str(stream_widget.content)
+        assert third_render != second_render, (
+            "spinner must keep animating on subsequent ticks"
+        )
+
+
+@pytest.mark.asyncio
+async def test_tui_spinner_cleared_on_turn_end(tmp_path: Path):
+    """When the turn ends (turn_active cleared), the spinner line
+    and any thinking text must be removed from the stream."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Arm waiting.
+        app._turn_active = True
+        app._last_delta_ts = 0.0
+        app._tick_waiting()
+        await pilot.pause()
+        stream_widget = app.query_one("#stream", Static)
+        before_render = str(stream_widget.content)
+        assert "Ctrl+C abort" in before_render or "thinking" in before_render.lower(), (
+            "spinner should be visible"
+        )
+
+        # Simulate turn completion: the event handler calls _remove_thinking_line
+        # and sets _turn_active = False.
+        app._turn_active = False
+        app._remove_thinking_line()
+        app._render_stream()
+        await pilot.pause()
+
+        after_render = str(stream_widget.content)
+        assert "Ctrl+C abort" not in after_render, (
+            "spinner must be removed after turn ends"
+        )
+
+
+@pytest.mark.asyncio
 async def test_tui_approval_prompt_toasts(tmp_path: Path):
     """_approval_prompt must call notify (toast) with a message containing 'Approve:'
     and timeout=8.0."""
@@ -4078,3 +4167,303 @@ async def test_tui_trim_eats_whole_live_block_no_corruption(tmp_path: Path):
         await pilot.pause()
         stream2 = "\n".join(app._stream_lines)
         assert "post-trim content" in stream2
+
+
+# ---------------------------------------------------------------------------
+# Task 14: one paste inserts text exactly once (dedup _on_paste / action_paste).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_via_event_inserts_once(tmp_path: Path, monkeypatch):
+    """Dispatching a real events.Paste must insert exactly once."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        paste_event = events.Paste("paste-from-event")
+        input_widget.post_message(paste_event)
+        await pilot.pause()
+        # Must appear exactly once — no double-insert.
+        assert input_widget.text == "paste-from-event"
+        assert input_widget.text.count("paste-from-event") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrlv_key_inserts_once(tmp_path: Path, monkeypatch):
+    """Pressing ctrl+v via pilot must insert exactly once (via the ctrl+v
+    binding which calls action_paste)."""
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: "via-ctrlv-key")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+        # Should have inserted once via the binding → action_paste path.
+        assert input_widget.text == "via-ctrlv-key"
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_then_enter_submits_once(tmp_path: Path, monkeypatch):
+    """Paste text then press Enter must submit one prompt containing the
+    pasted text exactly once (no duplicate from double-insert)."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: "submit-paste")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        # Dispatch a real Paste event (not direct action call).
+        paste_event = events.Paste("submit-paste")
+        input_widget.post_message(paste_event)
+        await pilot.pause()
+        assert input_widget.text == "submit-paste"
+        # Press Enter to submit.
+        await pilot.press("enter")
+        await pilot.pause()
+        # The input should be cleared after submission.
+        assert input_widget.text == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_multiline_paste_via_event_preserved(tmp_path: Path, monkeypatch):
+    """Multi-line paste via events.Paste stays multi-line (one paste = one
+    insertion of the full multi-line string)."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        multiline = "line1\nline2\nline3"
+        paste_event = events.Paste(multiline)
+        input_widget.post_message(paste_event)
+        await pilot.pause()
+        # The text must be present exactly once.
+        assert input_widget.text.count("line1") == 1
+        assert input_widget.text.count("line2") == 1
+        assert input_widget.text.count("line3") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_truncation_still_correct_via_event(tmp_path: Path, monkeypatch):
+    """Huge paste via events.Paste is still capped to _PASTE_MAX_CHARS."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        huge_text = "x" * 50_000
+        paste_event = events.Paste(huge_text)
+        input_widget.post_message(paste_event)
+        await pilot.pause()
+        assert len(input_widget.text) == tui_mode._CommandTextArea._PASTE_MAX_CHARS
+        assert input_widget.text == "x" * tui_mode._CommandTextArea._PASTE_MAX_CHARS
+
+
+# Task 16: backspace/delete/arrows must fire exactly once (no App MRO
+# double-dispatch). All tests use real pilot.press dispatch.
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_deletes_single_char(tmp_path: Path):
+    """One backspace press deletes exactly one char and moves cursor one."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 5))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert input_widget.text == "hell"
+        assert input_widget.cursor_location == (0, 4)
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_at_start_noop(tmp_path: Path):
+    """Backspace at (0, 0) changes nothing."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 0))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert input_widget.text == "hello"
+        assert input_widget.cursor_location == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_tui_delete_forward_single_char(tmp_path: Path):
+    """One delete press removes exactly one char forward."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 0))
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+        assert input_widget.text == "ello"
+        assert input_widget.cursor_location == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_tui_arrows_single_step(tmp_path: Path):
+    """Arrow keys move the cursor by exactly one position."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 5))
+        await pilot.pause()
+        await pilot.press("left")
+        await pilot.pause()
+        assert input_widget.cursor_location == (0, 4)
+        await pilot.press("right")
+        await pilot.pause()
+        assert input_widget.cursor_location == (0, 5)
+
+
+@pytest.mark.asyncio
+async def test_tui_printable_inserts_once(tmp_path: Path):
+    """A printable key inserts exactly one char (widget double-fire guard)."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        await pilot.press("a")
+        await pilot.pause()
+        assert input_widget.text == "a"
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_multiline_join_once(tmp_path: Path):
+    """Backspace at line start joins lines exactly once."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "ab\ncd"
+        await pilot.pause()
+        input_widget.move_cursor((1, 0))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert input_widget.text == "abcd"
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_selection_exact(tmp_path: Path):
+    """Backspace with a selection deletes only the selection."""
+    from textual.widgets import TextArea
+    from textual.widgets._text_area import Selection
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.selection = Selection((0, 1), (0, 4))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert input_widget.text == "ho"
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_repeat_three_times(tmp_path: Path):
+    """Three backspace presses delete exactly three chars."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 5))
+        await pilot.pause()
+        for _ in range(3):
+            await pilot.press("backspace")
+            await pilot.pause()
+        assert input_widget.text == "he"

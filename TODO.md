@@ -161,6 +161,52 @@ bash timeout in TUI, and the `/login` help text. Work happens on branch
    - **Details:** Investigation found no duplicate TUI subscription. The likely root cause is stale `_assistant_live_start_idx`/live buffer state across an unterminated failed stream: `message_start` resets indexes but leaves the already-rendered block, so every retry appends another copy.
    - **Details:** Stale live block discarded at `message_start`/`auto_retry_start` via tracked start index + line count; `_trim_stream` rebases live/tool-block indexes on front-trim; 4 new regression tests (one-fail, two-fail, trim-rebase, trim-eats-block); full suite 1027 passed.
 
+- [x] **Task 14:** Prevent duplicated text when pasting into the TUI.
+   - **Details:** ctrl+v consumed at widget level (stop+prevent) plus _on_paste override with shared truncation; 5 real-dispatch regression tests; image paste untouched.
+  - **Description:** Trace and fix the interaction between the custom `Ctrl+V`/clipboard action and Textual's native `events.Paste`/`TextArea._on_paste()` path. A single terminal paste must insert the clipboard contents exactly once, without breaking multiline paste, truncation, keyboard typing, or submit behavior. Preserve image-paste handling on `Ctrl+Shift+V`.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`, possibly Textual-version compatibility code only if required.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** One user paste produces one text insertion; a paste followed by Enter submits one prompt containing the text once; multiline and 10,240-character truncation behavior remain correct; image paste remains separate and functional.
+  - **Verification:** Add real Textual pilot/event tests for `ctrl+v`, `events.Paste`, both paths emitted for one paste, and end-to-end paste-then-submit. Run tests against the supported Textual version range where practical.
+  - **Details:** Likely duplication boundary is `ctrl+v` → custom `_CommandTextArea.action_paste()` plus native bracketed-paste `TextArea._on_paste()`; current tests call `action_paste()` directly and do not exercise dispatch.
+
+- [x] **Task 15:** Restore visible waiting-icon animation in the TUI.
+  - **Description:** Ensure every waiting-animation frame mutation refreshes the `#stream` widget. `_tick_waiting()` currently updates an existing spinner line in `_stream_lines` but can omit `_render_stream()`, leaving the visible icon frozen or absent after recent stream-trimming changes. Preserve waiting predicates, cleanup on `turn_end`, and retry behavior.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`, TUI snapshots only if rendering output intentionally changes.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** While the model is waiting, successive timer ticks visibly change the rendered spinner/icon; the animation starts after a turn begins, pauses/clears at the correct lifecycle events, and does not duplicate spinner lines.
+  - **Verification:** Add a TUI test that arms waiting, invokes `_tick_waiting()` multiple times, and compares both `_stream_lines` and the rendered `#stream` widget; cover normal turn, retry delay, queued prompt, and turn completion.
+  - **Details:** Investigation identified a regression introduced in `ac3ca07`: `_tick_waiting()` rewrites the existing spinner line but does not call `_render_stream()` on that branch. Retry backoff also intentionally clears `_turn_active`, so retry animation behavior must be tested explicitly.
+  - **Details:** _tick_waiting in-place spinner rewrite now calls _render_stream() each tick; widget-level regression tests for animation and turn-end cleanup.
+
+### Post-fix code review
+
+- [x] **Review 1:** Review Tasks 14–15 before merge.
+  - **Details:** Independent review: APPROVE, no blockers; 3 minor cosmetic findings applied; full suite green.
+  - **Objective:** Perform an independent code review after both fixes are implemented, with emphasis on event propagation, state ownership, render invalidation, and regressions introduced by the recent retry/live-block changes.
+  - **Review Scope:** `one/modes/tui_mode.py`, related `one/core/agent_session.py` event emission, changed tests, TUI/RPC snapshots, and the complete diff from the previous commit.
+  - **Required Checks:**
+    - Confirm one paste event cannot reach both custom and native insertion paths.
+    - Confirm spinner state mutation always invalidates the visible widget.
+    - Confirm live assistant/tool block cleanup still preserves legitimate output and retry indicators.
+    - Check Textual API compatibility with the declared `textual>=0.74.0` constraint.
+    - Check no duplicate event subscriptions, timers, callbacks, or key bindings.
+    - Check keyboard accessibility and preservation of `Ctrl+Z`, `Ctrl+R`, and `Ctrl+Shift+V` behavior.
+    - Check event contract and snapshot changes for unrelated churn.
+    - Check error handling, cancellation, and cleanup paths for stuck TUI state.
+  - **Files:** Review-only; no additional file path is predetermined. Record findings in the implementation review/commit, not in a new project artifact.
+  - **Acceptance Criteria:** No open high-severity findings; all paste and animation regressions have deterministic tests; full suite and lint pass; intentional snapshot changes are reviewed; changes are ready for maintainer approval.
+  - **Verification:** `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check one tests`, `git diff --check`, targeted TUI tests, and manual TUI smoke test with multiline paste, `Ctrl+Z`, `Ctrl+R`, `Ctrl+Shift+V`, model waiting, retry, and MCP output.
+
+- [x] **Task 16:** Fix backspace/delete/arrows double-dispatch in TUI input.
+  - **Description:** `_OneTextualApp._on_key` calls `await super()._on_key(event)` explicitly and then `MessagePump` invokes `App._on_key` a second time via MRO (nothing sets `prevent_default`), so every bubbled binding action (backspace/delete_left, delete/delete_right, arrows) fires twice. Add `event.prevent_default()` after the explicit super call (backward-compatible with `textual>=0.74.0`); do not remove the super call. Verify `ctrl+z`, `ctrl+c`+approval, `ctrl+v`, and `shift+enter` paths are unaffected.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** One `backspace` press deletes exactly one char; `delete` and arrows also single-step; printable typing, selection deletion, multiline join, paste paths, spinner, and shortcuts unchanged.
+  - **Verification:** Real `pilot.press` regression tests (backspace/delete/arrows/printable/multiline/selection/repeat + no-regression for Task 14/15 and shortcuts); full suite and ruff.
+  - **Details:** Reproduced pre-fix via Pilot: `hello@(0,5)+backspace → hel`, `delete → llo`, `left → 2 steps`. Task 14 masked this only for stopped keys.
+  - **Details:** Fixed with `event.prevent_default()` after explicit `super()._on_key(event)`; 8 real-dispatch regression tests; full suite 1042 passed, ruff clean.
+
 ### Risks & Mitigations
 
 | Risk | Mitigation |
@@ -177,6 +223,9 @@ bash timeout in TUI, and the `/login` help text. Work happens on branch
 - [x] All seven fixes implemented on `fix/tui-ux-batch`, each with tests.
 - [x] Follow-up corrections Tasks 8–12 implemented and covered by regressions.
 - [x] Task 13 repeated-response regression implemented and covered by retries with failed streamed attempts.
+- [x] Tasks 14–15 paste and waiting-animation fixes implemented and covered by regressions.
+- [x] Task 16 backspace/delete/arrows double-dispatch fixed and covered by regressions.
+- [ ] Independent post-fix code review completed with no open high-severity findings.
 - [ ] `ruff` clean, full `pytest` green, no unrelated behavior changes.
 - [ ] No merge/push without explicit approval.
 
