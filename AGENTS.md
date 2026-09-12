@@ -2,17 +2,17 @@
 
 ## Project
 
-Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (shell/file/code) headless or via CLI/TUI/RPC, with an **optional cooperation mode** — approval gates for mutating tools (`--cooperation`), mid-task steering/abort, and agent-initiated questions (`ask_user` tool). Started as a re-implementation of the `pi` coding agent but now independent — `pi` parity is explicitly out of scope. Open work lives in `TODO.md`; delivered work is summarized in `DONE.md`. Package name: `one`, source in `one/`.
+Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (shell/file/code) headless or via CLI/TUI/RPC, with an **optional cooperation mode** — approval gates for mutating tools (`--cooperation`), mid-task steering/abort, and agent-initiated questions (`ask_user` tool). Started as a re-implementation of the `pi` coding agent but now independent — `pi` parity is explicitly out of scope. Open work lives in `TODO.md`; delivered work is summarized in `DONE.md`. Distribution name: `one-agent` (PyPI); import name, console script, and source dir: `one`.
 
 ## Commands
 
 - Setup: `python3 -m venv .venv && .venv/bin/pip install -e .[dev]` (venv already exists; Python >= 3.12 required)
-- Tests: `.venv/bin/python -m pytest -q` (~790 tests, ~170s; `testpaths = tests`, no conftest)
+- Tests: `.venv/bin/python -m pytest -q` (~1000+ tests; `testpaths = tests`, no conftest)
 - Single test: `.venv/bin/python -m pytest tests/test_event_snapshots.py::test_event_snapshot_abort_path`
 - TUI golden snapshots (`tests/snapshots/tui/*.txt`): regenerate with `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py`, then review the diff
 - RPC golden snapshots (`tests/snapshots/rpc/*.jsonl`): same `ONE_UPDATE_SNAPSHOTS=1` flag
 - CLI: `.venv/bin/one ...` or `python -m one.cli.main ...` (tests use the module form)
-- Lint/format: `ruff` configured (`pyproject.toml`) but not enforced — `pytest` is the only gate.
+- Lint/format: `ruff` configured (`pyproject.toml`) and enforced as a CI gate (`.github/workflows/ci.yml`); keep both `pytest` and `ruff` green.
 
 ## State & config (gotchas)
 
@@ -23,7 +23,7 @@ Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (she
 - `settings.json` `tools.timeoutSec` (default 30) is the per-call tool timeout; the model can override it per call via the bash `timeout` arg. `askUser.timeoutSec` (default 0 = no timeout) governs `ask_user`.
 - The repo's `.one/` is gitignored real session data (may contain real auth keys) — never read or commit it. In tests and manual runs always set `ONE_CODING_AGENT_DIR` to a scratch dir so you don't touch the real config.
 - Auth precedence: runtime > auth file > env var (`<PROVIDER>_API_KEY`, generic fallback for unknown providers). `llama.cpp` needs no key; base URL from `LLAMA_CPP_BASE_URL` env, `--llama-cpp-url` flag, or per-model `url`.
-- `/login <provider> [apiKey] [model]` (interactive + TUI) validates the key BEFORE storing (`validate_and_fetch` in `one/core/provider_login.py`): 401/403 → `Authorization failed`, key NOT stored; on success it fetches the provider's model list (`ProviderAdapter.list_models`, `GET {base}/v1/models` for OpenAI-compatible / Gemini models endpoint; Anthropic has no list endpoint → minimal-chat fallback), registers the models in-memory and persists them to `models.json` (`ModelRegistry.register_models`/`persist_models`). NO_AUTH providers (`llama.cpp`/`ollama`) fetch their list without a key.
+- `/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]` (interactive + TUI) validates the key BEFORE storing (`validate_and_fetch` in `one/core/provider_login.py`): 401/403 → `Authorization failed`, key NOT stored; on success it fetches the provider's model list (`ProviderAdapter.list_models`, `GET {base}/v1/models` for OpenAI-compatible / Gemini models endpoint; Anthropic has no list endpoint → minimal-chat fallback), registers the models in-memory and persists them to `models.json` (`ModelRegistry.register_models`/`persist_models`). NO_AUTH providers (`llama.cpp`/`ollama`) fetch their list without a key.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (she
 - `one/mcp/client.py` — `McpManager`: stdio transport (spawns the server per session) + streamable-HTTP transport; `call_tool` defaults to a 120s timeout.
 - `one/modes/` — `run_mode` (headless one-shot), `print_mode` (text/json), `rpc_mode`, `tui_mode` (Textual), `interactive_mode`.
 - `one/providers/` — adapters `openai_compatible` / `anthropic` / `gemini` / `codex_responses`; `registry.py` wires them (llama.cpp = OpenAI-compatible).
-- `one/tools/` — 12 tools: read, bash, edit, write, grep, find, ls, finish, plan, ask_user, spawn_subagent, apply_patch. New tools must be registered in `tools/index.py` (`all_tools`, plus `coding_tools`/`read_only_tools` groups).
+- `one/tools/` — 13 tools: read, bash, edit, write, grep, find, ls, finish, plan, ask_user, spawn_subagent, apply_patch, read_image. New tools must be registered in `tools/index.py` (`all_tools`, plus `coding_tools`/`read_only_tools` groups).
 - `plan` tool semantics: persistent per-task plan stored via the `plan` tool, injected into the system prompt every step (`# Active Plan`), cleared on `finish`, persisted in session jsonl (`customType: "plan"`), survives compaction, and is approval-gated in cooperation mode (default `approvalTools` includes `plan`).
 - `one/resources/resource_loader.py` — discovers extensions/skills/prompts/themes/AGENTS files.
 - `one/resources/extension_runtime.py` — opencode-style extension hooks contract: a `.py` extension exports `register(ctx) -> hooks` (`tool.execute.before/after`, `chat.message`, `experimental.session.compacting`, `dispose`; any throw in `before` = deny via `tool_approval_rejected`). Auto-bound by `bind_extensions()` in `agent_session_runtime.py`; load/bind/hook errors → `extension_load_error` events, never crash the session. Full contract: `docs/EXTENSIONS.md`.

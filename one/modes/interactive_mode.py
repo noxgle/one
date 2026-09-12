@@ -526,7 +526,7 @@ class InteractiveMode:
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort | /new\n"
                     "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>\n"
-                    "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
+                    "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
                 )

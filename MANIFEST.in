@@ -1,7 +1,7 @@
 include LICENSE README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
 include pyproject.toml
 include scripts/install.sh
-include docs/EXTENSIONS.md
+include docs/EXTENSIONS.md docs/RELEASE_CHECKLIST.md
 include one/py.typed
 recursive-include one *.py
 recursive-exclude one blobs

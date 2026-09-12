@@ -3,6 +3,101 @@
 Completed work is recorded in [`DONE.md`](DONE.md). User-facing release notes
 are in [`CHANGELOG.md`](CHANGELOG.md).
 
+## Public release review (pre-GitHub, read-only audit 2026-09-12)
+
+Full doc-vs-code audit on post-merge `main`, worktree clean. Secrets scan clean
+(placeholders/fakes only; `.one/` untracked and gitignored). All P1 items were
+implemented and verified in build mode: full suite 1042 passed, ruff clean.
+P0 (maintainer decisions: contact, repo+tag) and P2 remain open.
+
+### P0 — blockers (must fix before anything public)
+
+- [ ] **P0-1:** Replace the `TODO-MAINTAINER: security@example.com` placeholder in
+  `SECURITY.md:17-18` and `SECURITY.md:89-90` with a real reporting channel
+  (GitHub Security Advisories URL already at `SECURITY.md:16`, or a real
+  maintainer email). Two occurrences.
+- [ ] **P0-2:** Do not publish until the repo exists: no `origin` remote, no tags.
+  `README.md:3` CI badge, `README.md:39` clone URL, and `pyproject.toml:65-69`
+  project URLs all point at `github.com/picon/one` (404 until push).
+  Decide: create repo + push + tag `v0.1.0` (must equal `one/config.py:VERSION`),
+  or keep everything local.
+- [ ] **P0-3:** Fix `CHANGELOG.md` release-state: `## [0.1.0] — 2026-08-30` claims a
+  release but no `v0.1.0` tag exists (violates `.github/workflows/release.yml:43-51`
+  tag==version gate). Either retitle to `Unreleased` or create the tag.
+  Move `## Unreleased` above `## [0.1.0]` (Keep-a-Changelog order; currently at line 43).
+
+### P1 — wrong or missing docs (code is correct, docs lie)
+
+- [x] **P1-1:** `README.md:204` "Codex provider rejects images" is false since Task 10:
+  Codex sends `input_image` parts (`one/providers/codex_responses.py:97-118,164`;
+  `one/core/model_registry.py:66-71`). Document support + `MissingBlobError` behavior.
+- [x] **P1-2:** `README.md:210-211` Ctrl+A cooperation is half wrong: TUI is now
+  `Ctrl+Z` (`one/modes/tui_mode.py:134,750,2539`); interactive stays `Ctrl+A`
+  (`one/modes/interactive_mode.py:134,461,531`). Split per-mode. Same for
+  `CHANGELOG.md:15` historical note → add `Unreleased` entry for Ctrl+A→Ctrl+Z.
+- [x] **P1-3:** `README.md:264` `/retry <on|off>` → `<on|off|unlimited>` and add the
+  missing `/retry-cycle` row (`one/modes/tui_mode.py:1436,1847-1871`;
+  `one/core/settings_manager.py:204-216`).
+- [x] **P1-4:** `one/modes/interactive_mode.py:529` help line `/retry <on|off>` is
+  stale → `/retry <on|off|unlimited> | /retry-cycle` (TUI `:1436` already correct).
+- [x] **P1-5:** `README.md:262` `/login` form is wrong → use
+  `/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]`
+  (matches `tui_mode.py:1432,2613`, `interactive_mode.py:528`).
+- [x] **P1-6:** `README.md:372` `--extensions <path>` → singular `--extension <path>`
+  (`one/cli/args.py:134`; `docs/EXTENSIONS.md:27` already correct).
+- [x] **P1-7:** `AGENTS.md:26` `/login` omits `status|refresh|subscription` → full form.
+- [x] **P1-8:** `AGENTS.md:35` "12 tools" → 13 (`one/tools/index.py:30-32` has
+  `read_image`; `CONTRIBUTING.md:35` and `CHANGELOG.md:47` already say 13).
+- [x] **P1-9:** `AGENTS.md:15` "pytest is the only gate" contradicts
+  `CONTRIBUTING.md:41-42` and `.github/workflows/ci.yml:9-23` (ruff IS a CI gate).
+- [x] **P1-10:** `AGENTS.md:5` package name `one` vs `pyproject.toml:6`
+  `one-agent` → distribution `one-agent`, import/script `one` (as `README.md:56`).
+- [x] **P1-11:** Stale test counts (`AGENTS.md:10`, `CONTRIBUTING.md:14` say ~790;
+  actual 1042) → drop exact numbers or recount.
+- [x] **P1-12:** `scripts/install.sh:26-31` needs a source checkout but
+  `README.md:388-392` implies it creates config in `~/.config/one` (config is
+  lazy-created on first run, `one/config.py:74-96`). Clarify both.
+- [x] **P1-R1:** Reviewer pass on Task 16 (backspace `prevent_default` fix) mirroring
+  Review 1 checklist (event propagation, Textual `>=0.74.0` compat, no regressions).
+
+### P1 — missing docs for shipped behavior (add to README/CHANGELOG)
+
+- [x] **P1-13:** `maxSteps=0` = unlimited tool steps (`agent_session.py:1532-1541`,
+  `settings_manager.py:358`) — only in `TODO.md` Open Questions today.
+- [x] **P1-14:** `tool start (timeout Ns)` TUI rendering (`agent_session.py:785`,
+  `tui_mode.py:2756-2760`) — note it is TUI-only.
+- [x] **P1-15:** Version display (TUI sidebar `tui_mode.py:1307`, CLI banner
+  `cli/main.py:467`, `--version`).
+- [x] **P1-16:** TUI shortcut table/pointer (`Ctrl+R`, `Ctrl+Shift+V`, `Ctrl+V`,
+  `Ctrl+Z` from `TUI_SHORTCUTS`, `tui_mode.py:129-142`).
+- [x] **P1-17:** `CHANGELOG.md` Unreleased: add all user-visible tui-ux-batch changes
+  (retry unlimited + `/retry-cycle` + `Ctrl+R`, Codex `input_image`, `Ctrl+Z`,
+  `Ctrl+Shift+V`, `maxSteps=0`, timeout display, `/login [subscription]` help,
+  version display, paste/spinner/backspace/duplicate-render fixes).
+- [x] **P1-18:** `README.md:499-505` doc list omits `docs/RELEASE_CHECKLIST.md`;
+  `MANIFEST.in` omits it too — include it or state intentional exclusion.
+
+### P2 — nice-to-have before public
+
+- [ ] **P2-1:** `.gitignore:9` `.config/one/` never matches `~/.config/one` — comment or drop.
+- [ ] **P2-2:** Windows classifier (`pyproject.toml:37`) vs best-effort status with no
+  Windows CI — keep with experimental note or drop classifier.
+- [ ] **P2-3:** Decide what of `TODO.md:236-342` (NO-GO audit, estimates) stays public;
+  confirm `LICENSE:3` holder string `Copyright (c) 2026 picon`.
+- [ ] **P2-4:** De-duplicate `AGENTS.md` vs `CONTRIBUTING.md` overlap (setup/tests/
+  architecture drifted already); make AGENTS canonical for agents, CONTRIBUTING for
+  humans, cross-link.
+
+### Verified clean (no action needed)
+
+Auth precedence `runtime > stored > env` consistent across docs and
+`one/core/auth_storage.py:174-184`. Steer/follow-up text-only and print
+image-only rejects match code. Seed Codex models match registry. CI matrix
+(ubuntu+macos × 3.12/3.13) matches README and `requires-python`. `release.yml`
+tag-gate + disabled publish as documented. Secrets scan clean
+(placeholders in `README.md:87,93,289` + test fakes only; no `/home/picon` in
+tracked files). `MANIFEST.in` packaging claims verified clean.
+
 ## Next engineering work
 
 - [ ] **Normalize provider-native tool calls.** Evaluate a common adapter layer
@@ -23,8 +118,10 @@ are in [`CHANGELOG.md`](CHANGELOG.md).
 Fix seven reported UX gaps without changing agent behavior otherwise:
 Ctrl-C handling of approval prompts, version visibility, unlimited retry mode
 with shortcut, Ctrl+Shift+V shortcut listing, Codex image support, visible
-bash timeout in TUI, and the `/login` help text. Work happens on branch
-`fix/tui-ux-batch` (based on `main`); no merge/push without approval.
+bash timeout in TUI, and the `/login` help text. Work happened on branch
+`fix/tui-ux-batch`, merged into `main` as `d3aa680` (plus follow-ups through
+Task 16 in `29a17a5`); the branch is kept for reference. No push without approval
+(no remote is configured).
 
 ### Scope
 
@@ -225,9 +322,9 @@ bash timeout in TUI, and the `/login` help text. Work happens on branch
 - [x] Task 13 repeated-response regression implemented and covered by retries with failed streamed attempts.
 - [x] Tasks 14–15 paste and waiting-animation fixes implemented and covered by regressions.
 - [x] Task 16 backspace/delete/arrows double-dispatch fixed and covered by regressions.
-- [ ] Independent post-fix code review completed with no open high-severity findings.
-- [ ] `ruff` clean, full `pytest` green, no unrelated behavior changes.
-- [ ] No merge/push without explicit approval.
+- [x] Independent post-fix code review completed with no open high-severity findings (Review 1: Tasks 14–15 APPROVE; Task 16 diff self-reviewed, needs reviewer pass — see P1-R1 below).
+- [x] `ruff` clean, full `pytest` green (1042 passed on `29a17a5` and post-merge `main`), no unrelated behavior changes.
+- [x] Merge to `main` done (`d3aa680`); no push without explicit approval (no remote configured).
 
 ### Estimated Timeline
 

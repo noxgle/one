@@ -154,7 +154,24 @@ TUI highlights:
 
 - live response streaming (provider-dependent; OpenAI-compatible/Anthropic/Gemini/Codex supported)
 - scrollable main stream with scrollbar, simplified view (`> ...` for user messages)
-- tool lifecycle visible in stream (`tool start`, `tool ok/err`)
+- tool lifecycle visible in stream (`tool start (timeout Ns)`, `tool ok/err`)
+- app version in the sidebar (`Version: 0.1.0`, from the single source `one/config.py:VERSION`; CLI prints `one v0.1.0` at startup)
+
+TUI keyboard shortcuts (also listed in the in-app shortcuts overlay):
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+P` | Command palette |
+| `Ctrl+C` | Abort turn / reject pending approval |
+| `Ctrl+L` | Clear stream |
+| `Ctrl+Q` | Quit |
+| `Ctrl+Z` | Toggle cooperation mode |
+| `Ctrl+S` | Toggle subagents |
+| `Ctrl+O` | Toggle bash output |
+| `Ctrl+V` | Paste text from the system clipboard |
+| `Ctrl+Shift+V` | Paste image from the system clipboard |
+| `Ctrl+R` | Cycle retry mode (`off` → `on` → `unlimited`) |
+| `Ctrl+F1` | Show slash-command help |
 - subscription login via `/login chatgpt subscription` / `/login anthropic subscription` (OAuth loopback/paste)
 - cooperation approval / `ask_user` pauses the spinner and shows a waiting indicator plus a toast notification
 
@@ -201,15 +218,17 @@ full filesystem path is never written to JSONL or emitted in events.
 - `one run`, `--mode text`, `--mode tui`, interactive mode: `read_image` / `--image` work.
 - `--mode rpc`: images are supported when the JSON-RPC request includes an `images` array.
 - **Steer / follow-up messages** are text-only (the steer queue does not forward images).
-- **Codex provider** rejects images explicitly; it does not accept vision payloads.
+- **Codex provider** supports image input via the Responses API (`input_image`
+  parts); invalid or missing attachments are rejected before any HTTP request.
 - **Print mode (`--print`)** with image-only input (no task text) is unsupported — a text
   message is required even when images are supplied.
 
 ## Cooperation mode
 
-By default `one` works autonomously. With `--cooperation` (or `/cooperation`, Ctrl+A
-in the TUI/interactive mode) it asks before running mutating tools (`bash`, `write`,
-`edit`, `plan`, `apply_patch`); rejections require a reason that is fed back to the model.
+By default `one` works autonomously. With `--cooperation` (or `/cooperation` —
+Ctrl+Z in the TUI, Ctrl+A in interactive mode) it asks before running mutating tools
+(`bash`, `write`, `edit`, `plan`, `apply_patch`); rejections require a reason that is
+fed back to the model.
 Mid-task steering (`/steer`, `/follow`) and abort (Ctrl+C) work in every interactive mode.
 
 `--cooperation` is an approval gate, not a sandbox. See the trust warning above.
@@ -259,10 +278,11 @@ Available in the TUI and interactive mode (type `/help` in the app):
 | `/fork <id>` | Fork the session at an entry |
 | `/new` | Start a new session |
 | `/providers [name|#] [model|#]` | List logged-in providers, models, and switch |
-| `/login [status|refresh <provider>|provider subscription|provider [apiKey] [model]]` | Show or configure provider credentials (subscription = OAuth login flow) |
+| `/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]` | Show or configure provider credentials (subscription = OAuth login flow) |
 | `/logout <provider>` | Remove runtime API key, stored API key, and OAuth token for a provider locally |
-| `/retry <on|off>` | Enable/disable auto-retry |
-| `/config [key] [value]` | Show or set a config value (e.g. `tools.maxSteps`) |
+| `/retry <on|off|unlimited>` | Set auto-retry mode (`unlimited` retries provider calls without a cap) |
+| `/retry-cycle` | Cycle retry mode `off` → `on` → `unlimited` (Ctrl+R in TUI) |
+| `/config [key] [value]` | Show or set a config value (e.g. `tools.maxSteps`; `0` = unlimited tool steps) |
 | `/extui <list|request|respond|cancel|clear>` | Extension UI control |
 | `/cooperation [on|off]` | Toggle cooperation mode (approval gates) |
 | `/subagents [on|off]` | Enable/disable subagents (Ctrl+S in TUI) |
@@ -369,7 +389,7 @@ shape. Use `one --no-mcp` to disable all MCP servers for a run.
 `one` discovers extensions, skills, prompts, and themes via `one/resources/resource_loader.py`.
 See [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) for the full extension contract:
 
-- discovery paths (`<agent_dir>/extensions/`, `<cwd>/.one/extensions/`, `--extensions <path>`)
+- discovery paths (`<agent_dir>/extensions/`, `<cwd>/.one/extensions/`, `--extension <path>`)
 - package manager (`one install/remove/update/list`)
 - hook contract (`tool.execute.before/after`, `chat.message`, `experimental.session.compacting`, `dispose`)
 
@@ -377,7 +397,8 @@ Project extensions in `.one/extensions/` are not sandboxed — see the trust war
 
 ## Global install (run `one` from any directory)
 
-The installer is Unix-specific (Linux, macOS). On Windows use `pip install one-agent`
+The installer is Unix-specific (Linux, macOS) and requires a source checkout
+(it installs the current tree editable). On Windows use `pip install one-agent`
 or `pipx install one-agent`.
 
 ```bash
@@ -389,7 +410,9 @@ Installer creates:
 
 - virtualenv in `~/.one/venv`
 - launcher in `~/.local/bin/one`
-- config in `~/.config/one` (or legacy `~/.one/agent` if already present)
+
+The config dir (`~/.config/one`, or legacy `~/.one/agent` if already present) is
+created lazily on first run, not by the installer.
 
 After that, `one` works from any directory (if `~/.local/bin` is on your `PATH`).
 
@@ -499,6 +522,7 @@ package metadata (`pyproject.toml` dynamic version) and `one --version`.
 - `TODO.md` — open roadmap items
 - `DONE.md` — delivered functionality and release-preparation record
 - `docs/EXTENSIONS.md` — extension hook contract
+- `docs/RELEASE_CHECKLIST.md` — reproducible release verification steps
 - `CONTRIBUTING.md` — development setup, testing, conventions
 - `SECURITY.md` — supported versions, reporting, trust boundaries
 - `CHANGELOG.md` — release notes

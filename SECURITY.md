@@ -14,8 +14,8 @@ when feasible.
 
 Please report security vulnerabilities privately via
 [GitHub Security Advisories](https://github.com/picon/one/security/advisories/new).
-If advisories are unavailable (e.g. in a fork), email **TODO-MAINTAINER:
-security@example.com** with "[SECURITY] " in the subject. Do **not** open a
+If advisories are unavailable (e.g. in a fork), email
+s.wielgosz@noxgle.com with "[SECURITY] " in the subject. Do **not** open a
 public issue for security-sensitive bugs.
 
 Include:
@@ -87,4 +87,4 @@ variables take precedence over stored keys but are not persisted.
 5. **Review extensions** before loading untrusted custom packages.
 
 If you need to contact maintainers without using advisories, email
-**TODO-MAINTAINER: security@example.com** with "[SECURITY] " in the subject.
+s.wielgosz@noxgle.com with "[SECURITY] " in the subject.
