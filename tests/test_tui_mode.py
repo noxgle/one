@@ -2563,13 +2563,17 @@ async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
         app._turn_active = True
         app._last_delta_ts = 0.0
         assert app._thinking_active is False
+        stream_widget = app.query_one("#stream", Static)
 
+        # NOTE: captures happen synchronously right after each manual tick
+        # with no `await` in between. The app's own 0.15s interval timer also
+        # drives _tick_waiting, and any await would let it fire extra ticks;
+        # with a 6-frame cycle that can land back on the same glyph and make
+        # consecutive-inequality assertions flaky on loaded runners.
         # --- First tick: initial append path (else branch) ---
         app._tick_waiting()
-        await pilot.pause()
         assert app._thinking_active is True
         first_lines = list(app._stream_lines)
-        stream_widget = app.query_one("#stream", Static)
         first_render = str(stream_widget.content)
         assert any(l.startswith("__MK__:") for l in app._stream_lines), (
             "spinner line must be present after first tick"
@@ -2577,7 +2581,6 @@ async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
 
         # --- Second tick: in-place rewrite path (if branch) ---
         app._tick_waiting()
-        await pilot.pause()
         second_lines = list(app._stream_lines)
         # _stream_lines must have changed (frame advanced).
         assert second_lines != first_lines, (
@@ -2590,7 +2593,6 @@ async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
 
         # --- Third tick: verify continued animation ---
         app._tick_waiting()
-        await pilot.pause()
         third_render = str(stream_widget.content)
         assert third_render != second_render, (
             "spinner must keep animating on subsequent ticks"
