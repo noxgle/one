@@ -63,9 +63,12 @@ BUILTIN_MODELS: list[ModelInfo] = [
     # ChatGPT/Codex subscription backend (Responses API); the real slug list
     # is fetched live from /models after login. Current generation as of 2026-08;
     # catalog volatile — windows unpublished for Codex backend, gauge falls back.
-    ModelInfo("chatgpt", "gpt-5.6-sol", reasoning=True, context_window=None),
-    ModelInfo("chatgpt", "gpt-5.6-terra", reasoning=True, context_window=None),
-    ModelInfo("chatgpt", "gpt-5.6-luna", reasoning=True, context_window=None),
+    # All three slugs support image input via the Responses API (input_image
+    # content parts); built-in vision capability is preserved by
+    # register_models when a persisted entry tries to downgrade it.
+    ModelInfo("chatgpt", "gpt-5.6-sol", reasoning=True, context_window=None, input_image=True),
+    ModelInfo("chatgpt", "gpt-5.6-terra", reasoning=True, context_window=None, input_image=True),
+    ModelInfo("chatgpt", "gpt-5.6-luna", reasoning=True, context_window=None, input_image=True),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp", "ollama"}
@@ -162,8 +165,24 @@ class ModelRegistry:
                 index_by_key[key] = len(out)
                 out.append(m)
             else:
-                # Later definitions (e.g. models.json) override builtin entries.
-                out[idx] = m
+                # Later definitions (e.g. models.json) override builtin entries,
+                # BUT known built-in vision capability wins over a persisted false.
+                builtin = next(
+                    (b for b in BUILTIN_MODELS if b.provider == m.provider and b.id == m.id),
+                    None,
+                )
+                if builtin and builtin.input_image and not m.input_image:
+                    out[idx] = ModelInfo(
+                        provider=m.provider,
+                        id=m.id,
+                        reasoning=m.reasoning,
+                        context_window=m.context_window,
+                        base_url=m.base_url,
+                        tool_parser=m.tool_parser,
+                        input_image=True,  # preserve builtin vision
+                    )
+                else:
+                    out[idx] = m
         return out
 
     def all(self) -> list[ModelInfo]:

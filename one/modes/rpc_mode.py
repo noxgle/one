@@ -198,7 +198,14 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                 session.set_auto_compaction_enabled(bool(cmd.get("enabled", True)))
                 output(success(cid, ctype))
             elif ctype == "set_auto_retry":
-                session.set_auto_retry_enabled(bool(cmd.get("enabled", True)))
+                # Backward-compatible: if "enabled" is provided, use it.
+                # Otherwise respect "mode" field (off/on/unlimited).
+                if "enabled" in cmd:
+                    session.set_auto_retry_enabled(bool(cmd["enabled"]))
+                elif "mode" in cmd:
+                    mode = str(cmd["mode"])
+                    session.settings_manager.set_retry_mode(mode)
+                    session.set_auto_retry_enabled(mode in ("on", "unlimited"))
                 output(success(cid, ctype))
             elif ctype == "abort_retry":
                 output(success(cid, ctype))

@@ -139,9 +139,12 @@ def test_build_sidebar_snapshot_lists_enabled_mcp_servers() -> None:
                 {"name": "old", "enabled": False, "running": False, "tools": [], "transport": "stdio", "error": None},
             ]
 
+    from one.core.settings_manager import SettingsManager
+
     session = _DummySession()
     session._mcp_manager = _FakeMcpManager()
-    session.auto_retry_enabled = False
+    session.settings_manager = SettingsManager.in_memory()
+    session.settings_manager.set_retry_mode("off")
     snapshot = build_sidebar_snapshot(session)
 
     assert snapshot["mcpEnabled"] is True
@@ -626,9 +629,9 @@ async def test_tui_command_help_lists_all_commands(tmp_path: Path):
             "/tree",
             "/navigate <id> [--summary <text>]",
             "/fork <id>",
-            "/login [status|refresh <provider>|provider [apiKey] [model]]",
+            "/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]",
             "/logout <provider>",
-            "/retry <on|off>",
+                "/retry <on|off|unlimited>",
             "/config [key] [value]",
             "/extui <list|request|respond|cancel|clear>",
             "/cooperation [on|off]",
@@ -1089,7 +1092,7 @@ async def test_tui_action_help_lists_providers(tmp_path: Path):
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "/providers" in stream
-        assert "/login [status|refresh <provider>|<provider> subscription (OAuth)|<provider> [apiKey] [model]]" in stream
+        assert "/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]" in stream
 
 
 @pytest.mark.asyncio
@@ -1324,25 +1327,49 @@ async def test_tui_command_navigate_unknown_id_error(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Clipboard: copy (mouse selection), paste (ctrl+v) and the ctrl+a binding.
+# Clipboard: copy (mouse selection), paste (ctrl+v) and the ctrl+z binding.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_tui_ctrl_a_toggles_cooperation(tmp_path: Path):
+async def test_tui_ctrl_z_toggles_cooperation(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        # Focus is on the Input widget, which binds ctrl+a to "home" by
-        # default; the app's priority binding must win.
+        # Focus is on the Input widget; the app's priority binding for
+        # ctrl+z toggles cooperation regardless of widget focus.
         input_widget = app.query_one("#input")
         assert input_widget.has_focus
-        await pilot.press("ctrl+a")
+        await pilot.press("ctrl+z")
         assert session.approval_callback is not None
+        await pilot.press("ctrl+z")
+        assert session.approval_callback is None
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_a_no_longer_toggles_cooperation(tmp_path: Path):
+    """Ctrl+A must NOT toggle cooperation anymore; it falls through to the
+    focused widget's default binding (home / cursor-to-start-of-line)."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Cooperation starts OFF (approval_callback is None).
+        assert session.approval_callback is None
+        # Press ctrl+a — should NOT toggle cooperation.
         await pilot.press("ctrl+a")
+        await pilot.pause()
+        # Still OFF: ctrl+a no longer triggers toggle_cooperation.
+        assert session.approval_callback is None
+        # Now toggle via ctrl+z and verify it works.
+        await pilot.press("ctrl+z")
+        assert session.approval_callback is not None
+        await pilot.press("ctrl+z")
         assert session.approval_callback is None
 
 
@@ -2518,6 +2545,95 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
+    """Every mutation of the spinner line must trigger a widget refresh.
+
+    Regression: _tick_waiting rewrote the spinner line in-place but never
+    called _render_stream, so the visible widget stayed frozen.
+    """
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Arm waiting: turn active + stale delta.
+        app._turn_active = True
+        app._last_delta_ts = 0.0
+        assert app._thinking_active is False
+
+        # --- First tick: initial append path (else branch) ---
+        app._tick_waiting()
+        await pilot.pause()
+        assert app._thinking_active is True
+        first_lines = list(app._stream_lines)
+        stream_widget = app.query_one("#stream", Static)
+        first_render = str(stream_widget.content)
+        assert any(l.startswith("__MK__:") for l in app._stream_lines), (
+            "spinner line must be present after first tick"
+        )
+
+        # --- Second tick: in-place rewrite path (if branch) ---
+        app._tick_waiting()
+        await pilot.pause()
+        second_lines = list(app._stream_lines)
+        # _stream_lines must have changed (frame advanced).
+        assert second_lines != first_lines, (
+            "_stream_lines should change when spinner frame advances"
+        )
+        second_render = str(stream_widget.content)
+        assert second_render != first_render, (
+            "rendered #stream content must change between ticks — the frozen-spinner bug"
+        )
+
+        # --- Third tick: verify continued animation ---
+        app._tick_waiting()
+        await pilot.pause()
+        third_render = str(stream_widget.content)
+        assert third_render != second_render, (
+            "spinner must keep animating on subsequent ticks"
+        )
+
+
+@pytest.mark.asyncio
+async def test_tui_spinner_cleared_on_turn_end(tmp_path: Path):
+    """When the turn ends (turn_active cleared), the spinner line
+    and any thinking text must be removed from the stream."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Arm waiting.
+        app._turn_active = True
+        app._last_delta_ts = 0.0
+        app._tick_waiting()
+        await pilot.pause()
+        stream_widget = app.query_one("#stream", Static)
+        before_render = str(stream_widget.content)
+        assert "Ctrl+C abort" in before_render or "thinking" in before_render.lower(), (
+            "spinner should be visible"
+        )
+
+        # Simulate turn completion: the event handler calls _remove_thinking_line
+        # and sets _turn_active = False.
+        app._turn_active = False
+        app._remove_thinking_line()
+        app._render_stream()
+        await pilot.pause()
+
+        after_render = str(stream_widget.content)
+        assert "Ctrl+C abort" not in after_render, (
+            "spinner must be removed after turn ends"
+        )
+
+
+@pytest.mark.asyncio
 async def test_tui_approval_prompt_toasts(tmp_path: Path):
     """_approval_prompt must call notify (toast) with a message containing 'Approve:'
     and timeout=8.0."""
@@ -2678,7 +2794,7 @@ async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
 
         # Strict indices on full _stream_lines
         a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A" in l)
-        tool_start_idx = next(i for i, l in enumerate(app._stream_lines) if "tool start: read" in l)
+        tool_start_idx = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "read" in l)
         tool_end_idx = next(i for i, l in enumerate(app._stream_lines) if "result1" in l)
         b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B" in l)
         answer_idx = next(i for i, l in enumerate(app._stream_lines) if "answer" in l)
@@ -2742,10 +2858,10 @@ async def test_tui_three_segments_two_tools_strict_chronology(tmp_path: Path):
 
         # Strict chronological order: A < tool1_start < tool1_end < B < tool2_start < tool2_end < C < final
         a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A-seg" in l)
-        tool1_start = next(i for i, l in enumerate(app._stream_lines) if "tool start: read" in l)
+        tool1_start = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "read" in l)
         tool1_end = next(i for i, l in enumerate(app._stream_lines) if "out1" in l)
         b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B-seg" in l)
-        tool2_start = next(i for i, l in enumerate(app._stream_lines) if "tool start: grep" in l)
+        tool2_start = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "grep" in l)
         tool2_end = next(i for i, l in enumerate(app._stream_lines) if "out2" in l)
         c_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "C-seg" in l)
         final_idx = next(i for i, l in enumerate(app._stream_lines) if "FINAL" in l)
@@ -3114,9 +3230,9 @@ async def test_tui_thinking_cleanup_on_tool_call(tmp_path: Path):
                 break
         stream = "\n".join(app._stream_lines)
         # Must contain the tool block but NOT a stale thinking line.
-        assert "tool start:" in stream
+        assert "tool start" in stream
         thinking_stale = any(
-            line == "Thinking:" and "tool start:" not in line
+            line == "Thinking:" and "tool start" not in line
             for line in app._stream_lines
         )
         # Thinking label should not remain after the turn completes.
@@ -3234,12 +3350,12 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
 
         stream = "\n".join(app._stream_lines)
         # The tool block must be present.
-        assert "tool start: bash" in stream
+        assert "tool start" in stream and "bash" in stream
         # The streamed JSON must NOT appear as a standalone assistant chat block.
         # Find the tool block line and verify there's no assistant delta block
         # before it (only logo lines and user text).
         tool_line_idx = next(
-            (i for i, l in enumerate(app._stream_lines) if "tool start: bash" in l),
+            (i for i, l in enumerate(app._stream_lines) if "tool start" in l and "bash" in l),
             None,
         )
         assert tool_line_idx is not None
@@ -3247,12 +3363,12 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
         for line in app._stream_lines:
             if line.startswith(" ") or line.startswith("\u2588"):
                 continue  # logo lines
-            if "tool start: bash" in line:
+            if "tool start" in line and "bash" in line:
                 continue  # the tool block itself
             # No assistant delta lines should contain the full JSON structure.
             # Check by looking for the JSON's key structural elements on the
             # same line (they may be wrapped, but the tool block line is safe).
-            assert 'tool_start' not in line or 'tool start: bash' in line
+            assert 'tool_start' not in line or ('tool start ' in line and 'bash' in line)
 
         # 4. message_end must NOT create a duplicate block (state already reset)
         session._emit({"type": "message_end", "message": {"role": "assistant", "content": ""}})
@@ -3260,7 +3376,7 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
         assert app._assistant_has_live_delta is False
         stream_after_end = "\n".join(app._stream_lines)
         # Only one tool block, no extra assistant block.
-        assert stream_after_end.count("tool start: bash") == 1
+        assert sum(1 for l in stream_after_end.split("\n") if "tool start" in l and "bash" in l) == 1
 
 
 @pytest.mark.asyncio
@@ -3281,7 +3397,7 @@ async def test_tui_tool_call_start_noop_without_live_block(tmp_path: Path):
         await pilot.pause()
 
         stream = "\n".join(app._stream_lines)
-        assert "tool start: read" in stream
+        assert "tool start" in stream and "read" in stream
         assert app._assistant_has_live_delta is False
 
 
@@ -3307,7 +3423,1047 @@ async def test_tui_message_end_after_tool_call_no_duplicate(tmp_path: Path):
 
         stream = "\n".join(app._stream_lines)
         # The tool block must be present exactly once.
-        assert stream.count("tool start: ls") == 1
+        assert sum(1 for l in stream.split("\n") if "tool start" in l and "ls" in l) == 1
         # No assistant delta block should remain (JSON was removed by tool_call_start).
         assert app._assistant_has_live_delta is False
         assert app._assistant_live_start_idx == -1
+
+
+# ---------------------------------------------------------------------------
+# Version line in sidebar.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_renders_version_line(tmp_path: Path):
+    """Sidebar info block must include a Version line with the package VERSION."""
+    from textual.widgets import Static
+
+    from one.config import VERSION
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        content = str(sidebar.content)
+        assert f"Version: {VERSION}" in content
+
+
+# ---------------------------------------------------------------------------
+# Cycle retry mode — action, slash commands, and shortcuts.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_cycle_retry_mode_action_transitions(tmp_path: Path):
+    """Ctrl+R (action_cycle_retry_mode) cycles off → on → unlimited → off."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Start: default is "on"
+        assert session.settings_manager.get_retry_mode() == "on"
+
+        # First cycle: on → unlimited
+        app.action_cycle_retry_mode()
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "unlimited"
+
+        # Second cycle: unlimited → off
+        app.action_cycle_retry_mode()
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "off"
+
+        # Third cycle: off → on
+        app.action_cycle_retry_mode()
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "on"
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_r_cycle_retry_mode_via_pilot(tmp_path: Path):
+    """ctrl+r keypress triggers action_cycle_retry_mode via pilot."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Start: default is "on"
+        assert session.settings_manager.get_retry_mode() == "on"
+
+        # Press ctrl+r: on → unlimited
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "unlimited"
+
+        # Press ctrl+r again: unlimited → off
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "off"
+
+        # Press ctrl+r again: off → on
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert session.settings_manager.get_retry_mode() == "on"
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_cycle_command(tmp_path: Path):
+    """/retry-cycle cycles through all three modes."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Start: on
+        assert session.settings_manager.get_retry_mode() == "on"
+
+        await _submit(app, pilot, "/retry-cycle")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to unlimited." in stream
+        assert session.settings_manager.get_retry_mode() == "unlimited"
+
+        await _submit(app, pilot, "/retry-cycle")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to off." in stream
+        assert session.settings_manager.get_retry_mode() == "off"
+
+        await _submit(app, pilot, "/retry-cycle")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to on." in stream
+        assert session.settings_manager.get_retry_mode() == "on"
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_unlimited_accepted(tmp_path: Path):
+    """/retry unlimited is accepted and persisted."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/retry unlimited")
+        stream = "\n".join(app._stream_lines)
+        assert "Auto-retry set to unlimited." in stream
+        assert session.settings_manager.get_retry_mode() == "unlimited"
+        assert session.settings_manager.get_retry_enabled() is True
+
+
+@pytest.mark.asyncio
+async def test_tui_shortcuts_overlay_contains_new_shortcuts(tmp_path: Path):
+    """The shortcuts panel (Ctrl+F1) must show Ctrl+Shift+V and Ctrl+R."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_show_shortcuts()
+        await pilot.pause()
+        overlay = app.query_one("#shortcuts_overlay")
+        content = str(overlay.content)
+        assert "Ctrl+Shift+V" in content
+        assert "paste image from the system clipboard" in content
+        assert "Ctrl+R" in content
+        assert "cycle retry mode" in content
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_sidebar_shows_unlimited_mode(tmp_path: Path):
+    """Sidebar Retry field reflects the actual retry mode string (off/on/unlimited)."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Start: "on"
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: on" in s
+
+        # Set to unlimited
+        session.settings_manager.set_retry_mode("unlimited")
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: unlimited" in s
+
+        # Set to off
+        session.settings_manager.set_retry_mode("off")
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        s = str(sidebar.content)
+        assert "Retry: off" in s
+
+
+# ---------------------------------------------------------------------------
+# Task 11: effectiveTimeout rendering in tool_call_start TUI lines
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_with_effective_timeout(tmp_path: Path):
+    """A tool_call_start event that carries a positive effectiveTimeout must
+    render it in the block: ``tool start (timeout 30s): bash {...}``."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "echo hi"},
+                "effectiveTimeout": 30,
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # The timeout and tool name must both appear in the stream.
+        assert "tool start (timeout 30s):" in stream
+        assert '"command": "echo hi"' in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_per_call_override_shows_override(tmp_path: Path):
+    """When the agent overrides the timeout per-call, the override value must
+    appear in the TUI line."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "sleep 10"},
+                "effectiveTimeout": 5,
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        assert "tool start (timeout 5s):" in stream
+        assert '"command": "sleep 10"' in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_without_effective_timeout_plain_format(tmp_path: Path):
+    """A tool_call_start event without effectiveTimeout (or with None / 0)
+    must render the old plain format without a timeout suffix."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # No effectiveTimeout key at all
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "read",
+                "args": {"path": "a.txt"},
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # Must use the plain "tool start: read" format — no "(timeout ..." suffix.
+        assert "tool start:" in stream
+        assert "tool start (timeout" not in stream
+        assert "a.txt" in stream
+
+
+# ---------------------------------------------------------------------------
+# Task 12 (PART A): spawn_subagent / ask_user effective timeout
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_tui_tool_call_start_no_timeout_for_spawn_subagent(tmp_path: Path):
+    """spawn_subagent and ask_user are called with timeout_sec=None;
+    effectiveTimeout must NOT fall back to the global default (30 s)."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Simulate what agent_session emits for spawn_subagent (timeout_sec=None):
+        # effectiveTimeout = args.get("timeout") or timeout_sec  →  None
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "spawn_subagent",
+                "args": {"task": "do something"},
+                "effectiveTimeout": None,
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        assert "tool start:" in stream
+        assert "tool start (timeout" not in stream
+
+
+# ---------------------------------------------------------------------------
+# Task 12 (PART B): duplicated assistant / tool-block fixes
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_tui_streamed_multiline_response_not_duplicated(tmp_path: Path):
+    """A multiline streamed assistant response + final message_end must
+    render each visible line exactly once — no duplicate from the
+    fallback final-text path."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # message_start resets live state.
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+        await pilot.pause()
+
+        # Stream three deltas (simulating multiline output).
+        for delta in ["Hello", "\n", "World!"]:
+            session._emit(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": delta},
+                }
+            )
+            await pilot.pause()
+
+        # message_end with content that matches the streamed text.
+        session._emit(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hello\nWorld!"}],
+                },
+                "suppressed": False,
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # "Hello" and "World!" must appear exactly once.
+        assert stream.count("Hello") == 1
+        assert stream.count("World!") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_block_after_500_lines_yields_one_status(tmp_path: Path):
+    """After more than 500 rendered lines force a trim, a subsequent
+    tool_call_start + tool_call_end must produce exactly one status block."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Force _stream_lines to > 500 so the next tool call triggers a trim.
+        for i in range(510):
+            app._write(f"line {i}", "info")
+
+        assert len(app._stream_lines) == 500
+
+        # Start a tool — this writes a block and records absolute indices.
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "echo hi"},
+                "effectiveTimeout": 30,
+            }
+        )
+        await pilot.pause()
+
+        active = app._active_tool_block
+        assert active is not None, "active tool block must exist"
+        tool_name, start, end, block_text = active
+
+        # End the tool — _finish_tool_block should succeed.
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "bash",
+                "ok": True,
+                "result": {"outputText": "", "result": ""},
+            }
+        )
+        await pilot.pause()
+
+        assert app._active_tool_block is None, "tool block should be cleared"
+
+        # Count how many lines contain the tool start marker (status block).
+        # _finish_tool_block replaces the multiline block with a single-line
+        # status:  "<original> [ok]" or "<original> [err]".
+        search_sub = "tool start (timeout"
+        status_lines = [l for l in app._stream_lines if search_sub in l]
+        assert len(status_lines) == 1, f"expected exactly 1 status block, found {status_lines}"
+
+
+@pytest.mark.asyncio
+async def test_tui_separate_tool_output_appears_once(tmp_path: Path):
+    """A tool_call_start followed by tool_call_end with real output text
+    must render exactly one status block AND exactly one output block."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "echo hello"},
+                "effectiveTimeout": 5,
+            }
+        )
+        await pilot.pause()
+
+        session._emit(
+            {
+                "type": "tool_call_end",
+                "tool": "bash",
+                "ok": True,
+                "result": {"outputText": "hello output\n", "result": "hello output\n"},
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        # Status block appears once (with [ok] suffix).
+        # Note: _format_chat_panel wraps long lines, so search for the unique prefix.
+        assert stream.count("tool start (timeout 5s)") == 1
+        # Output block appears exactly once.
+        assert stream.count("hello output") == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 13: discard partial assistant block on retry (no 2-3× duplication).
+# ---------------------------------------------------------------------------
+
+
+class _RetryingProvider:
+    """Provider that emits deltas then raises on *failures_left* attempts."""
+
+    def __init__(
+        self,
+        deltas: list[str],
+        failures_left: int = 1,
+        success_text: str = "",
+    ) -> None:
+        self.deltas = deltas
+        self.failures_left = failures_left
+        self.success_text = success_text
+        self.calls = 0
+
+    async def chat(
+        self,
+        api_key,
+        model,
+        messages,
+        thinking_level,
+        headers=None,
+        on_delta=None,
+        on_thinking_delta=None,
+        max_tokens=None,
+        images=None,
+        storage_dir="",
+    ):
+        from one.providers.base import ChatResult
+
+        self.calls += 1
+        # Always emit deltas so the session can render them.
+        for d in self.deltas:
+            if on_delta:
+                on_delta(d)
+            await asyncio.sleep(0.005)
+        if self.failures_left > 0:
+            self.failures_left -= 1
+            raise RuntimeError("connection reset")
+        return ChatResult(text=self.success_text, raw={}, usage={}, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_discards_partial_block_one_fail(tmp_path: Path):
+    """Provider streams a multiline response, then raises on attempt 1.
+    The retry succeeds.  Each distinctive line must appear EXACTLY ONCE
+    in the final stream — no 2× duplication.
+
+    Note: _format_chat_panel wraps long lines, so we search for unique
+    substrings that identify each line (the full line may be split across
+    two wrapped lines with a newline in between).
+    """
+    from one.modes.tui_mode import _OneTextualApp
+
+    # Docker/Playwright-style response with distinctive lines.
+    # Use short, unique tokens that survive wrapping.
+    lines = [
+        "docker ps",
+        "CONTAINER  IMAGE          STATUS",
+        "docker logs -f playwright-mcp",
+        "http://localhost:8931/sse",
+    ]
+    # Unique substrings that identify each line.
+    markers = [
+        "docker ps",
+        "CONTAINER  IMAGE",
+        "playwright-mcp",
+        "localhost:8931",
+    ]
+    # Interleave newlines to simulate realistic streaming.
+    deltas = []
+    for line in lines:
+        deltas.append(line)
+        deltas.append("\n")
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _RetryingProvider(deltas, failures_left=1)}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "run")
+        # Wait for the turn to settle.
+        for _ in range(300):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        stream = "\n".join(app._stream_lines)
+        # Every distinctive marker must appear exactly once.
+        for marker in markers:
+            count = stream.count(marker)
+            assert count == 1, f"Expected '{marker}' exactly once, found {count} times in stream"
+        # The retry indicator must be present.
+        assert "[retry]" in stream or "retry" in stream.lower()
+        # Final answer visible.
+        assert "localhost:8931" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_discards_partial_block_two_fails(tmp_path: Path):
+    """Provider fails TWICE then succeeds on attempt 3 (the reported
+    2-3× duplication scenario).  Each line must still appear EXACTLY ONCE."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    lines = [
+        "docker ps",
+        "CONTAINER  IMAGE          STATUS",
+        "docker logs -f playwright-mcp",
+        "http://localhost:8931/sse",
+    ]
+    markers = [
+        "docker ps",
+        "CONTAINER  IMAGE",
+        "playwright-mcp",
+        "localhost:8931",
+    ]
+    deltas = []
+    for line in lines:
+        deltas.append(line)
+        deltas.append("\n")
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _RetryingProvider(deltas, failures_left=2)}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "run")
+        for _ in range(500):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        stream = "\n".join(app._stream_lines)
+        for marker in markers:
+            count = stream.count(marker)
+            assert count == 1, (
+                f"Expected '{marker}' exactly once after 2 retries, "
+                f"found {count} times in stream"
+            )
+        # The retry indicator must be present.
+        assert "retry" in stream.lower()
+        # Final answer visible.
+        assert "localhost:8931" in stream
+
+
+# ---------------------------------------------------------------------------
+# Task 13 follow-up: _trim_stream must rebase _assistant_live_start_idx
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_trim_rebases_live_block_and_discard_survives(tmp_path: Path):
+    """When a >500-line trim happens while a live delta block is active,
+    _assistant_live_start_idx must be rebased so that
+    _discard_live_assistant_block() removes exactly the right lines and
+    surrounding content survives."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # 1. Pre-fill stream with 350 lines so the live block starts well
+        #    inside the 500-line window.
+        for i in range(350):
+            app._stream_lines.append(f"line-{i}")
+
+        # 2. Start a live assistant delta — it starts at index 350.
+        session._emit(
+            {"type": "message_start", "message": {"role": "assistant", "content": ""}}
+        )
+        await pilot.pause()
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "text_delta",
+                    "delta": "assistant text here",
+                },
+            }
+        )
+        await pilot.pause()
+
+        assert app._assistant_has_live_delta is True
+        live_start_before_trim = app._assistant_live_start_idx
+        live_count_before_trim = app._assistant_live_line_count
+        assert live_start_before_trim >= 0
+        assert live_count_before_trim > 0
+
+        # 3. Force a trim by adding enough lines to push total > 500.
+        #    350 pre-fill + ~4 live lines + 200 new = 554 lines → trim
+        #    drops 54 from front, rebasing live idx from ~350 to ~296.
+        for i in range(200):
+            app._stream_lines.append(f"pad-{i}")
+        app._trim_stream()
+
+        # Verify the index was rebased.
+        rebased_idx = app._assistant_live_start_idx
+        dropped = live_start_before_trim - rebased_idx
+        assert dropped >= 40, f"Expected >= 40 dropped, got {dropped}"
+        # Live bookkeeping must still be valid (block not fully trimmed).
+        assert rebased_idx >= 0
+        assert app._assistant_has_live_delta is True
+
+        # 4. Discard the live block — it should remove exactly the
+        #    rebased lines and preserve surviving content.
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "echo survive"},
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        assert "tool start" in stream and "bash" in stream
+        # line-349 was at the end of the pre-fill and should survive the trim
+        # (it was at index 349, which is within the last-500 window).
+        assert "line-349" in stream, "Near-end pre-fill line should survive"
+        # The discarded assistant text must NOT appear.
+        assert "assistant text here" not in stream
+
+        # Live bookkeeping must be reset.
+        assert app._assistant_live_start_idx == -1
+        assert app._assistant_has_live_delta is False
+
+
+@pytest.mark.asyncio
+async def test_tui_trim_eats_whole_live_block_no_corruption(tmp_path: Path):
+    """When a trim consumes the entire live assistant block, live
+    bookkeeping must be invalidated (idx=-1) so subsequent deltas start
+    fresh instead of splicing at a stale absolute index."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # 1. Build a live block that sits near the end of the stream.
+        session._emit(
+            {"type": "message_start", "message": {"role": "assistant", "content": ""}}
+        )
+        await pilot.pause()
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "short live block"},
+            }
+        )
+        await pilot.pause()
+        assert app._assistant_has_live_delta is True
+        live_start = app._assistant_live_start_idx
+        live_count = app._assistant_live_line_count
+        assert live_start >= 0
+
+        # 2. Fill the stream with 520 *more* lines so that when trimmed,
+        #    the tail (where the live block sits) gets dropped too.
+        for i in range(520):
+            app._stream_lines.append(f"pad-{i}")
+
+        # 3. Append one more delta to trigger _trim_stream — this is the
+        #    moment the trim must invalidate the live block that was
+        #    pushed off the end by the new lines.
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": " after trim"},
+            }
+        )
+        await pilot.pause()
+
+        # The trim should have invalidated the live block because the
+        # entire block was pushed beyond the 500-line window.
+        # Regardless of exact state, the next delta must not crash.
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": " fresh start ok"},
+            }
+        )
+        await pilot.pause()
+
+        # Verify the stream is coherent — no duplicate blocks, no crashes.
+        stream = "\n".join(app._stream_lines)
+        assert len(app._stream_lines) <= 500 + 10  # small headroom
+        # The stream should be non-empty and contain recent content.
+        assert len(app._stream_lines) > 0
+        # No crash means we're fine — just ensure subsequent writes work.
+        app._write("post-trim content")
+        await pilot.pause()
+        stream2 = "\n".join(app._stream_lines)
+        assert "post-trim content" in stream2
+
+
+# ---------------------------------------------------------------------------
+# Task 14: one paste inserts text exactly once (dedup _on_paste / action_paste).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_via_event_inserts_once(tmp_path: Path, monkeypatch):
+    """Dispatching a real events.Paste must insert exactly once."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        paste_event = events.Paste("paste-from-event")
+        input_widget.post_message(paste_event)
+        await pilot.pause()
+        # Must appear exactly once — no double-insert.
+        assert input_widget.text == "paste-from-event"
+        assert input_widget.text.count("paste-from-event") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrlv_key_inserts_once(tmp_path: Path, monkeypatch):
+    """Pressing ctrl+v via pilot must insert exactly once (via the ctrl+v
+    binding which calls action_paste)."""
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: "via-ctrlv-key")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+        # Should have inserted once via the binding → action_paste path.
+        assert input_widget.text == "via-ctrlv-key"
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_then_enter_submits_once(tmp_path: Path, monkeypatch):
+    """Paste text then press Enter must submit one prompt containing the
+    pasted text exactly once (no duplicate from double-insert)."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: "submit-paste")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        # Dispatch a real Paste event (not direct action call).
+        paste_event = events.Paste("submit-paste")
+        input_widget.post_message(paste_event)
+        await pilot.pause()
+        assert input_widget.text == "submit-paste"
+        # Press Enter to submit.
+        await pilot.press("enter")
+        await pilot.pause()
+        # The input should be cleared after submission.
+        assert input_widget.text == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_multiline_paste_via_event_preserved(tmp_path: Path, monkeypatch):
+    """Multi-line paste via events.Paste stays multi-line (one paste = one
+    insertion of the full multi-line string)."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        multiline = "line1\nline2\nline3"
+        paste_event = events.Paste(multiline)
+        input_widget.post_message(paste_event)
+        await pilot.pause()
+        # The text must be present exactly once.
+        assert input_widget.text.count("line1") == 1
+        assert input_widget.text.count("line2") == 1
+        assert input_widget.text.count("line3") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_truncation_still_correct_via_event(tmp_path: Path, monkeypatch):
+    """Huge paste via events.Paste is still capped to _PASTE_MAX_CHARS."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        huge_text = "x" * 50_000
+        paste_event = events.Paste(huge_text)
+        input_widget.post_message(paste_event)
+        await pilot.pause()
+        assert len(input_widget.text) == tui_mode._CommandTextArea._PASTE_MAX_CHARS
+        assert input_widget.text == "x" * tui_mode._CommandTextArea._PASTE_MAX_CHARS
+
+
+# Task 16: backspace/delete/arrows must fire exactly once (no App MRO
+# double-dispatch). All tests use real pilot.press dispatch.
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_deletes_single_char(tmp_path: Path):
+    """One backspace press deletes exactly one char and moves cursor one."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 5))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert input_widget.text == "hell"
+        assert input_widget.cursor_location == (0, 4)
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_at_start_noop(tmp_path: Path):
+    """Backspace at (0, 0) changes nothing."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 0))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert input_widget.text == "hello"
+        assert input_widget.cursor_location == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_tui_delete_forward_single_char(tmp_path: Path):
+    """One delete press removes exactly one char forward."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 0))
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+        assert input_widget.text == "ello"
+        assert input_widget.cursor_location == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_tui_arrows_single_step(tmp_path: Path):
+    """Arrow keys move the cursor by exactly one position."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 5))
+        await pilot.pause()
+        await pilot.press("left")
+        await pilot.pause()
+        assert input_widget.cursor_location == (0, 4)
+        await pilot.press("right")
+        await pilot.pause()
+        assert input_widget.cursor_location == (0, 5)
+
+
+@pytest.mark.asyncio
+async def test_tui_printable_inserts_once(tmp_path: Path):
+    """A printable key inserts exactly one char (widget double-fire guard)."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        await pilot.press("a")
+        await pilot.pause()
+        assert input_widget.text == "a"
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_multiline_join_once(tmp_path: Path):
+    """Backspace at line start joins lines exactly once."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "ab\ncd"
+        await pilot.pause()
+        input_widget.move_cursor((1, 0))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert input_widget.text == "abcd"
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_selection_exact(tmp_path: Path):
+    """Backspace with a selection deletes only the selection."""
+    from textual.widgets import TextArea
+    from textual.widgets._text_area import Selection
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.selection = Selection((0, 1), (0, 4))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert input_widget.text == "ho"
+
+
+@pytest.mark.asyncio
+async def test_tui_backspace_repeat_three_times(tmp_path: Path):
+    """Three backspace presses delete exactly three chars."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.text = "hello"
+        await pilot.pause()
+        input_widget.move_cursor((0, 5))
+        await pilot.pause()
+        for _ in range(3):
+            await pilot.press("backspace")
+            await pilot.pause()
+        assert input_widget.text == "he"

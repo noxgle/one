@@ -15,6 +15,7 @@ from typing import Any
 from rich.markup import escape as rich_escape
 from rich.text import Text
 
+from one.config import VERSION
 from one.core.oauth import OAuthError
 from one.core.provider_login import entry_id as fetched_entry_id
 from one.core.provider_login import run_oauth_login, validate_and_fetch
@@ -67,12 +68,23 @@ def build_sidebar_snapshot(
                 }
             )
 
-    # Retry: show on/off based on the persistent session setting (not the
-    # transient _retry_state which only reflects the current in-flight retry).
-    auto_retry = getattr(session, "auto_retry_enabled", True)
-    if not callable(auto_retry):
-        auto_retry = bool(auto_retry)
-    retry_display = "on" if auto_retry else "off"
+    # Retry: show the actual retry mode string (off/on/unlimited) read from
+    # settings when available, falling back to the current on/off logic.
+    try:
+        retry_display = str(
+            getattr(
+                getattr(session, "settings_manager", None),
+                "get_retry_mode",
+                lambda: "on",
+            )(),
+        )
+    except Exception:
+        retry_display = None
+    if retry_display not in ("off", "on", "unlimited"):
+        auto_retry = getattr(session, "auto_retry_enabled", True)
+        if not callable(auto_retry):
+            auto_retry = bool(auto_retry)
+        retry_display = "on" if auto_retry else "off"
 
     return {
         "model": f"{session.model.provider}/{session.model.id}" if session.model else "none",
@@ -119,10 +131,12 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+C", "abort"),
     ("Ctrl+L", "clear stream"),
     ("Ctrl+Q", "quit"),
-    ("Ctrl+A", "toggle cooperation"),
+    ("Ctrl+Z", "toggle cooperation"),
     ("Ctrl+S", "toggle subagents"),
     ("Ctrl+O", "toggle bash output"),
     ("Ctrl+V", "paste from the system clipboard"),
+    ("Ctrl+Shift+V", "paste image from the system clipboard"),
+    ("Ctrl+R", "cycle retry mode"),
     ("Ctrl+F1", "show slash-command help"),
     ("Esc", "close the shortcuts panel"),
 )
@@ -348,6 +362,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/login",
     "/logout",
     "/retry",
+    "/retry-cycle",
     "/config",
     "/extui",
     "/cooperation",
@@ -505,6 +520,27 @@ if TEXTUAL_AVAILABLE:
                 self._completion_matches = []
                 self._completion_index = -1
                 self._completion_locked = False
+            # shift+enter and ctrl+v are handled here so they don't reach
+            # App._on_key through _OneTextualApp (would cause double fire).
+            # ctrl+v is intercepted in _on_key — it is not a
+            # _CommandTextArea binding — to prevent the app-level key handler
+            # from checking bindings a second time.  Let the binding fire
+            # through the normal widget chain, then stop.
+            if event.key == "shift+enter":
+                # Let the binding action (action_newline) fire, but stop
+                # to prevent _OneTextualApp._on_key → App._on_key from
+                # processing the same binding a second time.
+                self.action_newline()
+                event.stop()
+                return
+            if event.key == "ctrl+v":
+                # Prevent double-dispatch: let the binding fire, then stop
+                # so _OneTextualApp._on_key → App._on_key doesn't check
+                # bindings a second time (which would call action_paste again).
+                self.action_paste()
+                event.stop()
+                event.prevent_default()
+                return
             await super()._on_key(event)
 
         async def action_submit(self) -> None:
@@ -580,6 +616,36 @@ if TEXTUAL_AVAILABLE:
                 text = text[: self._PASTE_MAX_CHARS]
             if result := self._replace_via_keyboard(text, *self.selection):
                 self.move_cursor(result.end_location)
+
+        async def _on_paste(self, event: events.Paste) -> None:
+            """Handle bracketed-terminal paste events as the single insertion path.
+
+            Textual's TextArea also has a native ``_on_paste`` that would
+            double-insert on the same paste.  We override it with the same
+            guarded insert (truncation) and consume the event so the
+            superclass handler never fires for us.
+
+            Compatible with Textual >= 0.74.0 (where ``_on_paste`` exists)
+            and Textual 8.x (installed 8.2.8).
+            """
+            # Guard: read-only blocks pasting.
+            if self.read_only:
+                event.stop()
+                event.prevent_default()
+                return
+            text = event.text
+            if not text:
+                event.stop()
+                event.prevent_default()
+                return
+            if len(text) > self._PASTE_MAX_CHARS:
+                text = text[: self._PASTE_MAX_CHARS]
+            if result := self._replace_via_keyboard(text, *self.selection):
+                self.move_cursor(result.end_location)
+            # Consume the event so Textual's native _on_paste (and any
+            # subsequent handlers) do not insert a second copy.
+            event.stop()
+            event.prevent_default()
 
     class _OneTextualApp(App[None]):
         CSS = """
@@ -681,10 +747,10 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+c", "abort", "Abort"),
             ("ctrl+l", "clear_stream", "Clear"),
             ("ctrl+q", "quit", "Quit"),
-            # priority=True so it wins over the focused TextArea's ctrl+a (home).
-            Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
+            Binding("ctrl+z", "toggle_cooperation", "Toggle approval", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle bash output", priority=True),
+            Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
             # Ctrl+Shift+V: paste image from clipboard (queued for import).
             Binding("ctrl+shift+v", "paste_image", "Paste image from clipboard", priority=True),
             ("ctrl+f1", "help", "Help"),
@@ -711,6 +777,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
             self._active_tool_block: tuple[str, int, int, str] | None = None
             self._turn_active = False
             self._last_delta_ts = 0.0
@@ -900,28 +967,81 @@ if TEXTUAL_AVAILABLE:
                 for i in range(len(self._stream_lines) - 1, -1, -1):
                     if self._stream_lines[i].startswith(_THINKING_MARK):
                         self._stream_lines[i] = line
+                        self._render_stream()
                         break
                 else:
                     # The line was trimmed away; re-append it.
                     self._stream_lines.append("")
                     self._stream_lines.append(line)
                     self._stream_lines.append("")
-                    if len(self._stream_lines) > 500:
-                        self._stream_lines = self._stream_lines[-500:]
+                    self._trim_stream()
             else:
                 self._stream_lines.append("")
                 self._stream_lines.append(line)
                 self._stream_lines.append("")
-                if len(self._stream_lines) > 500:
-                    self._stream_lines = self._stream_lines[-500:]
+                self._trim_stream()
                 self._thinking_active = True
-            self._render_stream()
 
         def _write(self, text: str, kind: str = "normal") -> None:
             self._stream_lines.append(sanitize_display_text(text))
-            if len(self._stream_lines) > 500:
+            self._trim_stream()
+
+        def _trim_stream(self) -> int:
+            """Trim *_stream_lines* to 500 entries.  Returns the number of
+            lines dropped from the front (0 if no trim happened) so callers
+            can rebase any absolute indexes they hold."""
+            before = len(self._stream_lines)
+            if before > 500:
+                dropped = before - 500
                 self._stream_lines = self._stream_lines[-500:]
+            else:
+                dropped = 0
+
+            # --- rebase assistant live bookkeeping ------------------------
+            if dropped and self._assistant_live_start_idx >= 0:
+                new_idx = self._assistant_live_start_idx - dropped
+                if new_idx < 0:
+                    # The live block was partially or fully trimmed away.
+                    self._assistant_live_start_idx = -1
+                    self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
+                    self._assistant_has_live_delta = False
+                elif (
+                    new_idx + self._assistant_live_line_count
+                    > len(self._stream_lines)
+                ):
+                    # The block extends beyond the trimmed list — invalidate.
+                    self._assistant_live_start_idx = -1
+                    self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
+                    self._assistant_has_live_delta = False
+                else:
+                    self._assistant_live_start_idx = new_idx
+
+            # --- rebase active tool block --------------------------------
+            if dropped:
+                active = self._active_tool_block
+                if active is not None:
+                    _name, start, end, _text = active
+                    new_start = start - dropped
+                    new_end = end - dropped
+                    if new_start < 0:
+                        self._active_tool_block = None
+                    elif new_end > len(self._stream_lines):
+                        self._active_tool_block = None
+                    else:
+                        self._active_tool_block = (
+                            _name, new_start, new_end, _text
+                        )
+            else:
+                active = self._active_tool_block
+                if active is not None:
+                    _name, start, end, _text = active
+                    if start >= len(self._stream_lines) or end > len(self._stream_lines):
+                        self._active_tool_block = None
+
             self._render_stream()
+            return dropped
 
         def _chat_panel_width(self) -> int:
             try:
@@ -976,6 +1096,7 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines.append("")
                 self._assistant_live_start_idx = len(self._stream_lines)
                 self._assistant_live_buffer = ""
+                self._assistant_live_line_count = 0  # will be set below
                 self._assistant_has_live_delta = True
             self._assistant_live_buffer += delta
             panel_lines = self._format_chat_panel("assistant", self._assistant_live_buffer)
@@ -983,9 +1104,30 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines = self._stream_lines[: self._assistant_live_start_idx] + panel_lines
             else:
                 self._stream_lines.extend(panel_lines)
-            if len(self._stream_lines) > 500:
-                self._stream_lines = self._stream_lines[-500:]
-            self._render_stream()
+            self._assistant_live_line_count = len(panel_lines)
+            self._trim_stream()
+
+        def _discard_live_assistant_block(self) -> None:
+            """Remove the currently-tracked live assistant block from
+            *_stream_lines*.  Uses the tracked start index and line count so
+            that content appended *after* the block (retry status, tool output,
+            error messages, etc.) survives intact — this is the key difference
+            from the brute-force ``del self._stream_lines[idx:]`` used in
+            *tool_call_start*.
+
+            Call this BEFORE resetting live bookkeeping so the buffer is still
+            available to calculate the exact extent of the block.
+            """
+            idx = self._assistant_live_start_idx
+            count = self._assistant_live_line_count
+            if idx >= 0 and count > 0 and idx < len(self._stream_lines):
+                del self._stream_lines[idx : idx + count]
+            # Always invalidate bookkeeping — whether we deleted anything or
+            # not, the caller will reset / rebuild state.
+            self._assistant_live_start_idx = -1
+            self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
+            self._assistant_has_live_delta = False
 
         def _write_chat_block(self, role: str, text: str) -> None:
             self._remove_thinking_line()
@@ -995,9 +1137,7 @@ if TEXTUAL_AVAILABLE:
                 rendered_text = f"> {text}"
             self._stream_lines.extend(self._format_chat_panel(role, rendered_text))
             self._stream_lines.append("")
-            if len(self._stream_lines) > 500:
-                self._stream_lines = self._stream_lines[-500:]
-            self._render_stream()
+            self._trim_stream()
 
         def _write_tool_block(self, text: str) -> tuple[int, int]:
             self._remove_thinking_line()
@@ -1006,10 +1146,10 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.extend(self._format_chat_panel("tool", text, pad_y=0))
             end = len(self._stream_lines)
             self._stream_lines.append("")
-            if len(self._stream_lines) > 500:
-                self._stream_lines = self._stream_lines[-500:]
-            self._render_stream()
-            return start, end
+            dropped = self._trim_stream()
+            # Return post-trim indices so callers get positions that are
+            # valid against the current (trimmed) _stream_lines list.
+            return start + dropped, end + dropped
 
         def _finish_tool_block(self, tool_name: str, status: str) -> bool:
             """Append a completed status to the matching active tool block."""
@@ -1164,6 +1304,7 @@ if TEXTUAL_AVAILABLE:
             info_block = Text()
             info_block.append_text(Text.from_markup(f"[b {self._theme.info}]Info[/]"))
             info_block.append("\n")
+            info_block.append(f"Version: {VERSION}\n")
             info_block.append(f"Model: {sanitize_display_text(s['model'])}\n")
             info_block.append(f"Theme: {sanitize_display_text(self._theme.name)}\n")
             info_block.append(f"Thinking: {sanitize_display_text(s['thinking'])}\n")
@@ -1288,11 +1429,11 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write(
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|refresh <provider>|provider [apiKey] [model]] | /logout <provider>",
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>",
                     "info",
                 )
                 self._write(
-                    "/retry <on|off> | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
+                    "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
                 )
                 self._write(
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>",
@@ -1306,10 +1447,12 @@ if TEXTUAL_AVAILABLE:
                 self._assistant_has_live_delta = False
                 self._assistant_live_start_idx = -1
                 self._assistant_live_buffer = ""
+                self._assistant_live_line_count = 0
                 return
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
             if cmd == "/abort":
                 await session.abort()
                 self._turn_active = False
@@ -1591,6 +1734,7 @@ if TEXTUAL_AVAILABLE:
                 self._assistant_has_live_delta = False
                 self._assistant_live_start_idx = -1
                 self._assistant_live_buffer = ""
+                self._assistant_live_line_count = 0
                 self._clear_extension_ui_state()
                 self._write("New session started.", "info")
                 self._refresh_sidebar()
@@ -1702,11 +1846,29 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd.startswith("/retry "):
                 mode = cmd[len("/retry ") :].strip().lower()
-                if mode not in {"on", "off"}:
-                    self._write("Usage: /retry <on|off>", "error")
+                if mode not in {"on", "off", "unlimited"}:
+                    self._write("Usage: /retry <on|off|unlimited>", "error")
                     return
-                session.set_auto_retry_enabled(mode == "on")
+                session.settings_manager.set_retry_mode(mode)
+                session.set_auto_retry_enabled(mode in ("on", "unlimited"))
                 self._write(f"Auto-retry set to {mode}.", "info")
+                self._refresh_sidebar()
+                return
+            if cmd == "/retry-cycle":
+                current = getattr(
+                    getattr(session, "settings_manager", None),
+                    "get_retry_mode",
+                    lambda: "on",
+                )()
+                if current == "off":
+                    new_mode = "on"
+                elif current == "on":
+                    new_mode = "unlimited"
+                else:
+                    new_mode = "off"
+                session.settings_manager.set_retry_mode(new_mode)
+                session.set_auto_retry_enabled(new_mode in ("on", "unlimited"))
+                self._write(f"Auto-retry set to {new_mode}.", "info")
                 self._refresh_sidebar()
                 return
             if cmd == "/subagents":
@@ -2343,6 +2505,28 @@ if TEXTUAL_AVAILABLE:
                 return True, ""
             return False, reason
 
+        async def _on_key(self, event: events.Key) -> None:
+            """Catch Ctrl-C when an approval prompt is open so it rejects
+            the pending approval instead of aborting the entire session.
+
+            The ctrl-c interception path is synchronous-safe: put_nowait +
+            event.stop() + prevent_default + return — no ``await`` needed
+            because we never reach ``super()`` on that branch.
+            """
+            if event.key == "ctrl+c" and self._approval_pending is not None:
+                queue = self._approval_queue
+                if queue is not None:
+                    queue.put_nowait(("no", "aborted by user"))
+                event.stop()
+                event.prevent_default()
+                return
+            await super()._on_key(event)
+            # Prevent MRO double-dispatch: MessagePump invokes App._on_key
+            # again after this handler (nothing set prevent_default yet),
+            # which would fire bubbled bindings (backspace/delete/arrows)
+            # a second time. Harmless no-op on older Textual single dispatch.
+            event.prevent_default()
+
         async def action_abort(self) -> None:
             await self.session.abort()
             self._turn_active = False
@@ -2352,7 +2536,7 @@ if TEXTUAL_AVAILABLE:
             self._refresh_sidebar()
 
         def action_toggle_cooperation(self) -> None:
-            """Ctrl+A: toggle ask-before-running (cooperation) mode.
+            """Ctrl+Z: toggle ask-before-running (cooperation) mode.
 
             Affects future tool calls only; a pending approval prompt keeps
             waiting for its answer.
@@ -2377,6 +2561,24 @@ if TEXTUAL_AVAILABLE:
             self._write(f"Bash output: {'on' if not state else 'off'}.", "info")
             self._refresh_sidebar()
 
+        def action_cycle_retry_mode(self) -> None:
+            """Ctrl+R: cycle retry mode off → on → unlimited → off."""
+            current = getattr(
+                getattr(self.session, "settings_manager", None),
+                "get_retry_mode",
+                lambda: "on",
+            )()
+            if current == "off":
+                new_mode = "on"
+            elif current == "on":
+                new_mode = "unlimited"
+            else:
+                new_mode = "off"
+            self.session.settings_manager.set_retry_mode(new_mode)
+            self.session.set_auto_retry_enabled(new_mode in ("on", "unlimited"))
+            self._write(f"Auto-retry set to {new_mode}.", "info")
+            self._refresh_sidebar()
+
         def action_clear_stream(self) -> None:
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
@@ -2384,6 +2586,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
 
         def action_show_shortcuts(self) -> None:
             """Show one-owned shortcuts rather than Textual's merged key panel."""
@@ -2407,7 +2610,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|<provider> subscription (OAuth)|<provider> [apiKey] [model]] /logout /retry /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /retry /retry-cycle /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
                 "info",
             )
 
@@ -2453,10 +2656,15 @@ if TEXTUAL_AVAILABLE:
             if et == "message_start":
                 msg = event.get("message", {})
                 if msg.get("role") == "assistant":
+                    # Discard any partial block left from a failed stream
+                    # before resetting bookkeeping so the buffer is still
+                    # available to calculate the block extent.
+                    self._discard_live_assistant_block()
                     self._assistant_stream = ""
                     self._assistant_has_live_delta = False
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
             elif et == "message_update":
                 ae = event.get("assistantMessageEvent", {})
                 if ae.get("type") == "text_delta":
@@ -2473,26 +2681,27 @@ if TEXTUAL_AVAILABLE:
                     # below will render the response correctly.
                     suppressed = event.get("suppressed", False)
                     if not suppressed:
-                        text = self._assistant_stream.strip()
-                        if not text:
-                            content = msg.get("content", "")
-                            if isinstance(content, list):
-                                text = "".join(x.get("text", "") for x in content if x.get("type") == "text").strip()
-                            else:
-                                text = str(content).strip()
-                        final_text = text or "[empty response]"
-                        if not self._assistant_has_live_delta:
-                            self._write_chat_block("assistant", final_text)
-                        else:
+                        # If live deltas were already streamed, the content is
+                        # visible in the stream — don't re-render it.
+                        if self._assistant_has_live_delta:
                             self._stream_lines.append("")
-                            if len(self._stream_lines) > 500:
-                                self._stream_lines = self._stream_lines[-500:]
-                            self._render_stream()
+                            self._trim_stream()
+                        else:
+                            text = self._assistant_stream.strip()
+                            if not text:
+                                content = msg.get("content", "")
+                                if isinstance(content, list):
+                                    text = "".join(x.get("text", "") for x in content if x.get("type") == "text").strip()
+                                else:
+                                    text = str(content).strip()
+                            final_text = text or "[empty response]"
+                            self._write_chat_block("assistant", final_text)
                     # Always reset live state regardless of suppression.
                     self._assistant_stream = ""
                     self._assistant_has_live_delta = False
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
             elif et == "thinking_delta":
                 delta = event.get("delta", "")
                 # Ignore exact empty string; whitespace-only allowed once block is open.
@@ -2541,7 +2750,14 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_start_idx = -1
                 self._assistant_has_live_delta = False
                 self._assistant_live_buffer = ""
-                text = f"tool start: {tool_name} {args_text}"
+                self._assistant_live_line_count = 0
+                # Render the per-call effective timeout when it's a positive
+                # number; omit the suffix for non-time-limited tools.
+                et_val = event.get("effectiveTimeout")
+                if isinstance(et_val, (int, float)) and et_val > 0:
+                    text = f"tool start (timeout {int(et_val)}s): {tool_name} {args_text}"
+                else:
+                    text = f"tool start: {tool_name} {args_text}"
                 start, end = self._write_tool_block(text)
                 self._active_tool_block = (tool_name, start, end, text)
             elif et == "tool_approval_rejected":
@@ -2622,6 +2838,10 @@ if TEXTUAL_AVAILABLE:
                 self._render_stream()
             elif et == "auto_retry_start":
                 self._retry_state = f"retry-{event.get('attempt')}"
+                # Defensive: discard any partial block that survived the
+                # preceding turn_end (e.g. when turn_end fires without a
+                # message_end for a killed stream).
+                self._discard_live_assistant_block()
                 self._write(
                     f"[retry] attempt {event.get('attempt')}/{event.get('maxAttempts')} in {event.get('delayMs')}ms",
                     "warn",
