@@ -152,6 +152,15 @@ bash timeout in TUI, and the `/login` help text. Work happens on branch
    - **Verification:** TUI regression with streamed multiline events, reasoning plus final text, and a tool start/end sequence crossing the trim boundary; targeted and full test suites.
   - **Details:** message_end live-delta suppression + `_trim_stream` invalidating stale tool-block indexes, 4 new tests, snapshots regenerated.
 
+- [x] **Task 13:** Prevent repeated assistant responses across failed attempts/retries.
+  - **Description:** Fix the remaining TUI duplication where the same multiline assistant response is displayed two or three times after a provider/MCP-related attempt fails and retry starts. A streamed partial assistant block remains visible because the failed attempt has no terminating `message_end`; the next `message_start` currently resets bookkeeping without removing the old live block. Add bounded cleanup of the currently tracked live assistant block before starting a new assistant message and defensively at `auto_retry_start`, without deleting legitimate tool output, retry status, or separate assistant messages. Preserve the existing event contract unless a terminating event is strictly necessary.
+  - **Files:** `one/modes/tui_mode.py`, possibly `one/core/agent_session.py` only if explicit failed-stream termination is required, `tests/test_tui_mode.py`, `tests/test_event_snapshots.py` only if event semantics change.
+  - **Dependencies:** Task 12's live-block and trim-safe rendering helpers.
+  - **Acceptance Criteria:** When a provider streams a multiline response, fails, and retries, the visible response appears exactly once after the successful retry. The same holds for two failed attempts followed by success. Distinctive lines from the Docker/Playwright MCP example are not repeated; legitimate retry indicators, tool output, and the final answer remain visible.
+  - **Verification:** Add a fake-provider TUI regression that emits the multiline text in chunks, raises after streaming on the first (and then second) attempt, and succeeds on the following attempt. Assert each distinctive line occurs once in `"\n".join(app._stream_lines)`; run `tests/test_tui_mode.py`, `tests/test_event_snapshots.py`, and the full suite.
+   - **Details:** Investigation found no duplicate TUI subscription. The likely root cause is stale `_assistant_live_start_idx`/live buffer state across an unterminated failed stream: `message_start` resets indexes but leaves the already-rendered block, so every retry appends another copy.
+   - **Details:** Stale live block discarded at `message_start`/`auto_retry_start` via tracked start index + line count; `_trim_stream` rebases live/tool-block indexes on front-trim; 4 new regression tests (one-fail, two-fail, trim-rebase, trim-eats-block); full suite 1027 passed.
+
 ### Risks & Mitigations
 
 | Risk | Mitigation |
@@ -161,11 +170,13 @@ bash timeout in TUI, and the `/login` help text. Work happens on branch
 | Unlimited retry hangs | Keep abort, budget, `finish`, and normal completion as hard stops; bound tests with fakes |
 | Codex image payload incompatibility | Verify the exact Responses API contract with fake wire-payload tests before enabling real requests |
 | Duplicate TUI rendering | Test both streamed final-message suppression and stale tool-block indexes after history trimming |
+| Repeated streamed responses across retries | Remove only the tracked live assistant block at failed-attempt/retry boundaries; cover one- and two-failure fake-provider cases |
 
 ### Project Acceptance Criteria
 
 - [x] All seven fixes implemented on `fix/tui-ux-batch`, each with tests.
 - [x] Follow-up corrections Tasks 8–12 implemented and covered by regressions.
+- [x] Task 13 repeated-response regression implemented and covered by retries with failed streamed attempts.
 - [ ] `ruff` clean, full `pytest` green, no unrelated behavior changes.
 - [ ] No merge/push without explicit approval.
 

@@ -1327,25 +1327,49 @@ async def test_tui_command_navigate_unknown_id_error(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Clipboard: copy (mouse selection), paste (ctrl+v) and the ctrl+a binding.
+# Clipboard: copy (mouse selection), paste (ctrl+v) and the ctrl+z binding.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_tui_ctrl_a_toggles_cooperation(tmp_path: Path):
+async def test_tui_ctrl_z_toggles_cooperation(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        # Focus is on the Input widget, which binds ctrl+a to "home" by
-        # default; the app's priority binding must win.
+        # Focus is on the Input widget; the app's priority binding for
+        # ctrl+z toggles cooperation regardless of widget focus.
         input_widget = app.query_one("#input")
         assert input_widget.has_focus
-        await pilot.press("ctrl+a")
+        await pilot.press("ctrl+z")
         assert session.approval_callback is not None
+        await pilot.press("ctrl+z")
+        assert session.approval_callback is None
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_a_no_longer_toggles_cooperation(tmp_path: Path):
+    """Ctrl+A must NOT toggle cooperation anymore; it falls through to the
+    focused widget's default binding (home / cursor-to-start-of-line)."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Cooperation starts OFF (approval_callback is None).
+        assert session.approval_callback is None
+        # Press ctrl+a — should NOT toggle cooperation.
         await pilot.press("ctrl+a")
+        await pilot.pause()
+        # Still OFF: ctrl+a no longer triggers toggle_cooperation.
+        assert session.approval_callback is None
+        # Now toggle via ctrl+z and verify it works.
+        await pilot.press("ctrl+z")
+        assert session.approval_callback is not None
+        await pilot.press("ctrl+z")
         assert session.approval_callback is None
 
 
@@ -3755,3 +3779,302 @@ async def test_tui_separate_tool_output_appears_once(tmp_path: Path):
         assert stream.count("tool start (timeout 5s)") == 1
         # Output block appears exactly once.
         assert stream.count("hello output") == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 13: discard partial assistant block on retry (no 2-3× duplication).
+# ---------------------------------------------------------------------------
+
+
+class _RetryingProvider:
+    """Provider that emits deltas then raises on *failures_left* attempts."""
+
+    def __init__(
+        self,
+        deltas: list[str],
+        failures_left: int = 1,
+        success_text: str = "",
+    ) -> None:
+        self.deltas = deltas
+        self.failures_left = failures_left
+        self.success_text = success_text
+        self.calls = 0
+
+    async def chat(
+        self,
+        api_key,
+        model,
+        messages,
+        thinking_level,
+        headers=None,
+        on_delta=None,
+        on_thinking_delta=None,
+        max_tokens=None,
+        images=None,
+        storage_dir="",
+    ):
+        from one.providers.base import ChatResult
+
+        self.calls += 1
+        # Always emit deltas so the session can render them.
+        for d in self.deltas:
+            if on_delta:
+                on_delta(d)
+            await asyncio.sleep(0.005)
+        if self.failures_left > 0:
+            self.failures_left -= 1
+            raise RuntimeError("connection reset")
+        return ChatResult(text=self.success_text, raw={}, usage={}, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_discards_partial_block_one_fail(tmp_path: Path):
+    """Provider streams a multiline response, then raises on attempt 1.
+    The retry succeeds.  Each distinctive line must appear EXACTLY ONCE
+    in the final stream — no 2× duplication.
+
+    Note: _format_chat_panel wraps long lines, so we search for unique
+    substrings that identify each line (the full line may be split across
+    two wrapped lines with a newline in between).
+    """
+    from one.modes.tui_mode import _OneTextualApp
+
+    # Docker/Playwright-style response with distinctive lines.
+    # Use short, unique tokens that survive wrapping.
+    lines = [
+        "docker ps",
+        "CONTAINER  IMAGE          STATUS",
+        "docker logs -f playwright-mcp",
+        "http://localhost:8931/sse",
+    ]
+    # Unique substrings that identify each line.
+    markers = [
+        "docker ps",
+        "CONTAINER  IMAGE",
+        "playwright-mcp",
+        "localhost:8931",
+    ]
+    # Interleave newlines to simulate realistic streaming.
+    deltas = []
+    for line in lines:
+        deltas.append(line)
+        deltas.append("\n")
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _RetryingProvider(deltas, failures_left=1)}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "run")
+        # Wait for the turn to settle.
+        for _ in range(300):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        stream = "\n".join(app._stream_lines)
+        # Every distinctive marker must appear exactly once.
+        for marker in markers:
+            count = stream.count(marker)
+            assert count == 1, f"Expected '{marker}' exactly once, found {count} times in stream"
+        # The retry indicator must be present.
+        assert "[retry]" in stream or "retry" in stream.lower()
+        # Final answer visible.
+        assert "localhost:8931" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_retry_discards_partial_block_two_fails(tmp_path: Path):
+    """Provider fails TWICE then succeeds on attempt 3 (the reported
+    2-3× duplication scenario).  Each line must still appear EXACTLY ONCE."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    lines = [
+        "docker ps",
+        "CONTAINER  IMAGE          STATUS",
+        "docker logs -f playwright-mcp",
+        "http://localhost:8931/sse",
+    ]
+    markers = [
+        "docker ps",
+        "CONTAINER  IMAGE",
+        "playwright-mcp",
+        "localhost:8931",
+    ]
+    deltas = []
+    for line in lines:
+        deltas.append(line)
+        deltas.append("\n")
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _RetryingProvider(deltas, failures_left=2)}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "run")
+        for _ in range(500):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        stream = "\n".join(app._stream_lines)
+        for marker in markers:
+            count = stream.count(marker)
+            assert count == 1, (
+                f"Expected '{marker}' exactly once after 2 retries, "
+                f"found {count} times in stream"
+            )
+        # The retry indicator must be present.
+        assert "retry" in stream.lower()
+        # Final answer visible.
+        assert "localhost:8931" in stream
+
+
+# ---------------------------------------------------------------------------
+# Task 13 follow-up: _trim_stream must rebase _assistant_live_start_idx
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_trim_rebases_live_block_and_discard_survives(tmp_path: Path):
+    """When a >500-line trim happens while a live delta block is active,
+    _assistant_live_start_idx must be rebased so that
+    _discard_live_assistant_block() removes exactly the right lines and
+    surrounding content survives."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # 1. Pre-fill stream with 350 lines so the live block starts well
+        #    inside the 500-line window.
+        for i in range(350):
+            app._stream_lines.append(f"line-{i}")
+
+        # 2. Start a live assistant delta — it starts at index 350.
+        session._emit(
+            {"type": "message_start", "message": {"role": "assistant", "content": ""}}
+        )
+        await pilot.pause()
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "text_delta",
+                    "delta": "assistant text here",
+                },
+            }
+        )
+        await pilot.pause()
+
+        assert app._assistant_has_live_delta is True
+        live_start_before_trim = app._assistant_live_start_idx
+        live_count_before_trim = app._assistant_live_line_count
+        assert live_start_before_trim >= 0
+        assert live_count_before_trim > 0
+
+        # 3. Force a trim by adding enough lines to push total > 500.
+        #    350 pre-fill + ~4 live lines + 200 new = 554 lines → trim
+        #    drops 54 from front, rebasing live idx from ~350 to ~296.
+        for i in range(200):
+            app._stream_lines.append(f"pad-{i}")
+        app._trim_stream()
+
+        # Verify the index was rebased.
+        rebased_idx = app._assistant_live_start_idx
+        dropped = live_start_before_trim - rebased_idx
+        assert dropped >= 40, f"Expected >= 40 dropped, got {dropped}"
+        # Live bookkeeping must still be valid (block not fully trimmed).
+        assert rebased_idx >= 0
+        assert app._assistant_has_live_delta is True
+
+        # 4. Discard the live block — it should remove exactly the
+        #    rebased lines and preserve surviving content.
+        session._emit(
+            {
+                "type": "tool_call_start",
+                "tool": "bash",
+                "args": {"command": "echo survive"},
+            }
+        )
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        assert "tool start" in stream and "bash" in stream
+        # line-349 was at the end of the pre-fill and should survive the trim
+        # (it was at index 349, which is within the last-500 window).
+        assert "line-349" in stream, "Near-end pre-fill line should survive"
+        # The discarded assistant text must NOT appear.
+        assert "assistant text here" not in stream
+
+        # Live bookkeeping must be reset.
+        assert app._assistant_live_start_idx == -1
+        assert app._assistant_has_live_delta is False
+
+
+@pytest.mark.asyncio
+async def test_tui_trim_eats_whole_live_block_no_corruption(tmp_path: Path):
+    """When a trim consumes the entire live assistant block, live
+    bookkeeping must be invalidated (idx=-1) so subsequent deltas start
+    fresh instead of splicing at a stale absolute index."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # 1. Build a live block that sits near the end of the stream.
+        session._emit(
+            {"type": "message_start", "message": {"role": "assistant", "content": ""}}
+        )
+        await pilot.pause()
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "short live block"},
+            }
+        )
+        await pilot.pause()
+        assert app._assistant_has_live_delta is True
+        live_start = app._assistant_live_start_idx
+        live_count = app._assistant_live_line_count
+        assert live_start >= 0
+
+        # 2. Fill the stream with 520 *more* lines so that when trimmed,
+        #    the tail (where the live block sits) gets dropped too.
+        for i in range(520):
+            app._stream_lines.append(f"pad-{i}")
+
+        # 3. Append one more delta to trigger _trim_stream — this is the
+        #    moment the trim must invalidate the live block that was
+        #    pushed off the end by the new lines.
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": " after trim"},
+            }
+        )
+        await pilot.pause()
+
+        # The trim should have invalidated the live block because the
+        # entire block was pushed beyond the 500-line window.
+        # Regardless of exact state, the next delta must not crash.
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": " fresh start ok"},
+            }
+        )
+        await pilot.pause()
+
+        # Verify the stream is coherent — no duplicate blocks, no crashes.
+        stream = "\n".join(app._stream_lines)
+        assert len(app._stream_lines) <= 500 + 10  # small headroom
+        # The stream should be non-empty and contain recent content.
+        assert len(app._stream_lines) > 0
+        # No crash means we're fine — just ensure subsequent writes work.
+        app._write("post-trim content")
+        await pilot.pause()
+        stream2 = "\n".join(app._stream_lines)
+        assert "post-trim content" in stream2

@@ -131,7 +131,7 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+C", "abort"),
     ("Ctrl+L", "clear stream"),
     ("Ctrl+Q", "quit"),
-    ("Ctrl+A", "toggle cooperation"),
+    ("Ctrl+Z", "toggle cooperation"),
     ("Ctrl+S", "toggle subagents"),
     ("Ctrl+O", "toggle bash output"),
     ("Ctrl+V", "paste from the system clipboard"),
@@ -706,8 +706,7 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+c", "abort", "Abort"),
             ("ctrl+l", "clear_stream", "Clear"),
             ("ctrl+q", "quit", "Quit"),
-            # priority=True so it wins over the focused TextArea's ctrl+a (home).
-            Binding("ctrl+a", "toggle_cooperation", "Toggle approval", priority=True),
+            Binding("ctrl+z", "toggle_cooperation", "Toggle approval", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle bash output", priority=True),
             Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
@@ -737,6 +736,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
             self._active_tool_block: tuple[str, int, int, str] | None = None
             self._turn_active = False
             self._last_delta_ts = 0.0
@@ -944,18 +944,62 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.append(sanitize_display_text(text))
             self._trim_stream()
 
-        def _trim_stream(self) -> None:
-            """Trim *_stream_lines* to 500 entries and invalidate stale
-            *_active_tool_block* indexes (absolute positions shift when lines
-            are dropped from the front)."""
-            if len(self._stream_lines) > 500:
+        def _trim_stream(self) -> int:
+            """Trim *_stream_lines* to 500 entries.  Returns the number of
+            lines dropped from the front (0 if no trim happened) so callers
+            can rebase any absolute indexes they hold."""
+            before = len(self._stream_lines)
+            if before > 500:
+                dropped = before - 500
                 self._stream_lines = self._stream_lines[-500:]
-            active = self._active_tool_block
-            if active is not None:
-                _name, start, end, _text = active
-                if start >= len(self._stream_lines) or end > len(self._stream_lines):
-                    self._active_tool_block = None
+            else:
+                dropped = 0
+
+            # --- rebase assistant live bookkeeping ------------------------
+            if dropped and self._assistant_live_start_idx >= 0:
+                new_idx = self._assistant_live_start_idx - dropped
+                if new_idx < 0:
+                    # The live block was partially or fully trimmed away.
+                    self._assistant_live_start_idx = -1
+                    self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
+                    self._assistant_has_live_delta = False
+                elif (
+                    new_idx + self._assistant_live_line_count
+                    > len(self._stream_lines)
+                ):
+                    # The block extends beyond the trimmed list — invalidate.
+                    self._assistant_live_start_idx = -1
+                    self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
+                    self._assistant_has_live_delta = False
+                else:
+                    self._assistant_live_start_idx = new_idx
+
+            # --- rebase active tool block --------------------------------
+            if dropped:
+                active = self._active_tool_block
+                if active is not None:
+                    _name, start, end, _text = active
+                    new_start = start - dropped
+                    new_end = end - dropped
+                    if new_start < 0:
+                        self._active_tool_block = None
+                    elif new_end > len(self._stream_lines):
+                        self._active_tool_block = None
+                    else:
+                        self._active_tool_block = (
+                            _name, new_start, new_end, _text
+                        )
+            else:
+                active = self._active_tool_block
+                if active is not None:
+                    _name, start, end, _text = active
+                    if start >= len(self._stream_lines) or end > len(self._stream_lines):
+                        self._active_tool_block = None
+
             self._render_stream()
+            return dropped
 
         def _chat_panel_width(self) -> int:
             try:
@@ -1010,6 +1054,7 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines.append("")
                 self._assistant_live_start_idx = len(self._stream_lines)
                 self._assistant_live_buffer = ""
+                self._assistant_live_line_count = 0  # will be set below
                 self._assistant_has_live_delta = True
             self._assistant_live_buffer += delta
             panel_lines = self._format_chat_panel("assistant", self._assistant_live_buffer)
@@ -1017,7 +1062,30 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines = self._stream_lines[: self._assistant_live_start_idx] + panel_lines
             else:
                 self._stream_lines.extend(panel_lines)
+            self._assistant_live_line_count = len(panel_lines)
             self._trim_stream()
+
+        def _discard_live_assistant_block(self) -> None:
+            """Remove the currently-tracked live assistant block from
+            *_stream_lines*.  Uses the tracked start index and line count so
+            that content appended *after* the block (retry status, tool output,
+            error messages, etc.) survives intact — this is the key difference
+            from the brute-force ``del self._stream_lines[idx:]`` used in
+            *tool_call_start*.
+
+            Call this BEFORE resetting live bookkeeping so the buffer is still
+            available to calculate the exact extent of the block.
+            """
+            idx = self._assistant_live_start_idx
+            count = self._assistant_live_line_count
+            if idx >= 0 and count > 0 and idx < len(self._stream_lines):
+                del self._stream_lines[idx : idx + count]
+            # Always invalidate bookkeeping — whether we deleted anything or
+            # not, the caller will reset / rebuild state.
+            self._assistant_live_start_idx = -1
+            self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
+            self._assistant_has_live_delta = False
 
         def _write_chat_block(self, role: str, text: str) -> None:
             self._remove_thinking_line()
@@ -1036,8 +1104,10 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.extend(self._format_chat_panel("tool", text, pad_y=0))
             end = len(self._stream_lines)
             self._stream_lines.append("")
-            self._trim_stream()
-            return start, end
+            dropped = self._trim_stream()
+            # Return post-trim indices so callers get positions that are
+            # valid against the current (trimmed) _stream_lines list.
+            return start + dropped, end + dropped
 
         def _finish_tool_block(self, tool_name: str, status: str) -> bool:
             """Append a completed status to the matching active tool block."""
@@ -1335,10 +1405,12 @@ if TEXTUAL_AVAILABLE:
                 self._assistant_has_live_delta = False
                 self._assistant_live_start_idx = -1
                 self._assistant_live_buffer = ""
+                self._assistant_live_line_count = 0
                 return
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
             if cmd == "/abort":
                 await session.abort()
                 self._turn_active = False
@@ -1620,6 +1692,7 @@ if TEXTUAL_AVAILABLE:
                 self._assistant_has_live_delta = False
                 self._assistant_live_start_idx = -1
                 self._assistant_live_buffer = ""
+                self._assistant_live_line_count = 0
                 self._clear_extension_ui_state()
                 self._write("New session started.", "info")
                 self._refresh_sidebar()
@@ -2416,7 +2489,7 @@ if TEXTUAL_AVAILABLE:
             self._refresh_sidebar()
 
         def action_toggle_cooperation(self) -> None:
-            """Ctrl+A: toggle ask-before-running (cooperation) mode.
+            """Ctrl+Z: toggle ask-before-running (cooperation) mode.
 
             Affects future tool calls only; a pending approval prompt keeps
             waiting for its answer.
@@ -2466,6 +2539,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
 
         def action_show_shortcuts(self) -> None:
             """Show one-owned shortcuts rather than Textual's merged key panel."""
@@ -2535,10 +2609,15 @@ if TEXTUAL_AVAILABLE:
             if et == "message_start":
                 msg = event.get("message", {})
                 if msg.get("role") == "assistant":
+                    # Discard any partial block left from a failed stream
+                    # before resetting bookkeeping so the buffer is still
+                    # available to calculate the block extent.
+                    self._discard_live_assistant_block()
                     self._assistant_stream = ""
                     self._assistant_has_live_delta = False
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
             elif et == "message_update":
                 ae = event.get("assistantMessageEvent", {})
                 if ae.get("type") == "text_delta":
@@ -2575,6 +2654,7 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_has_live_delta = False
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
             elif et == "thinking_delta":
                 delta = event.get("delta", "")
                 # Ignore exact empty string; whitespace-only allowed once block is open.
@@ -2623,6 +2703,7 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_start_idx = -1
                 self._assistant_has_live_delta = False
                 self._assistant_live_buffer = ""
+                self._assistant_live_line_count = 0
                 # Render the per-call effective timeout when it's a positive
                 # number; omit the suffix for non-time-limited tools.
                 et_val = event.get("effectiveTimeout")
@@ -2710,6 +2791,10 @@ if TEXTUAL_AVAILABLE:
                 self._render_stream()
             elif et == "auto_retry_start":
                 self._retry_state = f"retry-{event.get('attempt')}"
+                # Defensive: discard any partial block that survived the
+                # preceding turn_end (e.g. when turn_end fires without a
+                # message_end for a killed stream).
+                self._discard_live_assistant_block()
                 self._write(
                     f"[retry] attempt {event.get('attempt')}/{event.get('maxAttempts')} in {event.get('delayMs')}ms",
                     "warn",
