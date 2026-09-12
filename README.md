@@ -13,6 +13,9 @@ The project started as a re-implementation of the `pi` coding agent and is now a
 independent project with its own roadmap — see `TODO.md`. Completed work is
 recorded in `DONE.md`.
 
+`one` — *one for everyone* — builds on the experience gained while creating
+[`term_agent`](https://github.com/noxgle/term_agent).
+
 > **Maturity:** Alpha (`0.1.x`). The public API, tool contract, and storage formats may
 > change in `0.1` releases. See `CHANGELOG.md` and `TODO.md` for the roadmap.
 
