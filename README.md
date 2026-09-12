@@ -4,6 +4,29 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 
+```text
+ ██████╗ ███╗   ██╗███████╗
+██╔═══██╗████╗  ██║██╔════╝
+██║   ██║██╔██╗ ██║█████╗
+██║   ██║██║╚██╗██║██╔══╝
+╚██████╔╝██║ ╚████║███████╗
+ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+
+███████╗ ██████╗ ██████╗
+██╔════╝██╔═══██╗██╔══██╗
+█████╗  ██║   ██║██████╔╝
+██╔══╝  ██║   ██║██╔══██╗
+██║     ╚██████╔╝██║  ██║
+╚═╝      ╚═════╝ ╚═╝  ╚═╝
+
+███████╗██╗   ██╗███████╗██████╗ ██╗   ██╗ ██████╗ ███╗   ██╗███████╗
+██╔════╝██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔═══██╗████╗  ██║██╔════╝
+█████╗  ██║   ██║█████╗  ██████╔╝ ╚████╔╝ ██║   ██║██╔██╗ ██║█████╗
+██╔══╝  ╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  ██║   ██║██║╚██╗██║██╔══╝
+███████╗ ╚████╔╝ ███████╗██║  ██║   ██║   ╚██████╔╝██║ ╚████║███████╗
+╚══════╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+```
+
 Autonomous terminal agent written in Python: it executes assigned tasks on its own
 (shell / files / code) — plan, run tools, verify, report — and can optionally work
 in a **cooperation mode** where a human approves mutating tools, steers or aborts
