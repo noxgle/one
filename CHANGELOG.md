@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 pre-1.0 (breaking changes may occur in 0.x releases).
 
+## Unreleased
+
+### Added
+
+- **13 tools** (was 12): added `read_image` for vision / image input alongside the existing tool set.
+- **Multimodal image input** — `--image <path>` CLI flag and `read_image` tool support PNG, JPEG, WebP
+  (up to 4 images per prompt, 10 MB source / 5 MiB Base64). Images are transient per-turn.
+- **Codex image input** — the ChatGPT/Codex Responses adapter sends `input_image`
+  parts for vision-capable models (`gpt-5.6-sol/terra/luna`); invalid attachments
+  are rejected before any HTTP request.
+- **Retry mode `unlimited`** — third mode next to `off`/`on` (`/retry <on|off|unlimited>`,
+  `/retry-cycle`, Ctrl+R in TUI cycles `off` → `on` → `unlimited`).
+- **`maxSteps=0`** — `tools.maxSteps` set to `0` means unlimited tool steps per turn
+  (abort, budget limits, `finish`, and normal completion still end the turn).
+- **TUI additions** — version line in the sidebar and `one v<version>` CLI banner;
+  effective timeout in tool lines (`tool start (timeout Ns): bash {...}`);
+  shortcuts overlay entries for Ctrl+Shift+V (paste image) and Ctrl+R;
+  cooperation toggle moved from Ctrl+A to Ctrl+Z in the TUI.
+- **TUI reliability fixes** — no more duplicated assistant/tool output across
+  streamed retries and history trimming; single-insert paste; working waiting
+  spinner; backspace/delete/arrows fire once.
+- **`/login` help** — all help outputs show the `[subscription]` argument.
+
+### Changed
+
+- Auth precedence wording corrected to **runtime → stored → env** in README and docs.
+- SECURITY.md scoped atomic-storage claims to text config/session persistence (blob store
+  uses its own 0600/0700 handling).
+- Security reporting contact set to s.wielgosz@noxgle.com.
+
 ## [0.1.0] — 2026-08-30
 
 ### Added
@@ -39,32 +69,3 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 - Trust boundary documented: extensions and MCP servers are not sandboxed.
 - Private LAN IPs, stale claims, and sensitive paths removed from documentation.
 - Token redaction in error messages and RPC responses.
-
-## Unreleased
-
-### Added
-
-- **13 tools** (was 12): added `read_image` for vision / image input alongside the existing tool set.
-- **Multimodal image input** — `--image <path>` CLI flag and `read_image` tool support PNG, JPEG, WebP
-  (up to 4 images per prompt, 10 MB source / 5 MiB Base64). Images are transient per-turn.
-- **Codex image input** — the ChatGPT/Codex Responses adapter sends `input_image`
-  parts for vision-capable models (`gpt-5.6-sol/terra/luna`); invalid attachments
-  are rejected before any HTTP request.
-- **Retry mode `unlimited`** — third mode next to `off`/`on` (`/retry <on|off|unlimited>`,
-  `/retry-cycle`, Ctrl+R in TUI cycles `off` → `on` → `unlimited`).
-- **`maxSteps=0`** — `tools.maxSteps` set to `0` means unlimited tool steps per turn
-  (abort, budget limits, `finish`, and normal completion still end the turn).
-- **TUI additions** — version line in the sidebar and `one v<version>` CLI banner;
-  effective timeout in tool lines (`tool start (timeout Ns): bash {...}`);
-  shortcuts overlay entries for Ctrl+Shift+V (paste image) and Ctrl+R;
-  cooperation toggle moved from Ctrl+A to Ctrl+Z in the TUI.
-- **TUI reliability fixes** — no more duplicated assistant/tool output across
-  streamed retries and history trimming; single-insert paste; working waiting
-  spinner; backspace/delete/arrows fire once.
-- **`/login` help** — all help outputs show the `[subscription]` argument.
-
-### Changed
-
-- Auth precedence wording corrected to **runtime → stored → env** in README and docs.
-- SECURITY.md scoped atomic-storage claims to text config/session persistence (blob store
-  uses its own 0600/0700 handling).

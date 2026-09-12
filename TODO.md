@@ -12,19 +12,23 @@ P0 (maintainer decisions: contact, repo+tag) and P2 remain open.
 
 ### P0 — blockers (must fix before anything public)
 
-- [ ] **P0-1:** Replace the `TODO-MAINTAINER: security@example.com` placeholder in
+- [x] **P0-1:** Replace the `TODO-MAINTAINER: security@example.com` placeholder in
   `SECURITY.md:17-18` and `SECURITY.md:89-90` with a real reporting channel
   (GitHub Security Advisories URL already at `SECURITY.md:16`, or a real
   maintainer email). Two occurrences.
+  - **Details:** Both occurrences now use `s.wielgosz@noxgle.com`; committed in `883b9a6`.
 - [ ] **P0-2:** Do not publish until the repo exists: no `origin` remote, no tags.
   `README.md:3` CI badge, `README.md:39` clone URL, and `pyproject.toml:65-69`
   project URLs all point at `github.com/picon/one` (404 until push).
   Decide: create repo + push + tag `v0.1.0` (must equal `one/config.py:VERSION`),
   or keep everything local.
-- [ ] **P0-3:** Fix `CHANGELOG.md` release-state: `## [0.1.0] — 2026-08-30` claims a
+- [x] **P0-3:** Fix `CHANGELOG.md` release-state: `## [0.1.0] — 2026-08-30` claims a
   release but no `v0.1.0` tag exists (violates `.github/workflows/release.yml:43-51`
   tag==version gate). Either retitle to `Unreleased` or create the tag.
   Move `## Unreleased` above `## [0.1.0]` (Keep-a-Changelog order; currently at line 43).
+  - **Details:** Tag path chosen: annotated tag `v0.1.0` created on `883b9a6`,
+  matching `one/config.py:VERSION = "0.1.0"`. `## Unreleased` moved above
+  `## [0.1.0]` per Keep-a-Changelog (uncommitted follow-up with the contact change).
 
 ### P1 — wrong or missing docs (code is correct, docs lie)
 
