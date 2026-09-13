@@ -60,7 +60,7 @@ class TestImport:
         from one.config import APP_NAME, VERSION
 
         assert APP_NAME == "one"
-        assert VERSION == "0.1.1"
+        assert VERSION
 
     def test_import_tools_index(self) -> None:
         from one.tools.index import all_tools

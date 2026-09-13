@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import Callable
@@ -10,6 +11,10 @@ import httpx
 from one.core.attachments import AttachmentStorageError
 
 from .base import ChatResult, ProviderAdapter
+
+# Idle timeout for per-line SSE reads — aborts a stalled stream after 120 s
+# of no data. Must stay < the outer 300 s provider deadline.
+_IDLE_SSE_TIMEOUT = 120
 
 
 class MissingBlobError(AttachmentStorageError):
@@ -182,10 +187,22 @@ class GeminiAdapter(ProviderAdapter):
         usage: dict[str, Any] = {}
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream("POST", url, json=payload, headers=h) as resp:
                 resp.raise_for_status()
-                async for line in resp.aiter_lines():
+                aiter = resp.aiter_lines()
+                while True:
+                    try:
+                        line = await asyncio.wait_for(
+                            aiter.__anext__(), timeout=_IDLE_SSE_TIMEOUT
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError:
+                        raise RuntimeError(
+                            f"SSE stream idle for {_IDLE_SSE_TIMEOUT:.0f}s — "
+                            "the request did not resolve within the idle timeout"
+                        )
                     if not line or not line.startswith("data:"):
                         continue
                     data_str = line[5:].strip()
@@ -212,5 +229,6 @@ class GeminiAdapter(ProviderAdapter):
                             pass
                     if c0.get("finishReason"):
                         stop_reason = c0.get("finishReason")
+                        break
 
         return ChatResult(text="".join(text_parts), raw=raw_last, usage=usage, stop_reason=stop_reason)

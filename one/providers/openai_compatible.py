@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import Callable
@@ -10,6 +11,11 @@ import httpx
 from one.core.attachments import AttachmentStorageError
 
 from .base import ChatResult, ProviderAdapter
+
+# Idle timeout for per-line SSE reads — aborts a stalled stream after 120 s
+# of no data. Must stay < the outer 300 s provider deadline
+# (get_provider_timeout_sec), otherwise the outer deadline fires first.
+_IDLE_SSE_TIMEOUT = 120
 
 
 class MissingBlobError(AttachmentStorageError):
@@ -241,13 +247,25 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
 
-        async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
             async with client.stream("POST", f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers) as resp:
                 if resp.is_error:
                     body = (await resp.aread()).decode("utf-8", errors="ignore")[:1000]
                     raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
 
-                async for line in resp.aiter_lines():
+                aiter = resp.aiter_lines()
+                while True:
+                    try:
+                        line = await asyncio.wait_for(
+                            aiter.__anext__(), timeout=_IDLE_SSE_TIMEOUT
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError:
+                        raise RuntimeError(
+                            f"SSE stream idle for {_IDLE_SSE_TIMEOUT:.0f}s — "
+                            "the request did not resolve within the idle timeout"
+                        )
                     if not line:
                         continue
                     if not line.startswith("data:"):
@@ -285,6 +303,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                             pass
                     if choice.get("finish_reason"):
                         stop_reason = choice.get("finish_reason")
+                        break
 
         full_text = "".join(text_parts)
         return ChatResult(text=full_text, raw=raw_last, usage=usage, stop_reason=stop_reason)

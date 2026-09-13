@@ -668,9 +668,13 @@ class AgentSession:
                 self._emit({"type": "plan_update", "plan": ""})
                 self.session_manager.append_message({"role": "user", "customType": "plan", "content": "", "timestamp": int(time.time() * 1000)})
         elif tool_name == "spawn_subagent":
-            result = await self._spawn_subagent(args)
+            # Return the coroutine (not awaited here) so the outer timeout
+            # wrapping (lines 683-698) can enforce the tool timeout.
+            result = self._spawn_subagent(args)
         elif tool_name == "ask_user":
-            result = await self._ask_user(args)
+            # ask_user has its own askUser.timeoutSec semantics; return the
+            # coroutine but skip timeout wrapping below.
+            result = self._ask_user(args)
         elif tool_name == "plan":
             plan_text = args.get("plan", "")
             result = plan_tool(plan_text)
@@ -690,6 +694,8 @@ class AgentSession:
                 elif self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
                     model_timeout = args.get("timeout")
                     outer_timeout = (model_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC if model_timeout else None
+                # ask_user is invoked with timeout_sec=None (line 1671), so
+                # outer_timeout stays None → no asyncio.wait_for wrapping.
                 if outer_timeout and outer_timeout > 0:
                     result = await asyncio.wait_for(task, timeout=outer_timeout)
                 else:
@@ -779,9 +785,9 @@ class AgentSession:
         # Compute the effective timeout for the tool-call-start event so the
         # TUI / RPC renderers can show it (per-call override > passed timeout
         # > global default).  Only apply the global default when *timeout_sec*
-        # is not None — tools like spawn_subagent and ask_user are invoked
-        # with timeout_sec=None and run without a timeout; the TUI would
-        # otherwise show a misleading "(timeout 30s)".
+        # is not None — ask_user is invoked with timeout_sec=None and relies
+        # on askUser.timeoutSec semantics inside; the TUI would otherwise
+        # show a misleading "(timeout 30s)".
         effective_timeout = args.get("timeout") or timeout_sec
         if effective_timeout is None and timeout_sec is not None:
             effective_timeout = self.settings_manager.get_tool_timeout_sec()
@@ -1434,7 +1440,18 @@ class AgentSession:
         task = asyncio.create_task(provider.chat(**chat_kwargs))
         self._active_chat_tasks.add(task)
         try:
-            res = await task
+            provider_timeout = self.settings_manager.get_provider_timeout_sec()
+            res = await asyncio.wait_for(task, timeout=provider_timeout)
+        except TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise RuntimeError(
+                f"provider timed out after {provider_timeout}s — "
+                "the request did not resolve within the configured deadline"
+            ) from None
         except asyncio.CancelledError:
             if self._abort_requested:
                 raise _AbortSignal() from None
@@ -1526,367 +1543,397 @@ class AgentSession:
         if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
             await self._invoke_extension_chat_message(user_msg)
 
-        retry_cfg = self.settings_manager.get_retry_settings()
-        attempt = 0
-        while True:
-            try:
-                self._emit({"type": "turn_start", "attempt": attempt + 1})
-                # Nudge counters accumulate across turns (reported in get_session_stats);
-                # fireCount in nudge events reflects per-turn fires (always 1 since _should_tool_nudge fires only at step 0).
-                # self._nudge_fires and self._nudge_conversions are NOT reset here — they persist for session stats.
-                tool_results: list[dict[str, Any]] = []
-                tool_max = self.settings_manager.get_tool_max_steps()
-                is_unlimited = tool_max == 0
-                tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
-                final_assistant: dict[str, Any] | None = None
-                # Unlimited mode (maxSteps=0): infinite iterator → loop only
-                # exits via break (abort, budget, finish, no-tool-call).
-                # Bounded mode (maxSteps>0): finite range → exits when exhausted.
-                step_iter: Any = (
-                    itertools.count() if is_unlimited else range(max(1, tool_max))
-                )
-                for step in step_iter:
-                    if self._abort_requested:
-                        final_assistant = self._abort_assistant_message()
+        # Fail-closed outer wrapper: if anything unexpected escapes the retry
+        # loop (provider timeouts, unexpected exceptions, etc.), emit terminal
+        # events, reset streaming/retry flags, and re-raise.  This prevents the
+        # session from being stuck in _is_streaming=True forever when a
+        # provider call hangs or SSE keep-alives reset httpx timers.
+        try:
+            retry_cfg = self.settings_manager.get_retry_settings()
+            attempt = 0
+            while True:
+                    try:
+                        self._emit({"type": "turn_start", "attempt": attempt + 1})
+                        # Nudge counters accumulate across turns (reported in get_session_stats);
+                        # fireCount in nudge events reflects per-turn fires (always 1 since _should_tool_nudge fires only at step 0).
+                        # self._nudge_fires and self._nudge_conversions are NOT reset here — they persist for session stats.
+                        tool_results: list[dict[str, Any]] = []
+                        tool_max = self.settings_manager.get_tool_max_steps()
+                        is_unlimited = tool_max == 0
+                        tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
+                        final_assistant: dict[str, Any] | None = None
+                        # Unlimited mode (maxSteps=0): infinite iterator → loop only
+                        # exits via break (abort, budget, finish, no-tool-call).
+                        # Bounded mode (maxSteps>0): finite range → exits when exhausted.
+                        step_iter: Any = (
+                            itertools.count() if is_unlimited else range(max(1, tool_max))
+                        )
+                        for step in step_iter:
+                            if self._abort_requested:
+                                final_assistant = self._abort_assistant_message()
+                                break
+                            budget_hit = self._budget_exceeded()
+                            if budget_hit is not None:
+                                kind, message = budget_hit
+                                self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
+                                final_assistant = {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": message}],
+                                    "provider": self.model.provider if self.model else None,
+                                    "model": self.model.id if self.model else None,
+                                    "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                                    "stopReason": "budget_exceeded",
+                                    "timestamp": int(time.time() * 1000),
+                                }
+                                break
+                            try:
+                                # Capability gate: if images are present but the model does not
+                                # support image input, fail immediately (no provider call).
+                                images = self._all_images()
+                                if images and self.model and not self.model.input_image:
+                                    if self.approval_callback is not None:
+                                        raise _CapabilityErrorCooperative(
+                                            f"Model '{self.model.id}' does not support image input"
+                                        )
+                                    raise _CapabilityError(
+                                        f"Model '{self.model.id}' does not support image input"
+                                    )
+                                assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
+                            except _AbortSignal:
+                                self._abort_requested = True
+                                final_assistant = self._abort_assistant_message()
+                                break
+                            if self._abort_requested:
+                                final_assistant = self._abort_assistant_message()
+                                break
+                            self.messages.append(assistant)
+                            assistant_text = self._assistant_text(assistant)
+                            # Consume tool-loaded images after the first provider call
+                            # in the tool loop — they were attached to the prompt and
+                            # should not be re-sent on subsequent provider calls.
+                            self._tool_images = []
+                            tool_call = self._try_parse_tool_call(assistant_text)
+                            if tool_call is None and self._should_tool_nudge(assistant_text, step=step, tool_results=tool_results):
+                                self._nudge_fires += 1
+                                # fireCount is per-turn; currently always 1 since _should_tool_nudge fires only at step 0.
+                                self._emit({"type": "tool_call_nudge_start", "fireCount": self._nudge_fires})
+                                try:
+                                    nudged = await self._invoke_provider(
+                                        self._flatten_messages_for_provider()
+                                        + [
+                                            {
+                                                "role": "user",
+                                                "content": (
+                                                    "Decide now: if tools are required, respond ONLY with JSON "
+                                                    '{"tool":"<name>","args":{...}} and no extra text. '
+                                                    "If tools are not required, respond with FINAL_ANSWER:<text>."
+                                                ),
+                                            }
+                                        ],
+                                        allow_live_stream=False,
+                                    )
+                                except _AbortSignal:
+                                    self._abort_requested = True
+                                    final_assistant = self._abort_assistant_message()
+                                    break
+                                nudged_text = self._assistant_text(nudged)
+                                nudged_tool_call = self._try_parse_tool_call(nudged_text)
+                                if nudged_tool_call:
+                                    tool_call = nudged_tool_call
+                                    assistant = nudged
+                                    assistant_text = nudged_text
+                                    self._nudge_conversions["true"] += 1
+                                    self._emit(
+                                        {"type": "tool_call_nudge_end", "used": True, "fireCount": self._nudge_fires}
+                                    )
+                                else:
+                                    nudged_text = self._strip_final_answer_prefix(nudged_text)
+                                    nudged["content"] = [{"type": "text", "text": nudged_text}]
+                                    assistant = nudged
+                                    assistant_text = nudged_text
+                                    self._nudge_conversions["false"] += 1
+                                    self._emit(
+                                        {"type": "tool_call_nudge_end", "used": False, "fireCount": self._nudge_fires}
+                                    )
+                            if tool_call is None:
+                                toolish = (
+                                    '"tool"' in assistant_text
+                                    and '"args"' in assistant_text
+                                    and (
+                                        assistant_text.strip().startswith("{")
+                                        or "```" in assistant_text
+                                        or "TOOL_CALL:" in assistant_text
+                                    )
+                                )
+                                if toolish:
+                                    self._emit(
+                                        {
+                                            "type": "tool_call_parse_failed",
+                                            "sample": assistant_text[:500],
+                                        }
+                                    )
+
+                            if tool_call:
+                                sub_timeout = None if tool_call["tool"] == "ask_user" else tool_timeout_sec
+                                tool_payload = await self._run_tool_call(tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout)
+                                tool_results.append(tool_payload)
+                                if tool_call["tool"] == "finish" and tool_payload.get("ok"):
+                                    # Terminal tool: end the turn with the summary as the
+                                    # final assistant message; no further provider calls.
+                                    # (Plan cleanup is handled inside _execute_tool_by_name.)
+                                    final_assistant = self._finish_assistant_message(tool_payload)
+                                    break
+                                if self._abort_requested:
+                                    final_assistant = self._abort_assistant_message()
+                                    break
+                                continue
+
+                            final_assistant = assistant
+                            break
+
+                        if final_assistant is None and not is_unlimited:
+                            final_assistant = {
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "I ran tools but reached the step limit. Please refine your next instruction.",
+                                    }
+                                ],
+                                "provider": self.model.provider if self.model else None,
+                                "model": self.model.id if self.model else None,
+                                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                                "stopReason": "tool_step_limit",
+                                "timestamp": int(time.time() * 1000),
+                            }
+                        else:
+                            assistant_text = self._assistant_text(final_assistant).strip()
+                            if not assistant_text:
+                                final_assistant["content"] = [
+                                    {
+                                        "type": "text",
+                                        "text": "The model returned an empty response. Please try again or change the model.",
+                                    }
+                                ]
+                                final_assistant["stopReason"] = final_assistant.get("stopReason") or "empty_response"
+
+                        if final_assistant not in self.messages:
+                            self.messages.append(final_assistant)
+                        self.session_manager.append_message(final_assistant)
+                        streamed_started = bool(final_assistant.pop("_streamedStart", False))
+                        streamed_suppressed = bool(final_assistant.pop("_streamedSuppressed", False))
+                        streamed_msg = final_assistant.pop("_streamedMessage", None)
+                        if streamed_started and isinstance(streamed_msg, dict):
+                            event: dict[str, Any] = {"type": "message_end", "message": final_assistant}
+                            if streamed_suppressed:
+                                event["suppressed"] = True
+                            self._emit(event)
+                        elif not streamed_suppressed:
+                            # Only emit message events when content was NOT suppressed.
+                            # Suppressed content (tool JSON detected early) is rendered
+                            # via tool_call_start / tool_call_end, not as assistant text.
+                            self._emit({"type": "message_start", "message": final_assistant})
+                            for chunk in final_assistant.get("content", []):
+                                if chunk.get("type") == "text":
+                                    self._emit(
+                                        {
+                                            "type": "message_update",
+                                            "assistantMessageEvent": {"type": "text_delta", "delta": chunk.get("text", "")},
+                                        }
+                                    )
+                            self._emit({"type": "message_end", "message": final_assistant})
+                        else:
+                            # Suppressed — emit only message_end with suppressed=True so
+                            # the TUI knows to skip creating an assistant block.
+                            self._emit({"type": "message_end", "message": final_assistant, "suppressed": True})
+                        self._emit(
+                            {
+                                "type": "turn_end",
+                                "ok": True,
+                                "attempt": attempt + 1,
+                                "aborted": final_assistant.get("stopReason") == "abort",
+                                "reason": final_assistant.get("stopReason") or "completed",
+                                "message": final_assistant,
+                                "toolResults": tool_results,
+                            }
+                        )
+                        self._emit({"type": "agent_end", "messages": [user_msg, final_assistant]})
                         break
-                    budget_hit = self._budget_exceeded()
-                    if budget_hit is not None:
-                        kind, message = budget_hit
-                        self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
-                        final_assistant = {
+                    except _CapabilityError as e:
+                        # Capability errors: emit turn_end, then either raise
+                        # _CapabilityErrorCooperative (cooperation) or emit a
+                        # controlled assistant message (autonomous).  No retry.
+                        self._emit(
+                            {
+                                "type": "turn_end",
+                                "ok": False,
+                                "attempt": attempt + 1,
+                                "reason": "error",
+                                "error": str(e),
+                                "willRetry": False,
+                            }
+                        )
+                        if self.approval_callback is not None:
+                            # Cooperation mode: do NOT cache an assistant error message.
+                            # The caller (TUI / RPC / CLI) renders the error and offers
+                            # the user a way to switch models.
+                            # Reset streaming state and clear transient image refs so
+                            # the session is ready for the next prompt.
+                            self._is_streaming = False
+                            self._images = None
+                            self._tool_images = []
+                            self._emit({"type": "agent_end", "messages": [user_msg]})
+                            raise _CapabilityErrorCooperative(str(e)) from e
+                        # Autonomous mode: emit a controlled assistant message.
+                        error_msg = {
                             "role": "assistant",
-                            "content": [{"type": "text", "text": message}],
+                            "content": [{"type": "text", "text": str(e)}],
                             "provider": self.model.provider if self.model else None,
                             "model": self.model.id if self.model else None,
                             "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                            "stopReason": "budget_exceeded",
+                            "stopReason": "unsupported_vision",
                             "timestamp": int(time.time() * 1000),
                         }
+                        self.messages.append(error_msg)
+                        self.session_manager.append_message(error_msg)
+                        self._emit({"type": "message_start", "message": error_msg})
+                        self._emit({"type": "message_end", "message": error_msg})
+                        self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
                         break
-                    try:
-                        # Capability gate: if images are present but the model does not
-                        # support image input, fail immediately (no provider call).
-                        images = self._all_images()
-                        if images and self.model and not self.model.input_image:
-                            if self.approval_callback is not None:
-                                raise _CapabilityErrorCooperative(
-                                    f"Model '{self.model.id}' does not support image input"
-                                )
-                            raise _CapabilityError(
-                                f"Model '{self.model.id}' does not support image input"
-                            )
-                        assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
-                    except _AbortSignal:
-                        self._abort_requested = True
-                        final_assistant = self._abort_assistant_message()
-                        break
-                    if self._abort_requested:
-                        final_assistant = self._abort_assistant_message()
-                        break
-                    self.messages.append(assistant)
-                    assistant_text = self._assistant_text(assistant)
-                    # Consume tool-loaded images after the first provider call
-                    # in the tool loop — they were attached to the prompt and
-                    # should not be re-sent on subsequent provider calls.
-                    self._tool_images = []
-                    tool_call = self._try_parse_tool_call(assistant_text)
-                    if tool_call is None and self._should_tool_nudge(assistant_text, step=step, tool_results=tool_results):
-                        self._nudge_fires += 1
-                        # fireCount is per-turn; currently always 1 since _should_tool_nudge fires only at step 0.
-                        self._emit({"type": "tool_call_nudge_start", "fireCount": self._nudge_fires})
-                        try:
-                            nudged = await self._invoke_provider(
-                                self._flatten_messages_for_provider()
-                                + [
-                                    {
-                                        "role": "user",
-                                        "content": (
-                                            "Decide now: if tools are required, respond ONLY with JSON "
-                                            '{"tool":"<name>","args":{...}} and no extra text. '
-                                            "If tools are not required, respond with FINAL_ANSWER:<text>."
-                                        ),
-                                    }
-                                ],
-                                allow_live_stream=False,
-                            )
-                        except _AbortSignal:
-                            self._abort_requested = True
-                            final_assistant = self._abort_assistant_message()
-                            break
-                        nudged_text = self._assistant_text(nudged)
-                        nudged_tool_call = self._try_parse_tool_call(nudged_text)
-                        if nudged_tool_call:
-                            tool_call = nudged_tool_call
-                            assistant = nudged
-                            assistant_text = nudged_text
-                            self._nudge_conversions["true"] += 1
-                            self._emit(
-                                {"type": "tool_call_nudge_end", "used": True, "fireCount": self._nudge_fires}
-                            )
-                        else:
-                            nudged_text = self._strip_final_answer_prefix(nudged_text)
-                            nudged["content"] = [{"type": "text", "text": nudged_text}]
-                            assistant = nudged
-                            assistant_text = nudged_text
-                            self._nudge_conversions["false"] += 1
-                            self._emit(
-                                {"type": "tool_call_nudge_end", "used": False, "fireCount": self._nudge_fires}
-                            )
-                    if tool_call is None:
-                        toolish = (
-                            '"tool"' in assistant_text
-                            and '"args"' in assistant_text
-                            and (
-                                assistant_text.strip().startswith("{")
-                                or "```" in assistant_text
-                                or "TOOL_CALL:" in assistant_text
-                            )
+                    except Exception as e:
+                        retries_enabled = bool(retry_cfg.get("enabled", True))
+                        max_retries = int(retry_cfg.get("maxRetries", 3))
+                        error_text = str(e).strip() or e.__class__.__name__
+                        is_ctx_limit = self._is_context_limit_error(error_text)
+                        will_retry = retries_enabled and attempt < max_retries
+                        self._emit(
+                            {
+                                "type": "turn_end",
+                                "ok": False,
+                                "attempt": attempt + 1,
+                                "reason": "error",
+                                "error": error_text,
+                                "willRetry": will_retry,
+                            }
                         )
-                        if toolish:
-                            self._emit(
-                                {
-                                    "type": "tool_call_parse_failed",
-                                    "sample": assistant_text[:500],
-                                }
-                            )
-
-                    if tool_call:
-                        sub_timeout = None if tool_call["tool"] in ("spawn_subagent", "ask_user") else tool_timeout_sec
-                        tool_payload = await self._run_tool_call(tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout)
-                        tool_results.append(tool_payload)
-                        if tool_call["tool"] == "finish" and tool_payload.get("ok"):
-                            # Terminal tool: end the turn with the summary as the
-                            # final assistant message; no further provider calls.
-                            # (Plan cleanup is handled inside _execute_tool_by_name.)
-                            final_assistant = self._finish_assistant_message(tool_payload)
-                            break
-                        if self._abort_requested:
-                            final_assistant = self._abort_assistant_message()
-                            break
-                        continue
-
-                    final_assistant = assistant
-                    break
-
-                if final_assistant is None and not is_unlimited:
-                    final_assistant = {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "I ran tools but reached the step limit. Please refine your next instruction.",
+                        if not will_retry:
+                            error_msg = {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": error_text}],
+                                "provider": self.model.provider if self.model else None,
+                                "model": self.model.id if self.model else None,
+                                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                                "stopReason": "error",
+                                "timestamp": int(time.time() * 1000),
                             }
-                        ],
-                        "provider": self.model.provider if self.model else None,
-                        "model": self.model.id if self.model else None,
-                        "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                        "stopReason": "tool_step_limit",
-                        "timestamp": int(time.time() * 1000),
-                    }
-                else:
-                    assistant_text = self._assistant_text(final_assistant).strip()
-                    if not assistant_text:
-                        final_assistant["content"] = [
-                            {
-                                "type": "text",
-                                "text": "The model returned an empty response. Please try again or change the model.",
-                            }
-                        ]
-                        final_assistant["stopReason"] = final_assistant.get("stopReason") or "empty_response"
-
-                if final_assistant not in self.messages:
-                    self.messages.append(final_assistant)
-                self.session_manager.append_message(final_assistant)
-                streamed_started = bool(final_assistant.pop("_streamedStart", False))
-                streamed_suppressed = bool(final_assistant.pop("_streamedSuppressed", False))
-                streamed_msg = final_assistant.pop("_streamedMessage", None)
-                if streamed_started and isinstance(streamed_msg, dict):
-                    event: dict[str, Any] = {"type": "message_end", "message": final_assistant}
-                    if streamed_suppressed:
-                        event["suppressed"] = True
-                    self._emit(event)
-                elif not streamed_suppressed:
-                    # Only emit message events when content was NOT suppressed.
-                    # Suppressed content (tool JSON detected early) is rendered
-                    # via tool_call_start / tool_call_end, not as assistant text.
-                    self._emit({"type": "message_start", "message": final_assistant})
-                    for chunk in final_assistant.get("content", []):
-                        if chunk.get("type") == "text":
+                            self.messages.append(error_msg)
+                            self.session_manager.append_message(error_msg)
+                            self._emit({"type": "message_start", "message": error_msg})
                             self._emit(
                                 {
                                     "type": "message_update",
-                                    "assistantMessageEvent": {"type": "text_delta", "delta": chunk.get("text", "")},
+                                    "assistantMessageEvent": {"type": "text_delta", "delta": error_text},
                                 }
                             )
-                    self._emit({"type": "message_end", "message": final_assistant})
-                else:
-                    # Suppressed — emit only message_end with suppressed=True so
-                    # the TUI knows to skip creating an assistant block.
-                    self._emit({"type": "message_end", "message": final_assistant, "suppressed": True})
-                self._emit(
-                    {
-                        "type": "turn_end",
-                        "ok": True,
-                        "attempt": attempt + 1,
-                        "aborted": final_assistant.get("stopReason") == "abort",
-                        "reason": final_assistant.get("stopReason") or "completed",
-                        "message": final_assistant,
-                        "toolResults": tool_results,
-                    }
-                )
-                self._emit({"type": "agent_end", "messages": [user_msg, final_assistant]})
-                break
-            except _CapabilityError as e:
-                # Capability errors: emit turn_end, then either raise
-                # _CapabilityErrorCooperative (cooperation) or emit a
-                # controlled assistant message (autonomous).  No retry.
+                            self._emit({"type": "message_end", "message": error_msg})
+                            self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
+                            break
+                        # Context-limit error: compact *before* retrying so the same
+                        # logical turn/retry uses a smaller context without duplicating
+                        # the user message (user_msg was already added at prompt start).
+                        if is_ctx_limit:
+                            try:
+                                await self.compact(reason="context_limit_retry", allow_during_prompt=True)
+                            except Exception:
+                                pass  # compaction failure → fall through to normal retry
+                        attempt += 1
+                        delay_ms = min(int(retry_cfg.get("baseDelayMs", 1500)) * (2 ** (attempt - 1)), int(retry_cfg.get("maxDelayMs", 20000)))
+                        self._retrying = True
+                        self._emit(
+                            {
+                                "type": "auto_retry_start",
+                                "attempt": attempt,
+                                "maxAttempts": max_retries,
+                                "delayMs": delay_ms,
+                                "errorMessage": error_text,
+                            }
+                        )
+                        if self._abort_requested:
+                            abort_msg = self._abort_assistant_message()
+                            self.messages.append(abort_msg)
+                            self.session_manager.append_message(abort_msg)
+                            self._emit({"type": "message_start", "message": abort_msg})
+                            self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
+                            self._emit({"type": "message_end", "message": abort_msg})
+                            self._emit(
+                                {
+                                    "type": "turn_end",
+                                    "ok": True,
+                                    "attempt": attempt,
+                                    "aborted": True,
+                                    "reason": "abort",
+                                    "message": abort_msg,
+                                    "toolResults": [],
+                                }
+                            )
+                            self._emit({"type": "agent_end", "messages": [user_msg, abort_msg]})
+                            self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
+                            self._retrying = False
+                            break
+                        # Interruptible backoff: abort() during the delay must not
+                        # block the session for up to maxDelayMs.
+                        for _ in range(max(1, delay_ms // 25)):
+                            if self._abort_requested:
+                                break
+                            await asyncio.sleep(0.025)
+                        if self._abort_requested:
+                            abort_msg = self._abort_assistant_message()
+                            self.messages.append(abort_msg)
+                            self.session_manager.append_message(abort_msg)
+                            self._emit({"type": "message_start", "message": abort_msg})
+                            self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
+                            self._emit({"type": "message_end", "message": abort_msg})
+                            self._emit(
+                                {
+                                    "type": "turn_end",
+                                    "ok": True,
+                                    "attempt": attempt,
+                                    "aborted": True,
+                                    "reason": "abort",
+                                    "message": abort_msg,
+                                    "toolResults": [],
+                                }
+                            )
+                            self._emit({"type": "agent_end", "messages": [user_msg, abort_msg]})
+                            self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
+                            self._retrying = False
+                            break
+                        self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": True, "aborted": False})
+                        self._retrying = False
+
+        except BaseException as e:
+            # Fail-closed: if anything escapes the inner exception handlers
+            # (SystemExit, KeyboardInterrupt, etc.), reset state and emit
+            # terminal events so the session never stays stuck in
+            # _is_streaming=True.  Skip re-emitting agent_end for
+            # _CapabilityErrorCooperative since the inner handler already
+            # emitted it before re-raising.
+            self._is_streaming = False
+            self._retrying = False
+            self._abort_requested = False
+            if not isinstance(e, _CapabilityErrorCooperative):
                 self._emit(
                     {
                         "type": "turn_end",
                         "ok": False,
-                        "attempt": attempt + 1,
+                        "attempt": 1,
                         "reason": "error",
-                        "error": str(e),
+                        "error": "session error — provider call or tool loop failed unexpectedly",
                         "willRetry": False,
                     }
                 )
-                if self.approval_callback is not None:
-                    # Cooperation mode: do NOT cache an assistant error message.
-                    # The caller (TUI / RPC / CLI) renders the error and offers
-                    # the user a way to switch models.
-                    # Reset streaming state and clear transient image refs so
-                    # the session is ready for the next prompt.
-                    self._is_streaming = False
-                    self._images = None
-                    self._tool_images = []
-                    self._emit({"type": "agent_end", "messages": [user_msg]})
-                    raise _CapabilityErrorCooperative(str(e)) from e
-                # Autonomous mode: emit a controlled assistant message.
-                error_msg = {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": str(e)}],
-                    "provider": self.model.provider if self.model else None,
-                    "model": self.model.id if self.model else None,
-                    "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                    "stopReason": "unsupported_vision",
-                    "timestamp": int(time.time() * 1000),
-                }
-                self.messages.append(error_msg)
-                self.session_manager.append_message(error_msg)
-                self._emit({"type": "message_start", "message": error_msg})
-                self._emit({"type": "message_end", "message": error_msg})
-                self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
-                break
-            except Exception as e:
-                retries_enabled = bool(retry_cfg.get("enabled", True))
-                max_retries = int(retry_cfg.get("maxRetries", 3))
-                error_text = str(e).strip() or e.__class__.__name__
-                is_ctx_limit = self._is_context_limit_error(error_text)
-                will_retry = retries_enabled and attempt < max_retries
-                self._emit(
-                    {
-                        "type": "turn_end",
-                        "ok": False,
-                        "attempt": attempt + 1,
-                        "reason": "error",
-                        "error": error_text,
-                        "willRetry": will_retry,
-                    }
-                )
-                if not will_retry:
-                    error_msg = {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": error_text}],
-                        "provider": self.model.provider if self.model else None,
-                        "model": self.model.id if self.model else None,
-                        "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                        "stopReason": "error",
-                        "timestamp": int(time.time() * 1000),
-                    }
-                    self.messages.append(error_msg)
-                    self.session_manager.append_message(error_msg)
-                    self._emit({"type": "message_start", "message": error_msg})
-                    self._emit(
-                        {
-                            "type": "message_update",
-                            "assistantMessageEvent": {"type": "text_delta", "delta": error_text},
-                        }
-                    )
-                    self._emit({"type": "message_end", "message": error_msg})
-                    self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
-                    break
-                # Context-limit error: compact *before* retrying so the same
-                # logical turn/retry uses a smaller context without duplicating
-                # the user message (user_msg was already added at prompt start).
-                if is_ctx_limit:
-                    try:
-                        await self.compact(reason="context_limit_retry", allow_during_prompt=True)
-                    except Exception:
-                        pass  # compaction failure → fall through to normal retry
-                attempt += 1
-                delay_ms = min(int(retry_cfg.get("baseDelayMs", 1500)) * (2 ** (attempt - 1)), int(retry_cfg.get("maxDelayMs", 20000)))
-                self._retrying = True
-                self._emit(
-                    {
-                        "type": "auto_retry_start",
-                        "attempt": attempt,
-                        "maxAttempts": max_retries,
-                        "delayMs": delay_ms,
-                        "errorMessage": error_text,
-                    }
-                )
-                if self._abort_requested:
-                    abort_msg = self._abort_assistant_message()
-                    self.messages.append(abort_msg)
-                    self.session_manager.append_message(abort_msg)
-                    self._emit({"type": "message_start", "message": abort_msg})
-                    self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
-                    self._emit({"type": "message_end", "message": abort_msg})
-                    self._emit(
-                        {
-                            "type": "turn_end",
-                            "ok": True,
-                            "attempt": attempt,
-                            "aborted": True,
-                            "reason": "abort",
-                            "message": abort_msg,
-                            "toolResults": [],
-                        }
-                    )
-                    self._emit({"type": "agent_end", "messages": [user_msg, abort_msg]})
-                    self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
-                    self._retrying = False
-                    break
-                # Interruptible backoff: abort() during the delay must not
-                # block the session for up to maxDelayMs.
-                for _ in range(max(1, delay_ms // 25)):
-                    if self._abort_requested:
-                        break
-                    await asyncio.sleep(0.025)
-                if self._abort_requested:
-                    abort_msg = self._abort_assistant_message()
-                    self.messages.append(abort_msg)
-                    self.session_manager.append_message(abort_msg)
-                    self._emit({"type": "message_start", "message": abort_msg})
-                    self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
-                    self._emit({"type": "message_end", "message": abort_msg})
-                    self._emit(
-                        {
-                            "type": "turn_end",
-                            "ok": True,
-                            "attempt": attempt,
-                            "aborted": True,
-                            "reason": "abort",
-                            "message": abort_msg,
-                            "toolResults": [],
-                        }
-                    )
-                    self._emit({"type": "agent_end", "messages": [user_msg, abort_msg]})
-                    self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
-                    self._retrying = False
-                    break
-                self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": True, "aborted": False})
-                self._retrying = False
+                self._emit({"type": "agent_end", "messages": [user_msg]})
+            raise
 
         self._is_streaming = False
 

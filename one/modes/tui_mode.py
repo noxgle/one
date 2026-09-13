@@ -935,8 +935,9 @@ if TEXTUAL_AVAILABLE:
         def _finalize_thinking_block(self) -> None:
             """Close/reset the thinking-text block so the next turn starts clean.
 
-            Resets only the thinking-block flags; does NOT touch the animated
-            spinner (that is handled by _remove_thinking_line / _tick_waiting).
+            Resets only the thinking-block flags; previous thinking segments
+            remain visible as part of the turn transcript. The animated
+            spinner is handled by _remove_thinking_line / _tick_waiting.
             """
             self._thinking_label_shown = False
             self._thinking_buffer = ""
@@ -1020,6 +1021,9 @@ if TEXTUAL_AVAILABLE:
 
             # --- rebase active tool block --------------------------------
             if dropped:
+                if self._thinking_line_idx is not None:
+                    new_idx = self._thinking_line_idx - dropped
+                    self._thinking_line_idx = new_idx if new_idx >= 0 else None
                 active = self._active_tool_block
                 if active is not None:
                     _name, start, end, _text = active

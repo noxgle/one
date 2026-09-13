@@ -574,3 +574,71 @@ async def test_child_plan_tool_approval_in_cooperation(tmp_path: Path):
     await agent.prompt("go")
 
     assert "plan" in call_log
+
+
+# ---------------------------------------------------------------------------
+# Regression: spawn_subagent timeout (GAP 2)
+# ---------------------------------------------------------------------------
+
+
+class _SlowSubagentProvider:
+    """Provider that never returns — subagent hangs inside prompt()."""
+
+    def __init__(self, delay: float = 999.0) -> None:
+        self.delay = delay
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: Any = None,
+        on_delta: Any = None,
+        on_thinking_delta: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        await asyncio.sleep(self.delay)  # Never returns
+        return None  # unreachable
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_timeout_terminates_parent_turn(tmp_path: Path):
+    """spawn_subagent must receive the standard tool timeout (not None).
+
+    Verifies that _execute_tool_by_name wraps spawn_subagent in asyncio.wait_for
+    with the tool timeout.  A never-finishing subagent must be killed within the
+    timeout window.
+    """
+    session_dir = str(tmp_path / "sessions")
+    manager = SessionManager.create(str(tmp_path), session_dir)
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory(
+        {"tools": {"maxSteps": 4, "timeoutSec": 2}, "providers": {"timeoutSec": 3}}
+    )
+
+    parent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "finish"])
+    parent.providers = {"openai": _SlowSubagentProvider(delay=999.0)}
+
+    events: list[dict[str, Any]] = []
+    parent.subscribe(events.append)
+
+    # Time the spawn_subagent tool call directly via _run_tool_call.
+    # The tool timeout (2 s) must kill the subagent await.
+    import time
+
+    start = time.monotonic()
+    # Pass the tool timeout explicitly — in the prompt loop this flows from
+    # line 1671: sub_timeout = tool_timeout_sec (after the GAP 2 fix).
+    tool_timeout = settings.get_tool_timeout_sec()
+    result = await parent._run_tool_call("spawn_subagent", {"task": "work forever"}, timeout_sec=tool_timeout)
+    elapsed = time.monotonic() - start
+
+    # Should timeout within ~2s (plus small overhead), not hang.
+    assert elapsed < 6, f"spawn_subagent took {elapsed:.1f}s — should have timed out ~2s"
+    assert result["ok"] is False
+    # Error message should mention timeout.
+    error_msg = str(result.get("error", ""))
+    assert "timeout" in error_msg.lower() or "timedout" in error_msg.lower() or "timed out" in error_msg.lower()

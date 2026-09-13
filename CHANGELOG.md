@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Provider stream hangs** — provider calls now have an outer deadline, SSE
+  streams stop on terminal events, and stalled streams fail closed instead of
+  leaving the TUI stuck on `Thinking:`. Spawned subagents also respect tool
+  timeouts.
 - **Clean TUI shutdown** — quitting with Ctrl+Q no longer prints
   `BaseSubprocessTransport ... Event loop is closed`: MCP stdio servers are
   fully closed (stdin/pipes/drain task), the session aborts first, and bash
@@ -38,6 +42,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Provider timeout** — increased the default outer provider and HTTP
+  transport timeout from 190/180 seconds to 300 seconds; the 120-second SSE
+  idle watchdog remains active for stalled streams.
 - Auth precedence wording corrected to **runtime → stored → env** in README and docs.
 - SECURITY.md scoped atomic-storage claims to text config/session persistence (blob store
   uses its own 0600/0700 handling).

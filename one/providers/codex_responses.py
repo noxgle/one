@@ -21,6 +21,7 @@ mandatory quirks:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import uuid
@@ -48,6 +49,10 @@ _EFFORT_BY_LEVEL = {"low": "low", "medium": "medium", "high": "high", "xhigh": "
 
 # Backend rejects requests with empty `instructions`; sessions that carry no
 # system message fall back to this Codex-flavored base prompt.
+# Idle timeout for per-line SSE reads — aborts a stalled stream after 120 s
+# of no data. Must stay < the outer 300 s provider deadline.
+_IDLE_SSE_TIMEOUT = 120
+
 _BASE_INSTRUCTIONS = (
     "You are Codex, based on GPT-5. You are running as a coding agent inside "
     "the `one` terminal agent. Help the user with software engineering tasks: "
@@ -249,12 +254,24 @@ class CodexResponsesAdapter(ProviderAdapter):
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
 
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream("POST", url, json=payload, headers=req_headers) as resp:
                 if resp.is_error:
                     raw_body = await resp.aread()
                     raise _error_with_body(resp.status_code, raw_body.decode(errors="replace"))
-                async for line in resp.aiter_lines():
+                aiter = resp.aiter_lines()
+                while True:
+                    try:
+                        line = await asyncio.wait_for(
+                            aiter.__anext__(), timeout=_IDLE_SSE_TIMEOUT
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError:
+                        raise RuntimeError(
+                            f"SSE stream idle for {_IDLE_SSE_TIMEOUT:.0f}s — "
+                            "the request did not resolve within the idle timeout"
+                        )
                     if not line or not line.startswith("data:"):
                         continue
                     data_str = line[5:].strip()
@@ -282,6 +299,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                             usage.update(u)
                         stop_reason = response_obj.get("status")
                         raw_last = response_obj or chunk
+                        break
                     elif ctype == "response.failed":
                         err = chunk.get("response", {}).get("error") or chunk.get("error")
                         raise RuntimeError(f"chatgpt responses failed: {err}")

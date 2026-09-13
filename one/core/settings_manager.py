@@ -37,6 +37,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "bash": {"showOutput": True},
     "subagents": {"enabled": True, "maxConcurrent": 2, "maxDepth": 3},
     "askUser": {"timeoutSec": 0},
+    "providers": {"timeoutSec": 300},
     "packages": [],
     "budget": {"maxTokens": 0, "maxTimeSec": 0},
 }
@@ -271,6 +272,18 @@ class SettingsManager:
             return max(0, int((self.merged().get("askUser") or {}).get("timeoutSec", 0) or 0))
         except (TypeError, ValueError):
             return 0
+
+    def get_provider_timeout_sec(self) -> int:
+        """Timeout for a single provider call (outer asyncio.wait_for backstop).
+
+        Default 300 s. The SSE idle watchdog remains shorter and catches
+        streams that stop producing data. Overridable via
+        /config providers.timeoutSec.
+        """
+        try:
+            return max(10, int((self.merged().get("providers") or {}).get("timeoutSec", 300) or 300))
+        except (TypeError, ValueError):
+            return 300
 
     def get_bash_show_output(self) -> bool:
         return bool(self.merged().get("bash", {}).get("showOutput", True))
