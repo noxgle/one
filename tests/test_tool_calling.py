@@ -789,6 +789,35 @@ async def test_retry_success_then_queue_drains_once_without_duplication(tmp_path
     assert agent.get_pending_queues() == {"steering": [], "followUp": []}
 
 
+@pytest.mark.asyncio
+async def test_finish_does_not_auto_drain_queued_messages(tmp_path: Path) -> None:
+    """A terminal finish leaves messages queued for an explicit next turn."""
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"retry": {"enabled": False}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium")
+    provider = _FakeProvider(
+        [
+            '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
+            "queued response",
+        ]
+    )
+    agent.providers = {"openai": provider}
+
+    await agent.follow_up("do not run automatically")
+    await agent.prompt("complete this task")
+
+    assert provider.calls == 1
+    assert agent.get_pending_queues() == {
+        "steering": [],
+        "followUp": ["do not run automatically"],
+    }
+
+
 def test_finish_tool_registered_in_defaults() -> None:
     from one.tools.index import all_tools
 

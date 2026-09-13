@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Terminal `finish`** — queued steering/follow-up messages are no longer
+  executed automatically after the agent reports a completed task; they remain
+  pending for an explicit next turn.
 - **Provider stream hangs** — provider calls now have an outer deadline, SSE
   streams stop on terminal events, and stalled streams fail closed instead of
   leaving the TUI stuck on `Thinking:`. Spawned subagents also respect tool

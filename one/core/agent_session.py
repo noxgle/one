@@ -1548,6 +1548,7 @@ class AgentSession:
         # events, reset streaming/retry flags, and re-raise.  This prevents the
         # session from being stuck in _is_streaming=True forever when a
         # provider call hangs or SSE keep-alives reset httpx timers.
+        finished_with_tool = False
         try:
             retry_cfg = self.settings_manager.get_retry_settings()
             attempt = 0
@@ -1681,6 +1682,7 @@ class AgentSession:
                                     # Terminal tool: end the turn with the summary as the
                                     # final assistant message; no further provider calls.
                                     # (Plan cleanup is handled inside _execute_tool_by_name.)
+                                    finished_with_tool = True
                                     final_assistant = self._finish_assistant_message(tool_payload)
                                     break
                                 if self._abort_requested:
@@ -1939,6 +1941,13 @@ class AgentSession:
 
         if self._abort_requested:
             self._abort_requested = False
+            return
+
+        # A successful finish is an explicit terminal boundary. Messages
+        # queued while the task was running belong to a new user decision and
+        # must not be executed automatically after the agent has reported
+        # completion (especially when they refer to resources just created).
+        if finished_with_tool:
             return
 
         # Auto-compaction: shrink the context between turns when it grows past
