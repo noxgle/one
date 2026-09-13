@@ -6,7 +6,7 @@ Thank you for your interest in contributing to `one`!
 
 ```bash
 # Clone and set up
-git clone https://github.com/picon/one.git
+git clone https://github.com/noxgle/one.git
 cd one
 python3 -m venv .venv
 .venv/bin/pip install -e .[dev]

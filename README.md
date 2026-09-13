@@ -1,6 +1,6 @@
 # one
 
-[![CI](https://github.com/picon/one/actions/workflows/ci.yml/badge.svg)](https://github.com/picon/one/actions/workflows/ci.yml)
+[![CI](https://github.com/noxgle/one/actions/workflows/ci.yml/badge.svg)](https://github.com/noxgle/one/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 
@@ -62,7 +62,7 @@ sandbox; it is an approval gate only.
 ### From source (recommended for development)
 
 ```bash
-git clone https://github.com/picon/one.git
+git clone https://github.com/noxgle/one.git
 cd one
 python3 -m venv .venv
 source .venv/bin/activate

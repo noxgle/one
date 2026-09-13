@@ -13,7 +13,7 @@ when feasible.
 ## Reporting a vulnerability
 
 Please report security vulnerabilities privately via
-[GitHub Security Advisories](https://github.com/picon/one/security/advisories/new).
+[GitHub Security Advisories](https://github.com/noxgle/one/security/advisories/new).
 If advisories are unavailable (e.g. in a fork), email
 s.wielgosz@noxgle.com with "[SECURITY] " in the subject. Do **not** open a
 public issue for security-sensitive bugs.
