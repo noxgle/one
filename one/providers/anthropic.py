@@ -182,13 +182,47 @@ class AnthropicAdapter(ProviderAdapter):
                 continue
             content_messages.append({"role": m.get("role"), "content": m.get("content", "")})
 
+        # ── cache_control breakpoints (Anthropic prompt caching) ──
+        payload_system: list[dict[str, Any]] | None = None
+        if system is not None:
+            payload_system = [{"text": system, "cache_control": {"type": "ephemeral"}}]
+
+        # Add cache_control to the LAST user message in the conversation tail.
+        # Anthropic allows up to 4 breakpoints total (1 system + 3 on messages).
+        last_user = -1
+        for i, m in enumerate(content_messages):
+            if m.get("role") == "user":
+                last_user = i
+        if last_user >= 0:
+            msg = content_messages[last_user]
+            content = msg["content"]
+            if isinstance(content, str):
+                content_messages[last_user]["content"] = [
+                    {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+                ]
+            elif isinstance(content, list):
+                parts: list[dict[str, Any]] = []
+                for part in content:
+                    if isinstance(part, str):
+                        parts.append({"type": "text", "text": part})
+                    elif isinstance(part, dict):
+                        parts.append(part)
+                    else:
+                        parts.append({"type": "text", "text": str(part)})
+                # Attach cache_control to the last *text* block.
+                for i in range(len(parts) - 1, -1, -1):
+                    if parts[i].get("type") == "text":
+                        parts[i]["cache_control"] = {"type": "ephemeral"}
+                        break
+                content_messages[last_user]["content"] = parts
+
         payload: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens or 4096,
             "messages": content_messages,
         }
-        if system:
-            payload["system"] = system
+        if payload_system is not None:
+            payload["system"] = payload_system
         req_headers = {
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import struct
+from typing import Any
 
 import pytest
 
+from one.providers.anthropic import AnthropicAdapter
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
 
@@ -234,3 +236,273 @@ class TestCodexPayload:
         assert assistant_item["role"] == "assistant"
         assert assistant_item["content"][0]["type"] == "output_text"
         assert assistant_item["content"][0]["text"] == "a"
+
+
+# ---------------------------------------------------------------------------
+# Anthropic cache_control breakpoint tests
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_fake_client(monkeypatch) -> tuple[type, dict[str, Any]]:
+    """Patch anthropic.httpx.AsyncClient and capture the last request JSON body.
+
+    Returns ``(FakeClient, captured_body)`` where *captured_body* is set after
+    each ``chat`` call.
+    """
+    from one.providers import anthropic as anth_mod
+
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        status_code = 200
+        text = ""
+        is_error = False
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 42,
+                    "cache_creation_input_tokens": 17,
+                },
+                "stop_reason": "end_turn",
+            }
+
+    def handler(method: str, url: str, kwargs: dict[str, Any]) -> _Resp:
+        captured["body"] = kwargs.get("json", {})
+        return _Resp()
+
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def post(self, url: str, **kwargs: Any):
+            return handler("POST", url, kwargs)
+
+        def stream(self, method: str, url: str, **kwargs: Any):
+            return handler(method, url, kwargs)
+
+    monkeypatch.setattr(anth_mod.httpx, "AsyncClient", _FakeClient)
+    return _FakeClient, captured
+
+
+class TestAnthropicCacheControl:
+    """Prompt-caching breakpoints: system + last user message."""
+
+    @pytest.mark.asyncio
+    async def test_cache_control_on_system_and_last_user(self, monkeypatch) -> None:
+        """Breakpoint present on both system block and last user message."""
+        adapter = AnthropicAdapter()
+        _, captured = _anthropic_fake_client(monkeypatch)
+        await adapter.chat(
+            "sk-1",
+            "claude-3",
+            [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "hello"},
+            ],
+            "off",
+        )
+        body = captured["body"]
+        # System breakpoint — must be a list of content blocks (bare dict rejected by API)
+        assert body["system"] == [
+            {"text": "be terse", "cache_control": {"type": "ephemeral"}}
+        ]
+        # Last user message breakpoint
+        user_msg = [m for m in body["messages"] if m["role"] == "user"][-1]
+        assert user_msg["content"] == [
+            {"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}
+        ]
+        # Count breakpoints: 1 system + 1 message = 2
+        bp_count = 1  # system
+        for m in body["messages"]:
+            c = m.get("content")
+            if isinstance(c, list):
+                bp_count += sum(1 for p in c if p.get("cache_control"))
+        assert bp_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cache_control_with_images(self, monkeypatch) -> None:
+        """Content blocks with images — breakpoint on last text block."""
+        adapter = AnthropicAdapter()
+        png = _make_png()
+        adapter._read_blob = lambda storage_dir, blob_hash: png  # type: ignore[attr-defined]
+        _, captured = _anthropic_fake_client(monkeypatch)
+        await adapter.chat(
+            "sk-1",
+            "claude-3",
+            [{"role": "user", "content": "look at this"}],
+            "off",
+            images=[{"blobHash": "abc", "mime": "image/png"}],
+            storage_dir="/tmp",
+        )
+        body = captured["body"]
+        user_msg = [m for m in body["messages"] if m["role"] == "user"][-1]
+        content = user_msg["content"]
+        assert isinstance(content, list)
+        # Should have text + image blocks; breakpoint on the last text block.
+        text_blocks = [p for p in content if p.get("type") == "text"]
+        assert len(text_blocks) == 1
+        assert text_blocks[0]["cache_control"] == {"type": "ephemeral"}
+        image_blocks = [p for p in content if p.get("type") == "image"]
+        assert len(image_blocks) == 1
+        # No cache_control on image block
+        assert "cache_control" not in image_blocks[0]
+
+    @pytest.mark.asyncio
+    async def test_cache_control_no_system(self, monkeypatch) -> None:
+        """Without a system message, only the last user message has a breakpoint."""
+        adapter = AnthropicAdapter()
+        _, captured = _anthropic_fake_client(monkeypatch)
+        await adapter.chat(
+            "sk-1",
+            "claude-3",
+            [{"role": "user", "content": "hi there"}],
+            "off",
+        )
+        body = captured["body"]
+        assert "system" not in body
+        user_msg = [m for m in body["messages"] if m["role"] == "user"][-1]
+        assert user_msg["content"] == [
+            {"type": "text", "text": "hi there", "cache_control": {"type": "ephemeral"}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cache_control_multi_turn_only_last_user(self, monkeypatch) -> None:
+        """Only the LAST user message gets a breakpoint, earlier ones don't."""
+        adapter = AnthropicAdapter()
+        _, captured = _anthropic_fake_client(monkeypatch)
+        await adapter.chat(
+            "sk-1",
+            "claude-3",
+            [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "second"},
+            ],
+            "off",
+        )
+        body = captured["body"]
+        user_msgs = [m for m in body["messages"] if m["role"] == "user"]
+        assert len(user_msgs) == 2
+        # First user message: no cache_control
+        assert "cache_control" not in user_msgs[0]["content"]
+        # Last user message: has cache_control
+        assert user_msgs[1]["content"] == [
+            {"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_breakpoint_count_max_4(self, monkeypatch) -> None:
+        """Even with many messages, Anthropic gets only 2 breakpoints."""
+        adapter = AnthropicAdapter()
+        _, captured = _anthropic_fake_client(monkeypatch)
+        await adapter.chat(
+            "sk-1",
+            "claude-3",
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+                {"role": "user", "content": "u3"},
+            ],
+            "off",
+        )
+        body = captured["body"]
+        bp_count = 1  # system
+        for m in body["messages"]:
+            c = m.get("content")
+            if isinstance(c, list):
+                bp_count += sum(1 for p in c if p.get("cache_control"))
+            elif isinstance(c, str) and c == "":
+                pass  # no content
+        # Only system + last user = 2 breakpoints (well under 4)
+        assert bp_count == 2
+
+
+def test_other_adapters_unchanged_by_cache_control(monkeypatch) -> None:
+    """Non-Anthropic adapters should not include cache_control fields."""
+    adapter = OpenAICompatibleAdapter("openai", "https://api.openai.com")
+    payload = adapter._build_payload(
+        model="gpt-4",
+        messages=[{"role": "user", "content": "hi"}],
+        thinking_level="off",
+    )
+    # Guard: OpenAI payloads never have cache_control.
+    assert "cache_control" not in payload
+    # Recursion/serialization check — round-trip through json (executes serialization path).
+    import json
+
+    json.loads(json.dumps(payload))
+
+
+# ---------------------------------------------------------------------------
+# Cache token accounting test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_usage_maps_cache_tokens(tmp_path, monkeypatch) -> None:
+    """Fake transport echoing cache_read/cache_creation tokens flows into session stats."""
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+
+    # Create in-memory managers (follows test_event_snapshots pattern).
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("anthropic", "sk-dummy")
+    reg = ModelRegistry.create(auth)
+    reg.register_models("anthropic", [{"id": "claude-3", "reasoning": False}])
+    model = reg.find("anthropic", "claude-3")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    sessions = SessionManager.in_memory(str(tmp_path))
+
+    # Fake Anthropic provider that echoes cache tokens in usage.
+    class _FakeAnthropic:
+        async def chat(self, api_key, model, messages, thinking_level, headers=None,
+                       on_delta=None, on_thinking_delta=None, max_tokens=None,
+                       images=None, storage_dir=""):  # noqa: ARG002
+            from one.providers.base import ChatResult
+            return ChatResult(
+                text="cached response",
+                raw={},
+                usage={
+                    "input_tokens": 20,
+                    "output_tokens": 10,
+                    "cache_read_input_tokens": 88,
+                    "cache_creation_input_tokens": 33,
+                },
+                stop_reason="end_turn",
+            )
+
+    class _Loader:
+        def get_system_prompt(self, selected_tools=None):  # noqa: ARG002
+            return "You are a coding agent."
+
+    session = AgentSession(sessions, settings, reg, _Loader(), model, "off")
+    session.providers = {"anthropic": _FakeAnthropic()}  # type: ignore[assignment]
+
+    # Call _invoke_provider which wraps the raw provider response.
+    event = await session._invoke_provider([{"role": "user", "content": "test"}])
+
+    assert event["usage"]["input"] == 20
+    assert event["usage"]["output"] == 10
+    assert event["usage"]["cacheRead"] == 88
+    assert event["usage"]["cacheWrite"] == 33

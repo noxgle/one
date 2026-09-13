@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 
-def _current_time() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+def _current_date() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d")
 
 
 def _system_env() -> str:
@@ -52,7 +52,7 @@ def _user_privileges() -> str:
 
 def _build_header(cwd: str) -> str:
     return (
-        f"Current time: {_current_time()}\n"
+        f"Current date: {_current_date()}\n"
         f"workspace={cwd.replace(chr(92), '/')}\n"
         f"env={_system_env()}\n"
         f"user_privileges={_user_privileges()}\n"

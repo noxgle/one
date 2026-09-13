@@ -25,7 +25,7 @@ async def test_system_prompt_includes_header_tools_and_project_context(tmp_path:
     prompt = loader.get_system_prompt(["read", "bash", "grep", "finish"])
 
     # Header with environment context.
-    assert "Current time:" in prompt
+    assert "Current date:" in prompt
     assert f"workspace={tmp_path / 'proj'}" in prompt
     assert "env=" in prompt
     assert "user_privileges=" in prompt
@@ -52,7 +52,7 @@ async def test_system_prompt_honors_custom_and_append(tmp_path: Path):
 
     assert "CUSTOM SYSTEM" in prompt
     assert "APPENDIX" in prompt
-    assert "Current time:" in prompt  # header always present
+    assert "Current date:" in prompt  # header always present
     assert "workspace=" in prompt
     assert "env=" in prompt
 
@@ -76,7 +76,7 @@ async def test_system_prompt_without_read_skips_skills(tmp_path: Path):
 
 def test_env_helpers_do_not_crash() -> None:
     header = _build_header("/tmp/some/workspace")
-    assert "Current time:" in header
+    assert "Current date:" in header
     assert "workspace=/tmp/some/workspace" in header
     assert isinstance(_system_env(), str) and _system_env()
     assert _user_privileges() in {"root", "user", "user(sudo)", "user(sudo nopasswd)"}
