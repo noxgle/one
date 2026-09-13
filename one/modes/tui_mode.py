@@ -2871,4 +2871,10 @@ class TuiMode:
             or getattr(session.settings_manager, "get_tool_approval", lambda: False)()
         ):
             session.approval_callback = app._approval_prompt
-        await app.run_async()
+        try:
+            await app.run_async()
+        finally:
+            # Abort the session on Ctrl+Q (or any exit) so in-flight
+            # provider calls, tool tasks, and bash subprocesses are
+            # cancelled before the main cleanup path runs.
+            await session.abort()

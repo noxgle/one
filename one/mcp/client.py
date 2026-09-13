@@ -59,7 +59,7 @@ class McpClient:
             env=env,
         )
         # Drain stderr in the background (bounded tail kept for diagnostics).
-        asyncio.create_task(self._drain_stderr())
+        self._stderr_task: asyncio.Task[None] | None = asyncio.create_task(self._drain_stderr())
         await self._request(
             "initialize",
             {
@@ -133,8 +133,30 @@ class McpClient:
     async def close(self) -> None:
         proc = self._proc
         self._proc = None
+
+        # Cancel the fire-and-forget stderr drain task.
+        stderr_task = getattr(self, "_stderr_task", None)
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except asyncio.CancelledError:
+                pass
+
         if proc is None:
             return
+
+        try:
+            # Close stdin to signal the server we're done writing.
+            if proc.stdin is not None:
+                proc.stdin.close()
+                try:
+                    await proc.stdin.wait_closed()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         try:
             proc.terminate()
             await asyncio.wait_for(proc.wait(), timeout=3.0)
@@ -143,6 +165,23 @@ class McpClient:
                 proc.kill()
             except Exception:
                 pass
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+
+        # Close stdout/stderr read streams to release transport references.
+        # feed_eof() signals EOF so any pending reads fail immediately.
+        try:
+            if proc.stdout is not None:
+                proc.stdout.feed_eof()
+        except Exception:
+            pass
+        try:
+            if proc.stderr is not None:
+                proc.stderr.feed_eof()
+        except Exception:
+            pass
 
     def stderr_tail(self) -> list[str]:
         return list(self._stderr_tail)
@@ -364,8 +403,7 @@ class McpManager:
         }
 
     async def close(self) -> None:
-        for client in self._clients:
-            await client.close()
+        await asyncio.gather(*(c.close() for c in self._clients), return_exceptions=True)
         self._clients = []
 
     async def enable_server(

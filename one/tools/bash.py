@@ -60,6 +60,11 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
     except asyncio.CancelledError:
         _kill_process_group(proc.pid)
         proc.kill()
+        # Reap the process to avoid zombie/transport leaks.
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        except Exception:
+            pass
         await asyncio.sleep(0.1)
         exit_code = proc.returncode if proc.returncode is not None else -1
         if exit_code == 0:

@@ -80,7 +80,7 @@ one --help
 ```
 
 > The distribution name is `one-agent` (PyPI), the import name and console script
-> remain `one`. The single version source is `one/config.py:VERSION` (`0.1.0`).
+> remain `one`. The single version source is `one/config.py:VERSION`.
 
 ### Verify installation
 
@@ -181,7 +181,7 @@ TUI highlights:
 - live response streaming (provider-dependent; OpenAI-compatible/Anthropic/Gemini/Codex supported)
 - scrollable main stream with scrollbar, simplified view (`> ...` for user messages)
 - tool lifecycle visible in stream (`tool start (timeout Ns)`, `tool ok/err`)
-- app version in the sidebar (`Version: 0.1.0`, from the single source `one/config.py:VERSION`; CLI prints `one v0.1.0` at startup)
+- app version in the sidebar (`Version: …`, from the single source `one/config.py:VERSION`; CLI prints `one v…` at startup)
 
 TUI keyboard shortcuts (also listed in the in-app shortcuts overlay):
 

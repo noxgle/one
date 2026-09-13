@@ -613,6 +613,9 @@ class _RecordingClient:
         self.calls.append((name, arguments, timeout))
         return {"content": [{"type": "text", "text": "ok"}]}
 
+    async def close(self) -> None:
+        pass
+
 
 @pytest.mark.asyncio
 async def test_mcp_manager_call_tool_forwards_timeout():

@@ -514,6 +514,13 @@ async def _run(argv: list[str]) -> int:
         await interactive.run()
         return 0
     finally:
+        # Abort the session first (cancels in-flight provider calls,
+        # tool tasks, and bash subprocesses) before disposing host and
+        # closing MCP — this prevents transports from outliving the loop.
+        try:
+            await host.session.abort()
+        except Exception:
+            pass
         # Dispose the session runtime and close MCP to free all resources
         # even when the mode path returns early.
         if mcp_manager is not None:

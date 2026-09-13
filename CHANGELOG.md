@@ -8,6 +8,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Fixed
+
+- **Clean TUI shutdown** — quitting with Ctrl+Q no longer prints
+  `BaseSubprocessTransport ... Event loop is closed`: MCP stdio servers are
+  fully closed (stdin/pipes/drain task), the session aborts first, and bash
+  processes are reaped on cancellation.
+
 ### Added
 
 - **13 tools** (was 12): added `read_image` for vision / image input alongside the existing tool set.

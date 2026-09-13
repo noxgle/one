@@ -131,7 +131,7 @@ class TestMCPClientVersionUnified:
 
         # Check the module has the version import
         assert hasattr(client, "_ONE_VERSION")
-        assert client._ONE_VERSION == "0.1.0"
+        assert client._ONE_VERSION == "0.1.1"
 
 
 class TestCodexToSViolations:

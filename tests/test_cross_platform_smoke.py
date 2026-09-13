@@ -60,7 +60,7 @@ class TestImport:
         from one.config import APP_NAME, VERSION
 
         assert APP_NAME == "one"
-        assert VERSION == "0.1.0"
+        assert VERSION == "0.1.1"
 
     def test_import_tools_index(self) -> None:
         from one.tools.index import all_tools
@@ -73,13 +73,15 @@ class TestImport:
 
 class TestCLIVersion:
     def test_version_flag(self) -> None:
+        from one.config import VERSION
+
         result = subprocess.run(
             [sys.executable, "-m", "one.cli.main", "--version"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert "0.1.0" in result.stdout
+        assert VERSION in result.stdout
 
     def test_help_flag(self) -> None:
         result = subprocess.run(
