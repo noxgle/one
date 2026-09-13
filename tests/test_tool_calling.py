@@ -573,8 +573,142 @@ async def test_deferred_action_response_gets_tool_nudge(tmp_path: Path):
     assert agent.get_last_assistant_text() == "DONE"
     tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
     assert tool_results
-    assert any(e.get("type") == "tool_call_nudge_start" for e in events)
-    assert any(e.get("type") == "tool_call_nudge_end" and e.get("used") is True for e in events)
+    nudge_start = [e for e in events if e.get("type") == "tool_call_nudge_start"]
+    nudge_end = [e for e in events if e.get("type") == "tool_call_nudge_end"]
+    assert len(nudge_start) == 1
+    assert len(nudge_end) == 1
+    assert nudge_end[0].get("used") is True
+    # fireCount / session stats are tested in test_nudge_fire_convert_counts / test_nudge_fire_no_convert_counts.
+
+
+# ---------------------------------------------------------------------------
+# Task C4 — nudge instrumentation tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_nudge_fire_convert_counts(tmp_path: Path):
+    """Short prose at step 0 fires nudge; nudge yields tool call → count=1 fire, 1 conversion true."""
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["read"])
+    provider = _FakeProvider(
+        [
+            "Sprawdzę to i zacznę od diagnostyki.",  # short prose → triggers nudge
+            '{"tool":"read","args":{"path":"a.txt"}}',  # nudge yields tool call
+            "DONE",
+        ]
+    )
+    agent.providers = {"openai": provider}
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("sprawdź")
+
+    assert agent.get_last_assistant_text() == "DONE"
+
+    start_events = [e for e in events if e.get("type") == "tool_call_nudge_start"]
+    end_events = [e for e in events if e.get("type") == "tool_call_nudge_end"]
+    assert len(start_events) == 1
+    assert len(end_events) == 1
+    assert start_events[0].get("fireCount") == 1
+    assert end_events[0].get("used") is True
+    assert end_events[0].get("fireCount") == 1
+
+    # Session stats should reflect the nudge
+    stats = agent.get_session_stats()
+    assert stats["nudge"]["fires"] == 1
+    assert stats["nudge"]["conversions"]["true"] == 1
+    assert stats["nudge"]["conversions"]["false"] == 0
+
+
+@pytest.mark.asyncio
+async def test_nudge_fire_no_convert_counts(tmp_path: Path):
+    """Short prose at step 0 fires nudge; nudge yields more short prose (no tool) →
+    turn ends (loop breaks when tool_call stays None). Counters: 1 fire, 1 conversion false."""
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["read"])
+    provider = _FakeProvider(
+        [
+            "Sprawdzę to i zacznę od diagnostyki.",  # short prose → triggers nudge
+            "Nie mam dostępu do tych danych.",  # short prose → nudge doesn't convert
+        ]
+    )
+    agent.providers = {"openai": provider}
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("sprawdź")
+
+    # Turn ends because tool_call stays None after nudge (loop breaks at line 1667)
+    assert agent.get_last_assistant_text() == "Nie mam dostępu do tych danych."
+
+    start_events = [e for e in events if e.get("type") == "tool_call_nudge_start"]
+    end_events = [e for e in events if e.get("type") == "tool_call_nudge_end"]
+    assert len(start_events) == 1
+    assert len(end_events) == 1
+    assert start_events[0].get("fireCount") == 1
+    assert end_events[0].get("used") is False
+    assert end_events[0].get("fireCount") == 1
+
+    stats = agent.get_session_stats()
+    assert stats["nudge"]["fires"] == 1
+    assert stats["nudge"]["conversions"]["false"] == 1
+    assert stats["nudge"]["conversions"]["true"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_nudge_normal_tool_call(tmp_path: Path):
+    """Model returns JSON directly at step 0 → no nudge events, counters stay zero."""
+    (tmp_path / "a.txt").write_text("x\n", encoding="utf-8")
+
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    session = SessionManager.in_memory(str(tmp_path))
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=["read"])
+    provider = _FakeProvider(
+        [
+            '{"tool":"read","args":{"path":"a.txt"}}',  # normal tool JSON → no nudge
+            "DONE",
+        ]
+    )
+    agent.providers = {"openai": provider}
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("sprawdź")
+
+    assert agent.get_last_assistant_text() == "DONE"
+
+    nudge_start = [e for e in events if e.get("type") == "tool_call_nudge_start"]
+    nudge_end = [e for e in events if e.get("type") == "tool_call_nudge_end"]
+    assert len(nudge_start) == 0
+    assert len(nudge_end) == 0
+
+    stats = agent.get_session_stats()
+    assert stats["nudge"]["fires"] == 0
+    assert stats["nudge"]["conversions"]["true"] == 0
+    assert stats["nudge"]["conversions"]["false"] == 0
 
 
 @pytest.mark.asyncio

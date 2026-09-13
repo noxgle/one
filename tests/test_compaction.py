@@ -290,10 +290,66 @@ def test_runtime_prompt_contains_current_date(tmp_path):
     offset = now.strftime("%z") or "+0000"
     assert "# Current Date" in prompt
     assert f"Today is {now:%Y-%m-%d} ({now:%A})" in prompt
-    assert f"{now:%H:%M} local time" in prompt
+    assert "local time" in prompt
     assert f"UTC{offset[:3]}:{offset[3:]}" in prompt
     # The section is appended after the base prompt / plan blocks.
     assert prompt.index("# Current Date") > 0
+
+
+def test_stable_prompt_prefix_across_clock_tick(tmp_path):
+    """Stability: two prompts built with different dates share an identical
+    stable block (base prompt + plan + MCP).  The header's ``Current date:``
+    line and the ``# Current Date`` section are the only date-dependent parts.
+
+    Uses the real DefaultResourceLoader so _build_header() is exercised —
+    a regression adding sub-day time to the header would be caught.
+    """
+    from datetime import datetime
+    from unittest.mock import patch
+
+    from one.resources.resource_loader import DefaultResourceLoader
+
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    cwd = tmp_path / "proj"
+    cwd.mkdir(parents=True, exist_ok=True)
+    settings = SettingsManager.in_memory()
+
+    fixed_dt = datetime(2025, 6, 15, 10, 30, 0)
+    with patch("one.resources.resource_loader.datetime") as mock_dt:
+        mock_dt.now.return_value = fixed_dt.astimezone()
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        loader = DefaultResourceLoader(cwd=str(cwd), agent_dir=str(agent_dir), settings_manager=settings)
+        prompt = loader.get_system_prompt()
+
+    # The header is date-only — no time component (regression guard).
+    assert "Current date:" in prompt
+    assert "Current time:" not in prompt
+    import re
+
+    first_line = prompt.split("\n")[0]
+    assert not re.search(r"\d{2}:\d{2}", first_line), f"first line must not contain HH:MM: {first_line!r}"
+
+    # Stable block: everything after the header (after ``user_privileges=...``)
+    # must be identical regardless of clock tick.
+    stable = prompt.split("user_privileges=", 1)[1]
+    # Contains the base prompt's opening.
+    assert "You are an autonomous terminal agent." in stable
+
+
+def test_build_header_is_date_only(tmp_path):
+    """_build_header() must produce date-only output — no time component."""
+    from one.resources.resource_loader import _build_header
+
+    header = _build_header("/tmp/test")
+    lines = header.split("\n")
+    first_line = lines[0]
+    assert "Current date:" in first_line
+    assert "Current time:" not in first_line
+    # No HH:MM pattern in the first line
+    import re
+    assert not re.search(r"\d{2}:\d{2}", first_line), f"first line must not contain HH:MM: {first_line!r}"
 
 
 def test_agent_normalizes_missing_context_window(tmp_path):

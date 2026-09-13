@@ -115,6 +115,228 @@ tracked files). `MANIFEST.in` packaging claims verified clean.
   equivalent reproducible vulnerability scanner) to local release checks and
   CI after selecting its lockfile/allowlist policy.
 
+## Project: OpenCode ports (`feat/opencode-ports`)
+
+### Goal
+
+Port selected OpenCode behaviors to `one` without changing its core contract
+(JSON-in-text tool calls, synchronous session loop, flat text history, no
+phases). Work happens on branch `feat/opencode-ports` (based on `main`);
+no merge/push without approval.
+
+### Scope
+
+#### In Scope
+
+- Package A (Tasks A1–A3): `invalid` tool catch-all, `<system-reminder>`
+  per-read instruction injection, subagent recursion guard.
+- Package B (Task B1, after A): fuzzy `edit` matching + inline diagnostics.
+
+#### Non-Goals
+
+- Native function-calling (kills local-model support; see "Next engineering work").
+- Async session runtime / status API (sync loop is a deliberate testability choice).
+- Structured message parts (would rewrite the event contract and snapshots).
+- Plan-mode agent or any phase system (explicitly out of scope).
+- Full per-agent permission framework (at most 1–2 targeted rules later, separate decision).
+
+### Assumptions
+
+- OpenCode behaviors are reimplemented natively, not copied (license/API drift).
+- Every task keeps the event contract stable unless stated; fake-provider tests only.
+
+### Open Questions
+
+- Reminder budget for A2 in monorepos (dedup per turn + char cap TBD in design).
+- Whether B1 shows the matched snippet in the tool result (recommended: yes).
+
+### Package A (first)
+
+- [ ] **Task A1:** `invalid` tool catch-all for malformed tool calls.
+  - **Description:** Route unknown tool names (after lowercase repair attempt) to a
+    synthetic tool result: "unknown tool `<name>`; available: ...". The model
+    self-corrects next step via the normal loop — no new retry logic.
+  - **Files:** `one/core/agent_session.py` (parse/dispatch path), tool-result tests.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Unknown tool name yields a helpful tool result, never
+    a crash or silent drop; valid calls unaffected.
+  - **Verification:** Fake-provider tests (unknown name, case-variant repair, valid
+    call control); `test_event_snapshots.py` green if contract touched.
+
+- [ ] **Task A2:** `<system-reminder>` instruction injection on `read`.
+  - **Description:** When `read` touches a file under a directory containing an
+    `AGENTS.md`/`CLAUDE.md` not yet loaded this turn, append its content to the
+    tool result as a `<system-reminder>` block. Deduplicate per turn; cap chars.
+  - **Files:** `one/tools/` read path, `one/resources/resource_loader.py`,
+    `one/core/agent_session.py` (turn-scoped claim set).
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Subdirectory instructions reach the model exactly once
+    per turn; no reminder when already in system prompt; monorepo context bounded.
+  - **Verification:** Fake-filesystem tests (first read injects, second doesn't,
+    cap enforced); existing read/image tests green.
+
+- [ ] **Task A3:** Subagent recursion guard.
+  - **Description:** Forbid `spawn_subagent` inside a subagent (or enforce
+    depth ≤ 1) with a clear model-facing error. Check current `maxDepth`/
+    `maxConcurrent` semantics first — implement the minimal restriction.
+  - **Files:** `one/tools/` subagent path, `one/core/agent_session.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Nested spawn fails fast with an explicit error; depth-0
+    spawning unchanged.
+  - **Verification:** Fake-provider nesting tests; existing subagent tests green.
+
+### Package B (after A)
+
+- [ ] **Task B1:** Fuzzy `edit` matching + inline diagnostics.
+  - **Description:** Pass `oldString` through ordered fallback strategies (exact →
+    line-trimmed → whitespace-normalized → indentation-flexible → fuzzy/Levenshtein)
+    and report the matched snippet plus language diagnostics inline in the tool
+    result. Never silently edit the wrong location: on ambiguity, fail with
+    candidates shown.
+  - **Files:** `one/tools/edit.py` (or equivalent), related tests.
+  - **Dependencies:** Package A (shares tool-result conventions).
+  - **Acceptance Criteria:** Minor whitespace/indent mismatches succeed; ambiguous
+    matches fail loudly with candidates; diagnostics included where available.
+  - **Verification:** Strategy-matrix tests (each fallback level + ambiguity case);
+    full suite green.
+
+### Risks & Mitigations
+
+| Risk | Mitigation |
+|------|--------|
+| Reminder context bloat | Per-turn dedup + char cap |
+| Wrong-location fuzzy edit | Fail-loud on ambiguity, show matched snippet |
+| Parser behavior drift | Keep `_try_parse_tool_call` contract; snapshot tests |
+
+### Project Acceptance Criteria
+
+- [ ] Package A implemented on `feat/opencode-ports`, each task with tests.
+- [ ] Package B implemented after A, with strategy-matrix tests.
+- [ ] `ruff` clean, full `pytest` green, no unrelated behavior changes.
+- [ ] No merge/push without explicit approval.
+
+## Project: Prompt-cache performance (`perf/prompt-cache`)
+
+### Goal
+
+Cut per-step prefill cost and time-to-first-token so prompt processing feels as
+fast as OpenCode. Work happens on branch `perf/prompt-cache` (based on `main`);
+no merge/push without approval.
+
+### Context
+
+Read-only analysis (2026-09-12) confirmed three structural causes, all fixable
+without rewriting the loop or the JSON-in-text contract:
+
+1. No prompt caching anywhere, and every request carries fresh timestamps
+   (`Current time: <iso>` at the START of the system prompt,
+   `resource_loader.py:55`; `# Current Date … HH:MM` at the end,
+   `agent_session.py:229`). The prefix changes every minute, so OpenAI-style
+   automatic prefix caching (~1024 identical tokens) never hits — every step
+   of every turn pays a full prefill. Anthropic has no `cache_control`
+   breakpoints at all (verified: no `cache_control` in any adapter).
+2. `_invoke_provider` buffers ~48 chars before rendering anything, delaying the
+   first visible token even though the provider is already streaming.
+3. Nudge and retry-after-failure are extra full-prefill provider calls.
+
+Session `usage` already tracks `cacheRead`/`cacheWrite` — today `cacheRead` is
+effectively always 0, which is the baseline to beat.
+
+### Scope
+
+#### In Scope
+
+- Stable cacheable prefix (date without minutes, or clock moved behind the
+  cache breakpoint) for OpenAI-compatible + Codex backends.
+- Anthropic `cache_control` breakpoints (system block + conversation tail).
+- Smaller/faster stream-flush threshold for prose (keep JSON-vs-prose detection).
+- Nudge only when actually needed (measure first; change only if it fires often).
+
+#### Non-Goals
+
+- Native function-calling (kills local-model support).
+- Changing the JSON-in-text contract, event payloads, or history flattening.
+- Provider-specific system prompts (separate decision; keep one template).
+- Any change to retry/backoff semantics or budgets.
+
+### Assumptions
+
+- Providers honor standard caching (OpenAI automatic prefix cache ≥1024 tokens;
+  Anthropic `cache_control: {"type":"ephemeral"}` breakpoints).
+- Timestamp precision finer than one day is not load-bearing for model quality
+  (verify: date-only prompt must not degrade answers in regression tests).
+
+### Open Questions
+
+- Exact breakpoint placement for Anthropic (whole system vs split stable/dynamic).
+- Whether Codex `prompt_cache_key` + stable prefix is enough without extra work.
+- Flush threshold value that keeps tool-JSON suppression reliable (10 chars?).
+
+### Tasks
+
+- [x] **Task C1:** Stable cacheable prompt prefix.
+  - **Description:** Remove sub-day clock precision from the cacheable prefix:
+    date-only in `_build_header` / `# Current Date`, or move the live clock
+    behind the cache breakpoint (end of system prompt). Keep human-readable date.
+  - **Files:** `one/resources/resource_loader.py`, `one/core/agent_session.py`,
+    prompt snapshot/assertion tests.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Two prompts built a minute apart share an identical
+    prefix through the end of the stable block; date still visible to the model.
+  - **Verification:** Unit test comparing built prompts across a clock tick;
+    existing prompt tests green.
+  - **Details:** Date-only prefix (removes sub-minute `Current time:` drift); clock-tick stability test added comparing prompts built 60s apart — identical prefix confirmed, 6 tests.
+
+- [x] **Task C2:** Anthropic `cache_control` breakpoints.
+  - **Description:** Add `cache_control: {"type":"ephemeral"}` to the system block
+    and (if within provider limits) the conversation tail in the Anthropic
+    adapter. Count breakpoints against the provider maximum.
+  - **Files:** `one/providers/anthropic.py`, adapter payload tests.
+  - **Dependencies:** C1 (stable prefix maximizes breakpoint value).
+  - **Acceptance Criteria:** Payload carries breakpoints; second turn on the same
+    session reports `cacheRead > 0` against a fake transport echoing usage.
+  - **Verification:** Fake-transport wire tests asserting breakpoint placement and
+    simulated cache-hit accounting.
+  - **Details:** System prompt + tail `cache_control: {"type":"ephemeral"}` added (list-shaped system block); usage mapping wired; 8 wire tests.
+
+- [x] **Task C3:** Faster first-token flush.
+  - **Description:** Lower the pre-render buffer threshold (measure JSON-detection
+    reliability at ~10 chars) so prose paints earlier. Keep suppression of
+    streamed tool-JSON intact.
+  - **Files:** `one/core/agent_session.py` (`_invoke_provider` streaming path),
+    streaming/suppression tests.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Prose renders earlier; tool-JSON still never flashes
+    as assistant text (existing suppression tests + new threshold tests).
+  - **Verification:** Streaming unit tests with chunked tool-JSON vs prose.
+  - **Details:** Flush threshold lowered from 48→16 chars; 10 adversarial chunk-split suppression tests added, all green.
+
+- [x] **Task C4:** Measure and trim nudge usage.
+  - **Description:** Instrument how often the step-0 nudge fires and whether it
+    converts to a tool call; only then decide to narrow/keep it. No behavior
+    change until data exists.
+  - **Files:** Metrics/event counters only (no prompt changes yet).
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Nudge fire/convert rates known from test + manual runs.
+  - **Verification:** Counter assertions in fake-provider tests.
+  - **Details:** Nudge fire/convert counters added to stats + events; 1063 tests passed.
+
+### Risks & Mitigations
+
+| Risk | Mitigation |
+|------|--------|
+| Date-only degrades answers | Regression tests with time-sensitive prompts |
+| Breakpoint misuse costs more | Count breakpoints; verify simulated accounting first |
+| Flush shows tool-JSON flash | Threshold tests with adversarial chunk splits |
+
+### Project Acceptance Criteria
+
+- [ ] C1–C3 implemented on `perf/prompt-cache`, each with tests; C4 measured.
+- [ ] Real-provider spot check shows `cacheRead > 0` on turn 2+ and lower TTFT
+      (separately authorized run, never in automated tests).
+- [ ] `ruff` clean, full `pytest` green, no unrelated behavior changes.
+- [ ] No merge/push without explicit approval.
+
 ## Project: TUI/UX fix batch (`fix/tui-ux-batch`)
 
 ### Goal

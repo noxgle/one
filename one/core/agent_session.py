@@ -152,6 +152,9 @@ class AgentSession:
         self._active_bash_tasks: set[asyncio.Task] = set()
         self._active_tool_tasks: set[asyncio.Task] = set()
         self._extension_ui_pending: dict[str, dict[str, Any]] = {}
+        # Nudge instrumentation (Task C4 — measure, don't change behaviour).
+        self._nudge_fires: int = 0
+        self._nudge_conversions: dict[str, int] = {"true": 0, "false": 0}
         self._extension_ui_history: list[dict[str, Any]] = []
         self._pending_questions: dict[str, dict[str, Any]] = {}
         self._extension_runtime: ExtensionRuntime | None = None
@@ -226,7 +229,7 @@ class AgentSession:
         tz_name = now.tzname() or "UTC"
         prompt = (
             f"{prompt}\n\n# Current Date\n"
-            f"Today is {now:%Y-%m-%d} ({now:%A}), {now:%H:%M} local time ({tz_name}, UTC{offset_fmt})."
+            f"Today is {now:%Y-%m-%d} ({now:%A}), local time ({tz_name}, UTC{offset_fmt})."
         )
         return prompt
 
@@ -1367,7 +1370,7 @@ class AgentSession:
             if not streamed_started:
                 sample = streamed_buffer.lstrip()
                 # Delay rendering until we are reasonably sure it's user-facing prose, not tool JSON.
-                if len(sample) < 48:
+                if len(sample) < 16:
                     return
                 if sample.startswith("{") or sample.startswith("```") or sample.startswith("TOOL_CALL:"):
                     toolish = ('"tool"' in sample) or ('"args"' in sample) or ('"name"' in sample) or ("call:" in sample)
@@ -1447,8 +1450,8 @@ class AgentSession:
             "usage": {
                 "input": res.usage.get("prompt_tokens") or res.usage.get("input_tokens") or 0,
                 "output": res.usage.get("completion_tokens") or res.usage.get("output_tokens") or 0,
-                "cacheRead": 0,
-                "cacheWrite": 0,
+                "cacheRead": res.usage.get("cache_read_input_tokens") or 0,  # Anthropic-specific; other providers fall through to 0
+                "cacheWrite": res.usage.get("cache_creation_input_tokens") or 0,  # Anthropic-specific; other providers fall through to 0
                 "cost": {"total": 0},
             },
             "stopReason": res.stop_reason,
@@ -1528,6 +1531,9 @@ class AgentSession:
         while True:
             try:
                 self._emit({"type": "turn_start", "attempt": attempt + 1})
+                # Nudge counters accumulate across turns (reported in get_session_stats);
+                # fireCount in nudge events reflects per-turn fires (always 1 since _should_tool_nudge fires only at step 0).
+                # self._nudge_fires and self._nudge_conversions are NOT reset here — they persist for session stats.
                 tool_results: list[dict[str, Any]] = []
                 tool_max = self.settings_manager.get_tool_max_steps()
                 is_unlimited = tool_max == 0
@@ -1585,7 +1591,9 @@ class AgentSession:
                     self._tool_images = []
                     tool_call = self._try_parse_tool_call(assistant_text)
                     if tool_call is None and self._should_tool_nudge(assistant_text, step=step, tool_results=tool_results):
-                        self._emit({"type": "tool_call_nudge_start"})
+                        self._nudge_fires += 1
+                        # fireCount is per-turn; currently always 1 since _should_tool_nudge fires only at step 0.
+                        self._emit({"type": "tool_call_nudge_start", "fireCount": self._nudge_fires})
                         try:
                             nudged = await self._invoke_provider(
                                 self._flatten_messages_for_provider()
@@ -1611,13 +1619,19 @@ class AgentSession:
                             tool_call = nudged_tool_call
                             assistant = nudged
                             assistant_text = nudged_text
-                            self._emit({"type": "tool_call_nudge_end", "used": True})
+                            self._nudge_conversions["true"] += 1
+                            self._emit(
+                                {"type": "tool_call_nudge_end", "used": True, "fireCount": self._nudge_fires}
+                            )
                         else:
                             nudged_text = self._strip_final_answer_prefix(nudged_text)
                             nudged["content"] = [{"type": "text", "text": nudged_text}]
                             assistant = nudged
                             assistant_text = nudged_text
-                            self._emit({"type": "tool_call_nudge_end", "used": False})
+                            self._nudge_conversions["false"] += 1
+                            self._emit(
+                                {"type": "tool_call_nudge_end", "used": False, "fireCount": self._nudge_fires}
+                            )
                     if tool_call is None:
                         toolish = (
                             '"tool"' in assistant_text
@@ -2313,6 +2327,10 @@ class AgentSession:
             },
             "cost": total_cost,
             "contextUsage": self.get_context_usage(),
+            "nudge": {
+                "fires": self._nudge_fires,
+                "conversions": dict(self._nudge_conversions),
+            },
         }
 
     async def export_to_html(self, output_path: str | None = None) -> str:
