@@ -105,6 +105,8 @@ pip-audit -r requirements.txt  # if a requirements file is maintained
 
 ## Notes
 
+- **Version rule:** user-visible changes bump `VERSION` per `AGENTS.md → Versioning`
+  (pinned tests, TUI goldens, and `CHANGELOG → Unreleased` move with it).
 - **Secret/history scanning and GitHub security controls remain manual
   maintainer steps.** These are not automated in CI and must be run by an
   authorized maintainer with the necessary permissions.

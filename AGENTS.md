@@ -63,3 +63,14 @@ Python 3.12+ **autonomous terminal agent** (`one`): executes assigned tasks (she
 - Remote `origin` = `github.com/noxgle/one`, branch `main`. CI (`.github/workflows/ci.yml`) runs lint + build + tests (ubuntu/macos × 3.12/3.13) on every push to `main` and on PRs; Dependabot bumps GitHub Actions weekly.
 - Tags `vX.Y.Z` must equal `one/config.py:VERSION` (release workflow gates on tag==version); publishing stays disabled until explicitly approved.
 - Only commit, amend, push, or create PRs when explicitly requested.
+
+## Versioning (agent bumps VERSION itself)
+
+- After every **user-visible** change (behavior fix/feat, CLI, TUI, providers, user docs), bump `VERSION` in `one/config.py` — no separate request needed:
+  - patch (`0.1.x`) — fix with no API/CLI change; minor (`0.x.0`) — new feature/command; major — breaking change, maintainer decision only, never bump alone.
+  - Behavior-only work (tests-only, refactors, comments) does NOT bump the version.
+- Every bump must include, in the same change:
+  1. Version-pinned tests follow `VERSION` — prefer `from one.config import VERSION` over literals (literals in `test_cross_platform_smoke.py` / `test_oauth_production.py` broke the 0.1.1 bump).
+  2. Regenerated TUI goldens — the sidebar renders `Version: {VERSION}`, so any bump invalidates `tests/snapshots/tui/*.txt` (`ONE_UPDATE_SNAPSHOTS=1`, review the diff).
+  3. A `CHANGELOG.md → Unreleased` entry (Fixed/Added/Changed).
+- Never create the `vX.Y.Z` tag yourself — tagging is a maintainer release decision (tag must equal `VERSION` at tag time).
