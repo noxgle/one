@@ -670,3 +670,83 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
   tests). Subscription OAuth (`/login … subscription`) is in scope and shipped.
 - An npm/git extension package manager; extensions use the documented Python
   file/package contract.
+
+## Subagent timeout and post-timeout diagnostics
+
+### Goal
+
+Prevent long-running infrastructure tasks from being killed by the shared
+30-second tool timeout while still guaranteeing that a hung provider, SSH
+operation, or subprocess cannot block the parent agent indefinitely.
+
+### Architecture decision
+
+- Keep a timeout as a circuit breaker; do not allow unlimited execution.
+- Separate the timeout for one tool invocation (`tools.timeoutSec`, currently
+  30 seconds) from the timeout for the complete `spawn_subagent` task.
+- Give `spawn_subagent` its own configurable timeout, recommended default
+  `subagents.timeoutSec = 1800` seconds (30 minutes), with an optional per-call
+  override for unusually long Docker/build operations.
+- On timeout, abort the subagent, allow a short cleanup grace period, collect
+  diagnostics, and return a typed timeout result. Do not automatically start a
+  follow-up prompt or assume that the external operation was rolled back.
+- Preserve the subagent session ID so the parent or user can inspect/resume the
+  work after checking the real external state.
+
+### Implementation tasks
+
+- [ ] **Separate subagent and tool deadlines**
+  - **Description:** Add `subagents.timeoutSec` to settings and use it for the
+    complete `spawn_subagent` operation instead of passing
+    `tools.timeoutSec` as its total deadline. Keep `tools.timeoutSec` as the
+    default for individual tools executed inside the subagent, while allowing
+    explicit per-call overrides.
+  - **Files:** `one/core/settings_manager.py`, `one/core/agent_session.py`
+  - **Dependencies:** None
+  - **Acceptance Criteria:** A Docker/build subagent can run longer than 30
+    seconds; a genuinely stuck subagent still terminates at its configured
+    deadline; existing bash/tool timeout behavior is unchanged.
+  - **Verification:** Add tests for the default and configured subagent
+    timeout, including a task lasting longer than `tools.timeoutSec` but shorter
+    than `subagents.timeoutSec`.
+
+- [ ] **Implement controlled timeout cleanup and typed diagnostics**
+  - **Description:** On a subagent deadline, call `abort()`, wait for cleanup
+    with a bounded grace period, dispose resources, and return an explicit
+    `SubagentTimeout`/equivalent result containing session ID, elapsed time,
+    last event, last tool name, last assistant text, and sanitized error data.
+    Ensure child tasks and subprocesses are cancelled/reaped.
+  - **Files:** `one/core/agent_session.py`, `one/core/event_bus.py` only if a
+    new event type is required, `tests/test_subagents.py`,
+    `tests/test_provider_timeout_regression.py`
+  - **Dependencies:** Separate subagent and tool deadlines
+  - **Acceptance Criteria:** Timeout always emits `subagent_end`; no pending
+    child task remains; diagnostics contain no API keys/passwords; the parent
+    receives a failed tool result rather than hanging or silently retrying.
+  - **Verification:** Regression test with a blocked subagent and a blocked
+    child process; assert cleanup, terminal events, session ID, and redaction.
+
+- [ ] **Add post-timeout external-state inspection workflow**
+  - **Description:** Document and, where safe, expose a follow-up diagnostic
+    action that checks the real state after timeout (for example `docker ps -a`,
+    container inspect, SSH connectivity, and the last command output). The
+    agent must distinguish “operation timed out” from “operation failed” and
+    must not delete/recreate resources without explicit confirmation.
+  - **Files:** `one/core/agent_session.py`, `one/modes/interactive_mode.py`,
+    `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, relevant tests and docs
+  - **Dependencies:** Controlled timeout cleanup and typed diagnostics
+  - **Acceptance Criteria:** A timed-out Docker task reports that external
+    state is unknown, offers inspection rather than destructive recovery, and
+    leaves the user with an actionable session ID/diagnostic summary.
+  - **Verification:** Fake SSH/Docker integration tests covering completed,
+    partially completed, failed, and still-running external operations.
+
+### Risks and assumptions
+
+- A timeout cannot prove that a remote command stopped or that a Docker pull
+  was rolled back; external state must always be queried separately.
+- A larger subagent deadline increases the maximum wait for a real hang, so the
+  progress/heartbeat and explicit abort path are required alongside it.
+- Existing queued steering/follow-up messages must remain pending after a
+  terminal `finish` or timeout until the user explicitly chooses the next
+  action.

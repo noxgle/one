@@ -10,6 +10,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **MCP context estimation compatibility** — context usage calculation now
+  tolerates lightweight MCP test/client tool objects without an input schema.
+- **Context compaction** — auto-compaction now uses the complete provider
+  request estimate (runtime prompt and tool schemas included) and runs at the
+  default 80% threshold before sending a request.
 - **Terminal `finish`** — queued steering/follow-up messages are no longer
   executed automatically after the agent reports a completed task; they remain
   pending for an explicit next turn.
@@ -45,6 +50,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Compaction threshold** — new configurations now default to 80% context
+  usage; existing saved `thresholdPercent` values are preserved.
 - **Provider timeout** — increased the default outer provider and HTTP
   transport timeout from 190/180 seconds to 300 seconds; the 120-second SSE
   idle watchdog remains active for stalled streams.

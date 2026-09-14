@@ -210,7 +210,13 @@ class AgentSession:
                 # Backward compatibility with older loaders/mocks.
                 prompt = getter()
 
-        mcp_tools = self._mcp_manager.tools() if self._mcp_manager is not None else []
+        mcp_tools: list[Any] = []
+        if self._mcp_manager is not None:
+            tools_getter = getattr(self._mcp_manager, "tools", None)
+            if callable(tools_getter):
+                candidate = tools_getter()
+                if isinstance(candidate, list):
+                    mcp_tools = candidate
         if mcp_tools:
             lines = [
                 "\n# MCP Tools",
@@ -218,8 +224,12 @@ class AgentSession:
                 "Optional 'timeout' (seconds) in args overrides the per-call timeout.",
             ]
             for t in mcp_tools:
-                schema = json.dumps(t.input_schema, ensure_ascii=False) if t.input_schema else "{}"
-                lines.append(f"- {t.name} (server: {t.server}): {t.description} args={schema}")
+                input_schema = getattr(t, "input_schema", None)
+                schema = json.dumps(input_schema, ensure_ascii=False) if input_schema else "{}"
+                name = getattr(t, "name", "unknown")
+                server = getattr(t, "server", "unknown")
+                description = getattr(t, "description", "")
+                lines.append(f"- {name} (server: {server}): {description} args={schema}")
             prompt = f"{prompt}\n" + "\n".join(lines)
         if self._plan is not None:
             prompt = f"{prompt}\n\n# Active Plan\n{self._plan}\nFollow this plan; adapt it via the plan tool only when the situation changes materially."
@@ -1509,6 +1519,31 @@ class AgentSession:
             *self._flatten_conversation(self.messages),
         ]
 
+    def _estimate_request_tokens(self, messages: list[dict[str, Any]] | None = None) -> int:
+        """Estimate the complete provider request, including fixed prompt overhead.
+
+        The old context gauge counted only persisted message bodies.  Providers
+        also receive the runtime system prompt (including tool schemas), and a
+        character-based estimate is optimistic across tokenizers.  Include the
+        actual flattened request plus a conservative 15% tokenizer/serialization
+        margin so auto-compaction happens before the provider rejects it.
+        """
+        conversation = self.messages if messages is None else messages
+        request = [
+            {"role": "system", "content": self._build_runtime_system_prompt()},
+            *self._flatten_conversation(conversation),
+        ]
+        raw_tokens = sum(self._approx_message_tokens(message) for message in request)
+        return max(1, int(raw_tokens * 1.15) + 256)
+
+    async def _preflight_compact(self) -> None:
+        """Compact before a provider call when the full request nears its limit."""
+        if not self.auto_compaction_enabled or self._is_compacting:
+            return
+        usage = self.get_context_usage()
+        if usage and usage["percent"] >= self.settings_manager.get_compaction_threshold_percent():
+            await self.compact(reason="auto_preflight", allow_during_prompt=True)
+
     async def prompt(
         self,
         text: str,
@@ -1599,6 +1634,7 @@ class AgentSession:
                                     raise _CapabilityError(
                                         f"Model '{self.model.id}' does not support image input"
                                     )
+                                await self._preflight_compact()
                                 assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
                             except _AbortSignal:
                                 self._abort_requested = True
@@ -1619,6 +1655,7 @@ class AgentSession:
                                 # fireCount is per-turn; currently always 1 since _should_tool_nudge fires only at step 0.
                                 self._emit({"type": "tool_call_nudge_start", "fireCount": self._nudge_fires})
                                 try:
+                                    await self._preflight_compact()
                                     nudged = await self._invoke_provider(
                                         self._flatten_messages_for_provider()
                                         + [
@@ -2311,7 +2348,7 @@ class AgentSession:
     def get_context_usage(self) -> dict[str, Any] | None:
         if not self.model or not self.model.context_window:
             return None
-        approx_tokens = sum(self._approx_message_tokens(m) for m in self.messages)
+        approx_tokens = self._estimate_request_tokens()
         percent = (approx_tokens / self.model.context_window) * 100
         return {"tokens": approx_tokens, "contextWindow": self.model.context_window, "percent": percent}
 

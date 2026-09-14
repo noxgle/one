@@ -16,7 +16,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "enabledModels": [],
     "compaction": {
         "enabled": True,
-        "thresholdPercent": 85,
+        "thresholdPercent": 80,
         "recentTokens": 8192,
         "minKeptMessages": 20,
         "summarizeWithModel": True,

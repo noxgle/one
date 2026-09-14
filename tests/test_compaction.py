@@ -11,6 +11,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.core.types import ModelInfo
 
 
 class _Loader:
@@ -91,6 +92,36 @@ def _seed(agent: AgentSession, count: int = 10, prefix: str = "user message numb
         sm.append_message({"role": "user", "content": prefix.format(i)})
         sm.append_message({"role": "assistant", "content": f"answer {i}"})
     agent.messages = sm.build_session_context()["messages"]
+
+
+def test_context_usage_includes_runtime_prompt_and_uses_new_default_threshold(tmp_path):
+    agent = _mk_agent(tmp_path, {})
+    agent.messages = [{"role": "user", "content": "hello"}]
+
+    usage = agent.get_context_usage()
+    assert usage is not None
+    assert usage["tokens"] > agent._approx_message_tokens(agent.messages[0])
+    assert agent.settings_manager.get_compaction_threshold_percent() == 80
+
+
+@pytest.mark.asyncio
+async def test_preflight_compacts_before_oversized_provider_request(tmp_path):
+    model = ModelInfo(provider="openai", id="test-model", context_window=200)
+    provider = _Provider(["DONE"])
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": False, "recentTokens": 4, "minKeptMessages": 1}},
+        provider=provider,
+        model=model,
+    )
+    _seed(agent)
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("continue")
+
+    assert provider.calls >= 1
+    assert any(e["type"] == "compaction_start" and e["reason"] == "auto_preflight" for e in events)
 
 
 @pytest.mark.asyncio
