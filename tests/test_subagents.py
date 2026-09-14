@@ -602,11 +602,11 @@ class _SlowSubagentProvider:
 
 @pytest.mark.asyncio
 async def test_spawn_subagent_timeout_terminates_parent_turn(tmp_path: Path):
-    """spawn_subagent must receive the standard tool timeout (not None).
+    """spawn_subagent must respect the externally-controlled timeout.
 
-    Verifies that _execute_tool_by_name wraps spawn_subagent in asyncio.wait_for
-    with the tool timeout.  A never-finishing subagent must be killed within the
-    timeout window.
+    Verifies that _run_tool_call wraps spawn_subagent with the tool timeout
+    (timeout_sec param > per-call args.timeout > subagents setting default).
+    A never-finishing subagent must be killed within the timeout window.
     """
     session_dir = str(tmp_path / "sessions")
     manager = SessionManager.create(str(tmp_path), session_dir)
@@ -630,8 +630,6 @@ async def test_spawn_subagent_timeout_terminates_parent_turn(tmp_path: Path):
     import time
 
     start = time.monotonic()
-    # Pass the tool timeout explicitly — in the prompt loop this flows from
-    # line 1671: sub_timeout = tool_timeout_sec (after the GAP 2 fix).
     tool_timeout = settings.get_tool_timeout_sec()
     result = await parent._run_tool_call("spawn_subagent", {"task": "work forever"}, timeout_sec=tool_timeout)
     elapsed = time.monotonic() - start
@@ -642,3 +640,98 @@ async def test_spawn_subagent_timeout_terminates_parent_turn(tmp_path: Path):
     # Error message should mention timeout.
     error_msg = str(result.get("error", ""))
     assert "timeout" in error_msg.lower() or "timedout" in error_msg.lower() or "timed out" in error_msg.lower()
+    # Must be a typed timeout result, not CancelledError.
+    assert result.get("timedOut") is True or result.get("errorType") == "SubagentTimeout"
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_per_call_timeout_override(tmp_path: Path):
+    """Per-call args.timeout must override the tool timeout setting.
+
+    When spawn_subagent is called with an explicit ``timeout`` key in args,
+    that value must take precedence over tools.timeoutSec.
+    """
+    session_dir = str(tmp_path / "sessions")
+    manager = SessionManager.create(str(tmp_path), session_dir)
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    # tools.timeoutSec = 10, but per-call override = 1 s
+    settings = SettingsManager.in_memory(
+        {"tools": {"maxSteps": 4, "timeoutSec": 10}, "providers": {"timeoutSec": 3}}
+    )
+
+    parent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "finish"])
+    parent.providers = {"openai": _SlowSubagentProvider(delay=999.0)}
+
+    events: list[dict[str, Any]] = []
+    parent.subscribe(events.append)
+
+    import time
+
+    start = time.monotonic()
+    # Pass timeout via args, not timeout_sec — per-call override.
+    result = await parent._run_tool_call("spawn_subagent", {"task": "work forever", "timeout": 1})
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 5, f"spawn_subagent took {elapsed:.1f}s — should have timed out ~1s"
+    assert result["ok"] is False
+    assert result.get("timedOut") is True or result.get("errorType") == "SubagentTimeout"
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_falls_back_to_subagents_setting(tmp_path: Path):
+    """When no per-call timeout is given, falls back to subagents.timeoutSec."""
+    session_dir = str(tmp_path / "sessions")
+    manager = SessionManager.create(str(tmp_path), session_dir)
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    # tools.timeoutSec = 30, but subagents.timeoutSec = 2
+    settings = SettingsManager.in_memory(
+        {"tools": {"maxSteps": 4, "timeoutSec": 30}, "subagents": {"timeoutSec": 2}}
+    )
+
+    parent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "finish"])
+    parent.providers = {"openai": _SlowSubagentProvider(delay=999.0)}
+
+    import time
+
+    start = time.monotonic()
+    # No timeout in args, no timeout_sec — should use subagents.timeoutSec=2
+    result = await parent._run_tool_call("spawn_subagent", {"task": "work forever"})
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 6, f"spawn_subagent took {elapsed:.1f}s — should have timed out ~2s"
+    assert result["ok"] is False
+
+
+def test_get_subagents_timeout_sec_robust_defaults() -> None:
+    """get_subagents_timeout_sec must handle invalid / non-positive values."""
+    # Default
+    s = SettingsManager.in_memory()
+    assert s.get_subagents_timeout_sec() == 1800
+
+    # Valid value
+    s = SettingsManager.in_memory({"subagents": {"timeoutSec": 300}})
+    assert s.get_subagents_timeout_sec() == 300
+
+    # Zero → fallback to 1800
+    s = SettingsManager.in_memory({"subagents": {"timeoutSec": 0}})
+    assert s.get_subagents_timeout_sec() == 1800
+
+    # Negative → fallback to 1800
+    s = SettingsManager.in_memory({"subagents": {"timeoutSec": -10}})
+    assert s.get_subagents_timeout_sec() == 1800
+
+    # String that can't be converted → fallback to 1800
+    s = SettingsManager.in_memory({"subagents": {"timeoutSec": "bad"}})
+    assert s.get_subagents_timeout_sec() == 1800
+
+    # None / missing → fallback to 1800
+    s = SettingsManager.in_memory({"subagents": {"timeoutSec": None}})
+    assert s.get_subagents_timeout_sec() == 1800

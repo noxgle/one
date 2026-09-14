@@ -29,6 +29,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Subagent timeout diagnostics** — `inspect_subagent_timeout()` returns the last
+  subagent timeout diagnostic (cause, duration, timeoutSec, task summary); exposed
+  via `/inspect-timeout` in TUI and RPC, and logged in interactive mode.
+- **Streaming delivery modes** — TUI dispatches queued steer/follow-up messages
+  using `deliveryMode` (`followUp` vs `steer` vs `idle`), matching the
+  `deliveryMode` event field emitted by the session.
 - **13 tools** (was 12): added `read_image` for vision / image input alongside the existing tool set.
 - **Multimodal image input** — `--image <path>` CLI flag and `read_image` tool support PNG, JPEG, WebP
   (up to 4 images per prompt, 10 MB source / 5 MiB Base64). Images are transient per-turn.

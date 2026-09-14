@@ -158,6 +158,8 @@ class AgentSession:
         self._extension_ui_history: list[dict[str, Any]] = []
         self._pending_questions: dict[str, dict[str, Any]] = {}
         self._extension_runtime: ExtensionRuntime | None = None
+        # Last subagent-timeout diagnostic (Task 4 — inspect-timeout).
+        self._last_subagent_timeout: dict[str, Any] | None = None
         self.approval_callback = approval_callback
         self._approval_tools = set(settings_manager.get_tool_approval_tools())
 
@@ -678,9 +680,16 @@ class AgentSession:
                 self._emit({"type": "plan_update", "plan": ""})
                 self.session_manager.append_message({"role": "user", "customType": "plan", "content": "", "timestamp": int(time.time() * 1000)})
         elif tool_name == "spawn_subagent":
+            # Compute the effective timeout for spawn_subagent (per-call >
+            # timeout_sec param > subagents setting) — passed to _spawn_subagent
+            # so the inner wait_for uses the same deadline as the outer one.
+            _spawn_timeout = args.get("timeout") or timeout_sec
+            if _spawn_timeout is None:
+                _spawn_timeout = self.settings_manager.get_subagents_timeout_sec()
+            effective_timeout = _spawn_timeout
             # Return the coroutine (not awaited here) so the outer timeout
             # wrapping (lines 683-698) can enforce the tool timeout.
-            result = self._spawn_subagent(args)
+            result = self._spawn_subagent(args, timeout_sec=_spawn_timeout)
         elif tool_name == "ask_user":
             # ask_user has its own askUser.timeoutSec semantics; return the
             # coroutine but skip timeout wrapping below.
@@ -701,13 +710,48 @@ class AgentSession:
                 outer_timeout = timeout_sec
                 if tool_name == "bash":
                     outer_timeout = (effective_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC
+                elif tool_name == "spawn_subagent":
+                    # Use the effective (per-call > subagents setting) timeout for
+                    # the outer wait_for wrapper — spawn_subagent still wraps
+                    # sub.prompt() internally so the two timeouts are identical.
+                    outer_timeout = effective_timeout
                 elif self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
                     model_timeout = args.get("timeout")
                     outer_timeout = (model_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC if model_timeout else None
                 # ask_user is invoked with timeout_sec=None (line 1671), so
                 # outer_timeout stays None → no asyncio.wait_for wrapping.
                 if outer_timeout and outer_timeout > 0:
-                    result = await asyncio.wait_for(task, timeout=outer_timeout)
+                    try:
+                        result = await asyncio.wait_for(task, timeout=outer_timeout)
+                    except TimeoutError:
+                        # spawn_subagent has its own inner timeout; if the
+                        # outer timeout fires (race edge case), ensure we
+                        # return a typed SubagentTimeout result with cleanup.
+                        if tool_name == "spawn_subagent":
+                            # The inner timeout should have already returned a
+                            # structured result; just check and discard the
+                            # cancelled task.  If it hasn't, do minimal cleanup.
+                            if not task.done():
+                                task.cancel()
+                                try:
+                                    await task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                            result = {
+                                "sessionId": "unknown",
+                                "summary": "Subagent timed out",
+                                "goalSuccess": False,
+                                "finished": False,
+                                "ok": False,
+                                "output": "Subagent timed out",
+                                "content": [{"type": "text", "text": "Subagent timed out"}],
+                                "error": "Subagent timed out",
+                                "errorType": "SubagentTimeout",
+                                "timedOut": True,
+                                "externalState": "unknown",
+                            }
+                        else:
+                            raise
                 else:
                     result = await task
             finally:
@@ -794,13 +838,18 @@ class AgentSession:
                     emit_args[key] = str(Path(val).name) or "image"
         # Compute the effective timeout for the tool-call-start event so the
         # TUI / RPC renderers can show it (per-call override > passed timeout
-        # > global default).  Only apply the global default when *timeout_sec*
-        # is not None — ask_user is invoked with timeout_sec=None and relies
-        # on askUser.timeoutSec semantics inside; the TUI would otherwise
-        # show a misleading "(timeout 30s)".
-        effective_timeout = args.get("timeout") or timeout_sec
-        if effective_timeout is None and timeout_sec is not None:
-            effective_timeout = self.settings_manager.get_tool_timeout_sec()
+        # > global default).  spawn_subagent uses the subagents timeout; all
+        # other tools use tools.timeoutSec.  ask_user is invoked with
+        # timeout_sec=None and relies on askUser.timeoutSec semantics inside;
+        # the TUI would otherwise show a misleading "(timeout 30s)".
+        if tool_name == "spawn_subagent":
+            effective_timeout = args.get("timeout") or timeout_sec
+            if effective_timeout is None:
+                effective_timeout = self.settings_manager.get_subagents_timeout_sec()
+        else:
+            effective_timeout = args.get("timeout") or timeout_sec
+            if effective_timeout is None and timeout_sec is not None:
+                effective_timeout = self.settings_manager.get_tool_timeout_sec()
         self._emit({"type": "tool_call_start", "tool": tool_name, "args": emit_args, "effectiveTimeout": effective_timeout})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)
@@ -864,6 +913,19 @@ class AgentSession:
                 # (timeout must have aborted absent/False to stay distinct).
                 if result.get("cancelled") is True:
                     payload["aborted"] = True
+        except TimeoutError:
+            # asyncio.wait_for or a tool's internal wait_for timed out.
+            # Convert to a typed, non-CancelledError result so callers
+            # (TUI / RPC / parent agent) can distinguish timeout from
+            # cancellation (which signals user-initiated abort).
+            payload: dict[str, Any] = {
+                "ok": False,
+                "tool": tool_name,
+                "args": args,
+                "error": f"timed out after {timeout_sec or effective_timeout or '?'}s",
+                "errorType": "TimeoutError",
+                "timedOut": True,
+            }
         except asyncio.CancelledError:
             payload: dict[str, Any] = {
                 "ok": False,
@@ -948,7 +1010,7 @@ class AgentSession:
         except Exception:
             return 0
 
-    async def _spawn_subagent(self, args: dict[str, Any]) -> dict[str, Any]:
+    async def _spawn_subagent(self, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
         if not self.settings_manager.get_subagents_enabled():
             raise RuntimeError("Subagents disabled (enable with /subagents on or 'one config subagents.enabled true')")
         task = str(args.get("task") or "").strip()
@@ -1016,8 +1078,8 @@ class AgentSession:
                 )
 
         if task:
-            return await self._run_subagent(task, sub_model, sub_tools, depth)
-        results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth) for t in tasks))
+            return await self._run_subagent(task, sub_model, sub_tools, depth, timeout_sec=timeout_sec)
+        results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth, timeout_sec=timeout_sec) for t in tasks))
         # Aggregate: per-child results + top-level ok + error when any fails.
         all_ok = all(r.get("ok") for r in results)
         combined = "\n".join(f"- {r.get('summary', '(no summary)')}" for r in results)
@@ -1067,7 +1129,9 @@ class AgentSession:
                 return
         self._tool_images.append(image)
 
-    async def _run_subagent(self, task: str, sub_model: Any, sub_tools: list[str], depth: int) -> dict[str, Any]:
+    async def _run_subagent(
+        self, task: str, sub_model: Any, sub_tools: list[str], depth: int, *, timeout_sec: int | None = None
+    ) -> dict[str, Any]:
         # Use the parent's session_dir so subagent files go to the same directory.
         # Use __init__ directly to bypass SessionManager.create()'s "session_dir or
         # get_default_session_dir()" fallback (empty string would be treated as falsy).
@@ -1105,12 +1169,123 @@ class AgentSession:
         sub.subscribe(_sub_answer)
 
         sub_id = sub.session_id
+        task_id = task
         ok = False
         error_text: str | None = None
         error_type: str | None = None
-        self._emit({"type": "subagent_start", "sessionId": sub_id, "task": task})
+        self._emit({"type": "subagent_start", "sessionId": sub_id, "task": task_id})
+        sub_timeout_sec = timeout_sec or self.settings_manager.get_subagents_timeout_sec()
         try:
-            await sub.prompt(task)
+            try:
+                await asyncio.wait_for(sub.prompt(task_id), timeout=sub_timeout_sec)
+            except TimeoutError:
+                # Graceful shutdown: abort + bounded dispose, then cancel any
+                # stragglers.  Never re-raise — the parent already has a
+                # wait_for wrapper that would retry.
+                ok = False
+                error_text = "Subagent timed out"
+                error_type = "SubagentTimeout"
+                try:
+                    await sub.abort()
+                except Exception:
+                    pass
+                try:
+                    # Shield the dispose call from any outer cancellation so the
+                    # subagent has a bounded window to release resources.
+                    await asyncio.wait_for(asyncio.shield(sub.dispose()), timeout=1.0)
+                except (TimeoutError, asyncio.CancelledError):
+                    pass
+                except Exception:
+                    pass
+                # Cancel/reap any remaining active tasks on the subagent.
+                remaining: list[asyncio.Task] = []
+                for attr in ("_active_chat_tasks", "_active_bash_tasks", "_active_tool_tasks"):
+                    remaining.extend(getattr(sub, attr, set()) or [])
+                for t in remaining:
+                    if not t.done():
+                        t.cancel()
+                if remaining:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(asyncio.gather(*remaining, return_exceptions=True)), timeout=1.0)
+                    except (TimeoutError, asyncio.CancelledError):
+                        pass
+                    except Exception:
+                        pass
+                # Gather diagnostics from the subagent before it's torn down.
+                result = sub.get_last_finish_result()
+                assistant_text = sub.get_last_assistant_text() or ""
+                summary = result.get("summary") or assistant_text or "(no output)"
+                elapsed = time.monotonic() - sub._session_started_at
+                # Redact secrets in diagnostics.
+                error_text = re.sub(
+                    r"(sk-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9\._\-~+/=]+)",
+                    "REDACTED",
+                    error_text,
+                )
+                error_text = error_text[:512]
+                summary = f"{error_text} (elapsed {elapsed:.1f}s)" if not summary.startswith(("Subagent ", "Incompl")) else summary
+                # Extract last event type and last tool name from messages.
+                last_event = "unknown"
+                last_tool_name = "unknown"
+                for msg in reversed(sub.messages):
+                    ct = msg.get("customType")
+                    if ct:
+                        last_event = ct
+                        break
+                    role = msg.get("role")
+                    if role == "assistant":
+                        last_event = "message"
+                        break
+                    if role == "toolResult":
+                        content = msg.get("content", "")
+                        if isinstance(content, str):
+                            try:
+                                parsed = json.loads(content)
+                                last_tool_name = parsed.get("tool", "unknown")
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        break
+                diagnostic = {
+                    "operation": "timed out",
+                    "errorType": "SubagentTimeout",
+                    "externalState": "unknown",
+                    "sessionId": sub_id,
+                    "elapsedSec": round(elapsed, 2),
+                    "lastTool": last_tool_name,
+                    "lastEvent": last_event,
+                    "error": error_text,
+                    "summary": summary,
+                    "lastAssistantText": assistant_text,
+                    "actionableHint": (
+                        "Subagent exceeded the configured timeout. "
+                        "Check: (1) the subagent's task complexity, "
+                        "(2) bash/ask_user calls blocking indefinitely, "
+                        "(3) provider connectivity — increase `subagents.timeoutSec` or reduce task scope."
+                    ),
+                }
+                self._last_subagent_timeout = diagnostic
+                # Redact secrets in assistant text (same mechanism as error_text).
+                redacted_assistant = re.sub(
+                    r"(sk-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9\._\-~+/=]+)",
+                    "REDACTED",
+                    assistant_text,
+                )
+                return {
+                    "sessionId": sub_id,
+                    "summary": summary,
+                    "goalSuccess": bool(result.get("goalSuccess")),
+                    "finished": False,
+                    "ok": False,
+                    "output": summary,
+                    "content": [{"type": "text", "text": summary}],
+                    "error": error_text,
+                    "errorType": error_type,
+                    "elapsedSec": elapsed,
+                    "externalState": "unknown",
+                    "lastEvent": last_event,
+                    "lastTool": last_tool_name,
+                    "lastAssistantText": redacted_assistant,
+                }
             result = sub.get_last_finish_result()
             assistant_text = sub.get_last_assistant_text() or ""
             summary = result.get("summary") or assistant_text or "(no output)"
@@ -1147,6 +1322,7 @@ class AgentSession:
                 "content": [{"type": "text", "text": summary}],
                 "error": error_text,
                 "errorType": error_type,
+                "externalState": "unknown",
             }
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
@@ -1165,6 +1341,7 @@ class AgentSession:
                 "content": [{"type": "text", "text": f"Subagent error: {error_text}"}],
                 "error": error_text,
                 "errorType": error_type,
+                "externalState": "unknown",
             }
         finally:
             try:
@@ -1552,16 +1729,29 @@ class AgentSession:
     ) -> None:
         options = options or {}
         if self._is_streaming:
+            # Resolve the delivery mode for input received while the model is
+            # still streaming a response.  *steeringMode* is the primary signal
+            # (interrupt = allow interruption, follow_up / queue = defer);
+            # *followUpMode* is a secondary hint used only when steeringMode
+            # is interrupt (backwards-compatible with /steer, /follow callers).
             behavior = options.get("streamingBehavior")
             if not behavior:
-                raise RuntimeError("streamingBehavior is required while streaming")
+                sm = self.steering_mode
+                if sm == "follow_up":
+                    behavior = "followUp"
+                elif sm == "queue":
+                    behavior = "steer"  # queue as steer
+                else:
+                    # Default: steeringMode=interrupt → use followUpMode for
+                    # the follow-up vs steer decision.
+                    behavior = "followUp" if self.follow_up_mode == "follow_up" else "steer"
             if behavior == "steer":
                 await self.steer(text, images=images)
                 return
             if behavior == "followUp":
                 await self.follow_up(text, images=images)
                 return
-            raise RuntimeError("Invalid streamingBehavior")
+            raise RuntimeError(f"Invalid streamingBehavior: {behavior}")
 
         self._is_streaming = True
         self._abort_requested = False
@@ -1994,6 +2184,15 @@ class AgentSession:
             usage = self.get_context_usage()
             if usage and usage["percent"] >= self.settings_manager.get_compaction_threshold_percent():
                 await self.compact(reason="auto")
+
+        # Do not drain queued steering / follow-up messages when:
+        #   - steeringMode is "queue"  (user opted out of auto-steer),
+        #   - steeringMode is "follow_up"  (follow-up queue, not steer),
+        #   - abort was requested  (terminal state; user should inspect queues).
+        # When steeringMode is "interrupt" (default) the queue is drained
+        # normally so queued steer/follow-up messages continue the loop.
+        if self.steering_mode != "interrupt":
+            return
 
         # After compaction (or not), check abort before draining queued
         # steering / follow-up messages — prevents processing steering
@@ -2662,3 +2861,13 @@ class AgentSession:
 
     def clear_extension_ui_history(self) -> None:
         self._extension_ui_history = []
+
+    def inspect_subagent_timeout(self) -> dict[str, Any]:
+        """Return the last subagent-timeout diagnostic, or an empty dict if none.
+
+        Read-only, never mutates state.  Structured for machine consumption
+        (RPC/get_state) and human display (CLI/TUI slash command).
+        """
+        if self._last_subagent_timeout is not None:
+            return dict(self._last_subagent_timeout)
+        return {}

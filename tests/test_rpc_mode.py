@@ -128,6 +128,9 @@ async def test_rpc_get_state_snapshot(tmp_path: Path, monkeypatch: pytest.Monkey
     assert data["pendingMessageCount"] == 0
     assert data["activeTools"] == ["read", "read_image", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "ask_user", "spawn_subagent", "apply_patch"]
     assert data["autoRetryEnabled"] == session.auto_retry_enabled
+    # Task 4 — lastSubagentTimeout diagnostic field is present.
+    assert "lastSubagentTimeout" in data
+    assert data["lastSubagentTimeout"] == {}  # no timeout has occurred yet
 
 
 @pytest.mark.asyncio
@@ -276,6 +279,61 @@ async def test_rpc_resource_getters(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert _resp(responses, "get_prompts")["data"]["prompts"][0]["name"] == "review"
     assert _resp(responses, "get_themes")["data"]["themes"] == [{"path": "/tmp/theme.json"}]
     assert _resp(responses, "get_agents_files")["data"]["agentsFiles"][0]["path"] == "/tmp/AGENTS.md"
+
+
+@pytest.mark.asyncio
+async def test_rpc_inspect_subagent_timeout_no_diag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """inspect_subagent_timeout (standalone RPC ctype): no diagnostic → available:false, empty diagnostic."""
+    session = _mk_session(tmp_path)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "inspect_subagent_timeout", "id": "t1"})],
+    )
+    r = _resp(responses, "inspect_subagent_timeout", "t1")
+    assert r["success"] is True
+    data = r["data"]
+    assert data["available"] is False
+    assert data["diagnostic"] == {}
+
+
+@pytest.mark.asyncio
+async def test_rpc_inspect_subagent_timeout_with_diag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """inspect_subagent_timeout with a populated diagnostic: available:true, structured fields present."""
+    session = _mk_session(tmp_path)
+    # Manually set _last_subagent_timeout to simulate a timeout event.
+    session._last_subagent_timeout = {
+        "operation": "timed out",
+        "errorType": "SubagentTimeout",
+        "externalState": "unknown",
+        "sessionId": "sub-abc",
+        "elapsedSec": 60.5,
+        "lastTool": "bash",
+        "lastEvent": "message",
+        "error": "timed out",
+        "summary": "subagent timed out",
+        "lastAssistantText": "running...",
+        "actionableHint": "increase timeout",
+    }
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "inspect_subagent_timeout", "id": "t2"})],
+    )
+    r = _resp(responses, "inspect_subagent_timeout", "t2")
+    assert r["success"] is True
+    data = r["data"]
+    assert data["available"] is True
+    d = data["diagnostic"]
+    assert d["operation"] == "timed out"
+    assert d["errorType"] == "SubagentTimeout"
+    assert d["externalState"] == "unknown"
+    assert d["sessionId"] == "sub-abc"
+    assert d["elapsedSec"] == 60.5
+    assert d["lastTool"] == "bash"
+    assert d["lastEvent"] == "message"
+    assert d["error"] == "timed out"
+    assert d["summary"] == "subagent timed out"
+    assert d["lastAssistantText"] == "running..."
+    assert d["actionableHint"] == "increase timeout"
 
 
 @pytest.mark.asyncio

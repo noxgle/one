@@ -179,6 +179,18 @@ class SettingsManager:
     def get_follow_up_mode(self) -> str:
         return self.merged().get("followUpMode", "queue")
 
+    def get_subagents_timeout_sec(self) -> int:
+        """Return the subagents timeout in seconds.
+
+        Default 1800.  Invalid or non-positive values fall back to 1800.
+        """
+        try:
+            raw = self.merged().get("subagents", {}).get("timeoutSec", 1800)
+            value = int(raw) if raw is not None else 1800
+            return value if value > 0 else 1800
+        except (TypeError, ValueError):
+            return 1800
+
     def get_transport(self) -> str:
         return self.merged().get("transport", "http")
 

@@ -142,6 +142,13 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                 result = await runtime_host.new_session({"parentSession": cmd.get("parentSession")})
                 await rebind()
                 output(success(cid, ctype, result))
+            elif ctype == "inspect_subagent_timeout":
+                # Read-only diagnostic: structured timeout info (not get_state).
+                diag = session.inspect_subagent_timeout()
+                if not diag:
+                    output(success(cid, ctype, {"available": False, "diagnostic": {}}))
+                else:
+                    output(success(cid, ctype, {"available": True, "diagnostic": diag}))
             elif ctype == "get_state":
                 output(
                     success(
@@ -163,6 +170,7 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                             "pendingQueues": session.get_pending_queues(),
                             "activeTools": session.active_tools,
                             "autoRetryEnabled": session.auto_retry_enabled,
+                            "lastSubagentTimeout": session.inspect_subagent_timeout(),
                         },
                     )
                 )

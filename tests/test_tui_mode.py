@@ -236,7 +236,8 @@ async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_tui_prompt_queued_while_streaming(tmp_path: Path) -> None:
     """A plain prompt submitted while the agent is streaming is queued as a
-    follow-up instead of failing with 'streamingBehavior is required'."""
+    steer (default for followUpMode='queue') instead of failing with
+    'streamingBehavior is required'."""
     import asyncio
 
     from one.modes.tui_mode import _OneTextualApp
@@ -263,12 +264,13 @@ async def test_tui_prompt_queued_while_streaming(tmp_path: Path) -> None:
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "[error]" not in stream
-        assert "second prompt" in session.get_pending_queues()["followUp"]
+        # Default followUpMode='queue' → normal input during streaming routes to steer
+        assert "second prompt" in session.get_pending_queues()["steering"]
         for _ in range(200):
             await pilot.pause()
             if not app._turn_active and not session.is_streaming:
                 break
-        assert "second prompt" not in session.get_pending_queues()["followUp"]
+        assert "second prompt" not in session.get_pending_queues()["steering"]
 
 
 @pytest.mark.asyncio
@@ -3705,9 +3707,11 @@ async def test_tui_tool_call_start_without_effective_timeout_plain_format(tmp_pa
 # Task 12 (PART A): spawn_subagent / ask_user effective timeout
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_tui_tool_call_start_no_timeout_for_spawn_subagent(tmp_path: Path):
-    """spawn_subagent and ask_user are called with timeout_sec=None;
-    effectiveTimeout must NOT fall back to the global default (30 s)."""
+async def test_tui_tool_call_start_subagent_timeout(tmp_path: Path):
+    """spawn_subagent now uses subagents.timeoutSec as its effective timeout.
+
+    The TUI must render the subagents timeout (1800 s default) in the
+    tool_call_start event line."""
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -3715,21 +3719,20 @@ async def test_tui_tool_call_start_no_timeout_for_spawn_subagent(tmp_path: Path)
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        # Simulate what agent_session emits for spawn_subagent (timeout_sec=None):
-        # effectiveTimeout = args.get("timeout") or timeout_sec  →  None
+        # Simulate what agent_session emits for spawn_subagent:
+        # effectiveTimeout = subagents.timeoutSec (default 1800)
         session._emit(
             {
                 "type": "tool_call_start",
                 "tool": "spawn_subagent",
                 "args": {"task": "do something"},
-                "effectiveTimeout": None,
+                "effectiveTimeout": 1800,
             }
         )
         await pilot.pause()
 
         stream = "\n".join(app._stream_lines)
-        assert "tool start:" in stream
-        assert "tool start (timeout" not in stream
+        assert "tool start (timeout 1800s):" in stream
 
 
 # ---------------------------------------------------------------------------

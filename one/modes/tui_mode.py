@@ -48,6 +48,14 @@ def build_sidebar_snapshot(
     steer_count = len(queues.get("steering", []))
     follow_count = len(queues.get("followUp", []))
 
+    # Determine the streaming delivery mode: when is_streaming, pick the mode
+    # that normal input will use; otherwise "idle".
+    if getattr(session, "is_streaming", False):
+        fm = getattr(session, "follow_up_mode", "queue")
+        delivery_mode = "followUp" if fm == "follow_up" else "steer"
+    else:
+        delivery_mode = "idle"
+
     mcp_manager = getattr(session, "_mcp_manager", None)
     mcp_servers: list[dict[str, Any]] = []
     if mcp_manager is not None:
@@ -96,6 +104,7 @@ def build_sidebar_snapshot(
         "retry": retry_display,
         "coop": "on" if getattr(session, "approval_callback", None) is not None else "off",
         "contextPercent": float(usage.get("percent") or 0.0),
+        "deliveryMode": delivery_mode,
         "queueSteer": steer_count,
         "queueFollow": follow_count,
         "queueTotal": steer_count + follow_count,
@@ -371,6 +380,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/mcp",
     "/history",
     "/bash",
+    "/inspect-timeout",
 )
 
 
@@ -1315,6 +1325,7 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Ctx: {s['contextPercent']:.1f}%\n")
             info_block.append(f"Retry: {sanitize_display_text(s['retry'])}\n")
             info_block.append(f"Status: {sanitize_display_text(status)}\n")
+            info_block.append(f"Delivery: {sanitize_display_text(s['deliveryMode'])}\n")
             info_block.append(f"Coop: {sanitize_display_text(s['coop'])}\n")
             info_block.append(f"Subagents: {'on' if s['subagents'] else 'off'}\n")
             info_block.append(f"Bash: {'on' if s['bashOutput'] else 'off'}\n")
@@ -1443,6 +1454,7 @@ if TEXTUAL_AVAILABLE:
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>",
                     "info",
                 )
+                self._write("/inspect-timeout", "info")
                 return
             if cmd == "/clear":
                 stream_widget = self.query_one("#stream")
@@ -1493,6 +1505,25 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd == "/tools":
                 self._write(json.dumps({"tools": session.active_tools}, ensure_ascii=False), "info")
+                return
+            if cmd == "/inspect-timeout":
+                diag = session.inspect_subagent_timeout()
+                if not diag:
+                    self._write("No subagent-timeout diagnostics available.", "info")
+                else:
+                    lines = [
+                        f"operation: {diag.get('operation', 'unknown')}",
+                        f"errorType: {diag.get('errorType', 'unknown')}",
+                        f"externalState: {diag.get('externalState', 'unknown')}",
+                        f"sessionId: {diag.get('sessionId', 'unknown')}",
+                        f"lastTool: {diag.get('lastTool', 'unknown')}",
+                        f"lastEvent: {diag.get('lastEvent', 'unknown')}",
+                        f"elapsedSec: {diag.get('elapsedSec', 'N/A')}",
+                        f"error: {diag.get('error', '(none)')}",
+                        f"summary: {diag.get('summary', '(none)')}",
+                        f"actionable: {diag.get('actionableHint', '')}",
+                    ]
+                    self._write("\n".join(lines), "info")
                 return
             if cmd == "/model":
                 current = f"{session.model.provider}/{session.model.id}" if session.model else "none"
@@ -2247,12 +2278,28 @@ if TEXTUAL_AVAILABLE:
                     queued = False
                     try:
                         if self.session.is_streaming:
+                            # Resolve the delivery mode the same way as
+                            # agent_session.prompt() so feedback matches actual
+                            # behavior (steer vs followUp).
+                            sm = self.session.steering_mode
+                            if sm == "follow_up":
+                                resolved = "followUp"
+                            elif sm == "queue":
+                                resolved = "steer"
+                            else:
+                                resolved = (
+                                    "followUp"
+                                    if self.session.follow_up_mode == "follow_up"
+                                    else "steer"
+                                )
                             await self.session.prompt(
                                 clean_text,
-                                {"streamingBehavior": "followUp"},
                                 images=image_refs if image_refs else None,
                             )
-                            self._write("Queued follow-up message.", "info")
+                            self._write(
+                                f"Queued ({resolved})." if resolved == "steer" else "Queued follow-up message.",
+                                "info",
+                            )
                             queued = True
                         else:
                             await self.session.prompt(

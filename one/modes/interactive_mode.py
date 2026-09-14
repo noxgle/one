@@ -528,6 +528,7 @@ class InteractiveMode:
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>\n"
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
+                    "/inspect-timeout\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
                 )
                 continue
@@ -1227,6 +1228,14 @@ class InteractiveMode:
                     continue
                 print("Usage: /extui <list|request|respond|cancel|clear> ...")
                 continue
+            if line.strip() == "/inspect-timeout":
+                diag = session.inspect_subagent_timeout()
+                if not diag:
+                    print("No subagent-timeout diagnostics available.")
+                else:
+                    for key in ("operation", "errorType", "externalState", "sessionId", "lastTool", "lastEvent", "elapsedSec", "error", "summary", "actionableHint"):
+                        print(f"{key}: {diag.get(key, 'N/A')}")
+                continue
             if line.strip() == "/cooperation":
                 enabled = session.approval_callback is not None
                 print(
@@ -1254,8 +1263,20 @@ class InteractiveMode:
                 print(f"Unknown command: {line.strip()}. Use /help.")
                 continue
             if session.is_streaming:
-                await session.prompt(line, {"streamingBehavior": "followUp"})
-                print("Queued follow-up message.")
+                # Resolve the delivery mode the same way as agent_session.prompt()
+                # so feedback matches actual behavior (steer vs followUp).
+                sm = session.steering_mode
+                if sm == "follow_up":
+                    resolved = "followUp"
+                elif sm == "queue":
+                    resolved = "steer"
+                else:
+                    resolved = "followUp" if session.follow_up_mode == "follow_up" else "steer"
+                await session.prompt(line)
+                print(
+                    f"Queued ({resolved})." if resolved == "steer" else "Queued follow-up message.",
+                    flush=True,
+                )
             else:
                 await session.prompt(line)
 

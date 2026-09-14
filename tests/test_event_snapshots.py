@@ -674,3 +674,130 @@ async def test_prompt_with_images_sets_images_on_non_streaming(tmp_path: Path) -
     await session.prompt("describe it", images=images)
     assert session.providers["openai"].chat_call_count >= 1
     assert session._images == images
+
+
+# ── Streaming delivery-mode tests (Task A1) ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_streaming_delivery_defaults_to_steer_with_queue_mode(tmp_path: Path) -> None:
+    """Normal input during streaming → steer when followUpMode='queue' (default)."""
+    agent = _mk_agent(tmp_path)
+    agent.providers = {"openai": _Provider(["DONE"])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    # Simulate: a prompt is in-flight (is_streaming=True).
+    # The second prompt() call should route based on follow_up_mode config.
+    agent._is_streaming = True
+    await agent.prompt("while-streaming")
+    # Should have queued as steer (default for followUpMode='queue')
+    queues = agent.get_pending_queues()
+    assert queues["steering"] == ["while-streaming"]
+    assert queues["followUp"] == []
+    # Reset flag to allow cleanup
+    agent._is_streaming = False
+
+
+@pytest.mark.asyncio
+async def test_streaming_delivery_follow_up_mode_follow_up(tmp_path: Path) -> None:
+    """Normal input during streaming → followUp when followUpMode='follow_up'."""
+    agent = _mk_agent(tmp_path, settings_override={"followUpMode": "follow_up"})
+    agent.providers = {"openai": _Provider(["DONE"])}
+
+    agent._is_streaming = True
+    await agent.prompt("while-streaming")
+    queues = agent.get_pending_queues()
+    assert queues["steering"] == []
+    assert queues["followUp"] == ["while-streaming"]
+    agent._is_streaming = False
+
+
+@pytest.mark.asyncio
+async def test_explicit_streaming_behavior_still_works(tmp_path: Path) -> None:
+    """Explicit streamingBehavior option overrides config."""
+    agent = _mk_agent(tmp_path)
+    agent.providers = {"openai": _Provider(["DONE"])}
+
+    agent._is_streaming = True
+    await agent.prompt("explicit steer", {"streamingBehavior": "steer"})
+    assert agent.get_pending_queues()["steering"] == ["explicit steer"]
+
+    agent._is_streaming = True
+    await agent.prompt("explicit follow", {"streamingBehavior": "followUp"})
+    assert agent.get_pending_queues()["followUp"] == ["explicit follow"]
+    agent._is_streaming = False
+
+
+@pytest.mark.asyncio
+async def test_queues_not_drained_after_finish_tool(tmp_path: Path) -> None:
+    """After finish tool, _check_queues must NOT drain steering/follow-up."""
+    agent = _mk_agent(tmp_path)
+    agent.providers = {"openai": _Provider(['{"tool":"finish","args":{"summary":"done"}}'])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("go")
+    # The prompt finished with the finish tool, so _check_queues returned
+    # early via `finished_with_tool` guard — queues untouched.
+
+    # Now queue a steer via steer()
+    await agent.steer("queued steer")
+    queues = agent.get_pending_queues()
+    assert queues["steering"] == ["queued steer"]
+    assert queues["followUp"] == []
+
+
+@pytest.mark.asyncio
+async def test_queues_not_drained_after_abort(tmp_path: Path) -> None:
+    """After abort, _check_queues must NOT drain steering/follow-up."""
+    agent = _mk_agent(tmp_path)
+    agent.providers = {"openai": _SlowProvider()}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    task = asyncio.create_task(agent.prompt("go"))
+    await asyncio.sleep(0.01)
+    await agent.steer("queued steer")
+    queues_before = agent.get_pending_queues()
+    assert queues_before["steering"] == ["queued steer"]
+
+    await agent.abort()
+    await task
+
+    # Queue should still have the steer message — not drained by abort path.
+    queues_after = agent.get_pending_queues()
+    assert queues_after["steering"] == ["queued steer"]
+
+
+@pytest.mark.asyncio
+async def test_steer_and_follow_up_both_queued_fifo(tmp_path: Path) -> None:
+    """Multiple steer and follow-up messages queue correctly."""
+    agent = _mk_agent(tmp_path)
+
+    await agent.steer("s1")
+    await agent.steer("s2")
+    await agent.follow_up("f1")
+    await agent.follow_up("f2")
+
+    queues = agent.get_pending_queues()
+    assert queues["steering"] == ["s1", "s2"]
+    assert queues["followUp"] == ["f1", "f2"]
+
+
+@pytest.mark.asyncio
+async def test_clear_pending_queues_works(tmp_path: Path) -> None:
+    """clear_pending_queues clears the correct subset."""
+    agent = _mk_agent(tmp_path)
+    await agent.steer("s1")
+    await agent.follow_up("f1")
+
+    cleared = agent.clear_pending_queues("steering")
+    assert cleared["steering"] == []
+    assert cleared["followUp"] == ["f1"]
+
+    cleared = agent.clear_pending_queues("follow")
+    assert cleared["followUp"] == []
+
+    cleared = agent.clear_pending_queues("all")
+    assert cleared["steering"] == []
+    assert cleared["followUp"] == []

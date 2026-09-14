@@ -206,6 +206,42 @@ TUI keyboard shortcuts (also listed in the in-app shortcuts overlay):
 JSON-RPC over stdin/stdout for external orchestration (sessions, events,
 extension UI). See `one/modes/rpc_mode.py` and `tests/snapshots/rpc/*.jsonl`.
 
+#### `/inspect-timeout` — subagent timeout diagnostic
+
+The RPC ctype `inspect_subagent_timeout` returns a **read-only** snapshot of the
+last subagent timeout event (same data as the interactive `/inspect-timeout` and
+TUI `/inspect-timeout` slash commands).
+
+- **Response schema (no diagnostic yet):**
+
+  ```json
+  {"type":"response","success":true,"data":{"available":false,"diagnostic":{}}}
+  ```
+
+- **Response schema (diagnostic available):**
+
+  ```json
+  {"type":"response","success":true,"data":{"available":true,"diagnostic":{
+    "operation": "timed out",
+    "errorType": "SubagentTimeout",
+    "externalState": "unknown",
+    "sessionId": "<subagent-id>",
+    "elapsedSec": 60.5,
+    "lastTool": "bash",
+    "lastEvent": "message",
+    "error": "...",
+    "summary": "...",
+    "lastAssistantText": "...",
+    "actionableHint": "..."
+  }}}
+  ```
+
+- **`externalState`** is always `"unknown"` because the session has no visibility
+  into the OS-level state of the timed-out subagent process.
+- **Read-only** — this command never mutates session state, never performs
+  recovery, and never attempts to kill or clean up the subagent.  It is purely
+  diagnostic.
+
 ## Vision / images (multimodal)
 
 `one` supports image input via the `read_image` tool or the `--image` CLI flag.
