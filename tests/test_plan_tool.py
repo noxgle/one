@@ -96,6 +96,7 @@ async def test_plan_sets_session_plan_and_system_prompt(tmp_path: Path):
         tmp_path,
         [
             '{"tool":"plan","args":{"plan":"1. read file\\n2. edit content\\n3. finish"}}',
+            '{"tool":"read","args":{"path":"missing.txt"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
         ],
     )
@@ -128,6 +129,7 @@ async def test_plan_finish_clears_plan_and_emits_empty_update(tmp_path: Path):
         tmp_path,
         [
             '{"tool":"plan","args":{"plan":"step one"}}',
+            '{"tool":"read","args":{"path":"missing.txt"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
         ],
     )
@@ -221,7 +223,8 @@ async def test_plan_cleared_on_finish_and_restored_as_none(tmp_path: Path):
     await agent1._run_tool_call("plan", {"plan": "will be cleared"})
     assert agent1._plan == "will be cleared"
 
-    # Call finish to clear the plan
+    # A non-plan tool step permits finish and clears the plan.
+    await agent1._run_tool_call("read", {"path": "missing.txt"})
     await agent1._run_tool_call("finish", {"summary": "done", "goal_success": True})
     assert agent1._plan is None
 
@@ -243,6 +246,7 @@ async def test_plan_finish_goal_success_false_clears_plan_and_preserves_flag(tmp
         tmp_path,
         [
             '{"tool":"plan","args":{"plan":"step one"}}',
+            '{"tool":"read","args":{"path":"missing.txt"}}',
             '{"tool":"finish","args":{"summary":"failed task","goal_success":false}}',
         ],
     )
@@ -283,6 +287,7 @@ async def test_plan_finish_goal_success_false_restored_none(tmp_path: Path):
     await agent1._run_tool_call("plan", {"plan": "will be cleared"})
     assert agent1._plan == "will be cleared"
 
+    await agent1._run_tool_call("read", {"path": "missing.txt"})
     await agent1._run_tool_call("finish", {"summary": "failed", "goal_success": False})
     assert agent1._plan is None
 
@@ -294,3 +299,59 @@ async def test_plan_finish_goal_success_false_restored_none(tmp_path: Path):
     # Reload - _plan should be None
     agent2 = AgentSession(session, settings, registry, loader, model, "medium")
     assert agent2._plan is None
+
+
+# ---------------------------------------------------------------------------
+# Completion guard: planning alone is not a completed task
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_plan_then_finish_is_rejected_and_session_continues(tmp_path: Path):
+    (tmp_path / "input.txt").write_text("observed\n", encoding="utf-8")
+    agent = _make_agent(
+        tmp_path,
+        [
+            '{"tool":"plan","args":{"plan":"1. inspect file"}}',
+            '{"tool":"finish","args":{"summary":"premature","goal_success":true}}',
+            '{"tool":"read","args":{"path":"input.txt"}}',
+            '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
+        ],
+    )
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Make a plan and complete it.")
+
+    rejected = [e for e in events if e.get("type") == "tool_call_end" and e.get("tool") == "finish" and not e.get("ok")]
+    assert len(rejected) == 1
+    assert rejected[0]["result"]["error"] == "The plan was just created. Execute and verify a planned step before finishing."
+    assert agent.providers["openai"].calls == 4  # type: ignore[index,union-attr]
+    assert agent._plan is None
+
+
+@pytest.mark.asyncio
+async def test_plan_then_read_then_finish_is_allowed(tmp_path: Path):
+    (tmp_path / "input.txt").write_text("observed\n", encoding="utf-8")
+    agent = _make_agent(
+        tmp_path,
+        [
+            '{"tool":"plan","args":{"plan":"1. inspect file"}}',
+            '{"tool":"read","args":{"path":"input.txt"}}',
+            '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
+        ],
+    )
+
+    await agent.prompt("Make a plan, inspect, and complete it.")
+
+    assert agent.providers["openai"].calls == 3  # type: ignore[index,union-attr]
+    assert agent._plan is None
+
+
+@pytest.mark.asyncio
+async def test_finish_without_plan_is_allowed(tmp_path: Path):
+    agent = _make_agent(tmp_path, ['{"tool":"finish","args":{"summary":"done","goal_success":true}}'])
+
+    await agent.prompt("Complete this.")
+
+    assert agent.providers["openai"].calls == 1  # type: ignore[index,union-attr]

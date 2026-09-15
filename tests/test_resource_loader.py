@@ -41,6 +41,13 @@ def test_prompt_includes_plan_schema():
     assert "Use the plan tool to store the plan." in prompt
 
 
+def test_prompt_includes_plan_completion_and_reporting_integrity_rules():
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+    prompt = loader.get_system_prompt(selected_tools=["read", "plan", "finish"])
+    assert "After creating a plan, do not call finish immediately. Execute the planned steps and verify the result first. A plan is not task completion." in prompt
+    assert "Do not claim changes or verification without a successful, observed tool result." in prompt
+
+
 def test_prompt_includes_all_schemas_regression():
     settings = _make_settings()
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)

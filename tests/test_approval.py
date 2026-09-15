@@ -206,6 +206,7 @@ async def test_plan_approval_invokes_callback(tmp_path: Path):
         tmp_path,
         [
             '{"tool":"plan","args":{"plan":"step one"}}',
+            '{"tool":"read","args":{"path":"missing.txt"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
         ],
         approval_callback=callback,

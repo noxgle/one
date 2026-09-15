@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Plan completion guard** — a `finish` immediately after creating a plan is
+  rejected until the agent executes another tool step.
+- **Reporting integrity** — the system prompt now prohibits claims of changes
+  or verification without a successful observed tool result.
 - **MCP context estimation compatibility** — context usage calculation now
   tolerates lightweight MCP test/client tool objects without an input schema.
 - **Context compaction** — auto-compaction now uses the complete provider

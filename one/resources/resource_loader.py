@@ -237,6 +237,7 @@ REASONING & ADAPTATION
 - After each result, reassess assumptions
 - If assumptions fail, adapt strategy
 - Prefer observed evidence over initial expectations
+- Do not claim changes or verification without a successful, observed tool result.
 - Do NOT output reasoning
 
 PLANNING RULES
@@ -247,6 +248,7 @@ PLANNING RULES
 - Never create a new plan if one is already active.
 - Maximum 1 plan creation per task.
 - If a plan exists: continue execution within the existing plan; adapt inside the plan instead of creating a new one.
+After creating a plan, do not call finish immediately. Execute the planned steps and verify the result first. A plan is not task completion.
 
 ACTION STRATEGY
 - Decide FIRST whether any tool is needed. Greetings, questions, small talk and stateless queries need NO tool.

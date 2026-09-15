@@ -128,6 +128,7 @@ class AgentSession:
         self.providers = build_provider_registry()
         self.messages: list[dict[str, Any]] = self.session_manager.build_session_context()["messages"]
         self._plan: str | None = None
+        self._plan_just_created = False
         self._restore_plan_from_messages(self.messages)
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._is_streaming = False
@@ -651,6 +652,11 @@ class AgentSession:
         effective_timeout: int | float | None = None
         if tool_name not in self._active_tools:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
+        if tool_name == "finish" and self._plan_just_created:
+            return {
+                "ok": False,
+                "error": "The plan was just created. Execute and verify a planned step before finishing.",
+            }
         tool = all_tools.get(tool_name)
         if not tool:
             if self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
@@ -706,6 +712,7 @@ class AgentSession:
             plan_text = args.get("plan", "")
             result = plan_tool(plan_text)
             self._plan = plan_text
+            self._plan_just_created = True
             self._emit({"type": "plan_update", "plan": self._plan})
             self.session_manager.append_message({"role": "user", "customType": "plan", "content": plan_text, "timestamp": int(time.time() * 1000)})
         else:
@@ -769,6 +776,10 @@ class AgentSession:
         return result
 
     async def _run_tool_call(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
+        # A real tool step after a newly created plan permits a later finish.
+        # Do not count the guarded finish itself as that step.
+        if tool_name not in {"plan", "finish"}:
+            self._plan_just_created = False
         if (
             self.approval_callback is not None
             and tool_name != "finish"

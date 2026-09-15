@@ -769,6 +769,60 @@ implementation.
   them through existing tools and existing approval/security policies.
 - Do not inject complete skill contents into the permanent system prompt.
 
+## Plan completion guard
+
+### Goal
+
+Prevent the agent from treating plan creation as task completion or claiming
+unverified work after creating a plan.
+
+### Prompt requirement
+
+Add the following text to the system prompt immediately after the planning rules:
+
+> After creating a plan, do not call finish immediately. Execute the planned
+> steps and verify the result first. A plan is not task completion.
+
+### Implementation task
+
+- [x] **Block finish immediately after plan creation**
+  - **Description:** Track whether the current task has just created a plan.
+    If the next tool call is `finish` and no other tool has executed since the
+    plan was created, reject that finish call with a model-facing error:
+    `The plan was just created. Execute and verify a planned step before finishing.`
+    Clear the guard after any non-`plan` tool call, including read-only
+    inspection. Do not affect tasks that have no plan or tasks that execute a
+    real step before finishing. Preserve plan clearing on a valid terminal
+    `finish` and the existing event contract.
+  - **Files:** `one/resources/resource_loader.py`, `one/core/agent_session.py`,
+    `tests/test_plan_tool.py`, `tests/test_system_prompt.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** The system prompt contains the exact planning
+    warning above; a fake-provider sequence `plan → finish` cannot terminate
+    the task; the model receives the rejection and can continue; `finish`
+    succeeds after a non-plan step; ordinary finish-without-plan behavior is
+    unchanged.
+  - **Verification:** Add deterministic fake-provider tests for
+    `plan → finish`, `plan → read → finish`, and `finish` without a plan; run
+    `.venv/bin/python -m pytest -q tests/test_plan_tool.py tests/test_system_prompt.py`.
+
+### Additional integrity requirement
+
+- [x] **Prevent unverified completion claims**
+  - **Description:** Strengthen the system prompt and, where practical, the
+    completion path so the agent does not claim that files were changed or
+    commands were verified unless the corresponding tool succeeded and the
+    resulting state was observed. Keep this as a reporting-integrity rule; do
+    not require a specific VCS implementation.
+  - **Files:** `one/resources/resource_loader.py`, relevant completion tests.
+  - **Dependencies:** Plan completion guard.
+  - **Acceptance Criteria:** Completion summaries distinguish planned actions
+    from completed and verified actions; no unverified file-change claim is
+    emitted in the regression scenario.
+  - **Verification:** Fake-provider test with `plan → finish` and an
+    unverified claim; assert the first finish is rejected and the final summary
+    only reflects observed tool results.
+
 ## Subagent timeout and post-timeout diagnostics
 
 ### Goal
