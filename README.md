@@ -57,6 +57,47 @@ Extensions and MCP servers are **not sandboxed** — they run with the same
 permissions as `one` itself. Cooperation mode is **not** a security boundary or
 sandbox; it is an approval gate only.
 
+## Your Agent Needs Eyes
+
+Give `one` web search and full-page content extraction with the
+[web-deepsearch MCP server](https://github.com/noxgle/mcp-web-deepsearch).
+It uses DuckDuckGo, requires no API key, and can run locally over stdio.
+
+### Fast setup
+
+After installing `one` and Docker, start `one` and enter this prompt:
+
+```text
+Install and configure web-deepsearch from https://github.com/noxgle/mcp-web-deepsearch use stdio.
+```
+
+The agent can then configure the server in your `one` settings and verify the
+connection. The stdio configuration uses the published Docker image:
+
+```json
+{
+  "mcpServers": {
+    "web-deepsearch": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "ghcr.io/noxgle/mcp-web-deepsearch:latest"
+      ]
+    }
+  }
+}
+```
+
+The configuration can be stored globally in
+`~/.config/one/settings.json` (or the directory selected by
+`ONE_CODING_AGENT_DIR`) or per project in `.one/settings.json`. Restart `one`,
+or use `/mcp list` to verify that the server is available. Use
+`one --no-mcp` whenever MCP servers should be disabled for a run.
+
+> **Trust and network notice:** MCP servers are not sandboxed and the
+> web-deepsearch container requires outbound internet access. Only configure
+> MCP servers from repositories you trust.
+
 ## Installation
 
 ### From source (recommended for development)
