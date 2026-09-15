@@ -65,33 +65,20 @@ It uses DuckDuckGo, requires no API key, and can run locally over stdio.
 
 ### Fast setup
 
-After installing `one` and Docker, start `one` and enter this prompt:
+After installing `one`, start it and enter this prompt:
 
 ```text
 Install and configure web-deepsearch from https://github.com/noxgle/mcp-web-deepsearch use stdio.
 ```
 
-The agent can then configure the server in your `one` settings and verify the
-connection. The stdio configuration uses the published Docker image:
+The agent installs and configures the server itself — picking the setup that
+fits your environment (for example Docker-based stdio on a host with Docker,
+or a local setup when `one` runs inside a container without Docker access) —
+and then verifies the connection.
 
-```json
-{
-  "mcpServers": {
-    "web-deepsearch": {
-      "command": "docker",
-      "args": [
-        "run", "--rm", "-i",
-        "ghcr.io/noxgle/mcp-web-deepsearch:latest"
-      ]
-    }
-  }
-}
-```
-
-The configuration can be stored globally in
-`~/.config/one/settings.json` (or the directory selected by
-`ONE_CODING_AGENT_DIR`) or per project in `.one/settings.json`. Restart `one`,
-or use `/mcp list` to verify that the server is available. Use
+After the agent reports success, check `/mcp list` and ask a test question
+that requires web search. Ask the agent to show what it configured (without
+secrets) if you want to review or reproduce the setup later. Use
 `one --no-mcp` whenever MCP servers should be disabled for a run.
 
 > **Trust and network notice:** MCP servers are not sandboxed and the
