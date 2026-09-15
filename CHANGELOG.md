@@ -53,6 +53,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   streamed retries and history trimming; single-insert paste; working waiting
   spinner; backspace/delete/arrows fire once.
 - **`/login` help** — all help outputs show the `[subscription]` argument.
+- **Skills system** — modular, discoverable instruction sets via `.SKILL.md` files
+  with YAML frontmatter (name, description, optional license/compatibility/metadata/allowed-tools/disable-model-invocation).
+  Skills are listed in the system prompt (metadata only) and loaded on demand via
+  `/skill:<name>` (TUI/interactive) or `invoke_skill` ctype (RPC). Supports progressive
+  disclosure, trust warnings, cooperation approval gates, and `/reload` for resource
+  refresh. Includes `docs/SKILLS.md` with full specification.
 
 ### Changed
 
@@ -61,6 +67,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 - **Provider timeout** — increased the default outer provider and HTTP
   transport timeout from 190/180 seconds to 300 seconds; the 120-second SSE
   idle watchdog remains active for stalled streams.
+- **README** — added "Resources and skills" section documenting skill discovery,
+  `/skill:name` invocation, `/reload`, project vs global skill directories,
+  and trust warning; links to `docs/SKILLS.md`.
 - Auth precedence wording corrected to **runtime → stored → env** in README and docs.
 - SECURITY.md scoped atomic-storage claims to text config/session persistence (blob store
   uses its own 0600/0700 handling).

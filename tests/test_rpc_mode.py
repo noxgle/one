@@ -27,6 +27,9 @@ class _FakeLoader:
     def get_skills(self) -> dict[str, Any]:
         return {"skills": [{"name": "analiza", "filePath": "/tmp/SKILL.md"}], "diagnostics": []}
 
+    def get_skill(self, name: str) -> dict[str, Any]:
+        return {"error": f"Unknown skill: {name}"}
+
     def get_prompts(self) -> dict[str, Any]:
         return {"prompts": [{"name": "review", "description": "d", "source": "/tmp/p.md"}], "diagnostics": []}
 
@@ -759,3 +762,166 @@ async def test_rpc_login_preserves_pre_existing_auth_and_models(tmp_path: Path, 
     assert session.model_registry._auth.get_api_key("anthropic") == "sk-anthropic-key"
     # Anthropic model still there
     assert session.model_registry.find("anthropic", "claude-3") is not None
+
+
+@pytest.mark.asyncio
+async def test_rpc_invoke_skill_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """RPC invoke_skill returns trustWarning and skill metadata."""
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+    from one.resources.resource_loader import DefaultResourceLoader
+
+    # Create a valid skill
+    skill_dir = tmp_path / "test-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: A test\nallowed-tools:\n  - read\n---\n\nSkill body.\n"
+    )
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+        additional_skill_paths=[str(tmp_path)],
+    )
+    await loader.reload()
+
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    session_manager = SessionManager.in_memory(str(tmp_path))
+    session = AgentSession(session_manager, settings, registry, loader, model, "medium")
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "invoke_skill", "id": "s1", "name": "test-skill"})],
+    )
+    r = _resp(responses, "invoke_skill", "s1")
+    assert r["success"] is True
+    data = r["data"]
+    assert data["name"] == "test-skill"
+    assert "trustWarning" in data
+    assert data["allowedTools"] == ["read"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_invoke_skill_unknown_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """RPC invoke_skill for unknown skill returns structured error."""
+    session = _mk_session(tmp_path)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "invoke_skill", "id": "s2", "name": "nonexistent"})],
+    )
+    r = _resp(responses, "invoke_skill", "s2")
+    assert r["success"] is False
+    assert "SkillError" in r["error"]
+    assert "nonexistent" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_invoke_skill_missing_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """RPC invoke_skill without name returns error."""
+    session = _mk_session(tmp_path)
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "invoke_skill", "id": "s3"})],
+    )
+    r = _resp(responses, "invoke_skill", "s3")
+    assert r["success"] is False
+    assert "name is required" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_get_commands_has_descriptions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """RPC get_commands returns commands with descriptions from prompts and skills."""
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+    from one.resources.resource_loader import DefaultResourceLoader
+
+    # Create a prompt file with content that can be used as description
+    prompt_file = tmp_path / "review.md"
+    prompt_file.write_text("# Code Review\n\nReview code for best practices.")
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+        additional_prompt_template_paths=[str(tmp_path)],
+    )
+    await loader.reload()
+
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    session_manager = SessionManager.in_memory(str(tmp_path))
+    session = AgentSession(session_manager, settings, registry, loader, model, "medium")
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "get_commands", "id": "c1"})],
+    )
+    r = _resp(responses, "get_commands", "c1")
+    assert r["success"] is True
+    commands = r["data"]["commands"]
+    # Should have a command for the prompt with a non-empty description
+    prompt_cmds = [c for c in commands if c.get("source") == "prompt"]
+    assert len(prompt_cmds) > 0
+    prompt_desc = prompt_cmds[0].get("description", "")
+    assert prompt_desc != ""  # Description should be populated from prompt content
+
+
+@pytest.mark.asyncio
+async def test_rpc_invoke_skill_during_streaming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """RPC invoke_skill while session is streaming returns BusySessionError."""
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+    from one.resources.resource_loader import DefaultResourceLoader
+
+    # Create a valid skill
+    skill_dir = tmp_path / "test-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: A test\n---\n\nSkill body.\n"
+    )
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+        additional_skill_paths=[str(tmp_path)],
+    )
+    await loader.reload()
+
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    session_manager = SessionManager.in_memory(str(tmp_path))
+    session = AgentSession(session_manager, settings, registry, loader, model, "medium")
+
+    # Simulate an active streaming session.
+    session._is_streaming = True
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "invoke_skill", "id": "s1", "name": "test-skill"})],
+    )
+    r = _resp(responses, "invoke_skill", "s1")
+    assert r["success"] is False
+    assert "BusySessionError" in r["error"]
+    # Ensure the body does NOT get silently queued — the caller must know.
+    assert "busy" in r["error"].lower() or "streaming" in r["error"].lower() or "idle" in r["error"].lower()

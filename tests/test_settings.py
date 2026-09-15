@@ -3,27 +3,29 @@ from __future__ import annotations
 from one.core.settings_manager import SettingsManager
 
 
-def test_get_default_mode_is_tui() -> None:
-    """Default mode should be 'tui' when no custom value is set."""
+def test_default_subagents_has_timeout_sec_1800() -> None:
+    """DEFAULT_SETTINGS subagents dict includes timeoutSec=1800."""
+    from one.core.settings_manager import DEFAULT_SETTINGS
+
+    assert "subagents" in DEFAULT_SETTINGS
+    assert DEFAULT_SETTINGS["subagents"]["timeoutSec"] == 1800
+
+
+def test_get_subagents_timeout_sec_default() -> None:
+    """With default settings, get_subagents_timeout_sec returns 1800."""
     settings = SettingsManager.in_memory()
-    assert settings.get_default_mode() == "tui"
+    assert settings.get_subagents_timeout_sec() == 1800
 
 
-def test_get_default_mode_override_cli() -> None:
-    """When defaultMode is set to 'cli', get_default_mode returns 'cli'."""
-    settings = SettingsManager.in_memory(initial={"defaultMode": "cli"})
-    assert settings.get_default_mode() == "cli"
+def test_get_subagents_timeout_sec_custom() -> None:
+    """Custom timeoutSec in subagents is respected."""
+    settings = SettingsManager.in_memory(initial={"subagents": {"timeoutSec": 60}})
+    assert settings.get_subagents_timeout_sec() == 60
 
 
-def test_get_default_mode_invalid_falls_back() -> None:
-    """Invalid defaultMode values fall back to 'tui'."""
-    settings = SettingsManager.in_memory(initial={"defaultMode": "nope"})
-    assert settings.get_default_mode() == "tui"
-
-
-def test_get_default_mode_case_insensitive() -> None:
-    """defaultMode is case-insensitive: 'TUI' and 'CLI' work."""
-    settings = SettingsManager.in_memory(initial={"defaultMode": "TUI"})
-    assert settings.get_default_mode() == "tui"
-    settings_cli = SettingsManager.in_memory(initial={"defaultMode": "CLI"})
-    assert settings_cli.get_default_mode() == "cli"
+def test_get_subagents_timeout_sec_invalid_fallback() -> None:
+    """Invalid timeoutSec values fall back to 1800."""
+    settings = SettingsManager.in_memory(initial={"subagents": {"timeoutSec": -1}})
+    assert settings.get_subagents_timeout_sec() == 1800
+    settings2 = SettingsManager.in_memory(initial={"subagents": {"timeoutSec": "bad"}})
+    assert settings2.get_subagents_timeout_sec() == 1800

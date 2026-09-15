@@ -35,7 +35,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "shellCommandPrefix": None,
     "tools": {"maxSteps": 6, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit", "plan", "apply_patch"]},
     "bash": {"showOutput": True},
-    "subagents": {"enabled": True, "maxConcurrent": 2, "maxDepth": 3},
+    "subagents": {"enabled": True, "maxConcurrent": 2, "maxDepth": 3, "timeoutSec": 1800},
     "askUser": {"timeoutSec": 0},
     "providers": {"timeoutSec": 300},
     "packages": [],

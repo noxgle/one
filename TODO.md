@@ -671,6 +671,104 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 - An npm/git extension package manager; extensions use the documented Python
   file/package contract.
 
+## Skill contract and behavior (pi-inspired, implementation only)
+
+### Goal
+
+Allow the agent to create, discover, load, and use reusable skills using the
+same contract and user-visible behavior as pi, without copying pi's internal
+implementation.
+
+### Contract
+
+- A skill is a directory containing a required `SKILL.md`; optional `scripts/`,
+  `references/`, and `assets/` directories are supported as ordinary skill
+  resources.
+- `SKILL.md` begins with YAML frontmatter containing required fields:
+  `name` and `description`.
+- `name` is 1–64 characters and contains only lowercase letters, digits, and
+  single hyphens; it cannot begin or end with a hyphen.
+- `description` is non-empty and at most 1024 characters; it explains both the
+  capability and when it should be used.
+- Optional frontmatter fields are `license`, `compatibility`, `metadata`,
+  `allowed-tools`, and `disable-model-invocation`; unknown fields are ignored.
+- Project skills live in `.one/skills/<skill-name>/`; global skills live in
+  `<agent_dir>/skills/<skill-name>/` and are created only after the user
+  explicitly requests global scope. The current `~/.agents/skills/` discovery
+  compatibility remains supported.
+
+### Required behavior
+
+- At startup, discover valid skills and expose only their names and
+  descriptions in the system prompt (progressive disclosure); do not inject
+  full skill bodies into every prompt.
+- When a task matches a skill, the agent loads the full `SKILL.md` with the
+  existing read path and may then load referenced resources on demand using
+  paths relative to the skill directory.
+- Register skills as explicit `/skill:<name>` commands. Arguments following
+  the command are appended to the skill invocation as user input.
+- Provide `/reload` to rediscover skills, extensions, prompts, themes, and
+  context files without restarting the session.
+- The agent may create or update a skill using existing `write`/`edit` tools,
+  but must use the contract above, choose project scope by default, and ask
+  before choosing global scope.
+- Skill writes remain subject to the existing cooperation approval gate for
+  mutating tools. Skill files are instructions, not a sandbox or a permission
+  boundary; display a trust warning for unreviewed skills and executable
+  resources.
+- Invalid skills produce non-fatal diagnostics and are omitted from the active
+  skill list. Duplicate names produce a diagnostic and keep the first skill by
+  deterministic discovery order.
+- `--skill` remains additive and can explicitly load a skill even when
+  automatic discovery is disabled by `--no-skills`.
+
+### Implementation tasks
+
+- [x] **Implement pi-compatible skill parsing and diagnostics**
+  - **Files:** `one/resources/resource_loader.py`, `tests/test_system_prompt.py`,
+    new skill-loader tests.
+  - **Acceptance:** Frontmatter is parsed and validated; names/descriptions are
+    exposed; malformed, missing-description, invalid-name, and duplicate skills
+    are diagnosed without crashing the session.
+  - **Verification:** Loader fixture matrix and `pytest` skill/system-prompt
+    tests.
+
+- [x] **Add progressive disclosure and skill command behavior**
+  - **Files:** `one/resources/resource_loader.py`, `one/core/agent_session.py`,
+    `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`,
+    `tests/test_system_prompt.py`, mode/RPC tests.
+  - **Acceptance:** Prompt contains only skill metadata; `/skill:<name>` loads
+    the requested body with arguments; unknown skills fail clearly; RPC exposes
+    the same command metadata.
+  - **Verification:** Fake-loader command tests and TUI/interactive/RPC command
+    dispatch tests.
+
+- [x] **Add explicit skill creation and reload workflow**
+  - **Files:** `one/resources/resource_loader.py`, `one/core/agent_session.py`,
+    `one/modes/interactive_mode.py`, `one/modes/tui_mode.py`, `README.md`,
+    `docs/SKILLS.md`, relevant tests.
+  - **Acceptance:** The agent can create a valid project skill through existing
+    approved file tools; global creation requires explicit user intent; a
+    successful write can be followed by `/reload` and immediate skill use.
+  - **Verification:** Cooperation approval tests, project/global path tests,
+    reload tests, and documentation assertions.
+
+- [x] **Document and test the public skill contract**
+  - **Files:** `README.md`, `docs/SKILLS.md`, `CHANGELOG.md`, TUI snapshots if
+    help text changes.
+  - **Acceptance:** Documentation contains the frontmatter example, discovery
+    scopes, progressive disclosure, `/skill:<name>`, `/reload`, trust warning,
+    and explicit global-scope rule.
+  - **Verification:** Documentation review, full `pytest`, and `ruff`.
+
+### Non-goals
+
+- Do not copy pi's internal TypeScript implementation.
+- Do not add a separate skill package manager in this phase.
+- Do not execute skill scripts automatically; the model must explicitly invoke
+  them through existing tools and existing approval/security policies.
+- Do not inject complete skill contents into the permanent system prompt.
+
 ## Subagent timeout and post-timeout diagnostics
 
 ### Goal

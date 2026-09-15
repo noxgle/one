@@ -2,10 +2,163 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import yaml
+
+# ---------------------------------------------------------------------------
+# Skill constants and validation helpers (pi-compatible contract).
+# ---------------------------------------------------------------------------
+
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+_SKILL_NAME_MIN = 1
+_SKILL_NAME_MAX = 64
+_SKILL_DESC_MAX = 1024
+
+
+def _validate_skill_name(name: str) -> str | None:
+    """Return *None* if the name is valid, or an error message."""
+    if not name:
+        return "name is empty"
+    if len(name) < _SKILL_NAME_MIN or len(name) > _SKILL_NAME_MAX:
+        return f"name length {len(name)} not in [{_SKILL_NAME_MIN}, {_SKILL_NAME_MAX}]"
+    if not _SKILL_NAME_RE.match(name):
+        return "name must contain only lowercase letters, digits, and single hyphens (no edge hyphens)"
+    if name.startswith("-") or name.endswith("-"):
+        return "name must not begin or end with a hyphen"
+    return None
+
+
+def _parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
+    """Parse YAML frontmatter from SKILL.md content.
+
+    Returns (frontmatter_dict, body_without_frontmatter).
+    If no frontmatter is found, returns ({}, full_content).
+    """
+    body = raw
+    fm: dict[str, Any] = {}
+    stripped = raw.strip()
+    if stripped.startswith("---"):
+        # Find closing --- on its own line (start of string or after newline).
+        sep = _find_closing_dash_dash_dash(stripped)
+        if sep is not None:
+            yaml_block = stripped[3:sep].strip()
+            try:
+                fm = yaml.safe_load(yaml_block) or {}
+            except yaml.YAMLError:
+                fm = {}
+            body = stripped[sep + 3:].lstrip("\n")
+    return fm, body
+
+
+def _find_closing_dash_dash_dash(text: str) -> int | None:
+    """Return the index of the closing ``---`` delimiter.
+
+    The closing ``---`` must appear at the start of a line (preceded by
+    ``\\n``) and must NOT be followed by an alphanumeric character — this
+    rejects ``---more`` as a valid delimiter while still matching ``---\\n``
+    and ``--- `` (trailing whitespace).
+
+    Returns *None* when no valid closing delimiter exists.
+    """
+    idx = 3
+    while True:
+        pos = text.find("---", idx)
+        if pos == -1:
+            return None
+        # Must start a new line.
+        if text[pos - 1] != "\n":
+            idx = pos + 3
+            continue
+        # Must NOT be followed by an alphanumeric character (rejects "---more").
+        end = pos + 3
+        if end < len(text) and text[end].isalnum():
+            idx = end
+            continue
+        return pos
+    return None  # unreachable, but satisfies mypy
+
+
+def _validate_skill_fm(
+    fm: dict[str, Any], base_dir: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Parse and validate a skill frontmatter dict.
+
+    Returns (validated_skill_dict, diagnostics_list).
+    If the skill is invalid, the dict will have ``valid=False`` and diagnostics
+    will explain the problem.
+    """
+    diagnostics: list[str] = []
+
+    name = fm.get("name")
+    if not isinstance(name, str):
+        diagnostics.append(f"{base_dir}: missing or invalid 'name'")
+        return {"name": "unknown", "valid": False, "baseDir": base_dir, "description": "", "diagnostics": diagnostics}, diagnostics
+
+    name = name.strip()
+    name_err = _validate_skill_name(name)
+    if name_err:
+        diagnostics.append(f"{base_dir}: invalid name '{name}' — {name_err}")
+        return {"name": name, "valid": False, "baseDir": base_dir, "description": "", "diagnostics": diagnostics}, diagnostics
+
+    description = fm.get("description")
+    if not isinstance(description, str):
+        diagnostics.append(f"{base_dir}: missing or non-string 'description'")
+        return {"name": name, "valid": False, "baseDir": base_dir, "description": "", "diagnostics": diagnostics}, diagnostics
+
+    description = description.strip()
+    if not description:
+        diagnostics.append(f"{base_dir}: description is empty")
+        return {"name": name, "valid": False, "baseDir": base_dir, "description": "", "diagnostics": diagnostics}, diagnostics
+    if len(description) > _SKILL_DESC_MAX:
+        diagnostics.append(
+            f"{base_dir}: description too long ({len(description)} > {_SKILL_DESC_MAX} chars)"
+        )
+        return {"name": name, "valid": False, "baseDir": base_dir, "description": "", "diagnostics": diagnostics}, diagnostics
+
+    # Build the validated skill dict — only known optional fields + metadata.
+    skill: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "valid": True,
+        "baseDir": base_dir,
+        "diagnostics": diagnostics,
+    }
+
+    # Optional fields — copy only if present and the right type.
+    for key in ("license", "compatibility", "allowed-tools", "disable-model-invocation"):
+        if key in fm:
+            skill[key] = fm[key]
+
+    # metadata → dict only
+    meta = fm.get("metadata")
+    if meta is not None:
+        if isinstance(meta, dict):
+            skill["metadata"] = meta
+        else:
+            skill["metadata"] = {"raw": str(meta)}
+
+    return skill, diagnostics
+
+
+def load_skill_body(file_path: str) -> dict[str, Any]:
+    """Load the full SKILL.md body given a file path.
+
+    Returns a dict with ``body`` (str, full content without frontmatter) and
+    ``fm`` (parsed frontmatter), or ``{"error": str}`` if the file cannot be
+    read.
+    """
+    p = Path(file_path)
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except Exception as exc:
+        return {"error": str(exc), "filePath": file_path, "valid": False}
+    fm, body = _parse_frontmatter(raw)
+    return {"body": body, "fm": fm, "filePath": file_path, "baseDir": str(p.parent), "valid": True}
 
 
 def _current_date() -> str:
@@ -197,7 +350,9 @@ class DefaultResourceLoader:
 
         if not self.no_extensions:
             self._extensions = self._discover_extensions()
-        if not self.no_skills:
+        # Explicit skill paths always load, even when no_skills=True
+        has_explicit_skills = bool(self.additional_skill_paths)
+        if not self.no_skills or has_explicit_skills:
             self._skills = self._discover_skills()
         if not self.no_prompt_templates:
             self._prompts = self._discover_prompts()
@@ -224,6 +379,13 @@ class DefaultResourceLoader:
         return [{"path": f} for f in files]
 
     def _discover_skills(self) -> list[dict[str, Any]]:
+        """Discover, parse, validate and deduplicate skills.
+
+        Deterministic order (agent_dir → ~/.agents → .one → explicit paths).
+        First valid skill wins on duplicate names; subsequent dups produce
+        diagnostics. Malformed / invalid-name / missing-description skills
+        produce non-fatal diagnostics and are omitted from the active list.
+        """
         roots = [
             Path(self.agent_dir) / "skills",
             Path.home() / ".agents" / "skills",
@@ -231,11 +393,119 @@ class DefaultResourceLoader:
             *[Path(p) for p in self.additional_skill_paths],
         ]
         files = self._collect_files(roots, "SKILL.md")
-        out = []
+
+        all_valid: list[dict[str, Any]] = []
+        all_diagnostics: list[str] = []
+        seen_names: dict[str, str] = {}  # frontmatter name -> baseDir of first occurrence
+
         for f in files:
             p = Path(f)
-            out.append({"name": p.parent.name, "filePath": f, "baseDir": str(p.parent), "source": "discovered"})
-        return out
+            base_dir = str(p.parent)
+            # Directory name is used as fallback, but frontmatter name takes precedence
+            dir_name = p.parent.name
+
+            # Read and parse frontmatter
+            try:
+                raw = p.read_text(encoding="utf-8")
+            except Exception:
+                all_diagnostics.append(f"{base_dir}: unreadable SKILL.md")
+                continue
+
+            fm, _body = _parse_frontmatter(raw)
+
+            skill, diagnostics = _validate_skill_fm(fm, base_dir)
+            all_diagnostics.extend(diagnostics)
+
+            if not skill.get("valid", False):
+                # Attach diagnostics to skill so they're returned by get_skills()
+                skill["diagnostics"] = diagnostics
+                skill["valid"] = False
+                all_valid.append(skill)
+                continue
+
+            # Use frontmatter name (with dir_name fallback) for deduplication
+            skill_name = skill.get("name", dir_name)
+
+            # Dedup: first valid wins
+            if skill_name in seen_names:
+                dup_diag = f"duplicate skill name '{skill_name}': first at {seen_names[skill_name]}, skipping {base_dir}"
+                all_diagnostics.append(dup_diag)
+                # Add duplicate to all_valid with diagnostics so get_skills() can report it
+                skill["diagnostics"] = [dup_diag]
+                skill["valid"] = False
+                all_valid.append(skill)
+                continue
+
+            seen_names[skill_name] = base_dir
+
+            # Attach resources metadata (scan for scripts/, references/, assets/)
+            resources: list[str] = []
+            for res_dir in ("scripts", "references", "assets"):
+                res_path = p.parent / res_dir
+                if res_path.is_dir():
+                    resources.append(res_dir)
+            if resources:
+                skill["resources"] = resources
+
+            skill["filePath"] = f
+            skill["source"] = "discovered"
+            all_valid.append(skill)
+
+        self._skills = all_valid
+        return all_valid
+
+    def get_skills(self) -> dict[str, Any]:
+        """Return only valid, active skills with name+description.
+
+        Full bodies are NOT included here — progressive disclosure: load on
+        demand via ``get_skill``.
+        """
+        skills_out = []
+        all_diagnostics: list[str] = []
+        for s in self._skills:
+            if s.get("valid", False):
+                skills_out.append({
+                    "name": s["name"],
+                    "description": s["description"],
+                    "baseDir": s["baseDir"],
+                    "filePath": s.get("filePath", ""),
+                })
+            all_diagnostics.extend(s.get("diagnostics", []))
+        # Deduplicate diagnostics
+        seen_diag: set[str] = set()
+        unique_diag: list[str] = []
+        for d in all_diagnostics:
+            if d not in seen_diag:
+                seen_diag.add(d)
+                unique_diag.append(d)
+        return {"skills": skills_out, "diagnostics": unique_diag}
+
+    def get_skill(self, name: str) -> dict[str, Any]:
+        """Load the full body for a skill by name.
+
+        Returns ``{"body": str, "fm": dict, "name": str, "baseDir": str, "filePath": str}``
+        for valid skills, ``{"error": str, "invalid": True, "diagnostics": [...]}`` when a skill
+        with that name exists but is invalid, or ``{"error": str}`` when no skill with that name
+        exists at all.
+        """
+        for s in self._skills:
+            if s.get("name") == name and s.get("valid", False):
+                fp = s.get("filePath", "")
+                if fp:
+                    loaded = load_skill_body(fp)
+                    loaded["name"] = name
+                    return loaded
+                return {"error": f"Skill '{name}' found but filePath missing"}
+        # Check if a skill with this name exists but is invalid (not found → truly unknown).
+        for s in self._skills:
+            if s.get("name") == name:
+                diagnostics = s.get("diagnostics", ["invalid frontmatter or missing fields"])
+                return {
+                    "error": f"Skill '{name}' found but is invalid",
+                    "invalid": True,
+                    "diagnostics": diagnostics,
+                }
+        return {"error": f"Unknown skill: {name}"}
 
     def _discover_prompts(self) -> list[dict[str, Any]]:
         roots = [
@@ -247,7 +517,16 @@ class DefaultResourceLoader:
         out = []
         for f in files:
             p = Path(f)
-            out.append({"name": p.stem, "description": "", "source": f, "content": p.read_text(encoding="utf-8")})
+            content = p.read_text(encoding="utf-8")
+            # Extract a short description: first non-empty line after the title,
+            # or the title itself, truncated to 120 chars.
+            description = ""
+            lines = [l.strip() for l in content.splitlines() if l.strip()]
+            if lines:
+                # Skip the first line if it looks like a title (starts with #).
+                first = lines[0].lstrip("# ").strip()
+                description = first if first else lines[0][:120]
+            out.append({"name": p.stem, "description": description, "source": f, "content": content})
         return out
 
     def _discover_themes(self) -> list[dict[str, Any]]:
@@ -276,9 +555,6 @@ class DefaultResourceLoader:
 
     def get_extensions(self) -> dict[str, Any]:
         return {"extensions": self._extensions, "errors": [], "runtime": {"pendingProviderRegistrations": []}}
-
-    def get_skills(self) -> dict[str, Any]:
-        return {"skills": self._skills, "diagnostics": []}
 
     def get_prompts(self) -> dict[str, Any]:
         return {"prompts": self._prompts, "diagnostics": []}
@@ -315,10 +591,18 @@ class DefaultResourceLoader:
                 skills = self.get_skills().get("skills", [])
                 if skills:
                     prompt += "\n# Skills\n\n"
+                    prompt += (
+                        "Available skills (metadata only — full skill loaded on demand via `/skill:<name>`):\n"
+                    )
                     for skill in skills:
-                        name = skill.get("name") or "unknown-skill"
-                        path = skill.get("filePath") or ""
-                        prompt += f"- {name}: {path}\n"
+                        name = skill.get("name") or "unknown"
+                        desc = skill.get("description", "")
+                        prompt += f"- **{name}**: {desc}\n"
+                    prompt += (
+                        "\nWhen a skill matches the task, load the full `SKILL.md` with the `read` tool "
+                        "using the skill's base directory. Resource paths are relative to the skill directory. "
+                        "Use `/skill:<name> [args]` to explicitly invoke a skill — arguments are appended as user input."
+                    )
 
         if self.append_system_prompt:
             prompt = f"{prompt}\n\n{self.append_system_prompt}"

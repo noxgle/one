@@ -61,7 +61,10 @@ async def test_system_prompt_honors_custom_and_append(tmp_path: Path):
 async def test_system_prompt_without_read_skips_skills(tmp_path: Path):
     skills_dir = tmp_path / "agent" / "skills" / "demo"
     skills_dir.mkdir(parents=True, exist_ok=True)
-    (skills_dir / "SKILL.md").write_text("## Demo skill", encoding="utf-8")
+    (skills_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A demo skill\n---\n\n## Demo skill\n",
+        encoding="utf-8",
+    )
 
     loader = _mk_loader(tmp_path, no_skills=False)
     await loader.reload()

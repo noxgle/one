@@ -272,8 +272,8 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                 await session.wait_for_idle()
                 output(success(cid, ctype))
             elif ctype == "reload_resources":
-                await session.reload()
-                output(success(cid, ctype))
+                info = await session.reload()
+                output(success(cid, ctype, info))
             elif ctype == "get_queue":
                 output(success(cid, ctype, session.get_pending_queues()))
             elif ctype == "get_tools":
@@ -285,7 +285,7 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                 for p in prompts:
                     commands.append({"name": p.get("name"), "description": p.get("description", ""), "source": "prompt", "sourceInfo": p.get("source")})
                 for s in skills:
-                    commands.append({"name": f"skill:{s.get('name')}", "description": "", "source": "skill", "sourceInfo": s.get("filePath")})
+                    commands.append({"name": f"skill:{s.get('name')}", "description": s.get("description", ""), "source": "skill", "sourceInfo": s.get("filePath")})
                 output(success(cid, ctype, {"commands": commands}))
             elif ctype == "get_extension_ui":
                 output(success(cid, ctype, session.get_extension_ui_state()))
@@ -416,6 +416,33 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                 output(success(cid, ctype, session.resource_loader.get_themes()))
             elif ctype == "get_agents_files":
                 output(success(cid, ctype, session.resource_loader.get_agents_files()))
+            elif ctype == "invoke_skill":
+                name = cmd.get("name", "")
+                args_text = cmd.get("arguments", "") if isinstance(cmd.get("arguments"), str) else ""
+                if not name:
+                    output(error(cid, ctype, "name is required"))
+                else:
+                    result = await session.invoke_skill(name, args_text)
+                    if result.get("ok"):
+                        resp: dict[str, Any] = {
+                            "name": result["name"],
+                            "bodyLength": result["bodyLength"],
+                            "baseDir": result["baseDir"],
+                            "trustWarning": (
+                                "Skill instructions are loaded as user input. "
+                                "Review the skill before granting cooperation approval for file operations."
+                            ),
+                        }
+                        # Forward skill metadata when available.
+                        if "allowedTools" in result:
+                            resp["allowedTools"] = result["allowedTools"]
+                        if "disableModelInvocation" in result:
+                            resp["disableModelInvocation"] = result["disableModelInvocation"]
+                        output(success(cid, ctype, resp))
+                    else:
+                        err_msg = result.get("error", "unknown error")
+                        err_type = result.get("errorType", "SkillError")
+                        output(error(cid, ctype, f"{err_type}: {err_msg}"))
             else:
                 output(error(cid, ctype or "unknown", f"Unknown command: {ctype}"))
         except EOFError:

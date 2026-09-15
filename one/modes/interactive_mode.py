@@ -528,7 +528,7 @@ class InteractiveMode:
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>\n"
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
-                    "/inspect-timeout\n"
+                    "/inspect-timeout | /reload | /skill:<name> [args] (list with /skill: alone)\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
                 )
                 continue
@@ -1235,6 +1235,53 @@ class InteractiveMode:
                 else:
                     for key in ("operation", "errorType", "externalState", "sessionId", "lastTool", "lastEvent", "elapsedSec", "error", "summary", "actionableHint"):
                         print(f"{key}: {diag.get(key, 'N/A')}")
+                continue
+            if line.strip() == "/reload":
+                info = await session.reload()
+                skills = info.get("skills", [])
+                diagnostics = info.get("diagnostics", [])
+                print("Resources reloaded.")
+                if skills:
+                    names = ", ".join(s.get("name", "") for s in skills)
+                    print(f"Skills: {names}")
+                if diagnostics:
+                    for d in diagnostics:
+                        print(f"  ⚠ {d}")
+                continue
+            # /skill:<name> [args] — explicit skill invocation.
+            if line.startswith("/skill:"):
+                rest = line[len("/skill:") :].strip()
+                if not rest:
+                    # No name → list available skills.
+                    skills_info = session.resource_loader.get_skills()
+                    skills = skills_info.get("skills", [])
+                    if not skills:
+                        print("No skills discovered. Place SKILL.md files in project/global skill directories.")
+                    else:
+                        print("Available skills:")
+                        for s in skills:
+                            desc = s.get("description", "")
+                            if len(desc) > 80:
+                                desc = desc[:77] + "..."
+                            print(f"  {s['name']}: {desc}")
+                    continue
+                # Parse name (up to first space) and arguments.
+                parts = rest.split(None, 1)
+                skill_name = parts[0]
+                skill_args = parts[1] if len(parts) > 1 else ""
+                result = await session.invoke_skill(skill_name, skill_args)
+                if result.get("ok"):
+                    body_length = result.get("bodyLength", 0)
+                    print(f"Skill '{skill_name}' loaded ({body_length} chars).")
+                    print("⚠ Trust warning: skill instructions are loaded as user input. "
+                          "Review the skill before granting cooperation approval for file operations.")
+                else:
+                    err_type = result.get("errorType", "SkillError")
+                    err_msg = result.get("error", "unknown")
+                    if err_type == "BusySessionError":
+                        print(f"BusySessionError: {err_msg}")
+                    else:
+                        print(f"Skill error: {err_msg}")
                 continue
             if line.strip() == "/cooperation":
                 enabled = session.approval_callback is not None

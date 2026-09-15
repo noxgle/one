@@ -370,8 +370,10 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/new",
     "/login",
     "/logout",
+    "/reload",
     "/retry",
     "/retry-cycle",
+    "/skill",
     "/config",
     "/extui",
     "/cooperation",
@@ -1525,6 +1527,51 @@ if TEXTUAL_AVAILABLE:
                     ]
                     self._write("\n".join(lines), "info")
                 return
+            if cmd == "/reload":
+                info = await session.reload()
+                skills = info.get("skills", [])
+                diagnostics = info.get("diagnostics", [])
+                self._write("Resources reloaded.", "info")
+                if skills:
+                    names = ", ".join(s.get("name", "") for s in skills)
+                    self._write(f"Skills: {names}", "info")
+                if diagnostics:
+                    for d in diagnostics:
+                        self._write(f"  ⚠ {d}", "warn")
+                self._refresh_sidebar()
+                return
+            # /skill:<name> [args] — explicit skill invocation.
+            if cmd.startswith("/skill:"):
+                rest = cmd[len("/skill:") :].strip()
+                if not rest:
+                    # No name → list available skills.
+                    skills_info = session.resource_loader.get_skills()
+                    skills = skills_info.get("skills", [])
+                    if not skills:
+                        self._write("No skills discovered. Place SKILL.md files in project/global skill directories.", "info")
+                    else:
+                        self._write("Available skills:", "info")
+                        for s in skills:
+                            self._write(f"  {s['name']}: {s['description'][:80]}", "info")
+                    return
+                # Parse name (up to first space) and arguments.
+                parts = rest.split(None, 1)
+                skill_name = parts[0]
+                skill_args = parts[1] if len(parts) > 1 else ""
+                result = await session.invoke_skill(skill_name, skill_args)
+                if result.get("ok"):
+                    self._write(f"Skill '{skill_name}' loaded ({result.get('bodyLength', 0)} chars).", "info")
+                    # Trust warning for unreviewed skills.
+                    self._write("⚠ Trust warning: skill instructions are loaded as user input. "
+                                "Review the skill before granting cooperation approval for file operations.", "warn")
+                else:
+                    err_type = result.get("errorType", "SkillError")
+                    err_msg = result.get("error", "unknown")
+                    if err_type == "BusySessionError":
+                        self._write(f"BusySessionError: {err_msg}", "error")
+                    else:
+                        self._write(f"Skill error: {err_msg}", "error")
+                return
             if cmd == "/model":
                 current = f"{session.model.provider}/{session.model.id}" if session.model else "none"
                 providers = session.model_registry.providers()
@@ -2661,7 +2708,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /retry /retry-cycle /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list|name [args]] /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
                 "info",
             )
 

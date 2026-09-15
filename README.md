@@ -457,6 +457,55 @@ See [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) for the full extension contract:
 
 Project extensions in `.one/extensions/` are not sandboxed — see the trust warning.
 
+## Resources and skills
+
+`one` discovers **skills** (modular instruction sets) alongside extensions, prompts, and
+themes. Skills follow a YAML frontmatter + Markdown format (`.SKILL.md` files) and are
+loaded on demand — not injected into the system prompt. Full specification is in
+[`docs/SKILLS.md`](docs/SKILLS.md).
+
+### Discovery
+
+Skills are discovered from:
+
+1. `~/.config/one/skills/` — global agent skills
+2. `~/.agents/skills/` — platform-wide skills
+3. `.one/skills/` — per-project skills
+4. Explicit paths via `--skill <path>` CLI flag
+
+The system prompt lists all discovered skills (metadata only). The full skill body is
+loaded on demand.
+
+### Invocation
+
+| Command | Description |
+| --- | --- |
+| `/skill` | List all discovered skills |
+| `/skill:<name> [args]` | Load the full skill and append `[args]` as user input |
+| `/reload` | Reload all resources (skills, extensions, prompts) |
+
+### Project vs global skills
+
+- **Global skills** live in the agent directory (`~/.config/one/skills/`) and apply to
+  every project.
+- **Project skills** live in `.one/skills/` (per-project, gitignored) and only apply
+  when working inside that repository.
+- Duplicate names: the first valid skill wins; subsequent duplicates produce diagnostics.
+
+### Trust warning
+
+Skills are loaded as **user input** — not as system instructions. This means:
+
+1. The agent can review skill content before executing actions.
+2. Cooperation mode approval gates apply to mutating tools invoked by skill instructions.
+3. A trust warning is displayed before the first invocation of any skill.
+
+Skills are **never auto-executed**. They are listed in the system prompt (metadata only)
+and loaded explicitly via `/skill:<name>` or RPC `invoke_skill`.
+
+See [`docs/SKILLS.md`](docs/SKILLS.md) for the full specification including frontmatter
+schema, error handling, and examples.
+
 ## Global install (run `one` from any directory)
 
 The installer is Unix-specific (Linux, macOS) and requires a source checkout

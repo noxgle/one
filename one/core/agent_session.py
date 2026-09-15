@@ -36,6 +36,14 @@ FALLBACK_CONTEXT_WINDOW = 128_000
 
 
 # ---------------------------------------------------------------------------
+# Session exceptions
+# ---------------------------------------------------------------------------
+
+class BusySessionError(Exception):
+    """Raised when an action is attempted during an active streaming session."""
+
+
+# ---------------------------------------------------------------------------
 # read_image path sanitisation helpers (module-level — used before class defs).
 # ---------------------------------------------------------------------------
 
@@ -2770,8 +2778,114 @@ class AgentSession:
         for err in errors:
             self._emit({"type": "extension_load_error", **err})
 
-    async def reload(self) -> None:
+    async def reload(self) -> dict[str, Any]:
+        """Reload resources and rebind extensions safely.
+
+        Returns a diagnostics dict with ``skills``, ``prompts``, ``themes``,
+        ``extensions``, and ``diagnostics`` metadata so callers can display
+        progress.
+        """
         await self.resource_loader.reload()
+        # Dispose the old extension runtime (calls dispose hooks), then
+        # create a fresh one so old hooks cannot leak after reload.
+        if self._extension_runtime is not None:
+            try:
+                await self._extension_runtime.call_dispose(self._emit_extension_error)
+            except Exception:
+                pass
+            self._extension_runtime = None
+        await self.bind_extensions()
+
+        skills_info = self.resource_loader.get_skills()
+        extensions_info = self.resource_loader.get_extensions()
+        prompts_info = self.resource_loader.get_prompts()
+        themes_info = self.resource_loader.get_themes()
+
+        return {
+            "skills": skills_info.get("skills", []),
+            "diagnostics": skills_info.get("diagnostics", []),
+            "extensions": {
+                "count": len(extensions_info.get("extensions", [])),
+                "errors": extensions_info.get("errors", []),
+            },
+            "prompts": {
+                "count": len(prompts_info.get("prompts", [])),
+                "diagnostics": prompts_info.get("diagnostics", []),
+            },
+            "themes": {
+                "count": len(themes_info.get("themes", [])),
+                "diagnostics": themes_info.get("diagnostics", []),
+            },
+        }
+
+    async def invoke_skill(self, name: str, args_text: str = "") -> dict[str, Any]:
+        """Load a skill body and trigger a prompt with the skill instructions.
+
+        Loads the full SKILL.md via the resource loader, assembles the
+        invocation text (skill body + optional *args_text*), and delegates
+        to ``prompt()`` so the content is sent to the provider.  Returns a
+        result dict with ``ok``, ``name``, ``bodyLength``, ``baseDir``, and
+        optionally ``trustWarning``, ``allowedTools``, and
+        ``disableModelInvocation``.
+
+        When the session is currently streaming (a provider call is in flight),
+        this method fails fast with ``ok=False`` / ``errorType=BusySessionError``
+        rather than silently queuing the body — explicit skill invocation should
+        not disappear into a queue without the caller knowing.
+        """
+        # Fail-fast: explicit skill invocation is not deferred during streaming.
+        if self._is_streaming:
+            return {
+                "ok": False,
+                "errorType": "BusySessionError",
+                "error": (
+                    "Session is busy — the model is still processing a previous "
+                    "call. Use ``/follow`` to queue a message, or wait until the "
+                    "agent becomes idle and retry."
+                ),
+            }
+
+        skill = self.resource_loader.get_skill(name)
+        if "error" in skill:
+            return {
+                "ok": False,
+                "error": skill["error"],
+                "errorType": "SkillError",
+                "invalid": skill.get("invalid", False),
+                "diagnostics": skill.get("diagnostics", []),
+            }
+
+        body = skill.get("body", "")
+        skill_name = skill.get("name", name)
+        base_dir = skill.get("baseDir", "")
+
+        # Build the user message: skill body + any additional arguments.
+        invocation = f"## Invoked skill: {skill_name}\n\n{body}"
+        if args_text.strip():
+            invocation += f"\n\n## User arguments\n\n{args_text.strip()}"
+
+        # Delegate to prompt() — this handles message creation, event
+        # emission, and the full provider call (turn loop).
+        await self.prompt(invocation)
+
+        result: dict[str, Any] = {
+            "ok": True,
+            "name": skill_name,
+            "bodyLength": len(body),
+            "baseDir": base_dir,
+            "trustWarning": (
+                "Skill instructions are loaded as user input. "
+                "Review the skill before granting cooperation approval for file operations."
+            ),
+        }
+        # Include skill metadata when available.
+        fm = skill.get("fm", {})
+        if fm:
+            if "allowed-tools" in fm:
+                result["allowedTools"] = fm["allowed-tools"]
+            if "disable-model-invocation" in fm:
+                result["disableModelInvocation"] = fm["disable-model-invocation"]
+        return result
 
     async def dispose(self) -> None:
         if self._extension_runtime is not None:
