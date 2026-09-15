@@ -10,6 +10,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Skill invocation syntax** — the system prompt now explicitly states that
+  `/skill:<name>` is a TUI/interactive UI command, never a `read` tool path.
+  When the model passes `/skill:<name>` or `skill:<name>` to `read`, the agent
+  returns a structured diagnostic with the matching skill's `filePath` instead
+  of attempting filesystem access. Skills in the prompt now include their
+  `filePath` in metadata for unambiguous autonomous loading.
 - **Plan completion guard** — a `finish` immediately after creating a plan is
   rejected until the agent executes another tool step.
 - **Reporting integrity** — the system prompt now prohibits claims of changes

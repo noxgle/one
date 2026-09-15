@@ -823,6 +823,44 @@ Add the following text to the system prompt immediately after the planning rules
     unverified claim; assert the first finish is rejected and the final summary
     only reflects observed tool results.
 
+## Skill invocation syntax clarification
+
+### Goal
+
+Prevent the model from confusing the user-facing `/skill:<name>` command with
+a filesystem path passed to the `read` tool.
+
+### Required behavior
+
+- The system prompt must state that `/skill:<name>` is a UI command handled by
+  TUI/interactive mode, not a tool call and never a `read` path.
+- When the model invokes a skill autonomously, it must call `read` with the
+  exact `SKILL.md` `filePath` listed in the `# Skills` metadata.
+- If `read` receives exactly `/skill:<name>` or `skill:<name>`, the agent must
+  return a clear model-facing diagnostic with the matching skill and its real
+  `SKILL.md` path when available, rather than attempting filesystem access.
+- The fallback must not mutate session state, invoke the skill automatically,
+  or reinterpret ordinary filesystem paths.
+
+### Implementation task
+
+- [ ] **Disambiguate and recover skill invocation syntax**
+  - **Description:** Clarify the system prompt and add a safe read-dispatch
+    fallback for `/skill:<name>`/`skill:<name>`. Preserve explicit UI
+    `/skill:<name>` invocation and the existing progressive-disclosure flow.
+  - **Files:** `one/resources/resource_loader.py`, `one/core/agent_session.py`
+    or `one/tools/read.py`, `tests/test_skills.py`,
+    `tests/test_system_prompt.py`, `docs/SKILLS.md`, `README.md`.
+  - **Dependencies:** Existing skill loader and `/skill:<name>` command flow.
+  - **Acceptance Criteria:** A model-generated
+    `read({"path":"/skill:analiza-rynkow"})` does not produce a misleading
+    file-not-found result; it explains the syntax error and points to the
+    discovered skill path. A real path is unchanged, and explicit UI skill
+    invocation still executes exactly once.
+  - **Verification:** Fake-loader regression tests for valid, unknown, and
+    path-like skill names; exact system-prompt assertion; targeted skill,
+    system-prompt, TUI, interactive, and RPC tests.
+
 ## Subagent timeout and post-timeout diagnostics
 
 ### Goal

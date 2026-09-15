@@ -931,3 +931,283 @@ async def test_invoke_skill_after_streaming_clears_works_normally(tmp_path):
     result = await session.invoke_skill("test-skill")
     assert result["ok"] is True
     assert result["name"] == "test-skill"
+
+
+# ---------------------------------------------------------------------------
+# Skill invocation syntax — read dispatch fallback
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_read_skill_invocation_known_valid(tmp_path):
+    """read('/skill:my-skill') returns a hint with the skill's filePath."""
+    from one.core.agent_session import AgentSession
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.types import ModelInfo
+
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: A useful skill\n---\n\nBody.\n"
+    )
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 1, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+        additional_skill_paths=[str(tmp_path)],
+    )
+    await loader.reload()
+
+    registry = ModelRegistry(auth_storage=MagicMock())
+    mock_provider = MagicMock()
+    mock_provider.list_models = MagicMock(return_value=[])
+    model = ModelInfo(provider="openai", id="gpt-4")
+
+    session = AgentSession(
+        session_manager=SessionManager.in_memory(),
+        settings_manager=settings,
+        model_registry=registry,
+        resource_loader=loader,
+        model=model,
+        thinking_level="medium",
+    )
+    session.providers = {"openai": mock_provider}
+
+    result = await session._run_tool_call("read", {"path": "/skill:my-skill"})
+    assert result["ok"] is False
+    assert result.get("errorType") == "SkillInvocationHint"
+    raw = result.get("rawResult", {})
+    assert raw.get("skillName") == "my-skill"
+    # rawResult carries the full diagnostic
+    assert "filePath" in raw
+    assert "SKILL.md" in raw["filePath"]
+    # Should contain the real filePath in the error message
+    assert "SKILL.md" in result.get("error", "")
+    # Should NOT have caused filesystem read
+    assert "File not found" not in result.get("error", "")
+    assert raw.get("filePath") == str(skill_dir / "SKILL.md")
+
+
+@pytest.mark.asyncio
+async def test_read_skill_invocation_unknown_skill(tmp_path):
+    """read('/skill:nonexistent') returns a diagnostic saying no skill found."""
+    from one.core.agent_session import AgentSession
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.types import ModelInfo
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 1, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+    )
+    await loader.reload()
+
+    registry = ModelRegistry(auth_storage=MagicMock())
+    mock_provider = MagicMock()
+    mock_provider.list_models = MagicMock(return_value=[])
+    model = ModelInfo(provider="openai", id="gpt-4")
+
+    session = AgentSession(
+        session_manager=SessionManager.in_memory(),
+        settings_manager=settings,
+        model_registry=registry,
+        resource_loader=loader,
+        model=model,
+        thinking_level="medium",
+    )
+    session.providers = {"openai": mock_provider}
+
+    result = await session._run_tool_call("read", {"path": "/skill:nonexistent"})
+    assert result["ok"] is False
+    assert result.get("errorType") == "SkillInvocationHint"
+    raw = result.get("rawResult", {})
+    assert raw.get("skillName") == "nonexistent"
+    assert "not a file path" in result.get("error", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_read_skill_invocation_unknown_but_path_like(tmp_path):
+    """read('/skill:something') when skill exists but name doesn't match should still give hint."""
+    from one.core.agent_session import AgentSession
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.types import ModelInfo
+
+    # Create a skill with a DIFFERENT name
+    skill_dir = tmp_path / "other-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: other-skill\ndescription: Something else\n---\n\nBody.\n"
+    )
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 1, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+        additional_skill_paths=[str(tmp_path)],
+    )
+    await loader.reload()
+
+    registry = ModelRegistry(auth_storage=MagicMock())
+    mock_provider = MagicMock()
+    mock_provider.list_models = MagicMock(return_value=[])
+    model = ModelInfo(provider="openai", id="gpt-4")
+
+    session = AgentSession(
+        session_manager=SessionManager.in_memory(),
+        settings_manager=settings,
+        model_registry=registry,
+        resource_loader=loader,
+        model=model,
+        thinking_level="medium",
+    )
+    session.providers = {"openai": mock_provider}
+
+    # Requesting a skill name that doesn't exist (even though another skill does)
+    result = await session._run_tool_call("read", {"path": "/skill:my-skill"})
+    assert result["ok"] is False
+    assert result.get("errorType") == "SkillInvocationHint"
+    raw = result.get("rawResult", {})
+    assert raw.get("skillName") == "my-skill"
+
+
+@pytest.mark.asyncio
+async def test_read_skill_invocation_skill_without_slash(tmp_path):
+    """read('skill:my-skill') (no leading slash) also triggers the fallback."""
+    from one.core.agent_session import AgentSession
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.types import ModelInfo
+
+    skill_dir = tmp_path / "dash-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: dash-skill\ndescription: A dashed skill\n---\n\nBody.\n"
+    )
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 1, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+        additional_skill_paths=[str(tmp_path)],
+    )
+    await loader.reload()
+
+    registry = ModelRegistry(auth_storage=MagicMock())
+    mock_provider = MagicMock()
+    mock_provider.list_models = MagicMock(return_value=[])
+    model = ModelInfo(provider="openai", id="gpt-4")
+
+    session = AgentSession(
+        session_manager=SessionManager.in_memory(),
+        settings_manager=settings,
+        model_registry=registry,
+        resource_loader=loader,
+        model=model,
+        thinking_level="medium",
+    )
+    session.providers = {"openai": mock_provider}
+
+    result = await session._run_tool_call("read", {"path": "skill:my-skill"})
+    assert result["ok"] is False
+    assert result.get("errorType") == "SkillInvocationHint"
+    raw = result.get("rawResult", {})
+    assert raw.get("skillName") == "my-skill"
+
+
+@pytest.mark.asyncio
+async def test_read_real_path_unchanged(tmp_path):
+    """read('/some/real/file.txt') is NOT intercepted — normal filesystem path."""
+    from one.core.agent_session import AgentSession
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.types import ModelInfo
+
+    # Create a real file
+    (tmp_path / "real.txt").write_text("Hello world\n")
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 1, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+    )
+    await loader.reload()
+
+    registry = ModelRegistry(auth_storage=MagicMock())
+    mock_provider = MagicMock()
+    mock_provider.list_models = MagicMock(return_value=[])
+    model = ModelInfo(provider="openai", id="gpt-4")
+
+    session = AgentSession(
+        session_manager=SessionManager(
+            cwd=str(tmp_path),
+            session_dir=str(tmp_path / "sessions"),
+            session_file=None,
+            persist=False,
+        ),
+        settings_manager=settings,
+        model_registry=registry,
+        resource_loader=loader,
+        model=model,
+        thinking_level="medium",
+    )
+    session.providers = {"openai": mock_provider}
+
+    result = await session._run_tool_call("read", {"path": str(tmp_path / "real.txt")})
+    # Should succeed normally — not intercepted
+    assert result["ok"] is True
+    assert "Hello world" in result.get("result", "")
+    assert result.get("errorType") is None
+
+
+@pytest.mark.asyncio
+async def test_read_skill_invocation_invalid_skill(tmp_path):
+    """read('/skill:bad-skill') where skill exists but is invalid returns diagnostics."""
+    from one.core.agent_session import AgentSession
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.types import ModelInfo
+
+    # Create an invalid skill (missing description)
+    skill_dir = tmp_path / "bad-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: bad-skill\n---\n\nBody.\n")
+
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 1, "timeoutSec": 5}})
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path),
+        agent_dir=str(tmp_path),
+        settings_manager=settings,
+        additional_skill_paths=[str(tmp_path)],
+    )
+    await loader.reload()
+
+    registry = ModelRegistry(auth_storage=MagicMock())
+    mock_provider = MagicMock()
+    mock_provider.list_models = MagicMock(return_value=[])
+    model = ModelInfo(provider="openai", id="gpt-4")
+
+    session = AgentSession(
+        session_manager=SessionManager.in_memory(),
+        settings_manager=settings,
+        model_registry=registry,
+        resource_loader=loader,
+        model=model,
+        thinking_level="medium",
+    )
+    session.providers = {"openai": mock_provider}
+
+    result = await session._run_tool_call("read", {"path": "/skill:bad-skill"})
+    assert result["ok"] is False
+    assert result.get("errorType") == "SkillInvocationHint"
+    raw = result.get("rawResult", {})
+    assert raw.get("skillName") == "bad-skill"
+    assert "invalid" in result.get("error", "").lower()
+    assert len(raw.get("diagnostics", [])) > 0

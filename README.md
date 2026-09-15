@@ -512,6 +512,8 @@ loaded on demand.
 | `/skill:<name> [args]` | Load the full skill and append `[args]` as user input |
 | `/reload` | Reload all resources (skills, extensions, prompts) |
 
+> **Note:** `/skill:<name>` is a TUI/interactive **UI command** typed by the user. It is NOT a filesystem path. When the model uses a skill autonomously, it calls `read` with the skill's exact `filePath` (shown in the system prompt metadata under `# Skills`). See [`docs/SKILLS.md`](docs/SKILLS.md) for full details.
+
 ### Project vs global skills
 
 - **Global skills** live in the agent directory (`~/.config/one/skills/`) and apply to

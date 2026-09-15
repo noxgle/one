@@ -95,3 +95,53 @@ async def test_system_prompt_includes_read_image_schema(tmp_path: Path):
     assert "{path}" in prompt
     # read_image schema should appear in the tools list.
     assert "read_image {path}" in prompt
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_skill_disambiguation_includes_syntax_warning(tmp_path: Path):
+    """The system prompt must contain the /skill:<name> disambiguation text."""
+    skill_dir = tmp_path / "agent" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: A demo\n---\n\n## Demo\n",
+        encoding="utf-8",
+    )
+
+    loader = _mk_loader(tmp_path, no_skills=False)
+    await loader.reload()
+
+    prompt = loader.get_system_prompt(["read", "bash"])
+
+    # Must mention the UI command syntax
+    assert "/skill:<name>" in prompt
+    # Must say it's a TUI/interactive UI command, not a file path
+    assert "UI command" in prompt
+    assert "TUI/interactive" in prompt
+    # Must explicitly forbid passing it to read
+    assert "MUST NEVER" in prompt or "must never" in prompt or "never" in prompt
+    # Must mention filePath from metadata
+    assert "filePath" in prompt
+    # Must mention progressive disclosure
+    assert "progressive" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_skill_disambiguation_lists_filepaths(tmp_path: Path):
+    """Each skill in the system prompt must include its filePath."""
+    skill_dir = tmp_path / "agent" / "skills" / "path-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: path-skill\ndescription: Has a path\n---\n\nBody\n",
+        encoding="utf-8",
+    )
+
+    loader = _mk_loader(tmp_path, no_skills=False)
+    await loader.reload()
+
+    prompt = loader.get_system_prompt(["read"])
+    skills_section = prompt
+    assert "path-skill" in skills_section
+    # The filePath should appear for each listed skill
+    assert "SKILL.md" in skills_section
+    # Verify filePath key appears near skill name
+    assert "(filePath:" in skills_section

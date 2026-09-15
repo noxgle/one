@@ -599,11 +599,21 @@ class DefaultResourceLoader:
                     for skill in skills:
                         name = skill.get("name") or "unknown"
                         desc = skill.get("description", "")
-                        prompt += f"- **{name}**: {desc}\n"
+                        prompt += f"- **{name}**: {desc} (filePath: {skill.get('filePath', '')})\n"
                     prompt += (
-                        "\nWhen a skill matches the task, load the full `SKILL.md` with the `read` tool "
-                        "using the skill's base directory. Resource paths are relative to the skill directory. "
-                        "Use `/skill:<name> [args]` to explicitly invoke a skill — arguments are appended as user input."
+                        "\n"
+                        "**Skill invocation syntax — read carefully:**\n"
+                        "- `/skill:<name> [args]` is a **TUI/interactive UI command** typed by the user. "
+                        "It is NOT a tool call and is NOT a filesystem path for the `read` tool.\n"
+                        "- The autonomous model MUST NEVER pass `/skill:<name>` or `skill:<name>` as the `path` "
+                        "argument to the `read` tool.\n"
+                        "- When the model decides to use a skill, it must call `read` with the **exact `filePath`** "
+                        "shown in the skill metadata above (e.g. `/home/user/.config/one/skills/example-skill/SKILL.md`).\n"
+                        "- Resource paths inside a skill are relative to that skill's base directory.\n"
+                        "- If the model accidentally passes `/skill:<name>` or `skill:<name>` as a `read` path, "
+                        "the agent will return a diagnostic explaining the syntax and providing the correct filePath.\n"
+                        "- This rule preserves the existing progressive-disclosure flow: skills are listed in metadata "
+                        "only, and full bodies are loaded on demand via the explicit `filePath`.\n"
                     )
 
         if self.append_system_prompt:

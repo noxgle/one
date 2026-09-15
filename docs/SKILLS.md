@@ -69,10 +69,21 @@ The system prompt includes a **metadata section** listing all discovered skills:
 
 Available skills (metadata only — full skill loaded on demand via `/skill:<name>`):
 
-- **example-skill**: Performs X, Y, Z for the user's project
+- **example-skill**: Performs X, Y, Z for the user's project (filePath: /home/user/.config/one/skills/example-skill/SKILL.md)
 
-When a skill matches the task, load the full `SKILL.md` with the `read` tool using the skill's base directory. Resource paths are relative to the skill directory. Use `/skill:<name> [args]` to explicitly invoke a skill — arguments are appended as user input.
+When a skill matches the task, load the full `SKILL.md` with the `read` tool using the skill's exact `filePath`. Resource paths are relative to the skill directory. Use `/skill:<name> [args]` to explicitly invoke a skill — arguments are appended as user input.
 ```
+
+### Skill invocation syntax — important distinction
+
+**`/skill:<name>` is a TUI/interactive UI command, NOT a filesystem path.**
+
+- The user types `/skill:<name>` in the TUI or interactive prompt. The agent's UI layer intercepts it and loads the full skill body before sending it to the provider.
+- The autonomous model MUST **NEVER** pass `/skill:<name>` or `skill:<name>` as the `path` argument to the `read` tool.
+- When the model decides to use a skill autonomously, it must call `read` with the **exact `filePath`** shown in the skill metadata (e.g. `/home/user/.config/one/skills/example-skill/SKILL.md`).
+- If the model accidentally passes `/skill:<name>` to `read`, the agent returns a structured diagnostic explaining the syntax and pointing to the correct `filePath`.
+
+This distinction prevents the model from confusing the user-facing UI command with a tool argument and ensures the progressive-disclosure flow works correctly.
 
 ## Invocation
 

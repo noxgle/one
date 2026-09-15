@@ -666,6 +666,65 @@ class AgentSession:
         cwd = self.session_manager.cwd
         fn = tool.fn
         path_arg = args.get("path") or args.get("file")
+        # Safe fallback: when the model passes a `/skill:<name>` or
+        # `skill:<name>` path to `read`, return a structured diagnostic
+        # instead of attempting filesystem access.  This prevents the model
+        # from confusing the TUI/interactive `/skill:<name>` command with a
+        # `read` tool path (see system-prompt disambiguation).
+        _SKILL_INVOCATION_RE = re.compile(r"^/?skill:([a-z0-9]+(-[a-z0-9]+)*)$")
+        if tool_name == "read" and isinstance(path_arg, str):
+            _m = _SKILL_INVOCATION_RE.match(path_arg)
+            if _m:
+                _skill_name = _m.group(1)
+                get_skill = getattr(self.resource_loader, "get_skill", None)
+                if callable(get_skill):
+                    _sr: dict[str, Any] = get_skill(_skill_name)  # type: ignore[assignment]
+                    if "invalid" in _sr and _sr.get("invalid") is True:
+                        return {
+                            "ok": False,
+                            "error": (
+                                f"'{path_arg}' looks like a skill invocation command (/skill:{_skill_name}), not a file path. "
+                                f"Skill '{_skill_name}' was found but is invalid: "
+                                + "; ".join(_sr.get("diagnostics", []))
+                            ),
+                            "errorType": "SkillInvocationHint",
+                            "skillName": _skill_name,
+                            "diagnostics": _sr.get("diagnostics", []),
+                        }
+                    if "filePath" in _sr and _sr.get("valid", False):
+                        return {
+                            "ok": False,
+                            "error": (
+                                f"'{path_arg}' looks like a skill-invocation command (/skill:{_skill_name}), not a file path. "
+                                f"To load this skill, use the 'read' tool with the skill's filePath: "
+                                f"{_sr['filePath']}\n\n"
+                                f"Skill: {_sr.get('name', _skill_name)}\n"
+                                f"Description: {_sr.get('fm', {}).get('description', 'N/A')}"
+                            ),
+                            "errorType": "SkillInvocationHint",
+                            "skillName": _skill_name,
+                            "filePath": _sr["filePath"],
+                        }
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"'{path_arg}' looks like a skill invocation command (/skill:{_skill_name}), not a file path. "
+                            f"No skill named '{_skill_name}' was found."
+                        ),
+                        "errorType": "SkillInvocationHint",
+                        "skillName": _skill_name,
+                    }
+                # No resource_loader available — return a plain hint
+                return {
+                    "ok": False,
+                    "error": (
+                        f"'{path_arg}' looks like a skill invocation command (/skill:{_skill_name}), not a file path. "
+                        f"Use the 'read' tool with the skill's SKILL.md filePath."
+                    ),
+                    "errorType": "SkillInvocationHint",
+                    "skillName": _skill_name,
+                }
+
         if tool_name == "read":
             result = fn(cwd, path_arg or "", args.get("offset"), args.get("limit"))
         elif tool_name == "read_image":
