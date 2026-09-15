@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Steering checkpoints** — steering received while a tool is running is now
+  delivered FIFO to the next provider request after its result, without waiting
+  for the entire turn; terminal finish, abort, timeout, and error paths retain
+  queued input for an explicit follow-up.
 - **Skill invocation syntax** — the system prompt now explicitly states that
   `/skill:<name>` is a TUI/interactive UI command, never a `read` tool path.
   When the model passes `/skill:<name>` or `skill:<name>` to `read`, the agent

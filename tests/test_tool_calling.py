@@ -14,6 +14,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 from one.core.types import ModelInfo
+from one.tools.index import ToolDef, all_tools
 
 
 class _Loader:
@@ -135,6 +136,39 @@ class _FailThenStableProvider:
         if self.success_delay_sec > 0:
             await asyncio.sleep(self.success_delay_sec)
         return ChatResult(text="OK", raw={}, usage={}, stop_reason="stop")
+
+
+class _RecordingProvider:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.requests: list[list[dict[str, Any]]] = []
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
+    ) -> Any:
+        from one.providers.base import ChatResult
+
+        self.requests.append(messages)
+        return ChatResult(text=self.responses[len(self.requests) - 1], raw={}, usage={}, stop_reason="stop")
+
+
+class _TimeoutProvider:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def chat(self, **kwargs: Any) -> Any:
+        self.started.set()
+        await asyncio.Event().wait()
 
 
 @pytest.mark.asyncio
@@ -762,6 +796,85 @@ async def test_abort_does_not_drop_queued_messages(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_steering_is_injected_fifo_between_tool_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Steers received during a tool run reach the immediately following requests."""
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"retry": {"enabled": False}, "tools": {"maxSteps": 4}}),
+        registry,
+        _Loader(),
+        model,
+        "medium",
+        tools=["bash"],
+    )
+    provider = _RecordingProvider(
+        [
+            '{"tool":"bash","args":{"command":"first"}}',
+            '{"tool":"bash","args":{"command":"second"}}',
+            "DONE",
+        ]
+    )
+    agent.providers = {"openai": provider}
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    runs = 0
+
+    async def blocking_bash(cwd: str, command: str, timeout: int, prefix: str) -> dict[str, Any]:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            first_started.set()
+            await release_first.wait()
+        return {"ok": True, "result": command}
+
+    monkeypatch.setitem(all_tools, "bash", ToolDef("bash", "blocking test tool", blocking_bash))
+    task = asyncio.create_task(agent.prompt("start"))
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await agent.steer("first steer")
+    await agent.steer("second steer")
+    release_first.set()
+    await task
+
+    request_users = [[m["content"] for m in request if m["role"] == "user"] for request in provider.requests]
+    assert request_users[0] == ["start"]
+    assert request_users[1][-1] == "first steer"
+    assert "second steer" not in request_users[1]
+    assert request_users[2][-1] == "second steer"
+    assert request_users[2].index("first steer") < request_users[2].index("second steer")
+    assert agent.get_pending_queues() == {"steering": [], "followUp": []}
+
+
+@pytest.mark.asyncio
+async def test_terminal_provider_timeout_keeps_steering_queue(tmp_path: Path) -> None:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"retry": {"enabled": False}, "providers": {"timeoutSec": 1}}),
+        registry,
+        _Loader(),
+        model,
+        "medium",
+    )
+    provider = _TimeoutProvider()
+    agent.providers = {"openai": provider}
+    task = asyncio.create_task(agent.prompt("start"))
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+    await agent.steer("keep after timeout")
+    await task
+
+    assert agent.get_pending_queues() == {"steering": ["keep after timeout"], "followUp": []}
+
+
+@pytest.mark.asyncio
 async def test_retry_success_then_queue_drains_once_without_duplication(tmp_path: Path):
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
@@ -808,12 +921,13 @@ async def test_finish_does_not_auto_drain_queued_messages(tmp_path: Path) -> Non
     )
     agent.providers = {"openai": provider}
 
+    await agent.steer("do not run automatically either")
     await agent.follow_up("do not run automatically")
     await agent.prompt("complete this task")
 
     assert provider.calls == 1
     assert agent.get_pending_queues() == {
-        "steering": [],
+        "steering": ["do not run automatically either"],
         "followUp": ["do not run automatically"],
     }
 

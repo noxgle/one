@@ -274,9 +274,8 @@ async def test_tui_prompt_queued_while_streaming(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tui_spinner_survives_queued_prompt_and_resumes_for_followup(tmp_path: Path) -> None:
-    """The waiting spinner must stay armed when a prompt is queued mid-turn and
-    must reappear when the session starts the follow-up turn on its own."""
+async def test_tui_spinner_survives_queued_prompt_injected_before_next_request(tmp_path: Path) -> None:
+    """A prompt submitted mid-turn is injected without losing the active spinner."""
     import asyncio
 
     from one.modes.tui_mode import _THINKING_MARK, _OneTextualApp
@@ -307,8 +306,8 @@ async def test_tui_spinner_survives_queued_prompt_and_resumes_for_followup(tmp_p
         # is still running, so the spinner stays armed.
         assert app._turn_active is True
 
-        # Track how many distinct spinner windows appear; there must be at
-        # least two (turn 1 and the follow-up turn 2).
+        # The queued steer is consumed by the nudge request in this active
+        # turn, so there need not be a second agent_start/spinner window.
         spinner_windows = 0
         spinner_visible = False
         for _ in range(300):
@@ -321,7 +320,8 @@ async def test_tui_spinner_survives_queued_prompt_and_resumes_for_followup(tmp_p
                 spinner_visible = False
             if not app._turn_active and not session.is_streaming:
                 break
-        assert spinner_windows >= 2, "spinner must appear for the running turn AND the follow-up turn"
+        assert spinner_windows >= 1, "spinner must remain visible for the running turn"
+        assert "second prompt" in [m.get("content") for m in session.messages if m.get("role") == "user"]
 
 
 def test_thinking_frames_are_single_width() -> None:

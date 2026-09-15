@@ -861,6 +861,55 @@ a filesystem path passed to the `read` tool.
     path-like skill names; exact system-prompt assertion; targeted skill,
     system-prompt, TUI, interactive, and RPC tests.
 
+## Steering checkpoint correction
+
+### Problem
+
+TUI displays `Queued (steer).` immediately, but the current session loop keeps
+the steering message in `_steering` until the entire turn ends. The message is
+therefore consumed only after all provider/tool activity and `finish`, instead
+of before the next provider request. This makes mid-run steering appear to
+work in the UI while failing to influence the active turn.
+
+### Required behavior
+
+- Preserve immediate TUI/interactive queue feedback and `queue_update` events.
+- Consume pending steering at a safe provider boundary during the active turn:
+  after the current provider response/tool transaction and before the next
+  provider request.
+- Do not wait for the whole turn to finish before consuming steering.
+- Do not consume steering after terminal `finish`, abort, timeout, or another
+  terminal error; leave it available for an explicit later user action.
+- Preserve FIFO ordering, follow-up queue semantics, tool execution order,
+  event snapshots, and ordinary no-queue behavior.
+
+### Implementation task
+
+- [ ] **Consume steer at the next provider checkpoint**
+  - **Description:** Add a turn-local checkpoint/helper in
+    `one/core/agent_session.py` that safely removes the next steering message
+    and injects it into the provider-visible conversation before the next
+    provider request. Ensure steering queued while a provider call or tool is
+    running is applied at that next boundary rather than only in the final
+    post-turn drain. Keep terminal paths (`finish`, abort, timeout, terminal
+    error) from draining queues automatically.
+  - **Files:** `one/core/agent_session.py`, `one/modes/tui_mode.py`,
+    `one/modes/interactive_mode.py`, `tests/test_event_snapshots.py`,
+    `tests/test_tool_calling.py`, `tests/test_tui_mode.py`,
+    `tests/test_interactive_mode.py`.
+  - **Dependencies:** Existing mid-run delivery policy and queue handling in
+    the `Subagent timeout and post-timeout diagnostics` implementation tasks.
+  - **Acceptance Criteria:** In a fake-provider run with a long tool call,
+    input submitted during that call is shown as queued immediately and is
+    present in the next provider request before the agent can reach terminal
+    `finish`; a second queued steer remains FIFO; finish/abort/timeout leave
+    pending queues untouched; follow-up messages retain their existing
+    explicit FIFO behavior.
+  - **Verification:** Add deterministic fake-provider tests that block a tool,
+    submit steer, release the tool, and assert provider-call order and prompt
+    contents; add TUI pilot and interactive regression tests for the visible
+    queue status; run event snapshots and the full test suite.
+
 ## Subagent timeout and post-timeout diagnostics
 
 ### Goal

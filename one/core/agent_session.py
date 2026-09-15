@@ -1799,6 +1799,25 @@ class AgentSession:
         if usage and usage["percent"] >= self.settings_manager.get_compaction_threshold_percent():
             await self.compact(reason="auto_preflight", allow_during_prompt=True)
 
+    async def _inject_pending_steering(self) -> None:
+        """Make one pending steer visible before the next provider request.
+
+        This deliberately injects a user message into the current turn instead
+        of recursively calling ``prompt()`` while that turn is streaming.  One
+        message per request boundary preserves the queue's FIFO behaviour.
+        """
+        if self._abort_requested or self.steering_mode != "interrupt" or not self._steering:
+            return
+        text = self._steering.pop(0)
+        self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
+        user_msg = {"role": "user", "content": text, "timestamp": int(time.time() * 1000)}
+        self.messages.append(user_msg)
+        self.session_manager.append_message(user_msg)
+        self._emit({"type": "message_start", "message": user_msg})
+        self._emit({"type": "message_end", "message": user_msg})
+        if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
+            await self._invoke_extension_chat_message(user_msg)
+
     async def prompt(
         self,
         text: str,
@@ -1852,6 +1871,7 @@ class AgentSession:
         # session from being stuck in _is_streaming=True forever when a
         # provider call hangs or SSE keep-alives reset httpx timers.
         finished_with_tool = False
+        terminal_error = False
         try:
             retry_cfg = self.settings_manager.get_retry_settings()
             attempt = 0
@@ -1923,6 +1943,7 @@ class AgentSession:
                                 # fireCount is per-turn; currently always 1 since _should_tool_nudge fires only at step 0.
                                 self._emit({"type": "tool_call_nudge_start", "fireCount": self._nudge_fires})
                                 try:
+                                    await self._inject_pending_steering()
                                     await self._preflight_compact()
                                     nudged = await self._invoke_provider(
                                         self._flatten_messages_for_provider()
@@ -1993,6 +2014,11 @@ class AgentSession:
                                 if self._abort_requested:
                                     final_assistant = self._abort_assistant_message()
                                     break
+                                # A completed non-terminal tool is a safe
+                                # transaction boundary. Deliver queued steering
+                                # before the next provider request, rather than
+                                # after the whole turn.
+                                await self._inject_pending_steering()
                                 continue
 
                             final_assistant = assistant
@@ -2067,6 +2093,7 @@ class AgentSession:
                         self._emit({"type": "agent_end", "messages": [user_msg, final_assistant]})
                         break
                     except _CapabilityError as e:
+                        terminal_error = True
                         # Capability errors: emit turn_end, then either raise
                         # _CapabilityErrorCooperative (cooperation) or emit a
                         # controlled assistant message (autonomous).  No retry.
@@ -2124,6 +2151,7 @@ class AgentSession:
                             }
                         )
                         if not will_retry:
+                            terminal_error = True
                             error_msg = {
                                 "role": "assistant",
                                 "content": [{"type": "text", "text": error_text}],
@@ -2253,6 +2281,11 @@ class AgentSession:
         # must not be executed automatically after the agent has reported
         # completion (especially when they refer to resources just created).
         if finished_with_tool:
+            return
+
+        # A terminal provider/capability error is an explicit boundary just as
+        # finish and abort are. Keep queued input for a later explicit prompt.
+        if terminal_error:
             return
 
         # Auto-compaction: shrink the context between turns when it grows past
