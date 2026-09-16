@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Responsive TUI streaming input** — rapid provider deltas are coalesced
+  into bounded UI renders, so keyboard input remains editable and submittable
+  while output streams without an unbounded Textual message backlog.
 - **Steering checkpoints** — steering received while a tool is running is now
   delivered FIFO to the next provider request after its result, without waiting
   for the entire turn; terminal finish, abort, timeout, and error paths retain

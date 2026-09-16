@@ -274,6 +274,88 @@ async def test_tui_prompt_queued_while_streaming(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_tui_input_stays_responsive_during_rapid_streaming(tmp_path: Path) -> None:
+    """Provider deltas must not starve keyboard events or queue one UI event each."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.base import ChatResult
+
+    release_first_response = asyncio.Event()
+    first_response_complete = asyncio.Event()
+    deltas_finished = asyncio.Event()
+    rapid_output = "rapid-stream-output-" + ("x" * 4000)
+
+    class _RapidStreamProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(
+            self,
+            api_key,
+            model,
+            messages,
+            thinking_level,
+            headers=None,
+            on_delta=None,
+            on_thinking_delta=None,
+            max_tokens=None,
+            images=None,
+            storage_dir="",
+        ):
+            self.calls += 1
+            if self.calls == 1:
+                for char in rapid_output:
+                    assert on_delta is not None
+                    on_delta(char)
+                    # Simulate a fast async transport which yields frequently.
+                    await asyncio.sleep(0)
+                deltas_finished.set()
+                await release_first_response.wait()
+                first_response_complete.set()
+                return ChatResult(text=rapid_output, raw={}, usage={}, stop_reason="stop")
+            return ChatResult(text="follow-up complete", raw={}, usage={}, stop_reason="stop")
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _RapidStreamProvider()}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "first prompt")
+        for _ in range(200):
+            await pilot.pause()
+            if app._assistant_stream:
+                break
+        assert app._assistant_stream
+
+        # Use real pilot key events rather than assigning .text: this regresses
+        # the starvation that previously made keyboard input wait for the stream.
+        await pilot.press(*"second prompt")
+        input_widget = app.query_one("#input", TextArea)
+        assert input_widget.text == "second prompt"
+        assert not first_response_complete.is_set()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "second prompt" in session.get_pending_queues()["steering"]
+        for _ in range(200):
+            await pilot.pause()
+            if deltas_finished.is_set() and rapid_output in app._assistant_stream:
+                break
+        assert rapid_output == app._assistant_stream
+
+        release_first_response.set()
+        for _ in range(500):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+        stream = "\n".join(app._stream_lines)
+        assert "rapid-stream-output-" in stream
+        assert stream.count("x") >= 4000
+        assert stream.index("rapid-stream-output-") < stream.index("> second prompt")
+
+
+@pytest.mark.asyncio
 async def test_tui_spinner_survives_queued_prompt_injected_before_next_request(tmp_path: Path) -> None:
     """A prompt submitted mid-turn is injected without losing the active spinner."""
     import asyncio
@@ -3334,6 +3416,7 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
         # 2. JSON text_delta builds the live assistant panel
         session._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": '{"tool":"bash","args":{"command":"echo hi"}}'}})
         await pilot.pause()
+        app._flush_pending_assistant_deltas()
         assert app._assistant_has_live_delta is True
         assert app._assistant_live_start_idx >= 0
         # The JSON lines should be present in the stream (may be wrapped).
@@ -4028,6 +4111,36 @@ async def test_tui_retry_discards_partial_block_two_fails(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_clear_stream_discards_buffered_assistant_deltas(tmp_path: Path):
+    """Ctrl+L must prevent an unpainted delta batch from returning later."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        await pilot.pause()
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "stale buffered text"},
+            }
+        )
+        with app._pending_assistant_deltas_lock:
+            assert app._pending_assistant_deltas == "stale buffered text"
+
+        app.action_clear_stream()
+        app._flush_pending_assistant_deltas()
+
+        assert app._stream_lines == []
+        assert app._assistant_stream == ""
+        assert app._assistant_stream_open is False
+        with app._pending_assistant_deltas_lock:
+            assert app._pending_assistant_deltas == ""
+
+
+@pytest.mark.asyncio
 async def test_tui_trim_rebases_live_block_and_discard_survives(tmp_path: Path):
     """When a >500-line trim happens while a live delta block is active,
     _assistant_live_start_idx must be rebased so that
@@ -4060,6 +4173,7 @@ async def test_tui_trim_rebases_live_block_and_discard_survives(tmp_path: Path):
             }
         )
         await pilot.pause()
+        app._flush_pending_assistant_deltas()
 
         assert app._assistant_has_live_delta is True
         live_start_before_trim = app._assistant_live_start_idx
@@ -4130,6 +4244,7 @@ async def test_tui_trim_eats_whole_live_block_no_corruption(tmp_path: Path):
             }
         )
         await pilot.pause()
+        app._flush_pending_assistant_deltas()
         assert app._assistant_has_live_delta is True
         live_start = app._assistant_live_start_idx
         live_count = app._assistant_live_line_count
@@ -4150,6 +4265,7 @@ async def test_tui_trim_eats_whole_live_block_no_corruption(tmp_path: Path):
             }
         )
         await pilot.pause()
+        app._flush_pending_assistant_deltas()
 
         # The trim should have invalidated the live block because the
         # entire block was pushed beyond the 500-line window.
@@ -4161,6 +4277,7 @@ async def test_tui_trim_eats_whole_live_block_no_corruption(tmp_path: Path):
             }
         )
         await pilot.pause()
+        app._flush_pending_assistant_deltas()
 
         # Verify the stream is coherent — no duplicate blocks, no crashes.
         stream = "\n".join(app._stream_lines)

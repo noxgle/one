@@ -989,3 +989,210 @@ operation, or subprocess cannot block the parent agent indefinitely.
 - Existing queued steering/follow-up messages must remain pending after a
   terminal `finish` or timeout until the user explicitly chooses the next
   action.
+
+## Future version: autonomous provider-timeout recovery
+
+### Goal
+
+Make provider timeouts recoverable in autonomous mode without blindly starting
+duplicate requests against a local llama.cpp/Ollama server that may still be
+processing the timed-out request. Work on a new branch based on `main`,
+recommended name `feat/autonomous-provider-timeout-recovery`; do not merge or
+push without explicit approval.
+
+### Context
+
+`one` currently wraps each provider call in `asyncio.wait_for` and converts a
+timeout into a generic `RuntimeError`. The normal retry handler can then start
+another provider request. With local OpenAI-compatible servers, the server may
+continue prompt processing after the client-side cancellation, causing
+overlapping generations and confusing TUI state. Pi treats provider
+`error`/`aborted` results as terminal at the agent-loop boundary. OpenCode has
+typed header/stream timeouts and aborts the transport, but its documented issue
+history shows that automatic retry can still reproduce this exact local-provider
+problem.
+
+### Scope
+
+#### In Scope
+
+- Typed provider timeout and cancellation state.
+- Different recovery policies for interactive and autonomous execution.
+- Bounded autonomous recovery with backoff, observability, and optional model or
+  provider fallback.
+- Provider capability/configuration for local servers that cannot confirm remote
+  request cancellation.
+- Regression tests for local timeout, retry suppression, cleanup, and TUI state.
+
+#### Non-Goals
+
+- Guaranteeing that an arbitrary OpenAI-compatible server stopped computing after
+  a client disconnect.
+- Destructive restart of llama.cpp, Ollama, Docker, or other external services.
+- Removing retry support for unrelated transient provider errors.
+
+### Assumptions
+
+- A provider timeout only proves that the local deadline expired; remote state is
+  otherwise unknown.
+- Tool execution starts only after a complete assistant response, so a repeated
+  provider generation must not execute the same tool twice automatically.
+- Autonomous mode may recover without user input, but recovery must be bounded
+  and must preserve the session for later inspection/resume.
+
+### Open Questions
+
+- Should the default autonomous policy prefer a larger second deadline or a
+  configured fallback model/provider?
+- Can the llama.cpp deployment expose a reliable health/slot/request-status
+  endpoint that is safe to query after disconnect?
+- Should provider timeout policy be global, per provider, or per model?
+
+### Architecture Decisions
+
+#### ADR-001: Treat provider timeout as a distinct recoverable state
+
+**Decision:** Add a typed timeout error/result carrying provider, model, attempt,
+elapsed time, whether streaming started, and whether local cancellation
+completed. Keep ordinary transient errors on the existing retry path.
+
+**Alternatives:** Keep timeout as generic `RuntimeError`; make every timeout
+terminal; retry every timeout immediately.
+
+**Rationale:** The autonomous controller needs more information than an error
+string to avoid duplicate local requests while still recovering from slow
+cloud providers.
+
+**Trade-offs:** Adds event and test-contract surface, but prevents timeout
+classification from being accidentally changed by message matching.
+
+#### ADR-002: Use mode-aware, bounded recovery
+
+**Decision:** Interactive mode reports the timeout and returns control to the
+user. Autonomous mode runs a bounded recovery policy: cancel/close transport,
+apply a grace period, optionally inspect provider readiness, then retry with
+backoff or switch to an explicitly configured fallback. Exhaustion produces a
+terminal error with the preserved session ID.
+
+**Alternatives:** Always stop; always retry immediately; restart the local model
+server automatically.
+
+**Rationale:** Autonomous work must solve recoverable failures itself, while
+immediate retries are unsafe when the old local request may still be active.
+
+**Trade-offs:** Recovery can take longer and cannot prove remote cancellation;
+bounded attempts prevent indefinite autonomous loops.
+
+### Implementation Tasks
+
+- [ ] **Introduce typed provider-timeout results and stable events**
+  - **Description:** Replace the generic timeout error with a typed error/result
+    and add stable metadata for attempt, provider/model, elapsed time, stream
+    phase, cancellation outcome, and retry decision. Preserve existing event
+    ordering for non-timeout failures.
+  - **Files:** `one/core/agent_session.py`, `one/core/event_bus.py` if a new
+    event is required, provider adapter modules, `tests/test_event_snapshots.py`,
+    `tests/test_provider_timeout_regression.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Header/prompt-processing timeout, SSE idle timeout,
+    user abort, and ordinary provider error are distinguishable without parsing
+    display text; local provider task and transport cleanup are observable.
+  - **Verification:** Deterministic fake-provider tests assert typed metadata,
+    terminal event ordering, cancellation, and no active local chat task.
+
+- [ ] **Implement autonomous timeout recovery policy**
+  - **Description:** Add configurable bounded recovery with grace period,
+    exponential backoff, maximum attempts, and optional fallback model/provider.
+    Prevent immediate retry against a provider marked as possibly still busy;
+    preserve the conversation/session and never execute tools from an incomplete
+    response.
+  - **Files:** `one/core/agent_session.py`, `one/core/settings_manager.py`,
+    `one/core/model_registry.py` if fallback resolution needs registry support,
+    `tests/test_provider_timeout_regression.py`, retry/event snapshot tests.
+  - **Dependencies:** Typed provider-timeout results and stable events.
+  - **Acceptance Criteria:** Autonomous mode recovers from a slow provider via a
+    bounded policy, does not spin indefinitely, does not issue an immediate
+    duplicate local request, and ends with an actionable terminal diagnostic
+    after exhaustion.
+  - **Verification:** Fake local server/provider tests cover first-token timeout,
+    SSE idle timeout, successful delayed recovery, fallback recovery, exhausted
+    attempts, and queued-message preservation.
+
+- [ ] **Expose timeout state and recovery actions in clients**
+  - **Description:** Make TUI, interactive, RPC, and headless output distinguish
+    “provider timed out; recovering”, “provider may still be processing”, and
+    “recovery exhausted”. Expose safe retry/switch/stop actions where applicable.
+  - **Files:** `one/modes/tui_mode.py`, `one/modes/interactive_mode.py`,
+    `one/modes/rpc_mode.py`, relevant docs and snapshots/tests.
+  - **Dependencies:** Autonomous timeout recovery policy.
+  - **Acceptance Criteria:** TUI never displays an ambiguous timeout while the
+    agent silently continues; autonomous progress and final outcome are visible;
+    RPC/headless consumers receive machine-readable state.
+  - **Verification:** TUI pilot tests, RPC event assertions, snapshot review,
+    and headless fake-provider integration tests.
+
+### Project Acceptance Criteria
+
+- [ ] Autonomous mode recovers from a slow local provider without unbounded
+  retries or uncontrolled duplicate requests.
+- [ ] Interactive mode gives the user control after a provider timeout.
+- [ ] Every timeout path cleans up local tasks/streams and resets session state.
+- [ ] Session history remains valid and resumable after timeout/recovery failure.
+- [ ] Full `pytest` suite and `ruff` pass; event and TUI snapshots are reviewed.
+
+## Urgent current-version fix: responsive TUI input during streaming
+
+### Goal
+
+Keep the TUI input responsive while the model is streaming. Text typed during
+generation must be rendered immediately and remain editable/submit-able, while
+the existing `steer`/`follow_up` delivery behavior remains unchanged.
+
+### Diagnosis
+
+The input widget is not intentionally disabled or read-only during streaming.
+However, every provider text delta is posted as a separate `SessionEvent`, and
+`message_update` rebuilds the complete visible stream and calls
+`_render_stream()` for every delta (`one/modes/tui_mode.py:2751-2772`,
+`1107-1124`). Fast streams can therefore saturate Textual's message/render
+queue. Keyboard input is received but its visual update is delayed until the
+stream ends.
+
+### Implementation task
+
+- [ ] **Coalesce and throttle streamed TUI rendering**
+  - **Description:** Keep collecting assistant deltas immediately, but coalesce
+    pending `message_update` work and render at a bounded UI cadence rather than
+    rebuilding the full stream for every token. Flush pending assistant text
+    before `message_end`, `tool_call_start`, retry transitions, errors, and
+    abort. Ensure the input widget remains focused and editable during ordinary
+    streaming, and that queued submissions still reach the session promptly.
+    Do not alter provider/session event ordering or `steer`/`follow_up` queue
+    semantics.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`,
+    `tests/test_tui_snapshots.py` only if snapshots change.
+  - **Dependencies:** None; this is an urgent current-version UI fix and should
+    be implemented independently of the future provider-timeout recovery work.
+  - **Acceptance Criteria:**
+    - Text typed during a live assistant stream appears before the stream ends.
+    - Input remains editable, cursor movement works, and Enter submits while the
+      model is streaming.
+    - A submitted message is shown as queued and is delivered using the current
+      resolved `steer` or `follow_up` mode.
+    - Stream output remains complete and ordered; no deltas, tool calls, retry
+      indicators, or terminal events are lost.
+    - Rendering work is bounded/coalesced so a high-rate stream cannot starve
+      keyboard events or cause an unbounded Textual message backlog.
+  - **Verification:** Add a deterministic TUI pilot test with a provider that
+    emits many rapid deltas while the pilot types and submits a second message;
+    assert the input text is visible before the first provider completes, the
+    second message is queued, and all streamed output remains intact. Run the
+    focused TUI tests, relevant event/steering tests, full `pytest`, `ruff`, and
+    review any changed TUI snapshots.
+
+### Rollout
+
+Ship this as a user-visible patch in the current release line: bump
+`one/config.py:VERSION`, add a `CHANGELOG.md` Unreleased entry, and regenerate
+the TUI version snapshots as required by the repository release rules. Do not
+combine it with the future provider-timeout recovery branch.

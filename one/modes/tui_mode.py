@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import textwrap
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -790,6 +791,12 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
             self._assistant_live_line_count = 0
+            # Providers can produce deltas much faster than Textual can paint.
+            # Keep the data off the message queue and paint it on a bounded UI
+            # cadence instead; terminal/session events explicitly flush first.
+            self._pending_assistant_deltas = ""
+            self._pending_assistant_deltas_lock = threading.Lock()
+            self._assistant_stream_open = False
             self._active_tool_block: tuple[str, int, int, str] | None = None
             self._turn_active = False
             self._last_delta_ts = 0.0
@@ -849,6 +856,7 @@ if TEXTUAL_AVAILABLE:
             # Drive the "waiting for the model" spinner while a turn is in
             # flight but no assistant text is currently streaming.
             self.set_interval(0.15, self._tick_waiting)
+            self.set_interval(1 / 30, self._flush_pending_assistant_deltas)
             self._bind_session()
             _logo_lines = [
                 r" ██████╗ ███╗   ██╗███████╗",
@@ -891,6 +899,19 @@ if TEXTUAL_AVAILABLE:
                 self._off_listener = None
 
             def _listener(event: dict[str, Any]) -> None:
+                if event.get("type") == "message_update":
+                    assistant_event = event.get("assistantMessageEvent", {})
+                    if assistant_event.get("type") == "text_delta":
+                        delta = str(assistant_event.get("delta", ""))
+                        if delta:
+                            # This callback may be invoked by a provider-owned
+                            # thread.  Do not enqueue one Textual message per
+                            # token: a lock-protected buffer is drained by the
+                            # UI timer instead.
+                            with self._pending_assistant_deltas_lock:
+                                self._pending_assistant_deltas += delta
+                            self._last_delta_ts = time.monotonic()
+                        return
                 try:
                     self.post_message(SessionEvent(event))
                 except Exception:
@@ -927,6 +948,23 @@ if TEXTUAL_AVAILABLE:
                 self.query_one("#stream_container", VerticalScroll).scroll_end(animate=False)
             except Exception:
                 pass
+
+        def _flush_pending_assistant_deltas(self) -> None:
+            """Render accumulated provider deltas at most once per UI tick."""
+            with self._pending_assistant_deltas_lock:
+                delta = self._pending_assistant_deltas
+                self._pending_assistant_deltas = ""
+            if not delta:
+                return
+            if not self._assistant_stream_open:
+                # message_start is posted separately and must establish live
+                # block state before its deltas are rendered. Put the batch
+                # back rather than losing an early timer race.
+                with self._pending_assistant_deltas_lock:
+                    self._pending_assistant_deltas = delta + self._pending_assistant_deltas
+                return
+            self._assistant_stream += delta
+            self._append_assistant_delta(delta)
 
         def _remove_thinking_line(self) -> None:
             """Drop the animated 'waiting' line from the stream, if present.
@@ -1117,7 +1155,9 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer += delta
             panel_lines = self._format_chat_panel("assistant", self._assistant_live_buffer)
             if self._assistant_live_start_idx >= 0:
-                self._stream_lines = self._stream_lines[: self._assistant_live_start_idx] + panel_lines
+                tail_start = self._assistant_live_start_idx + self._assistant_live_line_count
+                tail = self._stream_lines[tail_start:]
+                self._stream_lines = self._stream_lines[: self._assistant_live_start_idx] + panel_lines + tail
             else:
                 self._stream_lines.extend(panel_lines)
             self._assistant_live_line_count = len(panel_lines)
@@ -2681,6 +2721,10 @@ if TEXTUAL_AVAILABLE:
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
             self._stream_lines = []
+            with self._pending_assistant_deltas_lock:
+                self._pending_assistant_deltas = ""
+            self._assistant_stream_open = False
+            self._assistant_stream = ""
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
@@ -2751,6 +2795,10 @@ if TEXTUAL_AVAILABLE:
         async def on_session_event(self, message: SessionEvent) -> None:
             event = message.payload
             et = event.get("type")
+            # Non-delta events delimit visible transcript state.  Flush before
+            # handling them so a final token cannot be painted after its end,
+            # tool, retry, error, abort, or terminal event.
+            self._flush_pending_assistant_deltas()
             if et == "message_start":
                 msg = event.get("message", {})
                 if msg.get("role") == "assistant":
@@ -2763,10 +2811,13 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
                     self._assistant_live_line_count = 0
+                    self._assistant_stream_open = True
             elif et == "message_update":
                 ae = event.get("assistantMessageEvent", {})
                 if ae.get("type") == "text_delta":
                     delta = str(ae.get("delta", ""))
+                    # Deltas are coalesced in the session listener.  Retain
+                    # this path for manually-posted test/UI events.
                     self._last_delta_ts = time.monotonic()
                     self._assistant_stream += delta
                     self._append_assistant_delta(delta)
@@ -2782,7 +2833,8 @@ if TEXTUAL_AVAILABLE:
                         # If live deltas were already streamed, the content is
                         # visible in the stream — don't re-render it.
                         if self._assistant_has_live_delta:
-                            self._stream_lines.append("")
+                            end = self._assistant_live_start_idx + self._assistant_live_line_count
+                            self._stream_lines.insert(max(0, end), "")
                             self._trim_stream()
                         else:
                             text = self._assistant_stream.strip()
@@ -2800,6 +2852,7 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
                     self._assistant_live_line_count = 0
+                    self._assistant_stream_open = False
             elif et == "thinking_delta":
                 delta = event.get("delta", "")
                 # Ignore exact empty string; whitespace-only allowed once block is open.
@@ -2839,16 +2892,12 @@ if TEXTUAL_AVAILABLE:
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
                 self._finalize_thinking_block()
+                self._assistant_stream_open = False
                 # Remove any partially-rendered assistant delta so that
                 # subsequent nudge/recovery attempts don't stack duplicate
                 # blocks (the JSON that was streamed as assistant text is
                 # actually a tool-call payload).
-                if self._assistant_live_start_idx >= 0:
-                    del self._stream_lines[self._assistant_live_start_idx :]
-                    self._assistant_live_start_idx = -1
-                self._assistant_has_live_delta = False
-                self._assistant_live_buffer = ""
-                self._assistant_live_line_count = 0
+                self._discard_live_assistant_block()
                 # Render the per-call effective timeout when it's a positive
                 # number; omit the suffix for non-time-limited tools.
                 et_val = event.get("effectiveTimeout")
@@ -2923,6 +2972,7 @@ if TEXTUAL_AVAILABLE:
             elif et == "turn_end":
                 self._retry_state = "idle"
                 self._turn_active = False
+                self._assistant_stream_open = False
                 self._finalize_thinking_block()
                 self._remove_thinking_line()
                 self._render_stream()
@@ -2932,10 +2982,12 @@ if TEXTUAL_AVAILABLE:
             elif et == "auto_retry_end":
                 self._retry_state = "idle"
                 self._turn_active = False
+                self._assistant_stream_open = False
                 self._remove_thinking_line()
                 self._render_stream()
             elif et == "auto_retry_start":
                 self._retry_state = f"retry-{event.get('attempt')}"
+                self._assistant_stream_open = False
                 # Defensive: discard any partial block that survived the
                 # preceding turn_end (e.g. when turn_end fires without a
                 # message_end for a killed stream).
