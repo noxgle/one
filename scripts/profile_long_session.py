@@ -11,6 +11,7 @@ the TUI if needed.
 Examples:
 
     .venv/bin/python scripts/profile_long_session.py --cycles 30
+    .venv/bin/python scripts/profile_long_session.py --cycles 12 --tool-output-chars 12000 --json
     .venv/bin/python scripts/profile_long_session.py --prompt-file task.txt
     .venv/bin/python scripts/profile_long_session.py --model llama.cpp/model-id
 """
@@ -29,11 +30,18 @@ from pathlib import Path
 from typing import Any
 
 
-def _default_prompt(cycles: int) -> str:
+def _default_prompt(cycles: int, tool_output_chars: int = 0) -> str:
+    if tool_output_chars > 0:
+        command = f"python3 -c \"print('X' * {tool_output_chars})\""
+        output_instructions = (
+            f" In each cycle, use the bash tool to run exactly `{command}`. "
+            f"The command must emit approximately {tool_output_chars} characters of deterministic output."
+        )
+    else:
+        output_instructions = " In each cycle, use the bash tool to run one harmless command such as `printf 'cycle N\\n'`."
     return (
         "Work autonomously in the current project and do not modify files. "
-        f"Perform exactly {cycles} short diagnostic cycles. In each cycle, use the bash tool "
-        "to run one harmless command such as `printf 'cycle N\\n'`, inspect the result, "
+        f"Perform exactly {cycles} short diagnostic cycles.{output_instructions} Inspect the result, "
         "and briefly report what happened. Do not stop early unless a tool fails. "
         "After the final cycle, summarize the run."
     )
@@ -84,7 +92,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     prompt = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else args.prompt
     if not prompt:
-        prompt = _default_prompt(args.cycles)
+        prompt = _default_prompt(args.cycles, args.tool_output_chars)
 
     command = [sys.executable, "-m", "one.cli.main", "--mode", "rpc", "--session-dir", str(session_dir)]
     if args.model:
@@ -100,6 +108,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        # Large tool results are emitted as one JSON-RPC line. The asyncio
+        # default (64 KiB) would fail before the profiler can measure pruning.
+        limit=8 * 1024 * 1024,
     )
     assert process.stdin is not None
     process.stdin.write(_request("prompt", "prompt", message=prompt))
@@ -186,6 +197,12 @@ def _parse_args() -> argparse.Namespace:
     source.add_argument("--prompt", help="Prompt to run against the configured model")
     source.add_argument("--prompt-file", help="Read the prompt from a UTF-8 file")
     parser.add_argument("--cycles", type=int, default=30, help="Cycles used by the default diagnostic prompt")
+    parser.add_argument(
+        "--tool-output-chars",
+        type=int,
+        default=0,
+        help="For the default prompt, request this many deterministic bash-output characters per cycle (0 disables)",
+    )
     parser.add_argument("--model", help="Optional provider/model override; otherwise use the configured default")
     parser.add_argument("--session-dir", help="Directory for the diagnostic session; default is a new /tmp directory")
     parser.add_argument("--timeout", type=float, default=1800, help="Maximum run time in seconds (default: 1800)")
@@ -195,8 +212,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    if args.cycles < 1 or args.timeout <= 0:
-        print("--cycles must be positive and --timeout must be greater than zero", file=sys.stderr)
+    if args.cycles < 1 or args.timeout <= 0 or args.tool_output_chars < 0:
+        print("--cycles must be positive, --timeout must be greater than zero, and --tool-output-chars cannot be negative", file=sys.stderr)
         return 2
     report = asyncio.run(_run(args))
     if args.json:
@@ -211,6 +228,8 @@ def main() -> int:
               f"{report['session'].get('sessionLines', 0)}/"
               f"{report['session'].get('sessionBytes', 0)}")
         print(f"context usage: {json.dumps(report.get('contextUsage'), ensure_ascii=False)}")
+        pruning = report["sessionStats"].get("toolOutputPruning", {})
+        print(f"tool output pruning: {json.dumps(pruning, ensure_ascii=False, sort_keys=True)}")
         print(f"events: {json.dumps(report['events'], ensure_ascii=False, sort_keys=True)}")
         if report["stdoutText"]:
             print(f"non-event stdout lines: {len(report['stdoutText'])}")
