@@ -46,6 +46,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Selective stale tool-output pruning** — oversized old tool results are now
+  replaced only in provider requests with bounded markers, while complete JSONL
+  session history remains unchanged. The protected recent window and thresholds
+  are configurable through `toolOutputPruning` settings.
+
 - **Subagent timeout diagnostics** — `inspect_subagent_timeout()` returns the last
   subagent timeout diagnostic (cause, duration, timeoutSec, task summary); exposed
   via `/inspect-timeout` in TUI and RPC, and logged in interactive mode.

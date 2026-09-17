@@ -1519,7 +1519,7 @@ requests while recent context and persistence remain unchanged.
 
 **Confidence:** Medium.
 
-- [ ] **Task:** Add configurable stale tool-output pruning
+- [x] **Task:** Add configurable stale tool-output pruning
 
   - **Description:** Add settings for the protected recent token budget,
     minimum eligible result size, and marker behavior. Implement a side-effect-free

@@ -19,6 +19,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.core.tool_output_pruning import prune_stale_tool_outputs
 from one.core.types import ModelInfo
 from one.mcp import McpManager
 from one.providers.openai_compatible import OpenAICompatibleAdapter
@@ -169,6 +170,8 @@ class AgentSession:
         self._extension_runtime: ExtensionRuntime | None = None
         # Last subagent-timeout diagnostic (Task 4 — inspect-timeout).
         self._last_subagent_timeout: dict[str, Any] | None = None
+        # Provider-only context diagnostics; durable session messages stay raw.
+        self._last_tool_output_pruning: dict[str, int] = {"count": 0, "tokensReclaimed": 0}
         self.approval_callback = approval_callback
         self._approval_tools = set(settings_manager.get_tool_approval_tools())
 
@@ -1769,10 +1772,23 @@ class AgentSession:
         return out
 
     def _flatten_messages_for_provider(self) -> list[dict[str, Any]]:
+        conversation, stats = self._pruned_provider_conversation(self.messages)
+        self._last_tool_output_pruning = stats
         return [
             {"role": "system", "content": self._build_runtime_system_prompt()},
-            *self._flatten_conversation(self.messages),
+            *self._flatten_conversation(conversation),
         ]
+
+    def _pruned_provider_conversation(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """Build the ephemeral provider view without changing session history."""
+        return prune_stale_tool_outputs(
+            messages,
+            enabled=self.settings_manager.get_tool_output_pruning_enabled(),
+            recent_tokens=self.settings_manager.get_tool_output_pruning_recent_tokens(),
+            min_result_tokens=self.settings_manager.get_tool_output_pruning_min_result_tokens(),
+            marker=self.settings_manager.get_tool_output_pruning_marker(),
+            estimate_tokens=self._approx_message_tokens,
+        )
 
     def _estimate_request_tokens(self, messages: list[dict[str, Any]] | None = None) -> int:
         """Estimate the complete provider request, including fixed prompt overhead.
@@ -1784,6 +1800,7 @@ class AgentSession:
         margin so auto-compaction happens before the provider rejects it.
         """
         conversation = self.messages if messages is None else messages
+        conversation, _ = self._pruned_provider_conversation(conversation)
         request = [
             {"role": "system", "content": self._build_runtime_system_prompt()},
             *self._flatten_conversation(conversation),
@@ -2730,6 +2747,7 @@ class AgentSession:
             },
             "cost": total_cost,
             "contextUsage": self.get_context_usage(),
+            "toolOutputPruning": dict(self._last_tool_output_pruning),
             "nudge": {
                 "fires": self._nudge_fires,
                 "conversions": dict(self._nudge_conversions),

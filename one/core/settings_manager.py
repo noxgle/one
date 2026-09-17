@@ -22,6 +22,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "summarizeWithModel": True,
         "maxSummaryInputTokens": 20000,
     },
+    "toolOutputPruning": {
+        "enabled": True,
+        "recentTokens": 8192,
+        "minResultTokens": 2048,
+        "marker": "Stale tool output pruned from active context. Re-run the tool if details are required.",
+    },
     "retry": {"mode": "on", "maxRetries": 3, "baseDelayMs": 1500, "maxDelayMs": 20000},
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
@@ -245,6 +251,31 @@ class SettingsManager:
 
     def get_compaction_max_summary_input_tokens(self) -> int:
         return int(self.get_compaction_settings().get("maxSummaryInputTokens", 20000))
+
+    def get_tool_output_pruning_settings(self) -> dict[str, Any]:
+        settings = self.merged().get("toolOutputPruning", {})
+        return settings if isinstance(settings, dict) else {}
+
+    def get_tool_output_pruning_enabled(self) -> bool:
+        return bool(self.get_tool_output_pruning_settings().get("enabled", True))
+
+    def get_tool_output_pruning_recent_tokens(self) -> int:
+        try:
+            return max(0, int(self.get_tool_output_pruning_settings().get("recentTokens", 8192)))
+        except (TypeError, ValueError):
+            return 8192
+
+    def get_tool_output_pruning_min_result_tokens(self) -> int:
+        try:
+            return max(1, int(self.get_tool_output_pruning_settings().get("minResultTokens", 2048)))
+        except (TypeError, ValueError):
+            return 2048
+
+    def get_tool_output_pruning_marker(self) -> str:
+        marker = self.get_tool_output_pruning_settings().get(
+            "marker", "Stale tool output pruned from active context. Re-run the tool if details are required."
+        )
+        return str(marker).strip()[:512] or "Stale tool output pruned from active context."
 
     def get_tool_settings(self) -> dict[str, Any]:
         return self.merged().get("tools", {})
