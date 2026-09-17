@@ -1196,3 +1196,410 @@ Ship this as a user-visible patch in the current release line: bump
 `one/config.py:VERSION`, add a `CHANGELOG.md` Unreleased entry, and regenerate
 the TUI version snapshots as required by the repository release rules. Do not
 combine it with the future provider-timeout recovery branch.
+
+## Test-suite organization refactor
+
+### Goal
+
+Improve test discoverability and reduce maintenance cost by splitting the two
+largest test modules into focused, topic-based modules while preserving test
+behavior, snapshot contracts, explicit isolation, and the existing pytest/ruff
+workflow. Work on a new branch, recommended name
+`refactor/test-suite-organization`; no production behavior change and no
+version bump.
+
+### Context
+
+The suite currently contains roughly 29k lines across 50+ files. The largest
+modules concentrate unrelated concerns:
+
+- `tests/test_tui_mode.py` — approximately 4.6k lines.
+- `tests/test_tool_calling.py` — approximately 1.1k lines.
+
+Both files contain local fake providers, session factories, and tests for
+multiple independent behaviors. The first refactor should be conservative:
+split only these two modules, then consider extracting shared helpers after the
+new boundaries are proven stable.
+
+### Scope
+
+#### In Scope
+
+- Split `tests/test_tui_mode.py` into focused modules for input/streaming,
+  rendering, commands, cooperation/approval, retry, and navigation/session UI.
+- Split `tests/test_tool_calling.py` into focused modules for basic tool calls,
+  retries/abort, timeout/limits, steering/follow-up, and tool-call parsing.
+- Move only genuinely shared fakes/factories into explicit modules under
+  `tests/support/`, using imports rather than broad implicit fixtures.
+- Preserve test names where practical and keep `pytest` node selection usable.
+- Run the full suite after each split and review all changes for accidental test
+  weakening.
+
+#### Non-Goals
+
+- No production-code changes.
+- No test behavior changes, relaxed assertions, deleted coverage, or snapshot
+  regeneration unless a path/module reference genuinely requires it.
+- Do not reorganize every test file in one pass.
+- Do not introduce a large global `conftest.py` or hidden mutable shared state.
+
+### Architecture Decisions
+
+#### ADR-003: Organize tests by behavior, not implementation file size
+
+**Decision:** Place tests in modules named after observable behavior and user
+workflow, keeping fixtures close to the tests that use them. Extract a helper
+only when it is shared by multiple resulting modules and remains behavior
+neutral.
+
+**Alternatives:** Keep large files; split mechanically by line ranges; create a
+single global fixture layer for all tests.
+
+**Rationale:** Behavioral boundaries make focused runs understandable and avoid
+creating arbitrary coupling to private implementation layout.
+
+**Trade-offs:** Imports and helper locations will change, and some duplicate
+small setup code may intentionally remain to preserve test clarity.
+
+#### ADR-004: Use explicit support helpers instead of implicit fixtures
+
+**Decision:** Prefer small modules under `tests/support/` with explicit helper
+imports. Add `conftest.py` only if a later measured need justifies it.
+
+**Alternatives:** Put all fakes in `tests/conftest.py`; duplicate every fake in
+each module; use a new fixture framework.
+
+**Rationale:** The repository currently has no `conftest.py`, and explicit
+dependencies make test isolation and ownership visible.
+
+**Trade-offs:** Test modules retain a few imports and factory calls, but hidden
+state leakage is less likely.
+
+### Phases
+
+#### Phase 1: Inventory and establish refactor safeguards
+
+**Objective:** Map test classes/functions, shared helpers, markers, snapshots,
+and import dependencies before moving code.
+
+**Prerequisites:** New branch based on current `main`.
+
+**Expected outcome:** A movement map with no behavior changes and a baseline
+test/lint result recorded in the branch.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Inventory large test-module boundaries
+  - **Description:** Group tests by behavior and identify helpers that are local
+    versus genuinely shared. Record any tests relying on module-level state,
+    ordering, snapshots, or private symbols before moving them.
+  - **Files:** `tests/test_tui_mode.py`, `tests/test_tool_calling.py`, new test
+    module map/documentation only if needed.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Every existing test is assigned to exactly one
+    destination group; shared helper candidates and snapshot dependencies are
+    identified.
+  - **Verification:** `pytest --collect-only -q`; compare collected node IDs and
+    baseline count before and after the inventory.
+
+#### Phase 2: Split TUI tests
+
+**Objective:** Make TUI tests independently runnable by behavior without
+changing assertions or UI behavior.
+
+**Prerequisites:** Phase 1 inventory.
+
+**Expected outcome:** The 4.6k-line TUI module is replaced by focused modules
+with shared setup extracted only where necessary.
+
+**Estimated effort:** 1–2 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Split `test_tui_mode.py` by behavior
+  - **Description:** Move tests and their local helpers into focused modules,
+    recommended: `tests/test_tui_input.py`, `tests/test_tui_streaming.py`,
+    `tests/test_tui_rendering.py`, `tests/test_tui_commands.py`,
+    `tests/test_tui_cooperation.py`, `tests/test_tui_retry.py`, and
+    `tests/test_tui_navigation.py`. Preserve async markers, Textual pilot setup,
+    snapshot assumptions, and test semantics. Keep only a thin compatibility
+    module if external tooling depends on existing node paths.
+  - **Files:** `tests/test_tui_mode.py`, the new `tests/test_tui_*.py` modules,
+    `tests/support/tui.py` only if shared setup is proven necessary.
+  - **Dependencies:** Phase 1.
+  - **Acceptance Criteria:** Each moved test passes unchanged or with only
+    import/path adjustments; no test is deleted or weakened; TUI snapshot tests
+    remain separate and unchanged unless collection requires an import update.
+  - **Verification:** Run each new TUI module independently, then
+    `pytest -q tests/test_tui_mode.py tests/test_tui_*.py` (avoiding duplicate
+    collection if a compatibility module remains), `tests/test_tui_snapshots.py`,
+    and `ruff check one tests`.
+
+#### Phase 3: Split tool-calling tests
+
+**Objective:** Separate agent tool-loop behavior into focused, maintainable test
+    modules.
+
+**Prerequisites:** Phase 1; Phase 2 may proceed first for simpler review, but is
+    not a semantic dependency.
+
+**Expected outcome:** The 1.1k-line tool-calling module is split without
+changing provider fakes, event contracts, or tool-result assertions.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Split `test_tool_calling.py` by agent-loop behavior
+  - **Description:** Move tests into recommended modules
+    `tests/test_agent_tool_calls.py`, `tests/test_agent_retry_abort.py`,
+    `tests/test_agent_timeouts_limits.py`, `tests/test_agent_steering.py`, and
+    `tests/test_agent_tool_parsing.py`. Extract common fake providers/session
+    factories into `tests/support/agents.py` only when used by at least two
+    modules. Preserve exact event payload assertions and async timing controls.
+  - **Files:** `tests/test_tool_calling.py`, new `tests/test_agent_*.py` modules,
+    `tests/support/agents.py` if needed.
+  - **Dependencies:** Phase 1.
+  - **Acceptance Criteria:** Tool-call, retry, abort, timeout, steering, and
+    parser coverage remains present with equivalent assertions; no production
+    files change.
+  - **Verification:** Run each new module, `tests/test_event_snapshots.py`,
+    `tests/test_provider_timeout_regression.py`, steering tests, and
+    `ruff check one tests`.
+
+#### Phase 4: Consolidate helpers and validate the suite
+
+**Objective:** Remove accidental duplication introduced by the split and prove
+the refactor did not alter coverage or collection.
+
+**Prerequisites:** Phases 2 and 3.
+
+**Expected outcome:** Focused test ownership is clear, helper imports are
+explicit, and the complete suite remains green.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Finalize support helpers and collection parity
+  - **Description:** Consolidate only shared fakes/factories, remove obsolete
+    source modules or compatibility shims after checking tooling references,
+    and compare collected test names/counts against the pre-refactor baseline.
+    Do not alter production code or silently drop tests.
+  - **Files:** `tests/support/*.py`, affected split test modules, obsolete test
+    modules only when safe.
+  - **Dependencies:** Phases 2 and 3.
+  - **Acceptance Criteria:** No hidden global mutable state; each helper has a
+    clear owner; collection parity is documented; focused node selection works.
+  - **Verification:** `pytest --collect-only -q`, full `.venv/bin/python -m
+    pytest -q`, `.venv/bin/ruff check one tests`, and `git diff --check`.
+
+### Project Acceptance Criteria
+
+- [ ] `test_tui_mode.py` and `test_tool_calling.py` are no longer oversized
+  catch-all modules.
+- [ ] Every pre-refactor test remains collected and meaningfully asserted.
+- [ ] TUI snapshots, event snapshots, timeout tests, and steering tests remain
+  green.
+- [ ] No production files, version, or changelog entries change.
+- [ ] Full pytest suite and ruff pass on `refactor/test-suite-organization`.
+
+## Project: Selective stale tool-output pruning
+
+Work happens on branch `feat/selective-tool-output-pruning`, based on the
+current `main`; do not merge, push, or delete the branch without approval.
+
+### Goal
+
+Reduce prompt-prefill cost during long sessions by removing or truncating stale,
+large tool results from the active provider context before full compaction, while
+preserving complete original results in the durable JSONL session history.
+
+### Context
+
+The current rolling compaction summarizes old messages and retains a recent-token
+window, but waits for the configured context threshold. Long local-model sessions
+can become slower earlier because old `bash`, `read`, `grep`, MCP, and similar
+tool outputs remain in the active conversation. OpenCode addresses this with
+selective pruning; this is the first performance improvement to implement.
+
+### Scope
+
+#### In Scope
+
+- Identify tool-result messages in the active provider conversation.
+- Apply deterministic age/size-based pruning before full compaction.
+- Replace pruned active content with a bounded model-visible marker.
+- Keep the original unmodified tool result in session persistence.
+- Make limits configurable and add diagnostics/tests.
+
+#### Non-Goals
+
+- No change to the JSON-in-text tool-call contract.
+- No deletion or mutation of persisted JSONL history.
+- No automatic re-execution of pruned tool calls.
+- No change to the rolling-summary algorithm in the first iteration.
+
+### Assumptions
+
+- Tool-result messages can be identified without changing the public event
+  contract.
+- The active provider view may contain a compact replacement, while the session
+  manager remains the source of the complete historical record.
+- Recent tool results remain verbatim; the first implementation is deterministic
+  and does not make an extra model request.
+
+### Open Questions
+
+- Select the protected recent window and per-result threshold from benchmark data.
+- Recommended first trigger: once before each provider request, not after every
+  tool result.
+- Recommended marker fields: tool name and original size, without old content.
+
+### Architecture
+
+Add a pure pruning step in the provider-request preparation path. It receives the
+current conversation and returns an active-context copy plus pruning statistics.
+It walks messages from newest to oldest, protects the configured recent-token
+budget, and replaces only eligible oversized tool-result content. Persisted
+session entries are never passed through this transformation. On reload, the
+authoritative full history is reconstructed and pruning is reapplied only when a
+provider request is prepared.
+
+### Architecture Decisions
+
+#### ADR-005: Prune active tool results, never durable history
+
+**Decision:** Replace only stale oversized tool-result content in the in-memory
+provider context; preserve the original result in JSONL.
+
+**Alternatives:** Delete persisted results; summarize every result with another
+model call; rely only on full compaction.
+
+**Rationale:** This reduces prompt size without losing auditability or requiring
+an additional latency-producing model request.
+
+**Trade-offs:** The model may need to re-read or rerun a tool when an old detail
+is needed; the marker must explain that limitation.
+
+**Consequences:** Provider messages and persisted messages are intentionally
+different views of the same session. Tests must verify persistence is lossless.
+
+#### ADR-006: Deterministic age-plus-size eligibility
+
+**Decision:** Protect newest messages up to a configured token budget, then prune
+only tool results exceeding a configured size threshold. Never prune user,
+assistant, system, plan, or compaction-summary messages in the first version.
+
+**Alternatives:** Character-count-only global truncation; prune all old messages;
+model-generated summaries for each tool result.
+
+**Rationale:** Tool outputs are the safest and most common source of accidental
+context growth. Age plus size is predictable across providers.
+
+**Trade-offs:** Several medium-sized old results may still accumulate, and an
+important old result may be pruned despite semantic value.
+
+### Phases
+
+#### Phase 1: Implement bounded active-context pruning
+
+**Objective:** Add deterministic pruning at the provider request boundary without
+changing persisted history or public event contracts.
+
+**Prerequisites:** Confirm the exact message shape for tool results and provider
+request construction in `one/core/agent_session.py`.
+
+**Expected outcome:** Large stale tool outputs become bounded markers in provider
+requests while recent context and persistence remain unchanged.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Add configurable stale tool-output pruning
+
+  - **Description:** Add settings for the protected recent token budget,
+    minimum eligible result size, and marker behavior. Implement a side-effect-free
+    transformation immediately before provider calls. Cover bash, read, grep,
+    MCP, and other registered tool results. Preserve recent results and all
+    non-tool messages; replace only eligible old results and collect counts/tokens
+    reclaimed. Do not mutate JSONL entries or tool-call IDs.
+
+  - **Files:** `one/core/agent_session.py`, `one/core/settings_manager.py`,
+    `one/core/session_manager.py` only if reconstruction needs an explicit active
+    versus persisted distinction, plus relevant tests.
+
+  - **Dependencies:** None.
+
+  - **Acceptance Criteria:**
+    - Eligible stale results are bounded in provider requests.
+    - Recent protected results remain unchanged.
+    - User, assistant, system, plan, summary, and tool-call metadata remain intact.
+    - JSONL retains the original complete tool output.
+    - Reloading a session does not lose or double-prune history.
+    - Existing provider/event contracts remain compatible.
+
+  - **Verification:** Add deterministic large-result tests for bash/read/MCP;
+    assert request size, marker contents, and lossless JSONL. Run focused tests,
+    `pytest -q`, `ruff check one tests`, and `git diff --check`.
+
+#### Phase 2: Benchmark and tune defaults
+
+**Objective:** Confirm that pruning improves long-session latency without harming
+tool-use correctness, then choose conservative defaults.
+
+**Prerequisites:** Phase 1 implementation and tests.
+
+**Expected outcome:** Before/after measurements show reduced active prompt size,
+reclaimed tokens, and improved or stable local-model time-to-first-token.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Extend long-session profiling and tune the pruning policy
+
+  - **Description:** Extend `scripts/profile_long_session.py` with active request
+    estimates, pruned-result count, reclaimed tokens, and per-request latency.
+    Exercise repeated large tool outputs and a follow-up requiring recent tool
+    context. Tune defaults only after comparing baseline and pruning runs; retain
+    an opt-out setting.
+
+  - **Files:** `scripts/profile_long_session.py`, settings documentation/config
+    references if defaults become user-facing, and benchmark/regression tests.
+
+  - **Dependencies:** Phase 1.
+
+  - **Acceptance Criteria:** Active tool-output growth is bounded; recent
+    tool-dependent tasks still succeed; full history remains recoverable; metrics
+    identify reclaimed capacity.
+
+  - **Verification:** Run the profile against the configured local provider for
+    baseline and pruning-enabled sessions, compare size/latency, then run focused
+    and full tests plus Ruff.
+
+### Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Needed old detail is hidden | Model may repeat a tool call | Medium | Protect recent context, configurable thresholds, explicit marker |
+| Active and persisted histories diverge incorrectly | Session reconstruction loses context | Medium | Side-effect-free pruning and JSONL byte-preservation tests |
+| Tool-result shape is missed | Context remains large or metadata breaks | Medium | Cover every registered tool path and preserve IDs/roles |
+| Local latency does not improve | Complexity without benefit | Medium | Require before/after profiling before broad rollout |
+
+### Project Acceptance Criteria
+
+- [ ] Stale oversized tool outputs are selectively bounded in active requests.
+- [ ] Full original results remain available in durable session JSONL.
+- [ ] Recent tool-dependent behavior and event contracts remain intact.
+- [ ] Profiling demonstrates reduced active prompt growth and records metrics.
+- [ ] Focused tests, full pytest, Ruff, and `git diff --check` pass.
+
+### Rollout
+
+Ship behind a configurable setting initially. If the final behavior is
+user-visible, bump `one/config.py:VERSION`, add a `CHANGELOG.md` Unreleased entry,
+and regenerate TUI version snapshots according to repository release rules.
