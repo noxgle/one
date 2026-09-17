@@ -127,4 +127,31 @@ def test_pruning_can_be_disabled() -> None:
     )
     assert view == messages
     assert view is not messages
+    assert view[0] is messages[0]
     assert stats == {"count": 0, "tokensReclaimed": 0}
+
+
+def test_pruning_uses_copy_on_write_without_mutating_input_data() -> None:
+    untouched_data = {"nested": ["unchanged"]}
+    untouched = {"role": "user", "content": "recent", "metadata": untouched_data}
+    old = _tool("bash", "OLD-OUTPUT " * 100)
+    old["metadata"] = {"nested": ["preserved"]}
+    messages = [old, untouched]
+
+    view, stats = _prune(messages, recent_tokens=1)
+
+    assert stats["count"] == 1
+    assert view is not messages
+    assert view[1] is untouched
+    assert view[1]["metadata"] is untouched_data
+    assert view[0] is not old
+    assert view[0]["metadata"] is old["metadata"]
+    assert "OLD-OUTPUT" in old["content"]
+    assert json.loads(view[0]["content"])["pruned"] is True
+
+    repeated, repeated_stats = _prune(view, recent_tokens=1)
+    assert repeated == view
+    assert repeated is not view
+    assert repeated[0] is view[0]
+    assert repeated[1] is view[1]
+    assert repeated_stats == {"count": 0, "tokensReclaimed": 0}

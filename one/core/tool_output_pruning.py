@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from copy import deepcopy
 from typing import Any
 
 
@@ -19,17 +18,19 @@ def prune_stale_tool_outputs(
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Return a detached provider view and deterministic pruning statistics.
 
-    The session message list is deliberately never modified.  Tool results are
+    The session message list is deliberately never modified. Untouched messages
+    are safely shared; only messages whose top-level content is replaced are
+    cloned. Tool results are
     represented as JSON text in a ``toolResult`` message; the replacement keeps
     its envelope (including any provider-specific call IDs) but contains only a
     bounded, safe JSON marker.
     """
     stats = {"count": 0, "tokensReclaimed": 0}
     if not enabled or min_result_tokens <= 0:
-        return deepcopy(messages), stats
+        return list(messages), stats
 
     protected = 0
-    out = deepcopy(messages)
+    out = list(messages)
     for index in range(len(messages) - 1, -1, -1):
         original = messages[index]
         tokens = estimate_tokens(original)
@@ -69,8 +70,9 @@ def prune_stale_tool_outputs(
             if isinstance(value, (str, int)):
                 replacement[key] = str(value)[:128]
 
-        pruned = out[index]
+        pruned = dict(original)
         pruned["content"] = json.dumps(replacement, ensure_ascii=False, separators=(",", ":"))
+        out[index] = pruned
         stats["count"] += 1
         stats["tokensReclaimed"] += max(0, tokens - estimate_tokens(pruned))
     return out, stats
