@@ -175,7 +175,7 @@ async def test_rpc_theme_get_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         ],
     )
 
-    assert _resp(responses, "get_theme", "1")["data"]["theme"] == "default"
+    assert _resp(responses, "get_theme", "1")["data"]["theme"] == "hacker"
     assert _resp(responses, "get_theme", "3")["data"]["theme"] == "test-theme"
     assert session.settings_manager.get_theme() == "test-theme"
 

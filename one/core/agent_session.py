@@ -2152,7 +2152,7 @@ class AgentSession:
                         self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
                         break
                     except Exception as e:
-                        retries_enabled = bool(retry_cfg.get("enabled", True))
+                        retries_enabled = self.settings_manager.get_retry_enabled()
                         max_retries = int(retry_cfg.get("maxRetries", 3))
                         error_text = str(e).strip() or e.__class__.__name__
                         is_ctx_limit = self._is_context_limit_error(error_text)

@@ -93,10 +93,10 @@ def test_set_tool_settings_rejects_negative_via_setter() -> None:
         settings.set_tool_settings(max_steps=-5)
 
 
-def test_get_tool_max_steps_default_is_six() -> None:
-    """Default maxSteps is 6."""
+def test_get_tool_max_steps_default_is_hundred() -> None:
+    """Default maxSteps is 100."""
     settings = SettingsManager.in_memory()
-    assert settings.get_tool_max_steps() == 6
+    assert settings.get_tool_max_steps() == 100
 
 
 def test_get_tool_max_steps_zero_from_initial() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,12 @@ from one.modes.tui_mode import (
     format_tui_shortcuts,
     resolve_tui_theme,
 )
+
+
+def _visible_text_area_text(widget: Any) -> str:
+    """Read TextArea compositor lines, rather than its backing ``.text``."""
+    height = max(1, int(widget.size.height))
+    return "\n".join(widget.render_line(y).text for y in range(height))
 
 
 class _DummyModel:
@@ -334,6 +341,10 @@ async def test_tui_input_stays_responsive_during_rapid_streaming(tmp_path: Path)
         await pilot.press(*"second prompt")
         input_widget = app.query_one("#input", TextArea)
         assert input_widget.text == "second prompt"
+        # Check the rendered TextArea, not merely its backing value: this is
+        # the user-visible paint that regressed under UI event backlogs.
+        await pilot.pause()
+        assert "second prompt" in _visible_text_area_text(input_widget)
         assert not first_response_complete.is_set()
         await pilot.press("enter")
         await pilot.pause()
@@ -353,6 +364,108 @@ async def test_tui_input_stays_responsive_during_rapid_streaming(tmp_path: Path)
         assert "rapid-stream-output-" in stream
         assert stream.count("x") >= 4000
         assert stream.index("rapid-stream-output-") < stream.index("> second prompt")
+
+
+@pytest.mark.asyncio
+async def test_tui_input_paints_and_submits_while_provider_is_silent(tmp_path: Path) -> None:
+    """A silent async provider wait must leave the TextArea paintable."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.base import ChatResult
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GatedProvider:
+        async def chat(self, *args, **kwargs):
+            entered.set()
+            await release.wait()
+            return ChatResult(text="silent complete", raw={}, usage={}, stop_reason="stop")
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session.providers = {"openai": _GatedProvider()}
+    session.settings_manager.set_retry_enabled(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "first")
+        for _ in range(50):
+            await pilot.pause()
+            if entered.is_set():
+                break
+        assert entered.is_set()
+        await pilot.press(*"queued while silent")
+        input_widget = app.query_one("#input", TextArea)
+        await pilot.pause()
+        assert "queued while silent" in _visible_text_area_text(input_widget)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "queued while silent" in session.get_pending_queues()["steering"]
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_tui_thinking_batches_preserve_output_and_retry_boundary(tmp_path: Path) -> None:
+    """Thinking storms are coalesced without losing order or queued input."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.base import ChatResult
+
+    thinking_emitted = asyncio.Event()
+    release = asyncio.Event()
+
+    class _ThinkingThenRetryProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, *args, on_delta=None, on_thinking_delta=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                for index in range(200):
+                    assert on_thinking_delta is not None
+                    on_thinking_delta(f"think-{index};")
+                    await asyncio.sleep(0)
+                thinking_emitted.set()
+                await release.wait()
+                assert on_delta is not None
+                on_delta("partial-retry-output")
+                raise RuntimeError("retry boundary")
+            if on_delta is not None:
+                on_delta("final-retry-output")
+            return ChatResult(text="final-retry-output", raw={}, usage={}, stop_reason="stop")
+
+    session = _mk_app_session(
+        tmp_path,
+        runtime_key="sk-test",
+        settings_override={"retry": {"enabled": True, "maxRetries": 1, "baseDelayMs": 1, "maxDelayMs": 1}},
+    )
+    provider = _ThinkingThenRetryProvider()
+    session.providers = {"openai": provider}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "first")
+        for _ in range(300):
+            await pilot.pause()
+            if thinking_emitted.is_set() and "think-199;" in app._thinking_buffer:
+                break
+        assert thinking_emitted.is_set()
+        await pilot.press(*"queued during thinking")
+        input_widget = app.query_one("#input", TextArea)
+        await pilot.pause()
+        assert "queued during thinking" in _visible_text_area_text(input_widget)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "queued during thinking" in session.get_pending_queues()["steering"]
+        release.set()
+        for _ in range(300):
+            await pilot.pause()
+            if provider.calls == 2 and not session.is_streaming:
+                break
+        stream = "\n".join(app._stream_lines)
+        assert "think-0;" in stream and "think-199;" in stream
+        assert "partial-retry-output" not in stream
+        assert stream.count("final-retry-output") == 1
 
 
 @pytest.mark.asyncio
@@ -449,7 +562,7 @@ class _FakeLoader:
         return "You are a coding agent."
 
 
-def _mk_app_session(tmp_path: Path, runtime_key: str | None = None):
+def _mk_app_session(tmp_path: Path, runtime_key: str | None = None, settings_override: dict | None = None):
     from one.core.agent_session import AgentSession
     from one.core.auth_storage import AuthStorage
     from one.core.model_registry import ModelRegistry
@@ -462,7 +575,19 @@ def _mk_app_session(tmp_path: Path, runtime_key: str | None = None):
     registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
-    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    base_settings: dict[str, Any] = {"tools": {"maxSteps": 4, "timeoutSec": 5}, "bash": {"showOutput": True}}
+    if settings_override:
+        from copy import deepcopy
+        merged = deepcopy(base_settings)
+        for k, v in settings_override.items():
+            if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                merged[k].update(v)
+            else:
+                merged[k] = v
+        settings_to_use = merged
+    else:
+        settings_to_use = base_settings
+    settings = SettingsManager.in_memory(settings_to_use)
     session_manager = SessionManager.in_memory(str(tmp_path))
     return AgentSession(session_manager, settings, registry, _FakeLoader(), model, "medium")
 
@@ -4037,7 +4162,7 @@ async def test_tui_retry_discards_partial_block_one_fail(tmp_path: Path):
         deltas.append(line)
         deltas.append("\n")
 
-    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session = _mk_app_session(tmp_path, runtime_key="sk-test", settings_override={"retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 5, "maxDelayMs": 50}})
     session.providers = {"openai": _RetryingProvider(deltas, failures_left=1)}
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
@@ -4082,7 +4207,7 @@ async def test_tui_retry_discards_partial_block_two_fails(tmp_path: Path):
         deltas.append(line)
         deltas.append("\n")
 
-    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    session = _mk_app_session(tmp_path, runtime_key="sk-test", settings_override={"retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 5, "maxDelayMs": 50}})
     session.providers = {"openai": _RetryingProvider(deltas, failures_left=2)}
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
@@ -4108,6 +4233,106 @@ async def test_tui_retry_discards_partial_block_two_fails(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # Task 13 follow-up: _trim_stream must rebase _assistant_live_start_idx
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_coalesces_lifecycle_wakeup_and_drains_delta_batch(tmp_path: Path):
+    """A token storm uses the timer/manual batch drain, not token-rate messages."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        wakeups: list[dict[str, Any]] = []
+
+        def record_wakeup(message: Any) -> bool:
+            wakeups.append(message.payload)
+            return True
+
+        app.post_message = record_wakeup  # type: ignore[method-assign]
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        # The first event gets one wakeup. Subsequent deltas coalesce behind
+        # it and remain available for the 30 Hz/manual drain.
+        for _ in range(250):
+            session._emit(
+                {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "x"}}
+            )
+
+        assert wakeups == [{"type": "_flush_pending_ui_events"}]
+        with app._pending_ui_events_lock:
+            assert len(app._pending_ui_events) == 251
+
+        app._flush_pending_ui_events()
+        assert app._assistant_stream == "x" * 250
+        with app._pending_ui_events_lock:
+            assert app._pending_ui_events == []
+            assert app._ui_flush_wakeup_pending is False
+
+
+@pytest.mark.asyncio
+async def test_tui_batch_drain_does_not_refresh_sidebar_for_deltas(tmp_path: Path):
+    """Only lifecycle events refresh the sidebar; delta batches do not."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        refreshes = 0
+
+        def record_refresh() -> None:
+            nonlocal refreshes
+            refreshes += 1
+
+        app._refresh_sidebar = record_refresh  # type: ignore[method-assign]
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        app._flush_pending_ui_events()
+        assert refreshes == 1
+
+        for _ in range(100):
+            session._emit(
+                {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "x"}}
+            )
+        app._flush_pending_ui_events()
+        assert refreshes == 1
+
+        session._emit({"type": "turn_end", "ok": True})
+        app._flush_pending_ui_events()
+        assert refreshes == 2
+
+
+@pytest.mark.asyncio
+async def test_tui_atomic_batch_swap_preserves_concurrent_deltas(tmp_path: Path):
+    """Producer appends racing the UI drain cannot lose or reorder tokens."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._handle_session_event({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        token_count = 500
+
+        def produce() -> None:
+            for index in range(token_count):
+                session._emit(
+                    {
+                        "type": "message_update",
+                        "assistantMessageEvent": {"type": "text_delta", "delta": f"{index},"},
+                    }
+                )
+
+        producer = threading.Thread(target=produce)
+        producer.start()
+        while producer.is_alive():
+            app._flush_pending_ui_events()
+        producer.join()
+        app._flush_pending_ui_events()
+
+        assert app._assistant_stream == "".join(f"{index}," for index in range(token_count))
+        with app._pending_ui_events_lock:
+            assert app._pending_ui_events == []
 
 
 @pytest.mark.asyncio

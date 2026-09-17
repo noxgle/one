@@ -284,7 +284,7 @@ async def test_set_model_fallback_context_window(tmp_path: Path):
 def test_settings_subagents_and_bash_defaults() -> None:
     settings = SettingsManager.in_memory()
     assert settings.get_subagents_enabled() is True
-    assert settings.get_bash_show_output() is True
+    assert settings.get_bash_show_output() is False
     settings.set_subagents_enabled(False)
     settings.set_bash_show_output(False)
     assert settings.get_subagents_enabled() is False

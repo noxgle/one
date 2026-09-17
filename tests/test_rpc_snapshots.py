@@ -59,14 +59,17 @@ class _RuntimeHost:
         return {"cancelled": False, "selectedText": None}
 
 
-def _mk_session(tmp_path: Path) -> AgentSession:
+def _mk_session(tmp_path: Path, retry_settings: dict | None = None) -> AgentSession:
     auth = AuthStorage.in_memory()
     # NOTE: no runtime API key here — a runtime key would shadow stored keys
     # in get_provider_auth_status() and break login/logout assertions.
     registry = ModelRegistry.create(auth)
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
-    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
+    settings_dict = {"tools": {"maxSteps": 4, "timeoutSec": 5}}
+    if retry_settings:
+        settings_dict["retry"] = retry_settings
+    settings = SettingsManager.in_memory(settings_dict)
     session_manager = SessionManager.in_memory(str(tmp_path))
     return AgentSession(session_manager, settings, registry, _FakeLoader(str(tmp_path)), model, "medium")
 
@@ -257,9 +260,9 @@ async def test_rpc_conversation_snapshot_success(
 async def test_rpc_conversation_snapshot_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Default settings allow retry (maxRetries=3). The always-fail provider
+    # Explicit retry settings (maxRetries=3). The always-fail provider
     # exhausts all retries and the session terminates with an error.
-    session = _mk_session(tmp_path)
+    session = _mk_session(tmp_path, retry_settings={"maxRetries": 3, "baseDelayMs": 5, "maxDelayMs": 50})
     session.model_registry.set_stored_api_key("openai", "dummy")
     session.providers = {"openai": _AlwaysFailProvider()}
 

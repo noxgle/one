@@ -10,9 +10,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
-- **Responsive TUI streaming input** — rapid provider deltas are coalesced
-  into bounded UI renders, so keyboard input remains editable and submittable
-  while output streams without an unbounded Textual message backlog.
+- **Responsive TUI streaming input** — one ordered UI accumulator now batches
+  both ordinary and thinking deltas at a bounded cadence, flushing before
+  lifecycle boundaries. This avoids token-rate transcript/sidebar rebuilds so
+  keyboard input remains visibly editable and submittable while providers wait,
+  reason, stream, or retry.
 - **Steering checkpoints** — steering received while a tool is running is now
   delivered FIFO to the next provider request after its result, without waiting
   for the entire turn; terminal finish, abort, timeout, and error paths retain
@@ -88,6 +90,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Default settings** — new configurations now use the `hacker` theme, hide
+  bash output by default, allow 100 tool steps, and make no automatic retry
+  attempts (`retry.maxRetries=0`). Existing explicit global and project
+  settings remain unchanged.
 - **Compaction threshold** — new configurations now default to 80% context
   usage; existing saved `thresholdPercent` values are preserved.
 - **Provider timeout** — increased the default outer provider and HTTP

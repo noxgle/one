@@ -147,6 +147,30 @@ class _FailingProvider:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retry",
+    [
+        {"enabled": False, "mode": "on", "maxRetries": 3},
+        {"enabled": True, "mode": "off", "maxRetries": 3},
+    ],
+)
+async def test_disabled_retry_settings_prevent_retry_attempts(tmp_path: Path, retry: dict[str, Any]) -> None:
+    """The retry loop uses the same enabled/mode semantics as the getter."""
+    agent = _mk_agent(
+        tmp_path,
+        settings_override={
+            "retry": {**retry, "baseDelayMs": 1, "maxDelayMs": 1},
+        },
+    )
+    provider = _FailingProvider()
+    agent.providers = {"openai": provider}
+
+    await agent.prompt("test retry mode off")
+
+    assert provider.chat_call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_fail_closed_resets_state_on_unexpected_error(
     tmp_path: Path,
 ) -> None:

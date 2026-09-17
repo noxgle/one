@@ -1150,17 +1150,95 @@ the existing `steer`/`follow_up` delivery behavior remains unchanged.
 
 ### Diagnosis
 
-The input widget is not intentionally disabled or read-only during streaming.
-However, every provider text delta is posted as a separate `SessionEvent`, and
-`message_update` rebuilds the complete visible stream and calls
-`_render_stream()` for every delta (`one/modes/tui_mode.py:2751-2772`,
-`1107-1124`). Fast streams can therefore saturate Textual's message/render
-queue. Keyboard input is received but its visual update is delayed until the
-stream ends.
+Implemented: ordinary text was already 30 Hz buffered, but `thinking_delta`
+events still queued and rebuilt the transcript/sidebar one at a time. The TUI
+now uses one ordered, message-aware accumulator for text, thinking, and
+lifecycle events; contiguous delta runs render once while lifecycle events
+flush preceding output as barriers. Sidebar refreshes now occur on state-changing
+events rather than token-rate deltas. Spinner rendering remains independently
+timer-driven. The shared asyncio loop and synchronous persistence/tools/extensions
+remain unchanged; async HTTP waits yield normally.
+
+### Recurrence: architecture decision and investigation phases
+
+**Scope:** Diagnose and bound UI work without changing steering, persistence,
+or provider event contracts. Do not mix this with default-settings changes.
+**Non-goals:** Lowering context limits, rewriting providers, or immediately
+moving the whole runtime into a thread/process.
+**Assumptions:** Existing tests establish text correctness but do not establish
+paint latency during sustained reasoning. The reported environment is not yet
+reproduced. **Open question:** Does typing stall with thinking disabled and during
+a genuinely silent provider wait? Collect this during reproduction.
+
+**ADR — Measure first, then unify UI batching.** Prefer ordered, message-aware
+text/thinking batching and dirty-only sidebar work over a dedicated runtime
+thread. A separate thread can isolate blocking runtime work but cannot cure
+expensive UI rendering and introduces ownership, cancellation and shutdown risks.
+Offload only measured blocking operations with ordered, awaited completion;
+never fire-and-forget durable session writes. Consider stronger isolation only
+if bounded UI work still leaves measured runtime-induced stalls. Research
+suggestions of guaranteed speedups or duplicate text dispatch are not evidence.
+
+#### Phase R1: Reproduce and classify stalls
+
+**Objective/outcome:** Separate loop blockage, queued-event backlog and painting
+delay. **Prerequisites:** None. **Effort:** 0.5–1 day. **Confidence:** Medium.
+
+- [ ] **Task:** Add bounded opt-in diagnostics and realistic input regressions.
+  - **Description:** Record heartbeat lag, event enqueue age/count, pending bytes,
+    stream/sidebar render duration and request/persistence duration in a capped
+    in-memory ring. No prompt/output content or synchronous per-token logging.
+    Exercise silent waiting, sustained thinking-only/mixed streams, bursty adapter
+    input, and adjacent retry/message boundaries. Type while emission is proven
+    active, not only while a completed stream waits behind a test gate.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`,
+    `one/core/agent_session.py` and `one/core/session_manager.py` only for timing.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Input painting checked before provider release;
+    bounded traces locate the stalled phase without sensitive data. Establish a
+    repeatable local input-to-paint baseline and target p95 below 100 ms; avoid
+    flaky wall-clock thresholds in shared CI.
+  - **Verification:** Fake-provider pilot tests with rendered-widget assertions,
+    event/render counters and deterministic gates; no real APIs in tests.
+
+#### Phase R2: Bound the measured hot path
+
+**Objective/outcome:** Responsive editing/submission during all stream phases.
+**Prerequisites:** R1 evidence. **Effort:** 1–2 days. **Confidence:** Medium.
+
+- [x] **Task:** Implement ordered thinking/text batching and bounded refresh work.
+  - **Description:** Use message-aware batches and explicit lifecycle barriers;
+    bound frame work, avoid token-rate sidebar estimation, and avoid rebuilding
+    the transcript merely to animate a spinner where practical. Preserve wrapping
+    across chunk boundaries; do not format each arbitrary delta independently.
+    If R1 identifies blocking I/O, design a separately reviewed ordered offload
+    before changing persistence. Document overflow/backpressure behavior without
+    dropping semantic output or lifecycle events.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`,
+    `tests/test_tui_snapshots.py`; `one/config.py`, `CHANGELOG.md`,
+    `tests/snapshots/tui/` for the user-visible release update.
+  - **Details:** Implemented in `one/modes/tui_mode.py` with deterministic
+    pilot regressions for silent waits, high-rate thinking, visible compositor
+    input, queued submission, and retry output ordering.
+  - **Acceptance Criteria:** Reasoning and text do not create per-token render
+    backlogs; typing/editing/submission paints while emission continues; exact
+    output ordering survives retry, abort, clear, session switch and 500-line
+    trimming. Sidebar remains current at state changes. No persistence loss.
+  - **Verification:** Compare R1 traces under identical workloads; focused TUI,
+    steering and event tests, full `.venv/bin/python -m pytest -q`,
+    `.venv/bin/ruff check .`, `git diff --check`; inspect snapshot changes.
+
+**Risks/mitigations:** Batch boundary misattribution → message identity and barrier
+tests; stale sidebar → explicit dirty triggers; I/O ordering loss → awaited
+single-owner persistence; CI timing noise → deterministic backlog/paint tests.
+**Rollout/rollback:** Separate feature branch and patch release after R1/R2;
+rollback UI changes without storage migration. Diagnostics disabled by default.
+**Estimated timeline:** 1.5–3 days, longer only if evidence warrants runtime
+isolation. Completion requires measured responsiveness, not merely green tests.
 
 ### Implementation task
 
-- [ ] **Coalesce and throttle streamed TUI rendering**
+- [x] **Coalesce and throttle streamed TUI rendering**
   - **Description:** Keep collecting assistant deltas immediately, but coalesce
     pending `message_update` work and render at a bounded UI cadence rather than
     rebuilding the full stream for every token. Flush pending assistant text
@@ -1183,7 +1261,7 @@ stream ends.
       indicators, or terminal events are lost.
     - Rendering work is bounded/coalesced so a high-rate stream cannot starve
       keyboard events or cause an unbounded Textual message backlog.
-  - **Verification:** Add a deterministic TUI pilot test with a provider that
+  - **Verification:** Deterministic TUI pilot tests use a provider that
     emits many rapid deltas while the pilot types and submits a second message;
     assert the input text is visible before the first provider completes, the
     second message is queued, and all streamed output remains intact. Run the

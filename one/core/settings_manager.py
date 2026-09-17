@@ -28,10 +28,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "minResultTokens": 2048,
         "marker": "Stale tool output pruned from active context. Re-run the tool if details are required.",
     },
-    "retry": {"mode": "on", "maxRetries": 3, "baseDelayMs": 1500, "maxDelayMs": 20000},
+    "retry": {"enabled": True, "mode": "on", "maxRetries": 0, "baseDelayMs": 1500, "maxDelayMs": 20000},
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
-    "theme": "default",
+    "theme": "hacker",
     "defaultMode": "tui",
     "quietStartup": False,
     "steeringMode": "interrupt",
@@ -39,8 +39,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "transport": "http",
     "thinkingBudgets": {},
     "shellCommandPrefix": None,
-    "tools": {"maxSteps": 6, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit", "plan", "apply_patch"]},
-    "bash": {"showOutput": True},
+    "tools": {"maxSteps": 100, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit", "plan", "apply_patch"]},
+    "bash": {"showOutput": False},
     "subagents": {"enabled": True, "maxConcurrent": 2, "maxDepth": 3, "timeoutSec": 1800},
     "askUser": {"timeoutSec": 0},
     "providers": {"timeoutSec": 300},
@@ -170,7 +170,8 @@ class SettingsManager:
         return self.merged().get("sessionDir")
 
     def get_theme(self) -> str:
-        return self.merged().get("theme", "default")
+        theme = self.merged().get("theme", "hacker")
+        return theme if isinstance(theme, str) else "hacker"
 
     def get_default_mode(self) -> str:
         mode = str(self.merged().get("defaultMode") or "tui").lower()
@@ -213,12 +214,14 @@ class SettingsManager:
         return bool(self.merged().get("image", {}).get("blockImages", False))
 
     def get_retry_settings(self) -> dict[str, Any]:
-        return self.merged().get("retry", {})
+        settings = self.merged().get("retry", {})
+        return settings if isinstance(settings, dict) else {}
 
     def get_retry_enabled(self) -> bool:
-        """Backward-compatible: True when retry mode is 'on' or 'unlimited'."""
+        """Whether retries are enabled by both the legacy flag and retry mode."""
+        enabled = self.get_retry_settings().get("enabled", True)
         mode = self.get_retry_mode()
-        return mode in ("on", "unlimited")
+        return bool(enabled) and mode in ("on", "unlimited")
 
     def get_retry_mode(self) -> str:
         """Return the retry mode: 'off', 'on', or 'unlimited'."""
@@ -235,10 +238,11 @@ class SettingsManager:
         self._save_global()
 
     def get_compaction_settings(self) -> dict[str, Any]:
-        return self.merged().get("compaction", {})
+        settings = self.merged().get("compaction", {})
+        return settings if isinstance(settings, dict) else {}
 
     def get_compaction_threshold_percent(self) -> float:
-        return float(self.get_compaction_settings().get("thresholdPercent", 85))
+        return float(self.get_compaction_settings().get("thresholdPercent", 80))
 
     def get_compaction_recent_tokens(self) -> int:
         return int(self.get_compaction_settings().get("recentTokens", 8192))
@@ -278,10 +282,11 @@ class SettingsManager:
         return str(marker).strip()[:512] or "Stale tool output pruned from active context."
 
     def get_tool_settings(self) -> dict[str, Any]:
-        return self.merged().get("tools", {})
+        settings = self.merged().get("tools", {})
+        return settings if isinstance(settings, dict) else {}
 
     def get_tool_max_steps(self) -> int:
-        return int(self.get_tool_settings().get("maxSteps", 6))
+        return int(self.get_tool_settings().get("maxSteps", 100))
 
     def get_tool_timeout_sec(self) -> int:
         return int(self.get_tool_settings().get("timeoutSec", 30))
@@ -329,7 +334,8 @@ class SettingsManager:
             return 300
 
     def get_bash_show_output(self) -> bool:
-        return bool(self.merged().get("bash", {}).get("showOutput", True))
+        bash = self.merged().get("bash", {})
+        return bool(bash.get("showOutput", False)) if isinstance(bash, dict) else False
 
     def set_bash_show_output(self, enabled: bool, persist: bool = True) -> None:
         if persist:

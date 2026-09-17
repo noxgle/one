@@ -791,11 +791,22 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
             self._assistant_live_line_count = 0
-            # Providers can produce deltas much faster than Textual can paint.
-            # Keep the data off the message queue and paint it on a bounded UI
-            # cadence instead; terminal/session events explicitly flush first.
+            # Providers can produce both text and thinking deltas much faster
+            # than Textual can paint. Keep *all* session events in one ordered
+            # accumulator: delta runs are painted at a bounded cadence and a
+            # lifecycle event is a barrier that flushes everything before it.
+            # The listener may be called from a provider thread, so it must not
+            # touch Textual widgets or post one message per token.
+            self._pending_ui_events: list[dict[str, Any]] = []
+            self._pending_ui_events_lock = threading.Lock()
+            # One coalesced flush wakeup may be queued at a time; the 30 Hz
+            # interval remains a safety net if no wakeup can be posted.
+            self._ui_flush_wakeup_pending = False
+            self._session_listener_generation = 0
+            # Compatibility observability for the existing direct TUI tests.
+            # The ordered event list above remains the sole rendering source.
             self._pending_assistant_deltas = ""
-            self._pending_assistant_deltas_lock = threading.Lock()
+            self._pending_assistant_deltas_lock = self._pending_ui_events_lock
             self._assistant_stream_open = False
             self._active_tool_block: tuple[str, int, int, str] | None = None
             self._turn_active = False
@@ -856,7 +867,7 @@ if TEXTUAL_AVAILABLE:
             # Drive the "waiting for the model" spinner while a turn is in
             # flight but no assistant text is currently streaming.
             self.set_interval(0.15, self._tick_waiting)
-            self.set_interval(1 / 30, self._flush_pending_assistant_deltas)
+            self.set_interval(1 / 30, self._flush_pending_ui_events)
             self._bind_session()
             _logo_lines = [
                 r" ██████╗ ███╗   ██╗███████╗",
@@ -891,31 +902,60 @@ if TEXTUAL_AVAILABLE:
             Used on mount and after /fork, which swaps the underlying session
             for a fresh one — the old listener must be detached first.
             """
+            # Invalidate before detaching. A callback already in flight from
+            # the old session must not append after its final drain.
+            with self._pending_ui_events_lock:
+                self._session_listener_generation += 1
+                listener_generation = self._session_listener_generation
             if callable(self._off_listener):
                 try:
                     self._off_listener()
                 except Exception:
                     pass
                 self._off_listener = None
+            # A session switch is a transcript boundary: drain accepted old
+            # events. Only an explicit user clear is allowed to discard them.
+            self._flush_pending_ui_events()
 
             def _listener(event: dict[str, Any]) -> None:
-                if event.get("type") == "message_update":
-                    assistant_event = event.get("assistantMessageEvent", {})
-                    if assistant_event.get("type") == "text_delta":
-                        delta = str(assistant_event.get("delta", ""))
-                        if delta:
-                            # This callback may be invoked by a provider-owned
-                            # thread.  Do not enqueue one Textual message per
-                            # token: a lock-protected buffer is drained by the
-                            # UI timer instead.
-                            with self._pending_assistant_deltas_lock:
-                                self._pending_assistant_deltas += delta
-                            self._last_delta_ts = time.monotonic()
+                # Preserve the session's event order, including the ordering
+                # between thinking and ordinary output. Lifecycle events are
+                # processed as barriers by _flush_pending_ui_events.
+                is_delta = event.get("type") == "thinking_delta" or (
+                    event.get("type") == "message_update"
+                    and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
+                )
+                wake_ui = False
+                with self._pending_ui_events_lock:
+                    if listener_generation != self._session_listener_generation:
                         return
-                try:
-                    self.post_message(SessionEvent(event))
-                except Exception:
-                    self.call_from_thread(self.post_message, SessionEvent(event))
+                    self._pending_ui_events.append(event)
+                    if (
+                        event.get("type") == "message_update"
+                        and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
+                    ):
+                        self._pending_assistant_deltas += str(event.get("assistantMessageEvent", {}).get("delta", ""))
+                    if self.is_running and not self._ui_flush_wakeup_pending:
+                        self._ui_flush_wakeup_pending = True
+                        wake_ui = True
+                if event.get("type") in ("message_update", "thinking_delta"):
+                    self._last_delta_ts = time.monotonic()
+                if wake_ui:
+                    # A coalesced private UI wakeup; session payloads stay in
+                    # the ordered accumulator and no token adds a message.
+                    try:
+                        self.post_message(SessionEvent({"type": "_flush_pending_ui_events"}))
+                    except Exception:
+                        try:
+                            self.call_from_thread(
+                                self.post_message,
+                                SessionEvent({"type": "_flush_pending_ui_events"}),
+                            )
+                        except Exception:
+                            # The timer remains a safe fallback; permit a
+                            # later lifecycle event to attempt a wakeup again.
+                            with self._pending_ui_events_lock:
+                                self._ui_flush_wakeup_pending = False
 
             self._off_listener = self.session.subscribe(_listener)
 
@@ -949,22 +989,127 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 pass
 
-        def _flush_pending_assistant_deltas(self) -> None:
-            """Render accumulated provider deltas at most once per UI tick."""
-            with self._pending_assistant_deltas_lock:
-                delta = self._pending_assistant_deltas
+        def _flush_pending_ui_events(self) -> None:
+            """Drain ordered session events without creating a token-rate UI backlog."""
+            with self._pending_ui_events_lock:
+                pending, self._pending_ui_events = self._pending_ui_events, []
                 self._pending_assistant_deltas = ""
-            if not delta:
+                # The queued wakeup is consumed when its drain begins. A
+                # concurrent lifecycle append can now schedule its successor.
+                self._ui_flush_wakeup_pending = False
+            if not pending:
                 return
-            if not self._assistant_stream_open:
-                # message_start is posted separately and must establish live
-                # block state before its deltas are rendered. Put the batch
-                # back rather than losing an early timer race.
-                with self._pending_assistant_deltas_lock:
-                    self._pending_assistant_deltas = delta + self._pending_assistant_deltas
-                return
+
+            delta_events: list[dict[str, Any]] = []
+
+            def flush_deltas() -> None:
+                if not delta_events:
+                    return
+                changed = False
+                # Process in event order, but collapse contiguous deltas of the
+                # same kind so wrapping/rebuilding happens once per run.
+                index = 0
+                while index < len(delta_events):
+                    event = delta_events[index]
+                    event_type = event.get("type")
+                    if event_type == "message_update":
+                        assistant_event = event.get("assistantMessageEvent", {})
+                        kind = assistant_event.get("type")
+                    else:
+                        kind = "thinking"
+                    chunks: list[str] = []
+                    while index < len(delta_events):
+                        candidate = delta_events[index]
+                        if candidate.get("type") == "message_update":
+                            candidate_kind = candidate.get("assistantMessageEvent", {}).get("type")
+                        else:
+                            candidate_kind = "thinking"
+                        if candidate_kind != kind:
+                            break
+                        if candidate_kind == "text_delta":
+                            chunks.append(str(candidate.get("assistantMessageEvent", {}).get("delta", "")))
+                        else:
+                            chunks.append(str(candidate.get("delta", "")))
+                        index += 1
+                    delta = "".join(chunks)
+                    if kind == "text_delta":
+                        changed = self._apply_assistant_deltas(delta) or changed
+                    else:
+                        changed = self._apply_thinking_delta(delta) or changed
+                delta_events.clear()
+                if changed:
+                    self._render_stream()
+
+            for event in pending:
+                event_type = event.get("type")
+                is_text_delta = (
+                    event_type == "message_update"
+                    and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
+                )
+                if is_text_delta or event_type == "thinking_delta":
+                    delta_events.append(event)
+                    continue
+                flush_deltas()
+                self._handle_session_event(event)
+            flush_deltas()
+            # Do not clear a wakeup scheduled by an append racing this drain.
+            # With no successor batch, the coalescing flag is reset at both
+            # drain boundaries.
+            with self._pending_ui_events_lock:
+                if not self._pending_ui_events:
+                    self._ui_flush_wakeup_pending = False
+
+        def _flush_pending_assistant_deltas(self) -> None:
+            """Backward-compatible test helper for the ordered UI drain."""
+            self._flush_pending_ui_events()
+
+        def _apply_assistant_deltas(self, delta: str) -> bool:
+            if not delta or not self._assistant_stream_open:
+                return False
             self._assistant_stream += delta
             self._append_assistant_delta(delta)
+            return True
+
+        def _apply_thinking_delta(self, delta: str) -> bool:
+            """Append one coalesced thinking run without rendering it yet."""
+            if not delta or (not delta.strip() and not self._thinking_label_shown):
+                return False
+            started_segment = not self._thinking_label_shown
+            if started_segment:
+                self._write("Thinking:", render=False)
+                self._thinking_label_shown = True
+                self._thinking_buffer = ""
+                self._thinking_line_idx = None
+            self._thinking_buffer += sanitize_display_text(delta)
+            escaped = rich_escape(self._thinking_buffer)
+            line_text = f"{_THINKING_TEXT_MARK}[{self._theme.info}]{escaped}[/]"
+            if (
+                self._thinking_line_idx is not None
+                and 0 <= self._thinking_line_idx < len(self._stream_lines)
+                and self._stream_lines[self._thinking_line_idx].startswith(_THINKING_TEXT_MARK)
+            ):
+                self._stream_lines[self._thinking_line_idx] = line_text
+            else:
+                # Spinner insertion/removal can shift a live index without a
+                # 500-line trim. Recover the current segment's marked line
+                # rather than duplicating the accumulated thinking transcript.
+                if not started_segment:
+                    for index in range(len(self._stream_lines) - 1, -1, -1):
+                        if self._stream_lines[index].startswith(_THINKING_TEXT_MARK):
+                            self._thinking_line_idx = index
+                            self._stream_lines[index] = line_text
+                            break
+                    else:
+                        self._stream_lines.append("")
+                        self._stream_lines.append(line_text)
+                        self._thinking_line_idx = len(self._stream_lines) - 1
+                        self._trim_stream(render=False)
+                else:
+                    self._stream_lines.append("")
+                    self._stream_lines.append(line_text)
+                    self._thinking_line_idx = len(self._stream_lines) - 1
+                    self._trim_stream(render=False)
+            return True
 
         def _remove_thinking_line(self) -> None:
             """Drop the animated 'waiting' line from the stream, if present.
@@ -1033,11 +1178,11 @@ if TEXTUAL_AVAILABLE:
                 self._trim_stream()
                 self._thinking_active = True
 
-        def _write(self, text: str, kind: str = "normal") -> None:
+        def _write(self, text: str, kind: str = "normal", *, render: bool = True) -> None:
             self._stream_lines.append(sanitize_display_text(text))
-            self._trim_stream()
+            self._trim_stream(render=render)
 
-        def _trim_stream(self) -> int:
+        def _trim_stream(self, *, render: bool = True) -> int:
             """Trim *_stream_lines* to 500 entries.  Returns the number of
             lines dropped from the front (0 if no trim happened) so callers
             can rebase any absolute indexes they hold."""
@@ -1094,7 +1239,8 @@ if TEXTUAL_AVAILABLE:
                     if start >= len(self._stream_lines) or end > len(self._stream_lines):
                         self._active_tool_block = None
 
-            self._render_stream()
+            if render:
+                self._render_stream()
             return dropped
 
         def _chat_panel_width(self) -> int:
@@ -1161,7 +1307,7 @@ if TEXTUAL_AVAILABLE:
             else:
                 self._stream_lines.extend(panel_lines)
             self._assistant_live_line_count = len(panel_lines)
-            self._trim_stream()
+            self._trim_stream(render=False)
 
         def _discard_live_assistant_block(self) -> None:
             """Remove the currently-tracked live assistant block from
@@ -2718,11 +2864,16 @@ if TEXTUAL_AVAILABLE:
             self._refresh_sidebar()
 
         def action_clear_stream(self) -> None:
+            # Clear is a lifecycle barrier: apply pending state transitions
+            # first, then intentionally discard the visible transcript.
+            self._flush_pending_ui_events()
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
             self._stream_lines = []
-            with self._pending_assistant_deltas_lock:
+            with self._pending_ui_events_lock:
+                self._pending_ui_events = []
                 self._pending_assistant_deltas = ""
+                self._ui_flush_wakeup_pending = False
             self._assistant_stream_open = False
             self._assistant_stream = ""
             self._assistant_has_live_delta = False
@@ -2793,12 +2944,18 @@ if TEXTUAL_AVAILABLE:
                 pass
 
         async def on_session_event(self, message: SessionEvent) -> None:
-            event = message.payload
+            """Handle manually-posted session events on Textual's UI loop.
+
+            Normal session delivery goes through the ordered accumulator above;
+            retaining this handler keeps direct UI-event tests/extensions working.
+            """
+            if message.payload.get("type") == "_flush_pending_ui_events":
+                self._flush_pending_ui_events()
+            else:
+                self._handle_session_event(message.payload)
+
+        def _handle_session_event(self, event: dict[str, Any]) -> None:
             et = event.get("type")
-            # Non-delta events delimit visible transcript state.  Flush before
-            # handling them so a final token cannot be painted after its end,
-            # tool, retry, error, abort, or terminal event.
-            self._flush_pending_assistant_deltas()
             if et == "message_start":
                 msg = event.get("message", {})
                 if msg.get("role") == "assistant":
@@ -2819,8 +2976,8 @@ if TEXTUAL_AVAILABLE:
                     # Deltas are coalesced in the session listener.  Retain
                     # this path for manually-posted test/UI events.
                     self._last_delta_ts = time.monotonic()
-                    self._assistant_stream += delta
-                    self._append_assistant_delta(delta)
+                    if self._apply_assistant_deltas(delta):
+                        self._render_stream()
             elif et == "message_end":
                 msg = event.get("message", {})
                 if msg.get("role") == "assistant":
@@ -2854,32 +3011,7 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_line_count = 0
                     self._assistant_stream_open = False
             elif et == "thinking_delta":
-                delta = event.get("delta", "")
-                # Ignore exact empty string; whitespace-only allowed once block is open.
-                if not delta:
-                    pass  # skip empty
-                elif not delta.strip() and not self._thinking_label_shown:
-                    pass  # whitespace-only with no block open → skip
-                else:
-                    # Substantive delta or whitespace within an open block.
-                    if not self._thinking_label_shown:
-                        self._write("Thinking:")
-                        self._thinking_label_shown = True
-                        self._thinking_buffer = ""
-                        self._thinking_line_idx = None
-                    self._thinking_buffer += sanitize_display_text(delta)
-                    escaped = rich_escape(self._thinking_buffer)
-                    line_text = f"{_THINKING_TEXT_MARK}[{self._theme.info}]{escaped}[/]"
-                    if (
-                        self._thinking_line_idx is not None
-                        and 0 <= self._thinking_line_idx < len(self._stream_lines)
-                        and self._stream_lines[self._thinking_line_idx].startswith(_THINKING_TEXT_MARK)
-                    ):
-                        self._stream_lines[self._thinking_line_idx] = line_text
-                    else:
-                        self._stream_lines.append("")
-                        self._stream_lines.append(line_text)
-                        self._thinking_line_idx = len(self._stream_lines) - 1
+                if self._apply_thinking_delta(str(event.get("delta", ""))):
                     self._render_stream()
             elif et == "turn_start":
                 # A turn is in flight — arm the waiting spinner. This also
@@ -3003,7 +3135,13 @@ if TEXTUAL_AVAILABLE:
                 else:
                     self._write_tool_block("Plan: cleared")
 
-            self._refresh_sidebar()
+            # Delta batches repaint only the stream. Sidebar work stays tied
+            # to lifecycle/state-changing events, never token rate.
+            if not (
+                et == "thinking_delta"
+                or (et == "message_update" and event.get("assistantMessageEvent", {}).get("type") == "text_delta")
+            ):
+                self._refresh_sidebar()
 
 
 class TuiMode:
