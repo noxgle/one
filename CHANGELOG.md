@@ -46,6 +46,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **llama.cpp configuration guidance** — document remote/custom
+  `models.json` entries, context-window alignment, tool parser order, endpoint
+  verification, and safe host configuration.
+
 - **Selective stale tool-output pruning** — oversized old tool results are now
   replaced only in provider requests with bounded markers, while complete JSONL
   session history remains unchanged. The protected recent window and thresholds

@@ -599,7 +599,9 @@ one --provider llama.cpp --model local --llama-cpp-url http://127.0.0.1:8089
 
 `llama.cpp` local provider does not require an API key by default.
 
-You can also set endpoint per model in `models.json`:
+For a remote or custom `llama.cpp` server, add the model entry to
+`~/.config/one/models.json` (or to `$ONE_CODING_AGENT_DIR/models.json` when that
+variable is set):
 
 ```json
 {
@@ -607,9 +609,9 @@ You can also set endpoint per model in `models.json`:
     "llama.cpp": [
       {
         "id": "local",
-        "reasoning": false,
-        "contextWindow": 32768,
-        "url": "http://127.0.0.1:8089",
+        "reasoning": true,
+        "contextWindow": 122880,
+        "url": "http://<LLAMA_CPP_HOST>:8089",
         "toolParser": [
           { "type": "raw-function-call" },
           { "type": "json" }
@@ -619,6 +621,27 @@ You can also set endpoint per model in `models.json`:
   }
 }
 ```
+
+Replace `<LLAMA_CPP_HOST>` with the hostname or IP address reachable from the
+machine running `one`. The URL should be the server root (for example,
+`http://127.0.0.1:8089`), not the `/v1` path; `one` calls the OpenAI-compatible
+`/v1/chat/completions` endpoint itself. `contextWindow` must match the context
+size configured in `llama-server` (for example, `--ctx-size 122880`); do not
+claim a larger window than the server actually allocates. `toolParser` tries
+raw function-call output first and JSON output second. Set `reasoning` to
+`true` only when the selected model/server exposes reasoning output.
+
+Verify that the endpoint and model are reachable before starting a session:
+
+```bash
+curl http://<LLAMA_CPP_HOST>:8089/v1/models
+one --provider llama.cpp --model local
+```
+
+If the server runs on another machine, bind `llama-server` to an address
+reachable from the client (for example, with its `--host` option) and allow TCP
+port `8089` through the host firewall. Keep the server off the public internet
+unless it is protected separately.
 
 ### Ollama
 
