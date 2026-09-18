@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Tool/MCP evidence preservation** — stale tool-output pruning is now disabled
+  by default, so complete older results remain in provider requests. Pruning is
+  an explicit opt-in for users who prefer smaller requests.
 - **Responsive TUI streaming input** — one ordered UI accumulator now batches
   both ordinary and thinking deltas at a bounded cadence, flushing before
   lifecycle boundaries. This avoids token-rate transcript/sidebar rebuilds so

@@ -33,16 +33,42 @@ def test_get_subagents_timeout_sec_invalid_fallback() -> None:
     assert settings2.get_subagents_timeout_sec() == 1800
 
 
-def test_tool_output_pruning_defaults_and_opt_out() -> None:
+def test_tool_output_pruning_defaults_to_evidence_preservation_and_allows_opt_in() -> None:
     settings = SettingsManager.in_memory()
-    assert settings.get_tool_output_pruning_enabled() is True
+    assert settings.get_tool_output_pruning_enabled() is False
     assert settings.get_tool_output_pruning_recent_tokens() == 8192
     assert settings.get_tool_output_pruning_min_result_tokens() == 2048
 
-    disabled = SettingsManager.in_memory({"toolOutputPruning": {"enabled": False}})
-    assert disabled.get_tool_output_pruning_enabled() is False
-    invalid = SettingsManager.in_memory({"toolOutputPruning": None})
-    assert invalid.get_tool_output_pruning_enabled() is True
+    enabled = SettingsManager.in_memory({"toolOutputPruning": {"enabled": True}})
+    assert enabled.get_tool_output_pruning_enabled() is True
+
+
+@pytest.mark.parametrize(
+    "tool_output_pruning",
+    [{}, None, {"enabled": None}, {"enabled": "true"}, {"enabled": 1}],
+)
+def test_tool_output_pruning_malformed_or_absent_config_does_not_enable_it(tool_output_pruning: object) -> None:
+    settings = SettingsManager.in_memory({"toolOutputPruning": tool_output_pruning})
+    assert settings.get_tool_output_pruning_enabled() is False
+
+
+def test_explicit_tool_output_pruning_opt_in_survives_global_and_project_settings_reload(tmp_path) -> None:
+    agent_dir = tmp_path / "agent"
+    project_dir = tmp_path / "project"
+    agent_dir.mkdir()
+    project_dir.mkdir()
+    (agent_dir / "settings.json").write_text('{"toolOutputPruning": {"enabled": true}}', encoding="utf-8")
+
+    global_enabled = SettingsManager(str(project_dir), str(agent_dir))
+    assert global_enabled.get_tool_output_pruning_enabled() is True
+
+    project_settings_dir = project_dir / ".one"
+    project_settings_dir.mkdir()
+    (project_settings_dir / "settings.json").write_text(
+        '{"toolOutputPruning": {"enabled": true}}', encoding="utf-8"
+    )
+    reloaded = SettingsManager(str(project_dir), str(agent_dir))
+    assert reloaded.get_tool_output_pruning_enabled() is True
 
 
 # ── Default settings: effective getter values ───────────────────────────────

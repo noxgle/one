@@ -81,19 +81,21 @@ def _agent(session: SessionManager, settings: SettingsManager) -> AgentSession:
     return AgentSession(session, settings, registry, _Loader(), model, "off")
 
 
-def test_provider_view_reduces_request_without_mutating_or_losing_persisted_history(tmp_path) -> None:
+def test_default_provider_view_preserves_old_mcp_evidence_across_reload_and_persistence(tmp_path) -> None:
     session_dir = tmp_path / "sessions"
     session = SessionManager.create(str(tmp_path), str(session_dir))
-    old = _tool("bash", "DURABLE-TOOL-OUTPUT " * 100)
+    old = _tool(
+        "research.search",
+        "ANALYST-FACT: CPI was 3.2 percent on 2026-04-12; "
+        "ANALYST-FACT: copper inventory was 184,731 tonnes; " * 100,
+    )
     recent = _tool("read", "RECENT-TOOL-OUTPUT " * 100)
     session.append_message(old)
     session.append_message(recent)
     path = session.session_file
     assert path is not None
     original_jsonl = open(path, encoding="utf-8").read()
-    settings = SettingsManager.in_memory(
-        {"toolOutputPruning": {"recentTokens": 400, "minResultTokens": 10, "marker": "stale marker"}}
-    )
+    settings = SettingsManager.in_memory({"toolOutputPruning": {"recentTokens": 400, "minResultTokens": 10}})
     agent = _agent(session, settings)
 
     request = agent._flatten_messages_for_provider()
@@ -101,18 +103,47 @@ def test_provider_view_reduces_request_without_mutating_or_losing_persisted_hist
     raw_size = sum(_tokens(m) for m in agent.messages)
     request_size = sum(_tokens(m) for m in request[1:])
 
-    assert "DURABLE-TOOL-OUTPUT" not in request_text
+    assert "CPI was 3.2 percent on 2026-04-12" in request_text
+    assert "copper inventory was 184,731 tonnes" in request_text
     assert "RECENT-TOOL-OUTPUT" in request_text
-    assert request_size < raw_size
-    assert agent.get_session_stats()["toolOutputPruning"]["count"] == 1
+    assert request_size == raw_size
+    assert agent.get_session_stats()["toolOutputPruning"] == {"count": 0, "tokensReclaimed": 0}
     assert open(path, encoding="utf-8").read() == original_jsonl
 
     reopened = SessionManager.open(path)
     restored = reopened.build_session_context()["messages"]
     assert restored[0] == old
-    assert "DURABLE-TOOL-OUTPUT" in restored[0]["content"]
-    reloaded_request = _agent(reopened, settings)._flatten_messages_for_provider()
-    assert "DURABLE-TOOL-OUTPUT" not in "\n".join(str(m["content"]) for m in reloaded_request)
+    assert "CPI was 3.2 percent on 2026-04-12" in restored[0]["content"]
+    reloaded_agent = _agent(reopened, settings)
+    reloaded_request = reloaded_agent._flatten_messages_for_provider()
+    reloaded_text = "\n".join(str(m["content"]) for m in reloaded_request)
+    assert "CPI was 3.2 percent on 2026-04-12" in reloaded_text
+    assert "copper inventory was 184,731 tonnes" in reloaded_text
+    assert reloaded_agent.get_session_stats()["toolOutputPruning"] == {"count": 0, "tokensReclaimed": 0}
+
+
+def test_explicit_enabled_pruning_still_reduces_provider_view_without_losing_jsonl(tmp_path) -> None:
+    session_dir = tmp_path / "sessions"
+    session = SessionManager.create(str(tmp_path), str(session_dir))
+    old = _tool("research.search", "DURABLE-TOOL-OUTPUT " * 100)
+    recent = _tool("read", "RECENT-TOOL-OUTPUT " * 100)
+    session.append_message(old)
+    session.append_message(recent)
+    path = session.session_file
+    assert path is not None
+    original_jsonl = open(path, encoding="utf-8").read()
+    settings = SettingsManager.in_memory(
+        {"toolOutputPruning": {"enabled": True, "recentTokens": 400, "minResultTokens": 10, "marker": "stale marker"}}
+    )
+
+    agent = _agent(session, settings)
+    request = agent._flatten_messages_for_provider()
+    request_text = "\n".join(str(m["content"]) for m in request)
+
+    assert "DURABLE-TOOL-OUTPUT" not in request_text
+    assert "RECENT-TOOL-OUTPUT" in request_text
+    assert agent.get_session_stats()["toolOutputPruning"]["count"] == 1
+    assert open(path, encoding="utf-8").read() == original_jsonl
 
 
 def test_pruning_can_be_disabled() -> None:

@@ -1486,6 +1486,10 @@ explicit, and the complete suite remains green.
 
 ## Project: Selective stale tool-output pruning
 
+> Superseded policy: the evidence-retention corrective plan below takes priority
+> over ADR-005/006 and the token-reduction acceptance criteria in this section.
+> Historical implementation completion does not establish analytical correctness.
+
 Work happens on branch `feat/selective-tool-output-pruning`, based on the
 current `main`; do not merge, push, or delete the branch without approval.
 
@@ -1681,3 +1685,114 @@ reclaimed tokens, and improved or stable local-model time-to-first-token.
 Ship behind a configurable setting initially. If the final behavior is
 user-visible, bump `one/config.py:VERSION`, add a `CHANGELOG.md` Unreleased entry,
 and regenerate TUI version snapshots according to repository release rules.
+
+## Corrective priority: Preserve analytical tool evidence
+
+### Goal and Context
+
+Stop automatically hiding analytical source data solely because it is old and
+large. User reports a factual-analysis failure with the literal pruning marker
+in the answer. The transformation in `one/core/tool_output_pruning.py` replaces
+the whole eligible result, not just redundant text. JSONL durability is not
+model accessibility. The report is not independently reproduced; the information
+removal mechanism is confirmed. Earlier repeated-X profiling measured token
+savings, not the ability to use older evidence.
+
+### Scope, Constraints and Assumptions
+
+- Preserve tool-result content in normal provider requests; disable automatic
+  age/size pruning by default. Keep explicit existing configuration overrides
+  visible and explain how to disable pruning for those users.
+- No changes to real user configuration, historical JSONL or existing pruning
+  artifacts during planning. Runtime source history remains intact before
+  compaction; after compaction, disabling pruning alone cannot restore it.
+- Non-goals: unlimited model context, automatic replay of tools, semantic
+  classification by tool name, or a new retrieval subsystem in the immediate fix.
+- Tech stack: existing Python settings merge, AgentSession provider preparation,
+  JSONL SessionManager and fake-provider pytest/explicit asyncio tests.
+- Open questions: whether to remove the opt-in legacy pruning path altogether;
+  later archival retrieval and evidence pinning need a separate approved design.
+
+### Architecture Decision: Evidence preservation before prompt reduction
+
+**Decision:** Default to unpruned tool results. Preserve existing context-limit
+checks and compaction settings; evaluate compaction's factual fidelity separately.
+**Alternatives:** Raise pruning thresholds; summaries plus archive retrieval;
+task-scoped pinned evidence. Raising thresholds merely delays the same failure.
+Retrieval can recover exact originals but needs stable references, authorization,
+bounded reads and tests. Pinning alone cannot keep unlimited evidence in a finite
+context and can miss necessary data.
+**Trade-offs:** Larger prompts and potentially slower requests/earlier compaction.
+**Consequences:** Do not claim that disabling pruning eliminates hallucinations.
+Do not lower compaction thresholds or replace summaries with count-only markers
+as a safety fix: both can remove more useful evidence. Do not automatically rerun
+tools: results may change and commands may have side effects. Missing evidence
+must be acknowledged rather than treated as factual input.
+
+### Phase E1: Disable implicit pruning and document existing-user recovery
+
+**Objective/outcome:** New/default sessions retain older large tool evidence.
+**Prerequisites:** None. **Effort:** 0.5 day. **Confidence:** High.
+
+- [x] **Task:** Change the default and fallback to pruning disabled.
+  - **Description:** Set `toolOutputPruning.enabled` default/fallback false;
+    retain the existing opt-out path and explicit overrides without silently
+    rewriting user files. Document `/config toolOutputPruning.enabled true`
+    and `one config toolOutputPruning.enabled true` as the opt-in path,
+    persistence/restart behavior,
+    and that already-compacted evidence needs recovery from originals. Keep
+    context estimates aligned with the actual full provider payload.
+  - **Files:** `one/core/settings_manager.py`, `tests/test_settings.py`,
+    `tests/test_tool_output_pruning.py`, `README.md`, `CHANGELOG.md`,
+    `one/config.py`, `tests/snapshots/tui/`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Omitted setting means no pruning; explicit false
+    retains full content; explicit legacy true is documented/tested. No storage
+    migration or tool replay. Release note explains correctness/latency trade-off.
+  - **Verification:** Fake-provider requests contain old oversized results;
+    assert zero pruning stats and unchanged raw history/JSONL. Test global/project
+    override precedence and reload in isolated scratch state.
+
+### Phase E2: Make evidence fidelity the acceptance gate
+
+**Objective/outcome:** Regressions detect loss of exact old facts, not just bytes.
+**Prerequisites:** E1. **Effort:** 0.5–1 day. **Confidence:** Medium.
+
+- [ ] **Task:** Add analytical evidence fixtures and separate compaction checks.
+  - **Description:** Generate old large results with unique values, units, dates
+    and conflicting records, followed by enough tool calls to exceed the former
+    protected window. Assert exact facts remain in outbound requests before
+    compaction, including after reload and on follow-up. Stub providers verify
+    payloads, not real-model intelligence. Separately exercise compaction to expose
+    its loss boundary. An opt-in controlled model evaluation must compare known
+    answers/citations, record unknowns and factual errors, then measure latency.
+  - **Files:** `tests/test_tool_output_pruning.py`, `tests/test_compaction.py`,
+    `scripts/profile_long_session.py` (optional evaluation mode).
+  - **Dependencies:** E1.
+  - **Acceptance Criteria:** Every seeded old fact present before compaction;
+    defaults never substitute the stale-output marker. Compaction limitations are
+    explicit; no fake-provider success presented as proof of model accuracy.
+    No real API calls in automated tests.
+  - **Verification:** Focused tests, full `.venv/bin/python -m pytest -q`,
+    `.venv/bin/ruff check .`, `git diff --check`; manual opt-in comparison uses
+    fixed fixtures and identical model settings, not repeated-X output.
+
+### Risks, Rollout and Project Acceptance
+
+- Larger context/latency: retain accurate context limits, measure separately from
+  UI responsiveness; do not reintroduce silent removal as a performance fix.
+- Existing explicit `enabled: true`: release guidance and override tests; changing
+  defaults alone does not change this user's stored setting.
+- Compaction remains lossy: do not promise full historical recall; archive
+  retrieval requires separate design and session-scoped access control.
+- Diagnostics record only counts/timings, not confidential tool contents.
+- Rollout as a user-visible patch with version/changelog/snapshot updates;
+  no destructive migration. Legacy opt-in is a rollback option, not recommended
+  for factual analysis.
+- [x] Default provider requests preserve older tool evidence within the available
+  context; override/reload/persistence tests pass.
+- [x] Documentation distinguishes complete archive from accessible model context.
+- [x] Factual payload verification precedes any token-saving performance claim.
+
+**Estimated timeline:** 1–1.5 days; retrieval/pinning excluded. Planning only:
+E1 implementation and verification are complete; E2 remains pending.

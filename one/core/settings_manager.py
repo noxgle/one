@@ -23,7 +23,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "maxSummaryInputTokens": 20000,
     },
     "toolOutputPruning": {
-        "enabled": True,
+        "enabled": False,
         "recentTokens": 8192,
         "minResultTokens": 2048,
         "marker": "Stale tool output pruned from active context. Re-run the tool if details are required.",
@@ -261,7 +261,8 @@ class SettingsManager:
         return settings if isinstance(settings, dict) else {}
 
     def get_tool_output_pruning_enabled(self) -> bool:
-        return bool(self.get_tool_output_pruning_settings().get("enabled", True))
+        enabled = self.get_tool_output_pruning_settings().get("enabled", False)
+        return enabled if isinstance(enabled, bool) else False
 
     def get_tool_output_pruning_recent_tokens(self) -> int:
         try:

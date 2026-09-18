@@ -342,6 +342,18 @@ Mid-task steering (`/steer`, `/follow`) and abort (Ctrl+C) work in every interac
   concurrent hostile filesystem modification, or rollback I/O failure. In such cases,
   backups may remain and must be handled manually.
 
+## Tool and MCP evidence retention
+
+Full tool and MCP results are preserved in the active provider context by default,
+including older oversized results. To opt into legacy stale-result pruning, set
+`one config toolOutputPruning.enabled true` or
+`/config toolOutputPruning.enabled true`; the setting persists like other config
+values. Pruning can reduce request size, but may hide evidence the model needs.
+
+Session JSONL durability and active provider context are distinct: JSONL retains
+complete recorded results, while an enabled pruning setting changes only the
+provider request view. Compaction has separate behavior and is not lossless.
+
 ## Slash commands
 
 Available in the TUI and interactive mode (type `/help` in the app):
