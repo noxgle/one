@@ -4,6 +4,24 @@ This file is the concise record of delivered work. It replaces completed roadmap
 items and the former detailed implementation diary. Release-by-release
 user-facing changes belong in [`CHANGELOG.md`](CHANGELOG.md).
 
+## Recent reliability and context-management work
+
+- Added a long-session RPC profiler, including an opt-in large-tool-output
+  workload that reports context, pruning, persistence, and timing metrics.
+- Added selective provider-context pruning for oversized tool results, then
+  changed the default to preserve full tool and MCP evidence after analytical
+  failures showed that durable JSONL history is not accessible to the model.
+  Pruning remains an explicit opt-in; its copy-on-write provider view never
+  mutates persisted history.
+- Changed defaults for new configurations: hacker TUI theme, 100 tool steps,
+  hidden inline bash output, and fail-fast retry (`maxRetries: 0`).
+- Reworked TUI stream delivery into an ordered, coalesced text/thinking event
+  accumulator with lifecycle barriers, coalesced UI wakeups, trim-safe state,
+  and lifecycle-only sidebar refreshes. Added pilot regressions for silent
+  waits, high-rate reasoning, queued input, retries, and concurrent draining.
+- Updated llama.cpp documentation for persistent per-model endpoints, context
+  windows, tool parsers, and remote-server verification.
+
 ## Foundation
 
 - Delivered four interfaces: one-shot text/JSON output, interactive REPL,

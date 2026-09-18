@@ -1140,140 +1140,18 @@ bounded attempts prevent indefinite autonomous loops.
 - [ ] Session history remains valid and resumable after timeout/recovery failure.
 - [ ] Full `pytest` suite and `ruff` pass; event and TUI snapshots are reviewed.
 
-## Urgent current-version fix: responsive TUI input during streaming
+## Follow-up: measure any remaining TUI input stalls
 
-### Goal
+The ordered text/thinking accumulator, bounded UI wakeups, lifecycle barriers,
+trim-safe state, and lifecycle-only sidebar refresh were delivered. If stalls
+recur, diagnose before introducing runtime threads or offloading persistence.
 
-Keep the TUI input responsive while the model is streaming. Text typed during
-generation must be rendered immediately and remain editable/submit-able, while
-the existing `steer`/`follow_up` delivery behavior remains unchanged.
-
-### Diagnosis
-
-Implemented: ordinary text was already 30 Hz buffered, but `thinking_delta`
-events still queued and rebuilt the transcript/sidebar one at a time. The TUI
-now uses one ordered, message-aware accumulator for text, thinking, and
-lifecycle events; contiguous delta runs render once while lifecycle events
-flush preceding output as barriers. Sidebar refreshes now occur on state-changing
-events rather than token-rate deltas. Spinner rendering remains independently
-timer-driven. The shared asyncio loop and synchronous persistence/tools/extensions
-remain unchanged; async HTTP waits yield normally.
-
-### Recurrence: architecture decision and investigation phases
-
-**Scope:** Diagnose and bound UI work without changing steering, persistence,
-or provider event contracts. Do not mix this with default-settings changes.
-**Non-goals:** Lowering context limits, rewriting providers, or immediately
-moving the whole runtime into a thread/process.
-**Assumptions:** Existing tests establish text correctness but do not establish
-paint latency during sustained reasoning. The reported environment is not yet
-reproduced. **Open question:** Does typing stall with thinking disabled and during
-a genuinely silent provider wait? Collect this during reproduction.
-
-**ADR — Measure first, then unify UI batching.** Prefer ordered, message-aware
-text/thinking batching and dirty-only sidebar work over a dedicated runtime
-thread. A separate thread can isolate blocking runtime work but cannot cure
-expensive UI rendering and introduces ownership, cancellation and shutdown risks.
-Offload only measured blocking operations with ordered, awaited completion;
-never fire-and-forget durable session writes. Consider stronger isolation only
-if bounded UI work still leaves measured runtime-induced stalls. Research
-suggestions of guaranteed speedups or duplicate text dispatch are not evidence.
-
-#### Phase R1: Reproduce and classify stalls
-
-**Objective/outcome:** Separate loop blockage, queued-event backlog and painting
-delay. **Prerequisites:** None. **Effort:** 0.5–1 day. **Confidence:** Medium.
-
-- [ ] **Task:** Add bounded opt-in diagnostics and realistic input regressions.
-  - **Description:** Record heartbeat lag, event enqueue age/count, pending bytes,
-    stream/sidebar render duration and request/persistence duration in a capped
-    in-memory ring. No prompt/output content or synchronous per-token logging.
-    Exercise silent waiting, sustained thinking-only/mixed streams, bursty adapter
-    input, and adjacent retry/message boundaries. Type while emission is proven
-    active, not only while a completed stream waits behind a test gate.
-  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`,
-    `one/core/agent_session.py` and `one/core/session_manager.py` only for timing.
-  - **Dependencies:** None.
-  - **Acceptance Criteria:** Input painting checked before provider release;
-    bounded traces locate the stalled phase without sensitive data. Establish a
-    repeatable local input-to-paint baseline and target p95 below 100 ms; avoid
-    flaky wall-clock thresholds in shared CI.
-  - **Verification:** Fake-provider pilot tests with rendered-widget assertions,
-    event/render counters and deterministic gates; no real APIs in tests.
-
-#### Phase R2: Bound the measured hot path
-
-**Objective/outcome:** Responsive editing/submission during all stream phases.
-**Prerequisites:** R1 evidence. **Effort:** 1–2 days. **Confidence:** Medium.
-
-- [x] **Task:** Implement ordered thinking/text batching and bounded refresh work.
-  - **Description:** Use message-aware batches and explicit lifecycle barriers;
-    bound frame work, avoid token-rate sidebar estimation, and avoid rebuilding
-    the transcript merely to animate a spinner where practical. Preserve wrapping
-    across chunk boundaries; do not format each arbitrary delta independently.
-    If R1 identifies blocking I/O, design a separately reviewed ordered offload
-    before changing persistence. Document overflow/backpressure behavior without
-    dropping semantic output or lifecycle events.
-  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`,
-    `tests/test_tui_snapshots.py`; `one/config.py`, `CHANGELOG.md`,
-    `tests/snapshots/tui/` for the user-visible release update.
-  - **Details:** Implemented in `one/modes/tui_mode.py` with deterministic
-    pilot regressions for silent waits, high-rate thinking, visible compositor
-    input, queued submission, and retry output ordering.
-  - **Acceptance Criteria:** Reasoning and text do not create per-token render
-    backlogs; typing/editing/submission paints while emission continues; exact
-    output ordering survives retry, abort, clear, session switch and 500-line
-    trimming. Sidebar remains current at state changes. No persistence loss.
-  - **Verification:** Compare R1 traces under identical workloads; focused TUI,
-    steering and event tests, full `.venv/bin/python -m pytest -q`,
-    `.venv/bin/ruff check .`, `git diff --check`; inspect snapshot changes.
-
-**Risks/mitigations:** Batch boundary misattribution → message identity and barrier
-tests; stale sidebar → explicit dirty triggers; I/O ordering loss → awaited
-single-owner persistence; CI timing noise → deterministic backlog/paint tests.
-**Rollout/rollback:** Separate feature branch and patch release after R1/R2;
-rollback UI changes without storage migration. Diagnostics disabled by default.
-**Estimated timeline:** 1.5–3 days, longer only if evidence warrants runtime
-isolation. Completion requires measured responsiveness, not merely green tests.
-
-### Implementation task
-
-- [x] **Coalesce and throttle streamed TUI rendering**
-  - **Description:** Keep collecting assistant deltas immediately, but coalesce
-    pending `message_update` work and render at a bounded UI cadence rather than
-    rebuilding the full stream for every token. Flush pending assistant text
-    before `message_end`, `tool_call_start`, retry transitions, errors, and
-    abort. Ensure the input widget remains focused and editable during ordinary
-    streaming, and that queued submissions still reach the session promptly.
-    Do not alter provider/session event ordering or `steer`/`follow_up` queue
-    semantics.
-  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`,
-    `tests/test_tui_snapshots.py` only if snapshots change.
-  - **Dependencies:** None; this is an urgent current-version UI fix and should
-    be implemented independently of the future provider-timeout recovery work.
-  - **Acceptance Criteria:**
-    - Text typed during a live assistant stream appears before the stream ends.
-    - Input remains editable, cursor movement works, and Enter submits while the
-      model is streaming.
-    - A submitted message is shown as queued and is delivered using the current
-      resolved `steer` or `follow_up` mode.
-    - Stream output remains complete and ordered; no deltas, tool calls, retry
-      indicators, or terminal events are lost.
-    - Rendering work is bounded/coalesced so a high-rate stream cannot starve
-      keyboard events or cause an unbounded Textual message backlog.
-  - **Verification:** Deterministic TUI pilot tests use a provider that
-    emits many rapid deltas while the pilot types and submits a second message;
-    assert the input text is visible before the first provider completes, the
-    second message is queued, and all streamed output remains intact. Run the
-    focused TUI tests, relevant event/steering tests, full `pytest`, `ruff`, and
-    review any changed TUI snapshots.
-
-### Rollout
-
-Ship this as a user-visible patch in the current release line: bump
-`one/config.py:VERSION`, add a `CHANGELOG.md` Unreleased entry, and regenerate
-the TUI version snapshots as required by the repository release rules. Do not
-combine it with the future provider-timeout recovery branch.
+- [ ] Add capped opt-in timings for loop lag, enqueue age, pending bytes, render,
+  request preparation, and persistence—never token/output content or synchronous
+  per-token logging. Reproduce silent waiting, reasoning, mixed streaming, and
+  message-boundary stalls with deterministic Textual pilots.
+- [ ] Use those measurements to justify any further UI/runtime architecture work;
+  retain explicit ordering, cancellation, persistence, and event-contract tests.
 
 ## Test-suite organization refactor
 
@@ -1484,315 +1362,149 @@ explicit, and the complete suite remains green.
 - [ ] No production files, version, or changelog entries change.
 - [ ] Full pytest suite and ruff pass on `refactor/test-suite-organization`.
 
-## Project: Selective stale tool-output pruning
+## Follow-up: factual evidence after compaction
 
-> Superseded policy: the evidence-retention corrective plan below takes priority
-> over ADR-005/006 and the token-reduction acceptance criteria in this section.
-> Historical implementation completion does not establish analytical correctness.
+Tool/MCP evidence is now preserved in provider requests by default; legacy stale
+result pruning is explicit opt-in. Compaction remains lossy, so validate its
+factual boundary before any new context-reduction work.
 
-Work happens on branch `feat/selective-tool-output-pruning`, based on the
-current `main`; do not merge, push, or delete the branch without approval.
+- [ ] Add fixtures with old unique facts, units, dates, and conflicting records;
+  verify exact facts remain in outbound requests before compaction, after reload,
+  and on follow-up. Stub provider payloads rather than asserting model intelligence.
+- [ ] Measure factual loss across compaction separately from latency. Any future
+  retrieval/pinned-evidence design needs stable references, bounded access, and
+  session-scoped authorization; do not automatically rerun potentially side-effecting
+  tools or claim unlimited historical recall.
+
+## Durable tool evidence with model retrieval after reload
 
 ### Goal
 
-Reduce prompt-prefill cost during long sessions by removing or truncating stale,
-large tool results from the active provider context before full compaction, while
-preserving complete original results in the durable JSONL session history.
+Preserve complete tool and MCP results independently of the bounded model-facing
+`toolResult` preview, then let the model retrieve the complete result after a
+session reload by an evidence ID.
 
 ### Context
 
-The current rolling compaction summarizes old messages and retains a recent-token
-window, but waits for the configured context threshold. Long local-model sessions
-can become slower earlier because old `bash`, `read`, `grep`, MCP, and similar
-tool outputs remain in the active conversation. OpenCode addresses this with
-selective pruning; this is the first performance improvement to implement.
-
-### Scope
-
-#### In Scope
-
-- Identify tool-result messages in the active provider conversation.
-- Apply deterministic age/size-based pruning before full compaction.
-- Replace pruned active content with a bounded model-visible marker.
-- Keep the original unmodified tool result in session persistence.
-- Make limits configurable and add diagnostics/tests.
-
-#### Non-Goals
-
-- No change to the JSON-in-text tool-call contract.
-- No deletion or mutation of persisted JSONL history.
-- No automatic re-execution of pruned tool calls.
-- No change to the rolling-summary algorithm in the first iteration.
-
-### Assumptions
-
-- Tool-result messages can be identified without changing the public event
-  contract.
-- The active provider view may contain a compact replacement, while the session
-  manager remains the source of the complete historical record.
-- Recent tool results remain verbatim; the first implementation is deterministic
-  and does not make an extra model request.
-
-### Open Questions
-
-- Select the protected recent window and per-result threshold from benchmark data.
-- Recommended first trigger: once before each provider request, not after every
-  tool result.
-- Recommended marker fields: tool name and original size, without old content.
+`AgentSession._TOOL_RESULT_MAX_CHARS` currently limits successful tool-result text
+to 12,000 characters before it is placed in `self.messages` and persisted to the
+session JSONL. `toolOutputPruning` is a separate, optional provider-context
+optimization and does not remove this limit. Raw results are available only
+ephemerally in live events, so the remainder is lost after reload or process
+termination.
 
 ### Architecture
 
-Add a pure pruning step in the provider-request preparation path. It receives the
-current conversation and returns an active-context copy plus pruning statistics.
-It walks messages from newest to oldest, protects the configured recent-token
-budget, and replaces only eligible oversized tool-result content. Persisted
-session entries are never passed through this transformation. On reload, the
-authoritative full history is reconstructed and pruning is reapplied only when a
-provider request is prepared.
+- Keep the existing bounded `toolResult` preview for ordinary provider context;
+  do not make full outputs automatically consume the model's context window.
+- Persist a separate durable evidence record for every relevant tool/MCP call,
+  keyed by a unique, session-scoped evidence ID. The record must retain the
+  complete raw result, tool name, sanitized arguments, success/error metadata,
+  timestamp, and linkage to the originating tool-result message/call.
+- Add a session-manager evidence API for writing, listing metadata, and reading a
+  record by evidence ID after reload. Evidence records must not be reconstructed
+  as ordinary provider messages during `build_session_context()`.
+- Include the evidence ID and a concise retrieval instruction in the bounded
+  `toolResult` preview so the model can request the full result when needed.
+- Add a read-only model-facing retrieval mechanism that accepts only a valid
+  evidence ID from the current session, returns the complete stored evidence in a
+  bounded/chunkable form, and cannot execute or replay the original tool.
+- Preserve existing event contracts where possible; expose the evidence ID in
+  tool lifecycle metadata rather than duplicating the complete raw result.
+- Apply existing path/secret sanitization before durable storage and retrieval.
+  Define explicit size, retention, and failure behavior before implementation;
+  oversized evidence must not silently corrupt the session or provider context.
 
-### Architecture Decisions
+### Implementation tasks
 
-#### ADR-005: Prune active tool results, never durable history
+- [x] **Add durable evidence storage and session reload support.**
 
-**Decision:** Replace only stale oversized tool-result content in the in-memory
-provider context; preserve the original result in JSONL.
-
-**Alternatives:** Delete persisted results; summarize every result with another
-model call; rely only on full compaction.
-
-**Rationale:** This reduces prompt size without losing auditability or requiring
-an additional latency-producing model request.
-
-**Trade-offs:** The model may need to re-read or rerun a tool when an old detail
-is needed; the marker must explain that limitation.
-
-**Consequences:** Provider messages and persisted messages are intentionally
-different views of the same session. Tests must verify persistence is lossless.
-
-#### ADR-006: Deterministic age-plus-size eligibility
-
-**Decision:** Protect newest messages up to a configured token budget, then prune
-only tool results exceeding a configured size threshold. Never prune user,
-assistant, system, plan, or compaction-summary messages in the first version.
-
-**Alternatives:** Character-count-only global truncation; prune all old messages;
-model-generated summaries for each tool result.
-
-**Rationale:** Tool outputs are the safest and most common source of accidental
-context growth. Age plus size is predictable across providers.
-
-**Trade-offs:** Several medium-sized old results may still accumulate, and an
-important old result may be pruned despite semantic value.
-
-### Phases
-
-#### Phase 1: Implement bounded active-context pruning
-
-**Objective:** Add deterministic pruning at the provider request boundary without
-changing persisted history or public event contracts.
-
-**Prerequisites:** Confirm the exact message shape for tool results and provider
-request construction in `one/core/agent_session.py`.
-
-**Expected outcome:** Large stale tool outputs become bounded markers in provider
-requests while recent context and persistence remain unchanged.
-
-**Estimated effort:** 0.5–1 day.
-
-**Confidence:** Medium.
-
-- [x] **Task:** Add configurable stale tool-output pruning
-
-  - **Description:** Add settings for the protected recent token budget,
-    minimum eligible result size, and marker behavior. Implement a side-effect-free
-    transformation immediately before provider calls. Cover bash, read, grep,
-    MCP, and other registered tool results. Preserve recent results and all
-    non-tool messages; replace only eligible old results and collect counts/tokens
-    reclaimed. Do not mutate JSONL entries or tool-call IDs.
-
-  - **Files:** `one/core/agent_session.py`, `one/core/settings_manager.py`,
-    `one/core/session_manager.py` only if reconstruction needs an explicit active
-    versus persisted distinction, plus relevant tests.
-
+  - **Description:** Extend the session persistence layer with a versioned
+    evidence record format and APIs to append and retrieve evidence by ID. Keep
+    evidence out of the normal conversation list and make old sessions without
+    evidence records continue to load unchanged. Choose a sidecar or dedicated
+    JSONL representation that supports append-only writes and safe reload.
+  - **Files:** `one/core/session_manager.py`, related session persistence tests
+    under `tests/test_session_manager.py`, plus any newly required evidence
+    module/test file.
   - **Dependencies:** None.
+  - **Acceptance Criteria:** Full raw results survive process restart and session
+    reload; evidence IDs are unique within the session; malformed or missing
+    evidence records do not prevent ordinary session loading; evidence is not
+    inserted into provider messages automatically.
+  - **Verification:** Add focused persistence/reload tests, including a large
+    Unicode result and a legacy session; run `pytest -q tests/test_session_manager.py`
+    and `git diff --check`.
 
-  - **Acceptance Criteria:**
-    - Eligible stale results are bounded in provider requests.
-    - Recent protected results remain unchanged.
-    - User, assistant, system, plan, summary, and tool-call metadata remain intact.
-    - JSONL retains the original complete tool output.
-    - Reloading a session does not lose or double-prune history.
-    - Existing provider/event contracts remain compatible.
+- [x] **Link tool execution results to durable evidence.**
 
-  - **Verification:** Add deterministic large-result tests for bash/read/MCP;
-    assert request size, marker contents, and lossless JSONL. Run focused tests,
-    `pytest -q`, `ruff check one tests`, and `git diff --check`.
+  - **Description:** Generate and persist an evidence record for successful,
+    failed, and MCP tool calls at the raw-result boundary. Keep the existing
+    12,000-character preview behavior for ordinary `toolResult` messages, add
+    the evidence ID/reference to that preview, and preserve read-image/path
+    sanitization and existing lifecycle event ordering.
+  - **Files:** `one/core/agent_session.py`, `one/mcp/client.py` only if needed
+    for raw-result normalization, and relevant tests in
+    `tests/test_tool_calling.py`, `tests/test_mcp.py`, and
+    `tests/test_event_snapshots.py`.
+  - **Dependencies:** Durable evidence storage task.
+  - **Acceptance Criteria:** Every persisted eligible tool result has a stable
+    evidence ID; results over 12,000 characters remain bounded in the normal
+    provider message while the complete raw result is retrievable; existing
+    event sequences and error contracts remain compatible except for additive
+    evidence metadata.
+  - **Verification:** Test built-in and MCP results before/after reload,
+    success/error paths, and exact 12,000-character preview truncation; run
+    focused tool/MCP/event tests.
 
-#### Phase 2: Benchmark and tune defaults
+- [x] **Expose secure evidence retrieval to the model.**
 
-**Objective:** Confirm that pruning improves long-session latency without harming
-tool-use correctness, then choose conservative defaults.
+  - **Description:** Add a read-only tool or equivalent model-facing dispatch
+    path that retrieves evidence by ID for the active session. Return complete
+    content without rerunning the original tool, support bounded chunks or
+    continuation for very large records, and reject unknown, malformed, or
+    cross-session IDs. Document the retrieval contract and ensure the model sees
+    how to use it from the initial preview.
+  - **Files:** `one/tools/index.py`, the new evidence tool/schema/dispatch path,
+    `one/core/agent_session.py`, and focused tool/RPC tests; update relevant
+    `README.md` or `docs/` documentation if the user-facing tool contract is
+    exposed.
+  - **Dependencies:** Durable evidence storage and tool-result linking tasks.
+  - **Acceptance Criteria:** A reloaded session can retrieve the exact complete
+    evidence by ID; retrieval is read-only, session-scoped, chunk-safe, and does
+    not invoke the original tool; unauthorized/unknown IDs fail clearly without
+    leaking data; provider context remains bounded unless the model explicitly
+    requests evidence.
+  - **Verification:** Add tests for reload retrieval, chunk boundaries, Unicode,
+    invalid IDs, cross-session access, and no tool re-execution; run the focused
+    tool, session, MCP, and RPC test suites.
 
-**Prerequisites:** Phase 1 implementation and tests.
+- [x] **Define evidence retention, size, and privacy behavior.**
 
-**Expected outcome:** Before/after measurements show reduced active prompt size,
-reclaimed tokens, and improved or stable local-model time-to-first-token.
-
-**Estimated effort:** 0.5 day.
-
-**Confidence:** Medium.
-
-- [ ] **Task:** Extend long-session profiling and tune the pruning policy
-
-  - **Description:** Extend `scripts/profile_long_session.py` with active request
-    estimates, pruned-result count, reclaimed tokens, and per-request latency.
-    Exercise repeated large tool outputs and a follow-up requiring recent tool
-    context. Tune defaults only after comparing baseline and pruning runs; retain
-    an opt-out setting.
-
-  - **Files:** `scripts/profile_long_session.py`, settings documentation/config
-    references if defaults become user-facing, and benchmark/regression tests.
-
-  - **Dependencies:** Phase 1.
-
-  - **Acceptance Criteria:** Active tool-output growth is bounded; recent
-    tool-dependent tasks still succeed; full history remains recoverable; metrics
-    identify reclaimed capacity.
-
-  - **Verification:** Run the profile against the configured local provider for
-    baseline and pruning-enabled sessions, compare size/latency, then run focused
-    and full tests plus Ruff.
-
-### Risks & Mitigations
-
-| Risk | Impact | Likelihood | Mitigation |
-|------|--------|------------|------------|
-| Needed old detail is hidden | Model may repeat a tool call | Medium | Protect recent context, configurable thresholds, explicit marker |
-| Active and persisted histories diverge incorrectly | Session reconstruction loses context | Medium | Side-effect-free pruning and JSONL byte-preservation tests |
-| Tool-result shape is missed | Context remains large or metadata breaks | Medium | Cover every registered tool path and preserve IDs/roles |
-| Local latency does not improve | Complexity without benefit | Medium | Require before/after profiling before broad rollout |
+  - **Description:** Specify configurable maximum evidence size, storage failure
+    handling, cleanup/retention behavior, and redaction rules for secrets and
+    sensitive paths. Ensure a failed evidence write is observable and cannot
+    falsely claim that complete evidence is available.
+  - **Files:** `one/core/settings_manager.py`, configuration documentation,
+    persistence/tool tests, and any storage implementation selected above.
+  - **Dependencies:** Durable evidence storage task; coordinate with retrieval
+    API before finalizing metadata and error states.
+  - **Acceptance Criteria:** Limits and retention are explicit; write/read
+    failures produce actionable metadata; sensitive values follow existing
+    sanitization policy; no unbounded disk or model-context growth is possible.
+  - **Verification:** Test size limits, disk/write failure handling, cleanup,
+    secret/path sanitization, and configuration defaults; run full pytest and
+    Ruff after implementation.
 
 ### Project Acceptance Criteria
 
-- [ ] Stale oversized tool outputs are selectively bounded in active requests.
-- [ ] Full original results remain available in durable session JSONL.
-- [ ] Recent tool-dependent behavior and event contracts remain intact.
-- [ ] Profiling demonstrates reduced active prompt growth and records metrics.
-- [ ] Focused tests, full pytest, Ruff, and `git diff --check` pass.
-
-### Rollout
-
-Ship behind a configurable setting initially. If the final behavior is
-user-visible, bump `one/config.py:VERSION`, add a `CHANGELOG.md` Unreleased entry,
-and regenerate TUI version snapshots according to repository release rules.
-
-## Corrective priority: Preserve analytical tool evidence
-
-### Goal and Context
-
-Stop automatically hiding analytical source data solely because it is old and
-large. User reports a factual-analysis failure with the literal pruning marker
-in the answer. The transformation in `one/core/tool_output_pruning.py` replaces
-the whole eligible result, not just redundant text. JSONL durability is not
-model accessibility. The report is not independently reproduced; the information
-removal mechanism is confirmed. Earlier repeated-X profiling measured token
-savings, not the ability to use older evidence.
-
-### Scope, Constraints and Assumptions
-
-- Preserve tool-result content in normal provider requests; disable automatic
-  age/size pruning by default. Keep explicit existing configuration overrides
-  visible and explain how to disable pruning for those users.
-- No changes to real user configuration, historical JSONL or existing pruning
-  artifacts during planning. Runtime source history remains intact before
-  compaction; after compaction, disabling pruning alone cannot restore it.
-- Non-goals: unlimited model context, automatic replay of tools, semantic
-  classification by tool name, or a new retrieval subsystem in the immediate fix.
-- Tech stack: existing Python settings merge, AgentSession provider preparation,
-  JSONL SessionManager and fake-provider pytest/explicit asyncio tests.
-- Open questions: whether to remove the opt-in legacy pruning path altogether;
-  later archival retrieval and evidence pinning need a separate approved design.
-
-### Architecture Decision: Evidence preservation before prompt reduction
-
-**Decision:** Default to unpruned tool results. Preserve existing context-limit
-checks and compaction settings; evaluate compaction's factual fidelity separately.
-**Alternatives:** Raise pruning thresholds; summaries plus archive retrieval;
-task-scoped pinned evidence. Raising thresholds merely delays the same failure.
-Retrieval can recover exact originals but needs stable references, authorization,
-bounded reads and tests. Pinning alone cannot keep unlimited evidence in a finite
-context and can miss necessary data.
-**Trade-offs:** Larger prompts and potentially slower requests/earlier compaction.
-**Consequences:** Do not claim that disabling pruning eliminates hallucinations.
-Do not lower compaction thresholds or replace summaries with count-only markers
-as a safety fix: both can remove more useful evidence. Do not automatically rerun
-tools: results may change and commands may have side effects. Missing evidence
-must be acknowledged rather than treated as factual input.
-
-### Phase E1: Disable implicit pruning and document existing-user recovery
-
-**Objective/outcome:** New/default sessions retain older large tool evidence.
-**Prerequisites:** None. **Effort:** 0.5 day. **Confidence:** High.
-
-- [x] **Task:** Change the default and fallback to pruning disabled.
-  - **Description:** Set `toolOutputPruning.enabled` default/fallback false;
-    retain the existing opt-out path and explicit overrides without silently
-    rewriting user files. Document `/config toolOutputPruning.enabled true`
-    and `one config toolOutputPruning.enabled true` as the opt-in path,
-    persistence/restart behavior,
-    and that already-compacted evidence needs recovery from originals. Keep
-    context estimates aligned with the actual full provider payload.
-  - **Files:** `one/core/settings_manager.py`, `tests/test_settings.py`,
-    `tests/test_tool_output_pruning.py`, `README.md`, `CHANGELOG.md`,
-    `one/config.py`, `tests/snapshots/tui/`.
-  - **Dependencies:** None.
-  - **Acceptance Criteria:** Omitted setting means no pruning; explicit false
-    retains full content; explicit legacy true is documented/tested. No storage
-    migration or tool replay. Release note explains correctness/latency trade-off.
-  - **Verification:** Fake-provider requests contain old oversized results;
-    assert zero pruning stats and unchanged raw history/JSONL. Test global/project
-    override precedence and reload in isolated scratch state.
-
-### Phase E2: Make evidence fidelity the acceptance gate
-
-**Objective/outcome:** Regressions detect loss of exact old facts, not just bytes.
-**Prerequisites:** E1. **Effort:** 0.5–1 day. **Confidence:** Medium.
-
-- [ ] **Task:** Add analytical evidence fixtures and separate compaction checks.
-  - **Description:** Generate old large results with unique values, units, dates
-    and conflicting records, followed by enough tool calls to exceed the former
-    protected window. Assert exact facts remain in outbound requests before
-    compaction, including after reload and on follow-up. Stub providers verify
-    payloads, not real-model intelligence. Separately exercise compaction to expose
-    its loss boundary. An opt-in controlled model evaluation must compare known
-    answers/citations, record unknowns and factual errors, then measure latency.
-  - **Files:** `tests/test_tool_output_pruning.py`, `tests/test_compaction.py`,
-    `scripts/profile_long_session.py` (optional evaluation mode).
-  - **Dependencies:** E1.
-  - **Acceptance Criteria:** Every seeded old fact present before compaction;
-    defaults never substitute the stale-output marker. Compaction limitations are
-    explicit; no fake-provider success presented as proof of model accuracy.
-    No real API calls in automated tests.
-  - **Verification:** Focused tests, full `.venv/bin/python -m pytest -q`,
-    `.venv/bin/ruff check .`, `git diff --check`; manual opt-in comparison uses
-    fixed fixtures and identical model settings, not repeated-X output.
-
-### Risks, Rollout and Project Acceptance
-
-- Larger context/latency: retain accurate context limits, measure separately from
-  UI responsiveness; do not reintroduce silent removal as a performance fix.
-- Existing explicit `enabled: true`: release guidance and override tests; changing
-  defaults alone does not change this user's stored setting.
-- Compaction remains lossy: do not promise full historical recall; archive
-  retrieval requires separate design and session-scoped access control.
-- Diagnostics record only counts/timings, not confidential tool contents.
-- Rollout as a user-visible patch with version/changelog/snapshot updates;
-  no destructive migration. Legacy opt-in is a rollback option, not recommended
-  for factual analysis.
-- [x] Default provider requests preserve older tool evidence within the available
-  context; override/reload/persistence tests pass.
-- [x] Documentation distinguishes complete archive from accessible model context.
-- [x] Factual payload verification precedes any token-saving performance claim.
-
-**Estimated timeline:** 1–1.5 days; retrieval/pinning excluded. Planning only:
-E1 implementation and verification are complete; E2 remains pending.
+- [x] Complete tool and MCP results survive process termination and session reload
+  in durable evidence storage.
+- [x] The model can retrieve complete evidence after reload using only the
+  evidence ID, without rerunning the original tool.
+- [x] Ordinary provider context retains a bounded 12,000-character preview and
+  optional `toolOutputPruning` behavior remains unchanged.
+- [x] Evidence retrieval is read-only, session-scoped, chunk-safe, and covered by
+  tests for invalid IDs, cross-session access, large Unicode content, and errors.
+- [x] Existing event ordering, JSONL compatibility, sanitization, and CLI/RPC
+  contracts remain backward compatible except for additive evidence metadata.

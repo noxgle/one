@@ -220,6 +220,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "grep": "{pattern, path?}",
     "find": "{pattern?, path?}",
     "ls": "{path?}",
+    "evidence_read": "{evidenceId, offset?, maxChars?}  # retrieve a bounded chunk of prior durable tool evidence; use nextOffset to continue",
     "finish": "{summary, goal_success}  # end the task; summary is shown to the user",
     "plan": "{plan}  # the execution plan for the current task; visible to you on every step",
     "spawn_subagent": "{task, tasks?, model?, tools?}  # delegate a subtask to an isolated subagent (returns summary)",

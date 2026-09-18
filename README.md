@@ -344,15 +344,25 @@ Mid-task steering (`/steer`, `/follow`) and abort (Ctrl+C) work in every interac
 
 ## Tool and MCP evidence retention
 
-Full tool and MCP results are preserved in the active provider context by default,
-including older oversized results. To opt into legacy stale-result pruning, set
+Tool and MCP results use a bounded 12,000-character preview in provider context.
+When a durable session is enabled, the complete sanitized normalized result is
+also appended to its private evidence sidecar. Tool-result previews include an
+`evidenceId`; the model can call read-only `evidence_read` with that ID, an
+optional `offset`, and `maxChars` (up to 8,000) to retrieve successive chunks
+after reload without re-running the original tool. Evidence is session-scoped,
+has a 2 MB per-record and 32 MB per-session limit, and is unavailable for
+in-memory sessions or failed writes.
+
+To opt into stale-result pruning, set
 `one config toolOutputPruning.enabled true` or
 `/config toolOutputPruning.enabled true`; the setting persists like other config
-values. Pruning can reduce request size, but may hide evidence the model needs.
+values. Pruning can reduce request size, while durable evidence remains outside
+provider context.
 
-Session JSONL durability and active provider context are distinct: JSONL retains
-complete recorded results, while an enabled pruning setting changes only the
-provider request view. Compaction has separate behavior and is not lossless.
+Session JSONL, evidence, and active provider context are distinct. Evidence is
+append-only and is never included by `build_session_context`; compaction and
+pruning therefore do not grow provider context. Malformed or missing evidence
+does not prevent legacy sessions from loading.
 
 ## Slash commands
 

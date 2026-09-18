@@ -28,7 +28,7 @@ class ToolDef:
 
 
 DEFAULT_TOOL_NAMES: list[str] = [
-    "read", "read_image", "bash", "edit", "write", "grep", "find", "ls", "finish", "plan", "spawn_subagent", "ask_user", "apply_patch",
+    "read", "read_image", "bash", "edit", "write", "grep", "find", "ls", "evidence_read", "finish", "plan", "spawn_subagent", "ask_user", "apply_patch",
 ]
 
 all_tools: dict[str, ToolDef] = {
@@ -44,6 +44,8 @@ all_tools: dict[str, ToolDef] = {
     "grep": ToolDef("grep", "Search file contents", grep_tool),
     "find": ToolDef("find", "Find files by pattern", find_tool),
     "ls": ToolDef("ls", "List directory contents", ls_tool),
+    # Dispatched by AgentSession because evidence is scoped to the active session.
+    "evidence_read": ToolDef("evidence_read", "Read a bounded chunk of durable tool evidence by evidenceId; never re-runs the original tool", lambda: {}),
     "finish": ToolDef("finish", "End the task with a summary and success flag", finish_tool),
     "plan": ToolDef("plan", "Store an execution plan for the current task; visible on every step", plan_tool),
     "ask_user": ToolDef(

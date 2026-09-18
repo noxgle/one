@@ -104,6 +104,7 @@ class ModelCycleResult:
 
 class AgentSession:
     _TOOL_RESULT_MAX_CHARS = 12_000
+    _EVIDENCE_READ_MAX_CHARS = 8_000
 
     def __init__(
         self,
@@ -560,6 +561,15 @@ class AgentSession:
             "tool": payload.get("tool"),
             "args": payload.get("args", {}),
         }
+        if payload.get("evidenceId"):
+            msg_payload["evidenceId"] = payload["evidenceId"]
+            msg_payload["evidenceInstruction"] = "Use evidence_read with this evidenceId to retrieve complete durable evidence in bounded chunks."
+        elif payload.get("evidenceUnavailable"):
+            msg_payload["evidenceUnavailable"] = payload["evidenceUnavailable"]
+        if payload.get("details") is not None:
+            # In particular, evidence_read exposes nextOffset here.  This is
+            # additive metadata and is still subject to the normal result cap.
+            msg_payload["details"] = payload["details"]
         # Sanitise read_image path arguments: replace full source paths with
         # just the basename so the absolute path never leaks into JSONL /
         # toolResult messages / summaries / event payloads.
@@ -625,6 +635,59 @@ class AgentSession:
                 msg_payload["goalSuccess"] = payload["goalSuccess"]
         return msg_payload
 
+    @staticmethod
+    def _evidence_normalize(value: Any, key: str = "") -> Any:
+        """JSON-safe evidence value with conservative credential redaction."""
+        sensitive = {"password", "passwd", "secret", "token", "apikey", "api_key", "authorization", "access_token"}
+        if key.lower().replace("-", "_") in sensitive:
+            return "[REDACTED]"
+        if isinstance(value, dict):
+            return {str(k): AgentSession._evidence_normalize(v, str(k)) for k, v in value.items()}
+        if isinstance(value, list):
+            return [AgentSession._evidence_normalize(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    def _store_tool_evidence(self, payload: dict[str, Any]) -> tuple[str | None, str | None]:
+        # read_image is the existing path-sensitive contract; apply it before
+        # storing both args and raw output so sidecar privacy matches JSONL.
+        safe_payload = _sanitise_read_image_payload(payload) if payload.get("tool") == "read_image" else dict(payload)
+        safe_args = safe_payload.get("args", {})
+        raw = safe_payload.get("rawResult", safe_payload)
+        return self.session_manager.append_evidence({
+            "id": uuid.uuid4().hex,
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "tool": safe_payload.get("tool"),
+            "ok": bool(safe_payload.get("ok")),
+            "args": self._evidence_normalize(safe_args),
+            "status": self._evidence_normalize({
+                k: safe_payload.get(k)
+                for k in ("error", "errorType", "timedOut", "cancelled", "aborted", "exitCode")
+                if safe_payload.get(k) is not None
+            }),
+            "rawResult": self._evidence_normalize(raw),
+        })
+
+    def _read_evidence(self, args: dict[str, Any]) -> dict[str, Any]:
+        evidence_id = args.get("evidenceId")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            return {"ok": False, "error": "evidenceId must be a non-empty string", "errorType": "EvidenceNotFound"}
+        offset = args.get("offset", 0)
+        maximum = args.get("maxChars", self._EVIDENCE_READ_MAX_CHARS)
+        if not isinstance(offset, int) or offset < 0 or not isinstance(maximum, int) or not 1 <= maximum <= self._EVIDENCE_READ_MAX_CHARS:
+            return {"ok": False, "error": f"offset must be >= 0 and maxChars must be 1..{self._EVIDENCE_READ_MAX_CHARS}", "errorType": "EvidenceRangeError"}
+        evidence = self.session_manager.read_evidence(evidence_id)
+        if evidence is None:
+            return {"ok": False, "error": "Unknown evidenceId for this session", "errorType": "EvidenceNotFound"}
+        # Sidecar framing/session fields are storage internals, not tool evidence
+        # for the model to consume.
+        model_evidence = {k: v for k, v in evidence.items() if k not in {"type", "version", "sessionId"}}
+        text = json.dumps(model_evidence, ensure_ascii=False, separators=(",", ":"))
+        chunk = text[offset : offset + maximum]
+        next_offset = offset + len(chunk)
+        return {"ok": True, "output": chunk, "details": {"evidenceId": evidence_id, "offset": offset, "nextOffset": next_offset if next_offset < len(text) else None, "totalChars": len(text)}}
+
     def _abort_assistant_message(self) -> dict[str, Any]:
         return {
             "role": "assistant",
@@ -665,6 +728,9 @@ class AgentSession:
             if self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
                 return await self._mcp_manager.call_tool(tool_name, args, timeout=args.get("timeout"))
             raise RuntimeError(f"Unknown tool: {tool_name}")
+
+        if tool_name == "evidence_read":
+            return self._read_evidence(args)
 
         cwd = self.session_manager.cwd
         fn = tool.fn
@@ -862,7 +928,12 @@ class AgentSession:
                     "rejected": True,
                     "reason": reason,
                 }
-                message_payload = self._build_tool_result_message_payload(payload)
+                evidence_id, evidence_error = self._store_tool_evidence(payload)
+                if evidence_id:
+                    payload["evidenceId"] = evidence_id
+                message_payload = self._build_tool_result_message_payload(
+                    payload if evidence_id or not evidence_error else {**payload, "evidenceUnavailable": evidence_error}
+                )
                 msg = {
                     "role": "toolResult",
                     "content": json.dumps(message_payload, ensure_ascii=False),
@@ -890,7 +961,12 @@ class AgentSession:
                     "rejected": True,
                     "reason": denied,
                 }
-                message_payload = self._build_tool_result_message_payload(payload)
+                evidence_id, evidence_error = self._store_tool_evidence(payload)
+                if evidence_id:
+                    payload["evidenceId"] = evidence_id
+                message_payload = self._build_tool_result_message_payload(
+                    payload if evidence_id or not evidence_error else {**payload, "evidenceUnavailable": evidence_error}
+                )
                 msg = {
                     "role": "toolResult",
                     "content": json.dumps(message_payload, ensure_ascii=False),
@@ -1052,7 +1128,16 @@ class AgentSession:
                             error_event_text = error_event_text.replace(v, basename)
                 self._emit({"type": "tool_call_error", "tool": tool_name, "args": error_event_args, "error": error_event_text})
 
-        message_payload = self._build_tool_result_message_payload(payload)
+        # Retrieval is itself bounded and must not recursively create evidence.
+        evidence_id: str | None = None
+        evidence_error: str | None = None
+        if tool_name != "evidence_read":
+            evidence_id, evidence_error = self._store_tool_evidence(payload)
+            if evidence_id:
+                payload["evidenceId"] = evidence_id
+        message_payload = self._build_tool_result_message_payload(
+            payload if tool_name == "evidence_read" or evidence_id or not evidence_error else {**payload, "evidenceUnavailable": evidence_error}
+        )
         msg = {
             "role": "toolResult",
             "content": json.dumps(message_payload, ensure_ascii=False),

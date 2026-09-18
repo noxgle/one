@@ -16,6 +16,11 @@ from one.core.persistence import (
 )
 
 CURRENT_SESSION_VERSION = 4
+# Evidence is deliberately a sidecar rather than a session entry: it must not
+# become provider context when a session is restored.  Limits bound disk use.
+EVIDENCE_VERSION = 1
+EVIDENCE_MAX_RECORD_BYTES = 2_000_000
+EVIDENCE_MAX_SESSION_BYTES = 32_000_000
 
 
 def _now_iso() -> str:
@@ -99,6 +104,61 @@ class SessionManager:
         self._entries = parsed
         self._migrate_if_needed()
         self._reindex()
+
+    def _evidence_path(self) -> Path | None:
+        if not self._persist or not self._session_file:
+            return None
+        # Do not use a .jsonl suffix: session discovery intentionally globs it.
+        return Path(self._session_file).with_suffix(Path(self._session_file).suffix + ".evidence")
+
+    def append_evidence(self, evidence: dict[str, Any]) -> tuple[str | None, str | None]:
+        """Append a complete, already-sanitised tool result outside chat history.
+
+        Returns ``(id, None)`` on success, or ``(None, reason)``.  Failures are
+        intentionally returned to callers so they never advertise unavailable
+        evidence.  In-memory/no-session runs cannot offer durable evidence.
+        """
+        path = self._evidence_path()
+        if path is None:
+            return None, "durable session storage is unavailable"
+        record = {"type": "tool_evidence", "version": EVIDENCE_VERSION, "sessionId": self.session_id, **evidence}
+        try:
+            encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            return None, f"evidence serialization failed: {exc}"
+        if len(encoded) > EVIDENCE_MAX_RECORD_BYTES:
+            return None, f"evidence exceeds {EVIDENCE_MAX_RECORD_BYTES} byte record limit"
+        try:
+            if path.exists() and path.stat().st_size + len(encoded) + 1 > EVIDENCE_MAX_SESSION_BYTES:
+                return None, f"evidence exceeds {EVIDENCE_MAX_SESSION_BYTES} byte session limit"
+            if not path.exists():
+                header = {"type": "evidence", "version": EVIDENCE_VERSION, "sessionId": self.session_id, "timestamp": _now_iso()}
+                # The initial header and record must appear together: a crash
+                # before either append would otherwise leave an incomplete sidecar.
+                atomic_write_text(path, json.dumps(header, separators=(",", ":")) + "\n" + encoded.decode("utf-8") + "\n")
+            else:
+                # Keep later evidence records append-only.
+                append_private_text(path, encoded.decode("utf-8") + "\n")
+        except Exception as exc:
+            return None, f"evidence write failed: {exc}"
+        return str(record.get("id")), None
+
+    def read_evidence(self, evidence_id: str) -> dict[str, Any] | None:
+        """Return one evidence record for this session, tolerating bad sidecars."""
+        path = self._evidence_path()
+        if path is None or not path.exists() or not isinstance(evidence_id, str):
+            return None
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if item.get("type") == "tool_evidence" and item.get("sessionId") == self.session_id and item.get("id") == evidence_id:
+                    return item
+        except Exception:
+            return None
+        return None
 
     def _migrate_if_needed(self) -> None:
         header = self._entries[0]
