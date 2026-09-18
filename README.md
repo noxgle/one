@@ -57,6 +57,53 @@ Extensions and MCP servers are **not sandboxed** — they run with the same
 permissions as `one` itself. Cooperation mode is **not** a security boundary or
 sandbox; it is an approval gate only.
 
+## Docker diagnostic session (agents)
+
+Run the opt-in, non-interactive diagnostic runner when a long RPC-session
+investigation is needed:
+
+```bash
+.venv/bin/python scripts/diagnose_long_session.py --json
+```
+
+It defaults to a 3600-second session and drives one persistent real RPC process
+with deterministic prompts/control commands, collecting bounded JSON events and
+expected-versus-observed tool coverage. A missing or unreachable model is reported
+as a workload failure; it is not reported as successful coverage. It analyzes sanitized results with
+the same default `llama.cpp/local` model at `http://192.168.200.19:8089`. This
+same-model analysis is heuristic and can share the workload model's blind spots;
+its conclusions are not independent verification. Docker must be installed and
+its daemon usable; the endpoint and model can be changed with
+`--llama-cpp-url` and `--model`. The container is unprivileged, has no Docker
+socket, no host repository/credential mounts, no MCP/extensions, and uses a
+synthetic workspace. Docker remains a containment aid, not a security boundary.
+The default Docker `bridge` network is intentionally enabled so the container can
+reach the configured endpoint; use `--docker-network` for an appropriate reachable
+network. `--docker-network none` is rejected because it cannot run a live model
+workload. The root filesystem is read-only; only the writable diagnostic bind
+mount and a bounded `/tmp` tmpfs are available. CPU, memory, PID, dropped-capability, and no-new-privileges
+limits are applied; container/image cleanup is attempted on normal exit, timeout,
+and signals.
+
+`report.md` and machine-readable `report.json` are atomically written below
+`diagnostic-reports/`. Raw events, logs, fixtures, and the disposable analysis
+workspace are deleted after successful report creation by default. They may
+contain sensitive diagnostic data, so retain them only when necessary with
+`--keep-artifacts`. A short run is useful for a local smoke check:
+
+```bash
+.venv/bin/python scripts/diagnose_long_session.py --duration 10 --skip-analysis --json
+```
+
+Use `--skip-analysis` for heuristic-only runs, `--workload safe|stress|custom`
+to select a workload, and `--prompt-file PATH` with `--workload custom`. `--json`
+prints a machine-readable completion result; `--keep-artifacts` retains the
+otherwise temporary diagnostic artifacts for inspection.
+
+For an opt-in Docker/model smoke test, set
+`ONE_RUN_DOCKER_DIAGNOSTIC_SMOKE=1` and run the diagnostic test suite. It skips
+when Docker, its daemon, or the configured model endpoint is unavailable.
+
 ## Your Agent Needs Eyes
 
 Give `one` web search and full-page content extraction with the

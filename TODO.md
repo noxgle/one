@@ -1376,6 +1376,383 @@ factual boundary before any new context-reduction work.
   session-scoped authorization; do not automatically rerun potentially side-effecting
   tools or claim unlimited historical recall.
 
+## Project: One-hour Docker diagnostic session and AI analysis
+
+### Goal
+
+Add a non-interactive diagnostic runner that executes an approximately one-hour
+agent workload in an isolated Docker container, exercises all built-in tools,
+detects runtime and protocol bugs, and asks the configured local
+`llama.cpp/local` model to analyze the diagnostic artifacts. The runner must be
+safe for another agent to invoke and must retain only the final Markdown and JSON
+reports by default.
+
+### Context
+
+`scripts/profile_long_session.py` already drives the real RPC runtime and records
+basic event, timing, session, and context metrics. The new runner should extend
+that approach rather than alter the production runtime. The repository has no
+dedicated Docker diagnostic image yet. The local analysis endpoint is expected at
+`http://192.168.200.19:8089` and the model is `llama.cpp/local`.
+
+### Scope
+
+#### In Scope
+
+- New non-interactive `scripts/diagnose_long_session.py` CLI with a default
+  `--duration 3600` and configurable workload, model endpoint, report directory,
+  artifact retention, and analysis timeout.
+- A Docker-based disposable workload environment capable of exercising all
+  built-in tools, including mutating tools, inside a fixture workspace.
+- Collection of RPC events, stderr/stdout diagnostics, lifecycle timings,
+  provider/context metrics, session JSONL, durable evidence sidecar metadata,
+  container/resource status, and tool outcomes.
+- Deterministic heuristic bug detection for malformed protocol output, missing or
+  duplicated lifecycle events, stalls, timeouts, retries, provider failures,
+  context/compaction anomalies, evidence/session inconsistencies, and resource
+  exhaustion.
+- Local model analysis with all built-in tools enabled, while diagnostic inputs
+  and the disposable analysis workspace are isolated from the real repository.
+- Final `report.md` and `report.json` output, stable exit codes, `--help`, and
+  machine-readable completion/failure output suitable for another agent.
+- Default cleanup of raw artifacts, containers, temporary workspaces, and logs;
+  `--keep-artifacts` remains available for forensic follow-up.
+
+#### Non-Goals
+
+- No changes to production agent behavior or tool contracts.
+- No automatic execution of arbitrary host commands, MCP servers, or extensions.
+- No mounting of the real repository or host credential directories by default.
+- No claim that heuristic findings or local-model analysis prove a bug without
+  evidence and confidence metadata.
+- No permanent storage of raw prompts, outputs, secrets, or diagnostic logs unless
+  the caller explicitly requests artifact retention.
+
+### Assumptions
+
+- Docker is installed and usable by the invoking agent.
+- The configured `llama.cpp` endpoint is reachable from the workload/analysis
+  environment at `http://192.168.200.19:8089`; the endpoint is configurable for
+  other networks.
+- The workload may install/use additional safe utilities such as Python, bash,
+  git, curl, and image fixtures inside the diagnostic image.
+- The final reports may contain sanitized excerpts and paths, but raw artifacts
+  are removed after analysis by default.
+- `ask_user` can be exercised through deterministic automated answers and
+  `spawn_subagent` through bounded child-session settings.
+
+### Open Questions
+
+- Confirm the supported Docker runtime/resource flags on Linux and Docker Desktop;
+  provide clear preflight diagnostics when a requested limit is unavailable.
+- Decide whether the default workload should use only synthetic fixtures or also
+  permit an explicitly supplied read-only project snapshot.
+- Define the exact workload cadence and whether a shorter `--smoke-duration` is
+  needed for CI and local verification.
+
+### Architecture
+
+The runner has four isolated stages:
+
+1. **Preflight:** validate Docker, endpoint/model settings, duration, output
+   paths, available disk, and safe environment-variable handling.
+2. **Workload container:** build/use a pinned diagnostic image, create a fixture
+   workspace, launch the real RPC agent with `--no-extensions --no-mcp`, execute
+   read/write/patch/bash/image/evidence/retry/timeout/steering/compaction and
+   bounded subagent scenarios, and stream structured RPC output to the host.
+3. **Finding and artifact collection:** normalize and redact events, preserve
+   bounded evidence references, calculate timings/resource metrics, run heuristic
+   checks, and write a temporary artifact manifest with schema/version metadata.
+4. **Model analysis:** invoke `llama.cpp/local` through the existing CLI with
+   all built-in tools enabled, no MCP/extensions, and the diagnostic artifact
+   directory mounted/readable only in a disposable analysis workspace. Treat all
+   log content as untrusted data. Validate the returned Markdown/JSON report,
+   write the two final reports, and remove temporary artifacts unless retention
+   was requested.
+
+### Architecture Decisions
+
+#### ADR-001: Use Docker for mutating diagnostic workloads
+
+**Decision:** Execute the one-hour workload in a disposable, resource-limited
+Docker container containing synthetic fixtures and a dedicated workspace.
+
+**Alternatives:** Run directly on the host; test only read-only tools; rely on
+cooperation mode as a safety boundary.
+
+**Rationale:** `bash`, `write`, `edit`, and `apply_patch` must be exercised, while
+the existing cooperation mode is explicitly not a sandbox. Docker limits damage
+to the disposable fixture environment.
+
+**Trade-offs:** Docker availability, image build time, network reachability, and
+platform-specific resource flags become prerequisites. Container isolation is
+not treated as a universal security boundary against privileged Docker access.
+
+#### ADR-002: Keep raw diagnostics temporary and reports durable
+
+**Decision:** Store raw event/session/log artifacts in a temporary directory and
+delete them after report validation by default. Preserve only `report.md` and
+`report.json`; `--keep-artifacts` opts into forensic retention.
+
+**Alternatives:** Always retain raw logs; stream only a final summary; store raw
+artifacts in the normal user session directory.
+
+**Rationale:** Diagnostics can contain prompts, paths, command output, or secrets.
+The default should minimize retention while still producing actionable reports.
+
+**Trade-offs:** Post-run reproduction requires explicit retention, and a failed
+cleanup must be reported rather than silently ignored.
+
+#### ADR-003: Use the existing CLI for local-model analysis
+
+**Decision:** Invoke the existing `one` CLI with `--provider llama.cpp --model
+local --llama-cpp-url http://192.168.200.19:8089`, rather than calling a provider
+adapter directly from the script.
+
+**Alternatives:** Direct HTTP calls to the OpenAI-compatible endpoint; import and
+invoke provider/session internals; embed a second analysis implementation.
+
+**Rationale:** Reuses authentication/model/tool/resource behavior and ensures the
+analysis path exercises the supported CLI contract. The endpoint remains a CLI
+option for Docker/network differences.
+
+**Trade-offs:** Analysis inherits CLI/session startup overhead and must isolate
+its working directory and tools carefully.
+
+### Phases
+
+#### Phase 1: Define diagnostic schemas and safe preflight
+
+**Objective:** Establish versioned artifact/report schemas, redaction rules,
+exit-code contract, endpoint handling, and Docker/resource preflight checks.
+
+**Prerequisites:** None.
+
+**Expected outcome:** Another agent can invoke the runner and receive predictable
+validation errors before any container or model request starts.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Add diagnostic CLI contract and artifact schemas.
+
+  - **Description:** Define `--duration`, `--model`, `--llama-cpp-url`,
+    `--report-dir`, `--keep-artifacts`, `--workload`, `--analysis-timeout`,
+    optional `--prompt-file`, JSON output, stable exit codes, schema versions,
+    redaction limits, and report validation rules.
+  - **Files:** `scripts/diagnose_long_session.py`, new diagnostic schema/helper
+    module if required, `tests/test_diagnostic_runner.py`, `README.md`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** `--help` is complete; invalid duration/endpoint/path
+    values fail before execution; success and failure output is machine-readable;
+    reports have stable required fields and never contain unredacted credentials.
+  - **Verification:** Unit-test argument validation, redaction, schema validation,
+    exit codes, and cleanup behavior without Docker or a real model.
+
+- [ ] **Task:** Add Docker preflight and resource-policy checks.
+
+  - **Description:** Detect Docker availability, build/runtime capability,
+    writable report space, and endpoint reachability. Apply configurable CPU,
+    memory, PID, disk, network, and timeout limits; report unsupported limits
+    explicitly instead of implying they were enforced.
+  - **Files:** `scripts/diagnose_long_session.py`, diagnostic Dockerfile/config,
+    `tests/test_diagnostic_runner.py`, `docs/RELEASE_CHECKLIST.md` only if
+    operational verification commands are added.
+  - **Dependencies:** CLI contract task.
+  - **Acceptance Criteria:** Preflight failures are actionable; no host
+    workspace/credential mount occurs by default; container cleanup is attempted
+    on normal exit, timeout, signal, and analysis failure.
+  - **Verification:** Mock Docker command tests and an opt-in integration smoke
+    test that starts/stops a minimal disposable container.
+
+#### Phase 2: Build the isolated one-hour workload
+
+**Objective:** Exercise built-in tools and long-session behavior in Docker while
+capturing complete, bounded, redacted diagnostics.
+
+**Prerequisites:** Phase 1.
+
+**Expected outcome:** A retained artifact bundle can explain what happened during
+the run without exposing the host repository or credentials.
+
+**Estimated effort:** 1–2 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Create the diagnostic image and synthetic fixture workspace.
+
+  - **Description:** Add a pinned Docker image definition with Python, bash, git,
+    curl, image/fixture support, and only required utilities. Generate fixture
+    files for text, large output, malformed output, images, patches, edits,
+    permissions, timeouts, and evidence reload. Keep the image reproducible and
+    avoid copying host secrets or the real repository.
+  - **Files:** `docker/diagnostic.Dockerfile`, optional
+    `docker/diagnostic-requirements.txt`, `scripts/diagnostic_workload.py`,
+    `tests/test_diagnostic_workload.py`.
+  - **Dependencies:** Docker preflight task.
+  - **Acceptance Criteria:** Fixture creation is deterministic and idempotent;
+    all required built-in tool scenarios have explicit expected outcomes; image
+    build does not depend on private host files.
+  - **Verification:** Docker build smoke test and fixture/workload unit tests.
+
+- [ ] **Task:** Implement the RPC workload driver and event collector.
+
+  - **Description:** Adapt the existing RPC subprocess protocol to run for the
+    requested duration with bounded cycles and scenario rotation. Exercise all
+    built-in tools, automated `ask_user`, bounded subagents, retries, timeouts,
+    steering/follow-up, compaction, reload, and durable evidence retrieval.
+    Record structured events, stderr, process exits, resource samples, session
+    JSONL/evidence metadata, and a heartbeat timeline without unbounded memory.
+  - **Files:** `scripts/diagnose_long_session.py`,
+    `scripts/diagnostic_workload.py`, `tests/test_diagnostic_runner.py`,
+    `tests/test_diagnostic_workload.py`.
+  - **Dependencies:** Diagnostic image and fixture task.
+  - **Acceptance Criteria:** The driver stops cleanly at the deadline, handles
+    malformed/non-event stdout, kills hung descendants, records all scenario
+    outcomes, bounds event/log memory, and never runs MCP/extensions by default.
+  - **Verification:** Fake RPC process tests for event ordering, malformed lines,
+    timeout/signal cleanup, bounded buffers, and scenario coverage; opt-in short
+    Docker smoke run.
+
+#### Phase 3: Detect bugs and analyze with llama.cpp
+
+**Objective:** Turn collected evidence into deterministic findings and a validated
+AI-assisted report using the configured local model.
+
+**Prerequisites:** Phase 2.
+
+**Expected outcome:** `report.md` and `report.json` identify reproducible issues,
+evidence locations, severity, probable causes, recommendations, and uncertainty.
+
+**Estimated effort:** 1–2 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Implement heuristic diagnostic finding detection.
+
+  - **Description:** Check lifecycle pairing/order, stalls, duplicate events,
+    malformed RPC, provider/tool failures, timeout/retry anomalies, compaction
+    and context inconsistencies, evidence/session mismatches, resource limits,
+    and cleanup failures. Emit finding IDs, severity, category, evidence refs,
+    probable cause, and confidence without asserting unverified root causes.
+  - **Files:** `scripts/diagnostic_findings.py`,
+    `tests/test_diagnostic_findings.py`.
+  - **Dependencies:** Event collector and artifact schema.
+  - **Acceptance Criteria:** Synthetic fixtures trigger known findings and clean
+    runs do not produce false critical/high findings; checks are deterministic,
+    bounded, redacted, and reference exact artifact records where possible.
+  - **Verification:** Table-driven tests for each detector, malformed artifacts,
+    missing events, duplicate events, and partial/crashed runs.
+
+- [ ] **Task:** Add isolated llama.cpp/local report analysis.
+
+  - **Description:** Invoke the existing CLI against the configured endpoint with
+    all built-in tools available, no MCP/extensions, and a disposable analysis
+    workspace. Mount diagnostic inputs read-only or copy only sanitized artifacts;
+    instruct the model to treat logs as untrusted data. Require Markdown and JSON
+    outputs, validate them, merge model findings with heuristic findings, and
+    preserve uncertainty when the model cannot establish a cause.
+   - **Files:** `scripts/diagnose_long_session.py`,
+     `scripts/diagnostic_analysis_prompt.md`, `tests/test_diagnostic_runner.py`,
+     `README.md`.
+  - **Dependencies:** Heuristic findings task; local model endpoint available for
+    opt-in integration verification.
+  - **Acceptance Criteria:** Analysis timeout/failure produces a valid partial
+    report; the model cannot modify the real repository; reports cite artifact
+    IDs/paths; malformed model output is handled without losing heuristic findings;
+    the endpoint and model are configurable with the requested defaults.
+  - **Verification:** Stub CLI/model tests for success, timeout, malformed JSON,
+    prompt-injection-like log content, and tool mutation isolation; opt-in local
+    llama.cpp integration test.
+
+#### Phase 4: Cleanup, reporting, and agent-facing documentation
+
+**Objective:** Make the tool reliable for repeated autonomous invocation and prove
+that default cleanup does not remove the final reports.
+
+**Prerequisites:** Phases 1–3.
+
+**Expected outcome:** Other agents can run the command, consume its JSON result,
+read the two final reports, and rely on cleanup/exit-code behavior.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Finalize cleanup, report retention, and documentation.
+
+  - **Description:** Atomically write `report.md`/`report.json` to `--report-dir`,
+    remove temporary artifacts by default, retain them with `--keep-artifacts`,
+    handle cleanup failures visibly, document Docker prerequisites and the
+    `192.168.200.19:8089` default, and provide examples for another agent.
+  - **Files:** `scripts/diagnose_long_session.py`, `README.md`,
+    `docs/RELEASE_CHECKLIST.md`, `tests/test_diagnostic_report.py`.
+  - **Dependencies:** Analysis and report validation tasks.
+  - **Acceptance Criteria:** Final reports remain readable after cleanup; JSON is
+    machine-consumable; repeated runs do not collide; cleanup is idempotent;
+    retained artifacts are clearly marked as sensitive diagnostic data.
+  - **Verification:** End-to-end short-duration run with a stub model, cleanup
+    assertions, retained-artifact assertions, repeated-run collision tests, full
+    pytest, Ruff, and `git diff --check`.
+
+### Project Acceptance Criteria
+
+- [ ] Another agent can run a non-interactive one-hour diagnostic session with
+  one documented command.
+- [ ] Built-in read, write, edit, patch, bash, image, evidence, retry, timeout,
+  steering, subagent, and lifecycle paths are exercised in an isolated Docker
+  workspace.
+- [ ] The run collects bounded, redacted, versioned diagnostics and detects
+  deterministic protocol/runtime anomalies.
+- [ ] `llama.cpp/local` at the configurable default endpoint produces validated
+  Markdown and JSON reports from the diagnostics without modifying the real repo.
+- [ ] Default cleanup removes raw artifacts while preserving only `report.md` and
+  `report.json`; `--keep-artifacts` provides an explicit forensic override.
+- [ ] Unit, short integration, and full-suite verification pass; no production
+  runtime behavior changes are introduced.
+
+### Rollout & Rollback
+
+The diagnostic runner is opt-in and does not change normal agent startup or tool
+execution. Roll back by removing the new script/image/test/documentation files;
+no user-session migration is required. Never mount a real repository or enable
+MCP/extensions by default as part of this feature.
+
+### Observability
+
+The runner itself must report phase, elapsed time, container ID, scenario counts,
+event counts, findings counts, analysis status, cleanup status, and report paths
+without printing secret values. Retained artifacts must include a manifest with
+schema version, command configuration, image digest, model endpoint (without
+credentials), and timestamps.
+
+### Security Considerations
+
+Docker is a containment aid, not an absolute security boundary. Do not run the
+diagnostic container privileged, do not mount the Docker socket, do not pass host
+credentials, and do not mount the real repository by default. Sanitize secrets in
+event/log/report pipelines. Treat model-visible diagnostic content as untrusted
+data and isolate analysis writes from the source checkout.
+
+### Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Container can reach or damage unintended resources | High | Medium | Disposable workspace, no privileged mode/socket/host mounts, resource limits, explicit network policy |
+| One-hour run grows logs or memory without bound | High | Medium | Ring buffers, byte/line caps, periodic flushes, artifact size limits, watchdog |
+| Local model follows instructions embedded in logs | High | Medium | Delimit logs as untrusted data, read-only artifact mount, disposable analysis workspace, heuristic findings retained independently |
+| llama.cpp endpoint is unreachable from Docker/host | Medium | Medium | Preflight probe, configurable URL, actionable failure report, analysis can be skipped while retaining findings |
+| Workload misses a real bug | Medium | High | Scenario rotation, deterministic expected outcomes, explicit coverage report, preserve `--prompt-file`/custom workload extension |
+| Cleanup removes evidence needed for debugging | Medium | Medium | Validate reports first, atomic writes, `--keep-artifacts` override, explicit cleanup status |
+
+### Estimated Timeline
+
+Approximately 3–5 engineering days: preflight/schemas, Docker workload, finding
+detectors, local-model analysis, cleanup/reporting, and verification. The main
+uncertainty is Docker networking/resource behavior across Linux and Docker
+Desktop.
+
 ## Durable tool evidence with model retrieval after reload
 
 ### Goal
