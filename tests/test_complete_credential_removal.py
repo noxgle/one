@@ -400,16 +400,10 @@ def test_registry_remove_provider_credentials_delegates():
 @pytest.mark.asyncio
 async def test_tui_logout_clears_all_and_wording(tmp_path: Path):
     """TUI /logout uses remove_provider_credentials and says 'locally'."""
-    # Import test helpers via sys.path so we can access _mk_app_session, _submit
-    import sys
-
     from one.modes.tui_mode import _OneTextualApp
-    _test_pkg_dir = str(Path(__file__).parent)
-    if _test_pkg_dir not in sys.path:
-        sys.path.insert(0, _test_pkg_dir)
-    import test_tui_mode as _tui_test  # noqa: F401
+    from tests.support.tui import _mk_app_session, _submit
 
-    session = _tui_test._mk_app_session(tmp_path)
+    session = _mk_app_session(tmp_path)
     auth = session.model_registry._auth
     auth.set_runtime_api_key("openai", "rt")
     auth.set_stored_api_key("openai", "stored")
@@ -418,7 +412,7 @@ async def test_tui_logout_clears_all_and_wording(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        await _tui_test._submit(app, pilot, "/logout openai")
+        await _submit(app, pilot, "/logout openai")
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "Removed credentials for openai locally." in stream

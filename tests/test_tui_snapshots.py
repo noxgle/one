@@ -26,10 +26,9 @@ import pytest
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "tui"
 
 # ---------------------------------------------------------------------------
-# Deterministic fake session / model helpers (replicate what
-# ``tests/test_tui_mode.py`` _DummySession / _DummyModel provide plus
-# the extra attributes/_OneTextualApp._refresh_sidebar_ and
-# ``build_sidebar_snapshot`` read).
+# Self-contained deterministic fake session / model helpers, including the
+# attributes read by ``_OneTextualApp._refresh_sidebar_`` and
+# ``build_sidebar_snapshot``.
 # ---------------------------------------------------------------------------
 
 

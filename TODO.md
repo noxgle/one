@@ -1247,7 +1247,7 @@ test/lint result recorded in the branch.
 
 **Confidence:** High.
 
-- [ ] **Task:** Inventory large test-module boundaries
+- [x] **Task:** Inventory large test-module boundaries
   - **Description:** Group tests by behavior and identify helpers that are local
     versus genuinely shared. Record any tests relying on module-level state,
     ordering, snapshots, or private symbols before moving them.
@@ -1274,7 +1274,7 @@ with shared setup extracted only where necessary.
 
 **Confidence:** Medium.
 
-- [ ] **Task:** Split `test_tui_mode.py` by behavior
+- [x] **Task:** Split `test_tui_mode.py` by behavior
   - **Description:** Move tests and their local helpers into focused modules,
     recommended: `tests/test_tui_input.py`, `tests/test_tui_streaming.py`,
     `tests/test_tui_rendering.py`, `tests/test_tui_commands.py`,
@@ -1308,7 +1308,7 @@ changing provider fakes, event contracts, or tool-result assertions.
 
 **Confidence:** High.
 
-- [ ] **Task:** Split `test_tool_calling.py` by agent-loop behavior
+- [x] **Task:** Split `test_tool_calling.py` by agent-loop behavior
   - **Description:** Move tests into recommended modules
     `tests/test_agent_tool_calls.py`, `tests/test_agent_retry_abort.py`,
     `tests/test_agent_timeouts_limits.py`, `tests/test_agent_steering.py`, and
@@ -1339,7 +1339,7 @@ explicit, and the complete suite remains green.
 
 **Confidence:** Medium.
 
-- [ ] **Task:** Finalize support helpers and collection parity
+- [x] **Task:** Finalize support helpers and collection parity
   - **Description:** Consolidate only shared fakes/factories, remove obsolete
     source modules or compatibility shims after checking tooling references,
     and compare collected test names/counts against the pre-refactor baseline.
@@ -1354,13 +1354,13 @@ explicit, and the complete suite remains green.
 
 ### Project Acceptance Criteria
 
-- [ ] `test_tui_mode.py` and `test_tool_calling.py` are no longer oversized
+- [x] `test_tui_mode.py` and `test_tool_calling.py` are no longer oversized
   catch-all modules.
-- [ ] Every pre-refactor test remains collected and meaningfully asserted.
-- [ ] TUI snapshots, event snapshots, timeout tests, and steering tests remain
+- [x] Every pre-refactor test remains collected and meaningfully asserted.
+- [x] TUI snapshots, event snapshots, timeout tests, and steering tests remain
   green.
-- [ ] No production files, version, or changelog entries change.
-- [ ] Full pytest suite and ruff pass on `refactor/test-suite-organization`.
+- [x] No production files, version, or changelog entries change.
+- [x] Full pytest suite and ruff pass on `refactor/test-suite-organization`.
 
 ## Follow-up: factual evidence after compaction
 
