@@ -1885,3 +1885,233 @@ termination.
   tests for invalid IDs, cross-session access, large Unicode content, and errors.
 - [x] Existing event ordering, JSONL compatibility, sanitization, and CLI/RPC
   contracts remain backward compatible except for additive evidence metadata.
+
+## Follow-up: Diagnostic findings and RPC event correlation
+
+### Goal
+
+Create a follow-up branch, recommended name `fix/diagnostic-event-correlation`,
+to resolve the findings from the Docker diagnostic run without weakening the
+diagnostic checks. Preserve backward compatibility for existing event consumers
+where possible; any new event fields must be additive.
+
+### Evidence from the diagnostic report
+
+- `tool_call_end` events were observed without `toolCallId`.
+- Multiple `agent_end` events were observed in one persistent RPC session.
+- One malformed/non-object stdout record was collected, but the final report did
+  not expose enough redacted raw evidence to identify its source.
+- `llama.cpp/local` analysis returned `unavailable` with an empty detail string.
+- The 60-second workload itself completed successfully: no missing expected
+  coverage, `wait_for_idle` completed 4/4, no runtime failure, and cleanup passed.
+
+### Scope
+
+#### In Scope
+
+- Propagate stable tool-call correlation IDs through tool lifecycle events.
+- Make lifecycle detection aware of persistent multi-turn RPC sessions.
+- Preserve actionable, redacted evidence for malformed stdout and model-analysis
+  failures.
+- Add deterministic regression tests and rerun the Docker diagnostic with retained
+  artifacts.
+
+#### Non-Goals
+
+- Do not change tool behavior, provider semantics, or production timeouts unless
+  a regression test proves they are required for lifecycle correctness.
+- Do not treat every repeated `agent_end` in a persistent session as a defect.
+- Do not suppress real malformed RPC output or lifecycle mismatches merely to make
+  the report green.
+
+### Architecture and decisions
+
+1. Use the provider/tool-call identifier when available; otherwise generate a
+   per-session/per-turn fallback ID that is unique and explicitly marked as
+   runtime-generated.
+2. Include the same `toolCallId` in `tool_call_start` and `tool_call_end`,
+   including approval rejection, extension denial, timeout, abort, and error
+   paths. Keep the field additive for existing consumers.
+3. Correlate `agent_start`/`agent_end` by turn/request/session context. A
+   persistent RPC session may legitimately contain multiple completed turns;
+   only duplicate terminal events for the same turn should be reported.
+4. Keep malformed stdout as a finding, but include bounded and redacted raw data,
+   source classification, and event index in retained artifacts and the final
+   machine-readable report.
+5. Preserve model-analysis failure status while reporting non-secret return code,
+   stderr, stdout envelope status, and endpoint/model context sufficient to
+   diagnose reachability or protocol failures.
+
+### Phases
+
+#### Phase 1: Correlate tool lifecycle events
+
+**Objective:** Ensure every tool start/end pair can be matched reliably.
+
+**Prerequisites:** None.
+
+**Expected outcome:** Diagnostic reports no longer flag valid tool completions as
+missing IDs, while genuine mismatches remain detectable.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Preserve and emit tool-call correlation IDs.
+
+  - **Description:** Trace the parsed provider tool-call ID into
+    `AgentSession._run_tool_call()` and add it to every `tool_call_start` and
+    `tool_call_end` event. Define a deterministic fallback only for providers
+    that genuinely omit IDs; document the fallback and avoid collisions across
+    concurrent or retried calls. Cover approval rejection, extension denial,
+    normal success, tool failure, timeout, abort, and `finish` paths.
+  - **Files:** `one/core/agent_session.py`, provider/tool-call parsing modules
+    identified during implementation, relevant event/RPC type definitions, and
+    focused tests under `tests/test_agent_tool_calls.py`,
+    `tests/test_event_snapshots.py`, and `tests/test_rpc_mode.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Every emitted tool lifecycle pair has the same
+    non-empty `toolCallId`; existing consumers remain compatible; IDs are not
+    derived from secret arguments or unbounded prompt text.
+  - **Verification:** Add tests for provider-supplied IDs, fallback IDs,
+    retries, rejection/error/timeout paths, and exact event ordering; run the
+    focused agent/event/RPC tests and `ruff check .`.
+
+#### Phase 2: Correct persistent-session lifecycle detection
+
+**Objective:** Distinguish valid multi-turn `agent_end` events from duplicate
+terminal events within one turn.
+
+**Prerequisites:** Phase 1 is preferred but not strictly required.
+
+**Expected outcome:** A multi-prompt persistent RPC workload does not generate a
+false `duplicate-agent-end` finding.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Add turn-aware lifecycle correlation to diagnostics.
+
+  - **Description:** Identify the existing event/request/turn boundary exposed by
+    the RPC stream. Update `diagnostic_findings.detect()` to group terminal
+    lifecycle events by that boundary and report only repeated terminal events
+    within the same turn. If the runtime does not expose sufficient metadata,
+    add a bounded additive turn identifier at the event emission boundary.
+  - **Files:** `scripts/diagnostic_findings.py`,
+    `scripts/diagnostic_workload.py`, `tests/test_diagnostic_findings.py`,
+    `tests/test_diagnostic_runner.py`, and runtime event tests if a new field is
+    needed.
+  - **Dependencies:** Understand the event contract from Phase 1 and existing
+    RPC snapshots.
+  - **Acceptance Criteria:** Multiple valid turns produce no duplicate finding;
+    two terminal events for one turn still produce a finding; reports retain
+    exact evidence references.
+  - **Verification:** Table-driven detector tests for one turn, multiple turns,
+    duplicate terminal events, aborted turns, and partial sessions; run the
+    short Docker workload and inspect `report.json`.
+
+#### Phase 3: Improve malformed-output evidence
+
+**Objective:** Make the malformed RPC finding actionable rather than merely
+pointing to an event index.
+
+**Prerequisites:** None.
+
+**Expected outcome:** A maintainer can identify whether malformed output came
+from the RPC protocol, startup logging, provider output, or the workload driver.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Preserve bounded redacted malformed-output context.
+
+  - **Description:** Retain the source stream, raw preview, truncation marker,
+    sequence index, and nearby event context in temporary artifacts and expose a
+    sanitized bounded excerpt in `report.json`. Ensure normal reports never leak
+    credentials or unbounded model output. Run once with `--keep-artifacts` to
+    classify the current `events[0]` finding before deciding whether runtime
+    stdout or the collector is at fault.
+  - **Files:** `scripts/diagnose_long_session.py`,
+    `scripts/diagnostic_workload.py`, `scripts/diagnostic_findings.py`,
+    `tests/test_diagnostic_runner.py`, `tests/test_diagnostic_findings.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Malformed findings include actionable redacted raw
+    context; credentials and oversized output remain protected; valid JSON RPC
+    events are not misclassified.
+  - **Verification:** Unit-test malformed JSON, non-object output, startup text,
+    secret redaction, truncation, and event ordering; run a retained-artifact
+    Docker smoke and inspect the exact first malformed record.
+
+#### Phase 4: Diagnose local-model analysis failures
+
+**Objective:** Make `llama.cpp/local` analysis failures diagnosable and verify the
+analysis path independently from the workload path.
+
+**Prerequisites:** Phase 3 artifacts and a reachable local model endpoint.
+
+**Expected outcome:** `modelAnalysis.detail` identifies connection, process,
+timeout, or malformed-response failures without leaking secrets.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Add structured model-analysis failure diagnostics.
+
+  - **Description:** Capture sanitized subprocess return code, stderr, bounded
+    stdout preview, timeout state, selected model, and endpoint reachability
+    status. Confirm whether analysis is expected to run on the host or inside a
+    networked container, and document the required endpoint/network setup.
+  - **Files:** `scripts/diagnose_long_session.py`,
+    `scripts/diagnostic_analysis_prompt.md`, `tests/test_diagnostic_runner.py`,
+    and `README.md` if invocation/network documentation changes.
+  - **Dependencies:** Local `llama.cpp` endpoint or a deterministic stub CLI for
+    tests.
+  - **Acceptance Criteria:** Analysis success, timeout, non-zero exit,
+    unreachable endpoint, and malformed envelope each produce valid reports with
+    distinct actionable status/detail values; heuristic findings are preserved.
+  - **Verification:** Stub subprocess tests plus one opt-in real endpoint run;
+    inspect `report.json` and verify no credentials appear in output.
+
+#### Phase 5: End-to-end regression verification
+
+**Objective:** Prove the corrected runtime events and diagnostic interpretations
+work together on the real Docker workload.
+
+**Prerequisites:** Phases 1–4.
+
+**Expected outcome:** The diagnostic report distinguishes real defects from
+expected multi-turn behavior and records any unresolved issue with evidence.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Run retained-artifact and normal cleanup diagnostics.
+
+  - **Description:** Execute short and one-hour-compatible commands on a dedicated
+    follow-up branch, first with `--keep-artifacts` for investigation and then
+    without it for cleanup verification. Compare coverage, lifecycle findings,
+    malformed records, analysis status, report validity, and container cleanup.
+  - **Files:** `README.md`, `TODO.md`, and diagnostic tests/docs only if command
+    or report contracts change.
+  - **Dependencies:** Phases 1–4.
+  - **Acceptance Criteria:** No false duplicate-agent-end finding for valid
+    multi-turn runs; tool lifecycle IDs correlate; malformed output has an exact
+    redacted explanation; model-analysis status is actionable; default cleanup
+    leaves final reports readable and removes raw artifacts.
+  - **Verification:** Focused tests, full `pytest`, Ruff, `git diff --check`, an
+    opt-in retained-artifact Docker run, and a normal cleanup Docker run.
+
+### Follow-up Acceptance Criteria
+
+- [ ] Every tool lifecycle event pair contains a stable matching `toolCallId`.
+- [ ] Persistent RPC sessions with multiple valid turns do not trigger a false
+  duplicate-terminal-event finding.
+- [ ] Genuine same-turn lifecycle duplication remains detectable.
+- [ ] Malformed RPC output includes bounded, redacted, source-identifying
+  evidence.
+- [ ] Model-analysis failures include actionable non-secret diagnostics.
+- [ ] Full local tests and CI pass on supported platforms.
