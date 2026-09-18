@@ -1,6 +1,6 @@
 # Skills
 
-Skills are modular, discoverable instruction sets that extend the agent's capabilities on demand. They follow a YAML frontmatter + Markdown body format (`.SKILL.md` files) and are loaded via the resource loader.
+Skills are modular, discoverable instruction sets that extend the agent's capabilities on demand. They follow a YAML frontmatter + Markdown body format (`SKILL.md` files) and are loaded via the resource loader.
 
 ## Discovery
 

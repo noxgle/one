@@ -10,9 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
-- **Tool/MCP evidence preservation** — stale tool-output pruning is now disabled
-  by default, so complete older results remain in provider requests. Pruning is
-  an explicit opt-in for users who prefer smaller requests.
+- **Tool/MCP evidence preservation** — provider requests retain bounded tool
+  previews. Complete sanitized results are kept in durable session evidence and
+  can be read by the model after reload through `evidence_read`; optional stale
+  preview pruning remains available for smaller requests.
 - **Responsive TUI streaming input** — one ordered UI accumulator now batches
   both ordinary and thinking deltas at a bounded cadence, flushing before
   lifecycle boundaries. This avoids token-rate transcript/sidebar rebuilds so
@@ -55,18 +56,14 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   `models.json` entries, context-window alignment, tool parser order, endpoint
   verification, and safe host configuration.
 
-- **Selective stale tool-output pruning** — oversized old tool results are now
-  replaced only in provider requests with bounded markers, while complete JSONL
-  session history remains unchanged. The protected recent window and thresholds
-  are configurable through `toolOutputPruning` settings.
-
 - **Subagent timeout diagnostics** — `inspect_subagent_timeout()` returns the last
   subagent timeout diagnostic (cause, duration, timeoutSec, task summary); exposed
   via `/inspect-timeout` in TUI and RPC, and logged in interactive mode.
 - **Streaming delivery modes** — TUI dispatches queued steer/follow-up messages
   using `deliveryMode` (`followUp` vs `steer` vs `idle`), matching the
   `deliveryMode` event field emitted by the session.
-- **13 tools** (was 12): added `read_image` for vision / image input alongside the existing tool set.
+- **14 tools** (was 12): added `read_image` for vision/image input and
+  `evidence_read` for bounded retrieval of durable tool evidence.
 - **Multimodal image input** — `--image <path>` CLI flag and `read_image` tool support PNG, JPEG, WebP
   (up to 4 images per prompt, 10 MB source / 5 MiB Base64). Images are transient per-turn.
 - **Codex image input** — the ChatGPT/Codex Responses adapter sends `input_image`
@@ -84,7 +81,7 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   streamed retries and history trimming; single-insert paste; working waiting
   spinner; backspace/delete/arrows fire once.
 - **`/login` help** — all help outputs show the `[subscription]` argument.
-- **Skills system** — modular, discoverable instruction sets via `.SKILL.md` files
+- **Skills system** — modular, discoverable instruction sets via `SKILL.md` files
   with YAML frontmatter (name, description, optional license/compatibility/metadata/allowed-tools/disable-model-invocation).
   Skills are listed in the system prompt (metadata only) and loaded on demand via
   `/skill:<name>` (TUI/interactive) or `invoke_skill` ctype (RPC). Supports progressive

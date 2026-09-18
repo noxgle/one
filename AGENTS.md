@@ -29,14 +29,18 @@
 - `one/core/agent_session.py` owns the event-emitting synchronous agent loop; `session_manager.py` persists session JSONL.
 - `one/providers/` contains OpenAI-compatible, Anthropic, Gemini, and Codex Responses adapters; llama.cpp uses the OpenAI-compatible adapter.
 - `one/tools/index.py` is the registration source of truth; adding a tool also requires its schema/resource and dispatch path.
-- Active provider context is intentionally different from durable session history: stale oversized `toolResult` output is pruned in memory, while complete JSONL output is retained. Settings are under `toolOutputPruning`.
+- Active provider context is intentionally different from durable evidence: normal
+  `toolResult` messages are bounded previews, while sanitized complete tool/MCP
+  results are stored in a session sidecar and retrieved by `evidence_read` when
+  needed. Optional stale-preview pruning is configured under `toolOutputPruning`.
 - Compaction retains a rolling summary plus recent messages; preserve its event contract when changing context handling.
 - `one/resources/extension_runtime.py` implements extension hooks; failures emit `extension_load_error` rather than crashing the session. Contract details are in `docs/EXTENSIONS.md`.
 
 ## Testing gotchas
 
 - Async tests require explicit `@pytest.mark.asyncio`; pytest has no auto asyncio mode.
-- Event tests assert exact sequences and payloads, especially `test_event_snapshots.py` and `test_tool_calling.py`; new events should be additive.
+- Event tests assert exact sequences and payloads, especially
+  `test_event_snapshots.py` and `test_agent_*.py`; new events should be additive.
 - TUI stream mutations must end in `_render_stream()`; `_stream_lines` is capped at 500 entries and absolute indexes must be rebased after trimming.
 - TUI paste has separate keyboard and terminal-paste paths; test with Textual `pilot.press`/`Paste`, not direct action calls.
 - Do not assert ambient display/clipboard/X11/Wayland state; mock platform probes as `tests/test_clipboard_image.py` does.

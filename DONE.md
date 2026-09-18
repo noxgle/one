@@ -102,7 +102,7 @@ user-facing changes belong in [`CHANGELOG.md`](CHANGELOG.md).
 - Removed personal filesystem paths and private LAN examples from tracked
   documentation and test fixtures.
 
-## Verification at the latest release-preparation checkpoint
+## Historical verification at the release-preparation checkpoint
 
 - `794 passed` — full pytest suite.
 - `ruff check .` — passed.

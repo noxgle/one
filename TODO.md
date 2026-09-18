@@ -388,7 +388,7 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
   - **Description:** Make Ctrl-C dismiss an open `[Approve] <tool> {...}` prompt in TUI and interactive/headless approval paths; treat as rejection with reason (e.g. "aborted by user") fed back to the model like other rejections. Must not kill the session.
   - **Files:** `one/modes/tui_mode.py`, `one/modes/interactive_mode.py`, approval-callback wiring, related tests.
   - **Acceptance:** Ctrl-C on a pending approval rejects the call, model receives the rejection, session stays usable.
-  - **Verification:** New fake-approval regression tests; `.venv/bin/python -m pytest -q tests/test_tui_mode.py tests/test_approval.py`.
+  - **Verification:** New fake-approval regression tests; `.venv/bin/python -m pytest -q tests/test_tui_cooperation.py tests/test_approval.py`.
   - **Details:** `_on_key` override in `_OneTextualApp` intercepts `ctrl+c` when `_approval_pending` is set, puts `("no", "aborted by user")` into the approval queue and stops the event; interactive_mode already returns `(False, "aborted by user")` on Ctrl-C at line 138.
 
 - [x] **Task 2:** Show app version in TUI and at CLI startup.
@@ -431,7 +431,7 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
   - **Files:** help-text source in TUI/interactive mode, related tests.
   - **Acceptance:** Help shows the `[subscription]` argument.
   - **Verification:** Help-text assertion test.
-  - **Details:** Login help string updated in TUI slash-help (tui_mode.py:1318), TUI action_help (tui_mode.py:2490), and interactive_mode (interactive_mode.py:528) — all now include `[subscription]`; tests assert the string in `test_tui_mode.py:632`, `test_tui_mode.py:1095`, and `test_interactive_mode.py:392`.
+  - **Details:** Login help string updated in TUI slash-help, TUI action_help, and interactive mode — all now include `[subscription]`; tests assert the string in `tests/test_tui_commands.py` and `tests/test_interactive_mode.py`.
 
 ### Follow-up corrections requested
 
@@ -445,7 +445,7 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 
 - [x] **Task 9:** Change retry-cycle shortcut to Ctrl+R.
   - **Description:** Replace every user-visible and Textual binding occurrence of Ctrl+Shift+R with Ctrl+R, without changing the cycle action or provider-switching bindings.
-  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`, `tests/snapshots/tui/base.txt`, `tests/snapshots/tui/overlay.txt`, `tests/snapshots/tui/widget_panel.txt`.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_commands.py`, `tests/snapshots/tui/base.txt`, `tests/snapshots/tui/overlay.txt`, `tests/snapshots/tui/widget_panel.txt`.
   - **Dependencies:** Task 3.
   - **Acceptance Criteria:** `ctrl+r` invokes `action_cycle_retry_mode`; overlay shows `Ctrl+R`; `ctrl+shift+r` is not registered for this action.
    - **Verification:** Textual pilot keypress test, binding assertions, and reviewed regenerated snapshots.
@@ -461,7 +461,7 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 
 - [x] **Task 11:** Render effective tool timeout in the TUI.
   - **Description:** Include `event["effectiveTimeout"]` in the `tool_call_start` line, e.g. `tool start (timeout 30s): bash {...}`, using the per-call timeout when overridden. Keep non-time-limited tools readable and preserve existing tool output/error rendering.
-  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`, TUI snapshots if the rendered fixtures change.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_rendering.py`, TUI snapshots if the rendered fixtures change.
   - **Dependencies:** Existing `effectiveTimeout` event field.
   - **Acceptance Criteria:** A TUI event containing `effectiveTimeout` visibly renders the timeout; timeout overrides show the override value; tools with no timeout do not show a misleading value.
    - **Verification:** Direct TUI event/render test plus targeted snapshot tests.
@@ -469,7 +469,7 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 
 - [x] **Task 12:** Prevent duplicated multiline assistant/tool responses.
   - **Description:** Trace and fix duplicate rendering in both paths: suppress repeated final assistant content after streamed/thinking deltas, and make active tool-block tracking resilient when the 500-line TUI history is trimmed so `tool_call_end` cannot append a second status block. Preserve legitimate separate tool output blocks.
-  - **Files:** `one/modes/tui_mode.py`, possibly `one/core/agent_session.py` for event semantics, `tests/test_tui_mode.py`, `tests/test_event_snapshots.py` only if the event contract must change.
+  - **Files:** `one/modes/tui_mode.py`, possibly `one/core/agent_session.py` for event semantics, `tests/test_tui_streaming.py`, `tests/test_event_snapshots.py` only if the event contract must change.
   - **Dependencies:** None; coordinate with Task 11 when updating the same TUI event renderer.
   - **Acceptance Criteria:** A multiline streamed response appears once; reasoning/final content is not duplicated; after more than 500 rendered lines, a tool has exactly one status block; genuine tool output still appears once.
    - **Verification:** TUI regression with streamed multiline events, reasoning plus final text, and a tool start/end sequence crossing the trim boundary; targeted and full test suites.
@@ -477,17 +477,17 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 
 - [x] **Task 13:** Prevent repeated assistant responses across failed attempts/retries.
   - **Description:** Fix the remaining TUI duplication where the same multiline assistant response is displayed two or three times after a provider/MCP-related attempt fails and retry starts. A streamed partial assistant block remains visible because the failed attempt has no terminating `message_end`; the next `message_start` currently resets bookkeeping without removing the old live block. Add bounded cleanup of the currently tracked live assistant block before starting a new assistant message and defensively at `auto_retry_start`, without deleting legitimate tool output, retry status, or separate assistant messages. Preserve the existing event contract unless a terminating event is strictly necessary.
-  - **Files:** `one/modes/tui_mode.py`, possibly `one/core/agent_session.py` only if explicit failed-stream termination is required, `tests/test_tui_mode.py`, `tests/test_event_snapshots.py` only if event semantics change.
+  - **Files:** `one/modes/tui_mode.py`, possibly `one/core/agent_session.py` only if explicit failed-stream termination is required, `tests/test_tui_retry.py`, `tests/test_event_snapshots.py` only if event semantics change.
   - **Dependencies:** Task 12's live-block and trim-safe rendering helpers.
   - **Acceptance Criteria:** When a provider streams a multiline response, fails, and retries, the visible response appears exactly once after the successful retry. The same holds for two failed attempts followed by success. Distinctive lines from the Docker/Playwright MCP example are not repeated; legitimate retry indicators, tool output, and the final answer remain visible.
-  - **Verification:** Add a fake-provider TUI regression that emits the multiline text in chunks, raises after streaming on the first (and then second) attempt, and succeeds on the following attempt. Assert each distinctive line occurs once in `"\n".join(app._stream_lines)`; run `tests/test_tui_mode.py`, `tests/test_event_snapshots.py`, and the full suite.
+  - **Verification:** Add a fake-provider TUI regression that emits the multiline text in chunks, raises after streaming on the first (and then second) attempt, and succeeds on the following attempt. Assert each distinctive line occurs once in `"\n".join(app._stream_lines)`; run `tests/test_tui_retry.py`, `tests/test_event_snapshots.py`, and the full suite.
    - **Details:** Investigation found no duplicate TUI subscription. The likely root cause is stale `_assistant_live_start_idx`/live buffer state across an unterminated failed stream: `message_start` resets indexes but leaves the already-rendered block, so every retry appends another copy.
    - **Details:** Stale live block discarded at `message_start`/`auto_retry_start` via tracked start index + line count; `_trim_stream` rebases live/tool-block indexes on front-trim; 4 new regression tests (one-fail, two-fail, trim-rebase, trim-eats-block); full suite 1027 passed.
 
 - [x] **Task 14:** Prevent duplicated text when pasting into the TUI.
    - **Details:** ctrl+v consumed at widget level (stop+prevent) plus _on_paste override with shared truncation; 5 real-dispatch regression tests; image paste untouched.
   - **Description:** Trace and fix the interaction between the custom `Ctrl+V`/clipboard action and Textual's native `events.Paste`/`TextArea._on_paste()` path. A single terminal paste must insert the clipboard contents exactly once, without breaking multiline paste, truncation, keyboard typing, or submit behavior. Preserve image-paste handling on `Ctrl+Shift+V`.
-  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`, possibly Textual-version compatibility code only if required.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_input.py`, possibly Textual-version compatibility code only if required.
   - **Dependencies:** None.
   - **Acceptance Criteria:** One user paste produces one text insertion; a paste followed by Enter submits one prompt containing the text once; multiline and 10,240-character truncation behavior remain correct; image paste remains separate and functional.
   - **Verification:** Add real Textual pilot/event tests for `ctrl+v`, `events.Paste`, both paths emitted for one paste, and end-to-end paste-then-submit. Run tests against the supported Textual version range where practical.
@@ -495,7 +495,7 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 
 - [x] **Task 15:** Restore visible waiting-icon animation in the TUI.
   - **Description:** Ensure every waiting-animation frame mutation refreshes the `#stream` widget. `_tick_waiting()` currently updates an existing spinner line in `_stream_lines` but can omit `_render_stream()`, leaving the visible icon frozen or absent after recent stream-trimming changes. Preserve waiting predicates, cleanup on `turn_end`, and retry behavior.
-  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`, TUI snapshots only if rendering output intentionally changes.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_streaming.py`, TUI snapshots only if rendering output intentionally changes.
   - **Dependencies:** None.
   - **Acceptance Criteria:** While the model is waiting, successive timer ticks visibly change the rendered spinner/icon; the animation starts after a turn begins, pauses/clears at the correct lifecycle events, and does not duplicate spinner lines.
   - **Verification:** Add a TUI test that arms waiting, invokes `_tick_waiting()` multiple times, and compares both `_stream_lines` and the rendered `#stream` widget; cover normal turn, retry delay, queued prompt, and turn completion.
@@ -523,7 +523,7 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 
 - [x] **Task 16:** Fix backspace/delete/arrows double-dispatch in TUI input.
   - **Description:** `_OneTextualApp._on_key` calls `await super()._on_key(event)` explicitly and then `MessagePump` invokes `App._on_key` a second time via MRO (nothing sets `prevent_default`), so every bubbled binding action (backspace/delete_left, delete/delete_right, arrows) fires twice. Add `event.prevent_default()` after the explicit super call (backward-compatible with `textual>=0.74.0`); do not remove the super call. Verify `ctrl+z`, `ctrl+c`+approval, `ctrl+v`, and `shift+enter` paths are unaffected.
-  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_mode.py`.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_input.py`.
   - **Dependencies:** None.
   - **Acceptance Criteria:** One `backspace` press deletes exactly one char; `delete` and arrows also single-step; printable typing, selection deletion, multiline join, paste paths, spinner, and shortcuts unchanged.
   - **Verification:** Real `pilot.press` regression tests (backspace/delete/arrows/printable/multiline/selection/repeat + no-regression for Task 14/15 and shortcuts); full suite and ruff.
@@ -593,8 +593,8 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 
 - [x] **Task R2.1:** Repair TUI/CLI/RPC input and tool discoverability.
   - **Description:** Fix the remaining `dir(sys.modules)` check in `action_paste_image` (it always reports unavailable). Keep clipboard reads off the UI thread and bound captured output. Extract multiple paths without mutating text at stale match offsets; handle `~` and session-relative paths. Validate combined clipboard/file/API counts centrally. Forward or explicitly reject `--image` for TUI/interactive/RPC startup and image-only print mode. Reject image-bearing steer/follow-up requests rather than silently dropping their images if queues remain text-only. Add only the `read_image {path}` schema to the original prompt, without redesigning it.
-  - **Details:** TUI pilot/action + count validation + schema tests in `tests/test_tui_mode.py`, `tests/test_tui_image_input.py` (Textual paste, submit with refs, image-count rejection, `_extract_image_paths` multi-path handling).
-  - **Files:** `one/modes/tui_mode.py`, `one/modes/print_mode.py`, `one/modes/rpc_mode.py`, `one/cli/main.py`, `one/core/agent_session.py`, `one/core/clipboard_image.py`, `one/resources/resource_loader.py`, `tests/test_tui_mode.py`, `tests/test_tui_image_input.py`, `tests/test_image_cli_rpc.py`, `tests/test_system_prompt.py`.
+  - **Details:** TUI pilot/action + count validation + schema tests in `tests/test_tui_input.py`, `tests/test_tui_image_input.py` (Textual paste, submit with refs, image-count rejection, `_extract_image_paths` multi-path handling).
+  - **Files:** `one/modes/tui_mode.py`, `one/modes/print_mode.py`, `one/modes/rpc_mode.py`, `one/cli/main.py`, `one/core/agent_session.py`, `one/core/clipboard_image.py`, `one/resources/resource_loader.py`, `tests/test_tui_input.py`, `tests/test_tui_image_input.py`, `tests/test_image_cli_rpc.py`, `tests/test_system_prompt.py`.
   - **Dependencies:** R1.2; supported-mode decision.
   - **Acceptance:** Actual bound paste action reaches import; actual submit passes refs to provider; multiple matched paths leave correct text; queued attachments never disappear silently; original bash/MCP behavior unchanged.
   - **Verification:** Textual pilot/action tests with fake clipboard and provider, CLI dispatch tests for each supported mode, startup RPC attachment test, combined 4+1 count rejection and real loader schema assertion.
@@ -895,7 +895,7 @@ work in the UI while failing to influence the active turn.
     error) from draining queues automatically.
   - **Files:** `one/core/agent_session.py`, `one/modes/tui_mode.py`,
     `one/modes/interactive_mode.py`, `tests/test_event_snapshots.py`,
-    `tests/test_tool_calling.py`, `tests/test_tui_mode.py`,
+    `tests/test_agent_steering.py`, `tests/test_tui_streaming.py`,
     `tests/test_interactive_mode.py`.
   - **Dependencies:** Existing mid-run delivery policy and queue handling in
     the `Subagent timeout and post-timeout diagnostics` implementation tasks.
@@ -1445,7 +1445,7 @@ termination.
     sanitization and existing lifecycle event ordering.
   - **Files:** `one/core/agent_session.py`, `one/mcp/client.py` only if needed
     for raw-result normalization, and relevant tests in
-    `tests/test_tool_calling.py`, `tests/test_mcp.py`, and
+    `tests/test_agent_tool_calls.py`, `tests/test_mcp.py`, and
     `tests/test_event_snapshots.py`.
   - **Dependencies:** Durable evidence storage task.
   - **Acceptance Criteria:** Every persisted eligible tool result has a stable

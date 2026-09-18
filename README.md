@@ -510,7 +510,7 @@ Project extensions in `.one/extensions/` are not sandboxed — see the trust war
 ## Resources and skills
 
 `one` discovers **skills** (modular instruction sets) alongside extensions, prompts, and
-themes. Skills follow a YAML frontmatter + Markdown format (`.SKILL.md` files) and are
+themes. Skills follow a YAML frontmatter + Markdown format (`SKILL.md` files) and are
 loaded on demand — not injected into the system prompt. Full specification is in
 [`docs/SKILLS.md`](docs/SKILLS.md).
 
@@ -708,6 +708,7 @@ package metadata (`pyproject.toml` dynamic version) and `one --version`.
 - `TODO.md` — open roadmap items
 - `DONE.md` — delivered functionality and release-preparation record
 - `docs/EXTENSIONS.md` — extension hook contract
+- `docs/SKILLS.md` — skill discovery, frontmatter, and invocation contract
 - `docs/RELEASE_CHECKLIST.md` — reproducible release verification steps
 - `CONTRIBUTING.md` — development setup, testing, conventions
 - `SECURITY.md` — supported versions, reporting, trust boundaries

@@ -11,7 +11,7 @@ cd one
 python3 -m venv .venv
 .venv/bin/pip install -e .[dev]
 
-# Run the full test suite (~790 tests, ~170s)
+# Run the full test suite (~1230 tests, ~3 minutes)
 .venv/bin/python -m pytest -q
 
 # Lint (ruff)
@@ -32,7 +32,7 @@ ruff check .
   `tui_mode` (Textual), `interactive_mode`.
 - **Providers**: `one/providers/` — adapters for OpenAI-compatible, Anthropic,
   Gemini, and Codex Responses API.
-- **Tools**: `one/tools/` — 13 tools registered in `tools/index.py`.
+- **Tools**: `one/tools/` — 14 tools registered in `tools/index.py`.
 - **MCP**: `one/mcp/client.py` — stdio and streamable-HTTP transport.
 - **Resources**: `one/resources/` — extension/runtime, skills, prompts, themes.
 

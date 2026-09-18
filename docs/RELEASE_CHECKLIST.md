@@ -48,6 +48,8 @@ pip check
 # Install into a temporary venv from the built wheel
 TMPDIR=$(mktemp -d)
 python3 -m venv "$TMPDIR/test-env"
+. "$TMPDIR/test-env/bin/activate"
+python -m pip install --no-deps dist/one-agent-*.whl
 # PYTHONPATH must NOT be set so the test resolves the installed package,
 # not the source checkout.
 env -u PYTHONPATH "$TMPDIR/test-env/bin/python" -c "import one; print(one.config.VERSION)"
@@ -92,9 +94,10 @@ Always check `gitleaks --help` for the exact flags on the installed version.
 ## 9. pip-audit — resolved-environment scan
 
 ```bash
-pip-audit --requirement /dev/null  # scan the current resolved environment
-# Or for specific packages:
-pip-audit -r requirements.txt  # if a requirements file is maintained
+# Scan the currently resolved environment.
+pip-audit
+# If a requirements file is introduced later, scan it explicitly with:
+# pip-audit -r requirements.txt
 ```
 
 ## 10. License & fixture provenance
