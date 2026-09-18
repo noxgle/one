@@ -6,6 +6,10 @@ user-facing changes belong in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Recent reliability and context-management work
 
+- Added durable, session-scoped tool/MCP evidence sidecars. Normal provider
+  context keeps a bounded preview, while `evidence_read` retrieves sanitized,
+  chunked full results by evidence ID after reload without rerunning a tool.
+  Storage is append-only with record/session limits and atomic initial writes.
 - Added a long-session RPC profiler, including an opt-in large-tool-output
   workload that reports context, pruning, persistence, and timing metrics.
 - Added selective provider-context pruning for oversized tool results, then
@@ -21,6 +25,13 @@ user-facing changes belong in [`CHANGELOG.md`](CHANGELOG.md).
   waits, high-rate reasoning, queued input, retries, and concurrent draining.
 - Updated llama.cpp documentation for persistent per-model endpoints, context
   windows, tool parsers, and remote-server verification.
+
+## Test-suite organization
+
+- Split the former monolithic TUI and agent tool-calling test modules into
+  behavior-focused modules with explicit helpers under `tests/support/`.
+  Preserved all 195 original test nodes, snapshot/event/timeout/steering
+  coverage, and focused pytest selection without production-code changes.
 
 ## Foundation
 
