@@ -11,6 +11,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 from one.core.types import ModelInfo
+from one.providers.base import ChatResult
 from tests.support.agents import _FakeProvider, _Loader
 
 
@@ -36,11 +37,61 @@ async def test_tool_call_parsed_from_mixed_text_and_bom(tmp_path: Path):
         )
     }
 
+    events: list[dict[str, object]] = []
+    agent.subscribe(events.append)
     await agent.prompt("go")
     assert agent.get_last_assistant_text() == "DONE"
     tool_results = [m for m in agent.messages if m.get("role") == "toolResult"]
     assert tool_results
     assert '"tool": "read"' in tool_results[0]["content"]
+    start = next(e for e in events if e["type"] == "tool_call_start")
+    end = next(e for e in events if e["type"] == "tool_call_end")
+    assert start["toolCallId"] == end["toolCallId"]
+    assert str(start["toolCallId"]).startswith("runtime-")
+
+
+def test_tool_parser_preserves_native_and_function_metadata_ids(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium")
+    direct = agent._try_parse_tool_call('{"id":"call-direct","tool":"read","args":{"path":"x"}}')
+    nested = agent._try_parse_tool_call('{"id":"call-function","function":{"name":"read","arguments":"{\\"path\\":\\"x\\"}"}}')
+    assert direct and direct["toolCallId"] == "call-direct"
+    assert nested and nested["toolCallId"] == "call-function"
+
+
+@pytest.mark.asyncio
+async def test_openai_raw_tool_call_id_is_propagated_to_tool_events(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"tools": {"maxSteps": 3}}),
+        registry, _Loader(), model, "medium", tools=["read"],
+    )
+    agent.providers = {"openai": _FakeProvider([
+        ChatResult(
+            text='{"tool":"read","args":{"path":"a.txt"}}',
+            raw={"id": "chatcmpl-not-a-tool", "choices": [{"message": {"tool_calls": [
+                {"id": "call_openai_123", "type": "function", "function": {"name": "read", "arguments": '{"path":"a.txt"}'}}
+            ]}}]},
+            usage={}, stop_reason="tool_calls",
+        ),
+        "DONE",
+    ])}
+    events: list[dict[str, object]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("read it")
+
+    lifecycle = [event for event in events if event["type"] in {"tool_call_start", "tool_call_end"}]
+    assert [event["toolCallId"] for event in lifecycle] == ["call_openai_123", "call_openai_123"]
 
 
 @pytest.mark.asyncio

@@ -119,7 +119,11 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                                 pass
                         output(error(cid, ctype, f"Attachment error: {e}"))
                         continue
-                asyncio.create_task(session.prompt(cmd.get("message", ""), {"streamingBehavior": cmd.get("streamingBehavior")}, images=image_refs))
+                asyncio.create_task(session.prompt(cmd.get("message", ""), {
+                    "streamingBehavior": cmd.get("streamingBehavior"),
+                    # The command id is an optional, additive correlation key.
+                    "requestId": cid,
+                }, images=image_refs))
                 output(success(cid, ctype))
             elif ctype == "steer":
                 steer_images = cmd.get("images")

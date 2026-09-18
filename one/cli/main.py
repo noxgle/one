@@ -463,7 +463,7 @@ async def _run(argv: list[str]) -> int:
     try:
         # Startup banner (version shown once at launch).
         # Suppress when --json is used to keep stdout clean for JSON parsing.
-        if not settings.get_quiet_startup() and not parsed.json_output:
+        if not settings.get_quiet_startup() and not parsed.json_output and parsed.mode != "rpc":
             print(f"one v{VERSION}", flush=True)
 
         if parsed.command == "run":

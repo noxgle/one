@@ -92,7 +92,7 @@ async def test_turn_end_emitted_on_non_retryable_error(tmp_path: Path):
 
     events: list[dict[str, Any]] = []
     agent.subscribe(events.append)
-    await agent.prompt("fail now")
+    await agent.prompt("fail now", {"requestId": "exception-request"})
 
     turn_end = [e for e in events if e.get("type") == "turn_end"]
     assert turn_end
@@ -100,7 +100,10 @@ async def test_turn_end_emitted_on_non_retryable_error(tmp_path: Path):
     assert turn_end[-1]["reason"] == "error"
     assert "provider down" in turn_end[-1]["error"]
 
-    assert any(e.get("type") == "agent_end" for e in events)
+    agent_end = next(e for e in events if e.get("type") == "agent_end")
+    assert agent_end["requestId"] == "exception-request"
+    assert agent_end["turnId"] == "turn-1"
+    assert agent._active_turn_id is None and agent._active_request_id is None
 
 
 @pytest.mark.asyncio
@@ -119,7 +122,7 @@ async def test_abort_stops_turn_with_abort_message(tmp_path: Path):
     events: list[dict[str, Any]] = []
     agent.subscribe(events.append)
 
-    task = asyncio.create_task(agent.prompt("run and abort"))
+    task = asyncio.create_task(agent.prompt("run and abort", {"requestId": "abort-request"}))
     await asyncio.sleep(0.02)
     await agent.abort()
     await task
@@ -129,6 +132,10 @@ async def test_abort_stops_turn_with_abort_message(tmp_path: Path):
     assert turn_end
     assert turn_end[-1]["aborted"] is True
     assert turn_end[-1]["reason"] == "abort"
+    agent_end = next(e for e in events if e.get("type") == "agent_end")
+    assert agent_end["requestId"] == "abort-request"
+    assert agent_end["turnId"] == "turn-1"
+    assert agent._active_turn_id is None and agent._active_request_id is None
 
 
 @pytest.mark.asyncio
@@ -146,7 +153,7 @@ async def test_retry_then_success_emits_reason_completed(tmp_path: Path):
 
     events: list[dict[str, Any]] = []
     agent.subscribe(events.append)
-    await agent.prompt("retry once")
+    await agent.prompt("retry once", {"requestId": "retry-request"})
 
     assert agent.get_last_assistant_text() == "RECOVERED"
     turn_ends = [e for e in events if e.get("type") == "turn_end"]
@@ -154,3 +161,7 @@ async def test_retry_then_success_emits_reason_completed(tmp_path: Path):
     assert turn_ends[0]["ok"] is False
     assert turn_ends[-1]["ok"] is True
     assert turn_ends[-1]["reason"] in {"stop", "completed"}
+    agent_end = next(e for e in events if e.get("type") == "agent_end")
+    assert agent_end["requestId"] == "retry-request"
+    assert agent_end["turnId"] == "turn-1"
+    assert agent._active_turn_id is None and agent._active_request_id is None

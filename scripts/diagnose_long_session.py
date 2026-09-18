@@ -105,12 +105,13 @@ def collect_lines(stdout: str) -> tuple[list[dict[str, Any]], list[dict[str, Any
         try:
             item = json.loads(line)
         except json.JSONDecodeError:
-            malformed.append({"type": "malformed", "raw": line[:512]})
+            if len(malformed) < MAX_MALFORMED:
+                malformed.append({"type": "malformed", "source": "stdout", "raw": redact(line[:512])})
             continue
         if isinstance(item, dict):
             events.append(redact(item))
-        else:
-            malformed.append({"type": "non_object_output"})
+        elif len(malformed) < MAX_MALFORMED:
+            malformed.append({"type": "non_object_output", "source": "stdout", "raw": redact(line[:512])})
     return events, malformed
 
 
@@ -147,11 +148,11 @@ def collect_workload_output(stdout: str) -> tuple[list[dict[str, Any]], list[dic
             item = json.loads(line)
         except json.JSONDecodeError:
             if len(malformed) < MAX_MALFORMED:
-                malformed.append({"type": "malformed", "raw": redact(line[:512])})
+                malformed.append({"type": "malformed", "source": "stdout", "raw": redact(line[:512])})
             continue
         if not isinstance(item, dict):
             if len(malformed) < MAX_MALFORMED:
-                malformed.append({"type": "non_object_output"})
+                malformed.append({"type": "non_object_output", "source": "stdout", "raw": redact(line[:512])})
             continue
         if item.get("type") == "diagnostic_workload":
             summary = item
@@ -368,6 +369,42 @@ def prepare_analysis_workspace(workspace: Path, artifact: dict[str, Any]) -> lis
     return paths
 
 
+def _analysis_preview(value: Any) -> str:
+    """Return a JSON-safe, redacted preview of subprocess output."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return str(redact(value if isinstance(value, str) else str(value), 1024))
+
+
+def _analysis_text_candidates(stdout: Any) -> list[str]:
+    """Return bounded model text from direct output and the CLI JSON summary."""
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="replace")
+    text = str(stdout)[:MAX_ANALYSIS_INPUT]
+    candidates = [text]
+    try:
+        cli_output = json.loads(text)
+    except json.JSONDecodeError:
+        return candidates
+    if isinstance(cli_output, dict) and isinstance(cli_output.get("summary"), str):
+        candidates.insert(0, cli_output["summary"][:MAX_ANALYSIS_INPUT])
+    return candidates
+
+
+def _parse_diagnostic_envelope(text: str) -> tuple[dict[str, Any] | None, str]:
+    """Parse exactly one required diagnostic envelope from bounded model text."""
+    begin, end = "DIAGNOSTIC_JSON_BEGIN", "DIAGNOSTIC_JSON_END"
+    if text.count(begin) != 1 or text.count(end) != 1:
+        return None, "missing"
+    try:
+        data = json.loads(text.split(begin, 1)[1].split(end, 1)[0].strip())
+    except json.JSONDecodeError:
+        return None, "invalid"
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str) or not isinstance(data.get("findings"), list) or not isinstance(data.get("recommendations", []), list):
+        return None, "shape"
+    return data, "valid"
+
+
 def run_analysis(args: argparse.Namespace, artifact: dict[str, Any], workspace: Path) -> dict[str, Any]:
     """Use the supported CLI, never a provider adapter, in a disposable cwd."""
     artifact_paths = prepare_analysis_workspace(workspace, artifact)
@@ -376,21 +413,42 @@ def run_analysis(args: argparse.Namespace, artifact: dict[str, Any], workspace: 
     environment["ONE_CODING_AGENT_DIR"] = str(workspace / "runtime-state")
     try:
         result = subprocess.run(command, cwd=workspace, env=environment, capture_output=True, text=True, timeout=args.analysis_timeout, check=False)
-    except subprocess.TimeoutExpired:
-        return {"status": "timeout", "summary": "Local model analysis timed out.", "findings": []}
+    except subprocess.TimeoutExpired as exc:
+        return {"status": "timeout", "summary": "Local model analysis timed out.", "findings": [], "detail": {"timeoutSec": args.analysis_timeout, "stdoutPreview": _analysis_preview(getattr(exc, "stdout", "") or ""), "stderrPreview": _analysis_preview(getattr(exc, "stderr", "") or "")}}
+    candidates = _analysis_text_candidates(result.stdout)
+    parsed_data: dict[str, Any] | None = None
+    parse_state = "missing"
+    for text in candidates:
+        parsed_data, parse_state = _parse_diagnostic_envelope(text)
+        if parsed_data is not None:
+            break
+
+    if parsed_data is not None:
+        response = {
+            "status": "completed_with_nonzero_exit" if result.returncode else "completed",
+            "summary": redact(parsed_data["summary"]),
+            "findings": redact(parsed_data["findings"]),
+            "recommendations": redact(parsed_data.get("recommendations", [])),
+        }
+        if result.returncode:
+            response["detail"] = {"returnCode": result.returncode}
+        return response
+
+    text = candidates[0]
     if result.returncode:
-        return {"status": "unavailable", "summary": "Local model analysis failed; heuristic findings are retained.", "findings": [], "detail": redact(result.stderr)}
-    text = result.stdout[:MAX_ANALYSIS_INPUT]
-    begin, end = "DIAGNOSTIC_JSON_BEGIN", "DIAGNOSTIC_JSON_END"
-    if begin not in text or end not in text:
-        return {"status": "malformed", "summary": "Model output did not contain the required diagnostic JSON envelope.", "findings": []}
+        return {"status": "unavailable", "summary": "Local model analysis failed; heuristic findings are retained.", "findings": [], "detail": {"returnCode": result.returncode, "stdoutPreview": _analysis_preview(text), "stderrPreview": _analysis_preview(result.stderr)}}
+    if parse_state == "missing":
+        return {"status": "malformed", "summary": "Model output did not contain the required diagnostic JSON envelope.", "findings": [], "detail": {"envelope": "missing", "stdoutPreview": _analysis_preview(text), "stderrPreview": _analysis_preview(result.stderr)}}
+    if parse_state == "invalid":
+        return {"status": "malformed", "summary": "Model diagnostic JSON was invalid.", "findings": [], "detail": {"envelope": "present", "json": "invalid", "stdoutPreview": _analysis_preview(text), "stderrPreview": _analysis_preview(result.stderr)}}
+    # recommendations remains optional under the established result contract.
     try:
-        data = json.loads(text.split(begin, 1)[1].split(end, 1)[0].strip())
-    except json.JSONDecodeError:
-        return {"status": "malformed", "summary": "Model diagnostic JSON was invalid.", "findings": []}
-    if not isinstance(data, dict) or not isinstance(data.get("summary"), str) or not isinstance(data.get("findings"), list) or not isinstance(data.get("recommendations", []), list):
-        return {"status": "malformed", "summary": "Model diagnostic JSON did not match the required shape.", "findings": []}
-    return {"status": "completed", "summary": redact(data.get("summary", "")), "findings": redact(data["findings"]), "recommendations": redact(data.get("recommendations", []))}
+        data = json.loads(text.split("DIAGNOSTIC_JSON_BEGIN", 1)[1].split("DIAGNOSTIC_JSON_END", 1)[0].strip())
+    except json.JSONDecodeError:  # Defensive: _parse_diagnostic_envelope already checked this.
+        data = None
+    missing = [key for key in ("summary", "findings") if isinstance(data, dict) and key not in data] if isinstance(data, dict) else ["object"]
+    invalid = [key for key in ("summary", "findings", "recommendations") if isinstance(data, dict) and key in data and not isinstance(data[key], str if key == "summary" else list)]
+    return {"status": "malformed", "summary": "Model diagnostic JSON did not match the required shape.", "findings": [], "detail": {"envelope": "present", "json": "valid", "missingFields": missing, "invalidFields": invalid, "stdoutPreview": _analysis_preview(text), "stderrPreview": _analysis_preview(result.stderr)}}
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -441,7 +499,12 @@ def main(argv: list[str] | None = None) -> int:
             else run_analysis(args, {"run": run, "findings": findings}, analysis_dir)
         )
         report_paths = {"markdown": str((report_dir / "report.md").resolve()), "json": str((report_dir / "report.json").resolve())}
-        report = {"schemaVersion": SCHEMA_VERSION, "run": {"duration": args.duration, "workload": args.workload, "dockerVersion": docker_version, "completed": run.get("ok", False), "coverage": run.get("coverage", {}), "missingCoverage": run.get("missingCoverage", []), "waitForIdle": run.get("waitForIdle", {}), "fixture": run.get("fixture", {}), "elapsedSec": run.get("elapsedSec"), "runtimeFailure": run.get("runtimeFailure", False), "processReturnCode": run.get("processReturnCode"), "processTerminatedByDriver": run.get("processTerminatedByDriver", False), "sessionArtifacts": run.get("sessionArtifacts", {})}, "findings": findings, "modelAnalysis": analysis, "cleanup": cleanup, "reportPaths": report_paths}
+        run_events = run.get("events", [])
+        malformed_events = [
+            event for event in run_events
+            if isinstance(event, dict) and event.get("type") in {"malformed", "stdout_text", "non_object_output"}
+        ][:MAX_MALFORMED]
+        report = {"schemaVersion": SCHEMA_VERSION, "run": {"duration": args.duration, "workload": args.workload, "dockerVersion": docker_version, "completed": run.get("ok", False), "events": run_events, "malformed": malformed_events, "coverage": run.get("coverage", {}), "missingCoverage": run.get("missingCoverage", []), "waitForIdle": run.get("waitForIdle", {}), "fixture": run.get("fixture", {}), "elapsedSec": run.get("elapsedSec"), "runtimeFailure": run.get("runtimeFailure", False), "processReturnCode": run.get("processReturnCode"), "processTerminatedByDriver": run.get("processTerminatedByDriver", False), "sessionArtifacts": run.get("sessionArtifacts", {})}, "findings": findings, "modelAnalysis": analysis, "cleanup": cleanup, "reportPaths": report_paths}
         validate_report(report)
         atomic_write(report_dir / "report.md", render_markdown(report))
         atomic_json(report_dir / "report.json", report)

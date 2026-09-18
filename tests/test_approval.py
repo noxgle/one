@@ -139,7 +139,9 @@ async def test_approval_reject_skips_execution_and_feeds_reason(tmp_path: Path):
     assert "don't touch that file" in ctx_text
 
     # Event contract: approval rejection is surfaced, turn ends cleanly.
-    assert any(e["type"] == "tool_approval_rejected" for e in events)
+    rejection = next(e for e in events if e["type"] == "tool_approval_rejected")
+    rejected_end = next(e for e in events if e["type"] == "tool_call_end" and not e["ok"])
+    assert rejection["toolCallId"] == rejected_end["toolCallId"]
     assert any(e["type"] == "agent_end" for e in events)
     assert agent.get_last_assistant_text() == "ok, not touching that"
 

@@ -287,6 +287,26 @@ def test_cli_flag_validation_errors(tmp_path: Path):
     assert "invalid --thinking value" in bad_thinking.stdout.lower()
 
 
+def test_cli_rpc_stdout_has_no_startup_banner(tmp_path: Path):
+    env = os.environ.copy()
+    env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+
+    result = subprocess.run(
+        [sys.executable, "-m", "one.cli.main", "--mode", "rpc", "--no-extensions", "--no-mcp"],
+        cwd=str(tmp_path),
+        env=env,
+        input='{"type":"nope","id":"test"}\n',
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert "one v" not in result.stdout
+    assert all(isinstance(json.loads(line), dict) for line in result.stdout.splitlines())
+
+
 def test_cli_flag_semantics_mode_print_session_fork(tmp_path: Path):
     env = os.environ.copy()
     env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")

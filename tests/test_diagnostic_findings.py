@@ -15,6 +15,20 @@ def test_lifecycle_and_malformed_detectors_are_evidence_based() -> None:
     assert all("probableCause" in item and "confidence" in item for item in findings)
 
 
+def test_agent_end_is_grouped_by_turn_but_same_turn_duplicates_remain_findings() -> None:
+    valid = detect([{"type": "agent_end", "turnId": "turn-1"}, {"type": "agent_end", "turnId": "turn-2"}])
+    duplicate = detect([{"type": "agent_end", "turnId": "turn-1"}, {"type": "agent_end", "turnId": "turn-1"}])
+    assert "duplicate-agent-end" not in {item["id"] for item in valid}
+    assert "duplicate-agent-end" in {item["id"] for item in duplicate}
+
+
+def test_malformed_finding_exposes_bounded_redacted_record_evidence() -> None:
+    findings = detect([{"type": "malformed", "source": "stdout", "raw": "token=secret " + "x" * 1000}])
+    evidence = findings[0]["evidence"][0]
+    assert "events[0]" in evidence and "stdout" in evidence
+    assert "secret" not in evidence and len(evidence) < 400
+
+
 def test_coverage_and_context_findings_reference_recorded_evidence() -> None:
     findings = detect(
         [{"type": "provider_error", "message": "context window limit exceeded"}],

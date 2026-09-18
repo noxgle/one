@@ -43,7 +43,14 @@ def detect(events: list[dict[str, Any]], diagnostics: dict[str, Any] | None = No
     context_evidence: list[str] = []
     for index, event in enumerate(events):
         if event.get("type") in {"malformed", "stdout_text", "non_object_output"}:
-            output.append(finding("malformed-rpc", "medium", "protocol", "Non-JSON or non-object RPC output was collected.", [f"events[{index}]"], "The child process may have written diagnostics to stdout.", "high"))
+            evidence = f"events[{index}]"
+            raw = event.get("raw")
+            if raw is not None:
+                evidence += f":raw={redact(raw, 256)!r}"
+            source = event.get("source")
+            if source:
+                evidence += f":source={redact(source, 128)!r}"
+            output.append(finding("malformed-rpc", "medium", "protocol", "Non-JSON or non-object RPC output was collected.", [evidence], "The child process may have written diagnostics to stdout.", "high"))
         if event.get("type") == "tool_call_end" and not event.get("toolCallId"):
             output.append(finding("malformed-tool-lifecycle", "medium", "lifecycle", "A tool completion has no tool-call identifier.", [f"events[{index}]"], "The event producer may not have supplied correlation metadata."))
         if event.get("type") in {"error", "provider_error", "tool_error"} or event.get("success") is False:
@@ -58,8 +65,17 @@ def detect(events: list[dict[str, Any]], diagnostics: dict[str, Any] | None = No
             context_evidence.append(f"events[{index}]")
     if counts["agent_start"] and not counts["agent_end"]:
         output.append(finding("missing-agent-end", "high", "lifecycle", "Agent start was observed without a matching agent end.", ["events:type=agent_start"], "The process may have stalled, been terminated, or omitted a lifecycle event."))
-    if counts["agent_end"] > 1:
-        output.append(finding("duplicate-agent-end", "medium", "lifecycle", "More than one agent-end event was observed.", ["events:type=agent_end"], "Duplicate emission or merged runs are possible."))
+    terminal_groups: Counter[str] = Counter()
+    for index, event in enumerate(events):
+        if event.get("type") != "agent_end":
+            continue
+        # Legacy streams lack a boundary, so retain the previous conservative
+        # global check. New RPC streams provide turnId/requestId.
+        key = event.get("turnId") or event.get("requestId")
+        terminal_groups[str(key) if key else "legacy"] += 1
+    for key, count in terminal_groups.items():
+        if count > 1:
+            output.append(finding("duplicate-agent-end", "medium", "lifecycle", "More than one agent-end event was observed for one turn.", [f"agentEnd:{key}"], "Duplicate emission or merged runs are possible."))
     starts = Counter(str(e.get("toolCallId")) for e in events if e.get("type") == "tool_call_start" and e.get("toolCallId"))
     ends = Counter(str(e.get("toolCallId")) for e in events if e.get("type") == "tool_call_end" and e.get("toolCallId"))
     for call_id, count in starts.items():

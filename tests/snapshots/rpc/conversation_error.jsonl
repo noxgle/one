@@ -1,5 +1,5 @@
 {"command": "prompt", "id": "p2", "success": true, "type": "response"}
-{"type": "agent_start"}
+{"requestId": "p2", "turnId": "turn-1", "type": "agent_start"}
 {"message": {"content": "do something", "role": "user"}, "type": "message_start"}
 {"message": {"content": "do something", "role": "user"}, "type": "message_end"}
 {"attempt": 1, "type": "turn_start"}
@@ -19,5 +19,5 @@
 {"message": {"content": [{"text": "boom", "type": "text"}], "model": "gpt-4.1", "provider": "openai", "role": "assistant", "stopReason": "error", "usage": {"cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}, "input": 0, "output": 0}}, "type": "message_start"}
 {"assistantMessageEvent": {"delta": "boom", "type": "text_delta"}, "type": "message_update"}
 {"message": {"content": [{"text": "boom", "type": "text"}], "model": "gpt-4.1", "provider": "openai", "role": "assistant", "stopReason": "error", "usage": {"cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}, "input": 0, "output": 0}}, "type": "message_end"}
-{"type": "agent_end"}
+{"requestId": "p2", "turnId": "turn-1", "type": "agent_end"}
 {"command": "wait_for_idle", "id": "w2", "success": true, "type": "response"}

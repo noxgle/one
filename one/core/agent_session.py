@@ -169,6 +169,12 @@ class AgentSession:
         self._extension_ui_history: list[dict[str, Any]] = []
         self._pending_questions: dict[str, dict[str, Any]] = {}
         self._extension_runtime: ExtensionRuntime | None = None
+        # These identifiers are runtime metadata only.  They are deliberately
+        # counters, not prompt or argument derived values.
+        self._tool_call_sequence = 0
+        self._turn_sequence = 0
+        self._active_turn_id: str | None = None
+        self._active_request_id: str | None = None
         # Last subagent-timeout diagnostic (Task 4 — inspect-timeout).
         self._last_subagent_timeout: dict[str, Any] | None = None
         # Provider-only context diagnostics; durable session messages stay raw.
@@ -214,6 +220,53 @@ class AgentSession:
             return "".join(x.get("text", "") for x in content if x.get("type") == "text")
         return str(content)
 
+    @staticmethod
+    def _provider_tool_call_id(raw: Any) -> str | None:
+        """Extract only tool-call-scoped provider IDs, never a request/message ID."""
+        def bounded(value: Any) -> str | None:
+            if isinstance(value, (str, int)) and str(value).strip():
+                return str(value).strip()[:128]
+            return None
+
+        def walk(value: Any, scoped: bool = False) -> str | None:
+            if isinstance(value, dict):
+                scoped = scoped or any(
+                    key in value for key in ("tool", "name", "function", "arguments", "input")
+                )
+                for key in ("toolCallId", "tool_call_id"):
+                    found = bounded(value.get(key))
+                    if found:
+                        return found
+                if scoped:
+                    found = bounded(value.get("id"))
+                    if found:
+                        return found
+                # Provider envelopes hold calls under choices[].message.tool_calls
+                # (OpenAI) as well as under their direct tool-call containers.
+                # Traverse only structural containers so a response/message ID
+                # cannot be mistaken for a tool-call ID.
+                for key in ("choices", "message", "delta", "tool_calls", "toolCalls", "function_call", "function", "output", "content"):
+                    if key in value:
+                        found = walk(value[key], key in {"tool_calls", "toolCalls", "function_call", "function"})
+                        if found:
+                            return found
+            elif isinstance(value, list):
+                for child in value:
+                    found = walk(child, scoped)
+                    if found:
+                        return found
+            return None
+
+        return walk(raw)
+
+    def _agent_event(self, event_type: str, messages: list[dict[str, Any]]) -> None:
+        event: dict[str, Any] = {"type": event_type, "messages": messages}
+        if self._active_turn_id:
+            event["turnId"] = self._active_turn_id
+        if self._active_request_id:
+            event["requestId"] = self._active_request_id
+        self._emit(event)
+
     def _build_runtime_system_prompt(self) -> str:
         getter = getattr(self.resource_loader, "get_system_prompt", None)
         if not callable(getter):
@@ -258,7 +311,7 @@ class AgentSession:
         )
         return prompt
 
-    def _try_parse_tool_call(self, text: str) -> dict[str, Any] | None:
+    def _try_parse_tool_call(self, text: str, provider_tool_call_id: str | None = None) -> dict[str, Any] | None:
         def normalize_tool_args(tool: str, raw_args: Any) -> dict[str, Any] | None:
             if isinstance(raw_args, dict):
                 return raw_args
@@ -389,13 +442,24 @@ class AgentSession:
                             start = -1
             return objs
 
+        def bounded_id(value: Any) -> str | None:
+            if not isinstance(value, (str, int)):
+                return None
+            value = str(value).strip()
+            return value[:128] if value else None
+
         def parse_from_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
             tool = obj.get("tool") or obj.get("name")
+            function = obj.get("function")
+            if tool is None and isinstance(function, dict):
+                tool = function.get("name") or function.get("tool")
             args = obj.get("args")
             if args is None:
                 args = obj.get("input")
             if args is None and "arguments" in obj:
                 args = obj.get("arguments")
+            if args is None and isinstance(function, dict):
+                args = function.get("arguments") or function.get("args") or function.get("input")
             if args is None:
                 args = {}
             if isinstance(args, str):
@@ -414,7 +478,18 @@ class AgentSession:
             if isinstance(tool, str):
                 normalized_args = normalize_tool_args(tool, args)
                 if normalized_args is not None:
-                    return {"tool": tool, "args": normalized_args}
+                    call_id = bounded_id(
+                        obj.get("toolCallId") or obj.get("tool_call_id") or obj.get("id")
+                    )
+                    if call_id is None and isinstance(function, dict):
+                        call_id = bounded_id(
+                            function.get("toolCallId") or function.get("tool_call_id") or function.get("id")
+                        )
+                    return {
+                        "tool": tool,
+                        "args": normalized_args,
+                        "toolCallId": call_id or provider_tool_call_id,
+                    }
             return None
 
         def parse_json_candidates(raw_text: str) -> dict[str, Any] | None:
@@ -903,7 +978,20 @@ class AgentSession:
             raise RuntimeError(f"Invalid result from tool: {tool_name}")
         return result
 
-    async def _run_tool_call(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
+    def _new_tool_call_id(self) -> str:
+        self._tool_call_sequence += 1
+        # The session-local monotonic counter is stable for diagnostics and is
+        # unique for sequential dispatches; it deliberately contains no input.
+        return f"runtime-{self._active_turn_id or 'turn-0'}-{self._tool_call_sequence}"
+
+    async def _run_tool_call(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        timeout_sec: int | None = None,
+        tool_call_id: str | None = None,
+    ) -> dict[str, Any]:
+        tool_call_id = str(tool_call_id).strip()[:128] if tool_call_id else self._new_tool_call_id()
         # A real tool step after a newly created plan permits a later finish.
         # Do not count the guarded finish itself as that step.
         if tool_name not in {"plan", "finish"}:
@@ -941,12 +1029,12 @@ class AgentSession:
                 }
                 self.messages.append(msg)
                 self.session_manager.append_message(msg)
-                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": args, "reason": reason})
+                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": args, "reason": reason, "toolCallId": tool_call_id})
                 # Sanitise read_image paths in tool_call_end event.
                 end_result = payload
                 if tool_name == "read_image":
                     end_result = _sanitise_read_image_payload(payload)
-                self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": end_result})
+                self._emit({"type": "tool_call_end", "tool": tool_name, "toolCallId": tool_call_id, "ok": False, "result": end_result})
                 return payload
         # Extension hooks: tool.execute.before (opencode contract). A raising
         # hook denies the call using the same contract as a user rejection.
@@ -978,11 +1066,11 @@ class AgentSession:
                 rej_args = args
                 if tool_name == "read_image":
                     rej_args = _sanitise_read_image_args(args)
-                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": rej_args, "reason": denied})
+                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": rej_args, "reason": denied, "toolCallId": tool_call_id})
                 end_result = payload
                 if tool_name == "read_image":
                     end_result = _sanitise_read_image_payload(payload)
-                self._emit({"type": "tool_call_end", "tool": tool_name, "ok": False, "result": end_result})
+                self._emit({"type": "tool_call_end", "tool": tool_name, "toolCallId": tool_call_id, "ok": False, "result": end_result})
                 return payload
         # Sanitise read_image path arguments before emitting events — the
         # full source path must not appear in tool_call_start / JSONL / logs.
@@ -1007,7 +1095,7 @@ class AgentSession:
             effective_timeout = args.get("timeout") or timeout_sec
             if effective_timeout is None and timeout_sec is not None:
                 effective_timeout = self.settings_manager.get_tool_timeout_sec()
-        self._emit({"type": "tool_call_start", "tool": tool_name, "args": emit_args, "effectiveTimeout": effective_timeout})
+        self._emit({"type": "tool_call_start", "tool": tool_name, "toolCallId": tool_call_id, "args": emit_args, "effectiveTimeout": effective_timeout})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)
             if result.get("ok", True) is True:
@@ -1126,7 +1214,7 @@ class AgentSession:
                         if isinstance(v, str):
                             basename = str(Path(v).name) or "image"
                             error_event_text = error_event_text.replace(v, basename)
-                self._emit({"type": "tool_call_error", "tool": tool_name, "args": error_event_args, "error": error_event_text})
+                self._emit({"type": "tool_call_error", "tool": tool_name, "toolCallId": tool_call_id, "args": error_event_args, "error": error_event_text})
 
         # Retrieval is itself bounded and must not recursively create evidence.
         evidence_id: str | None = None
@@ -1163,7 +1251,7 @@ class AgentSession:
                     val = event_args.get(key)
                     if isinstance(val, str):
                         event_args[key] = str(Path(val).name) or "image"
-        tool_call_end: dict[str, Any] = {"type": "tool_call_end", "tool": tool_name, "ok": payload.get("ok", False), "result": event_result}
+        tool_call_end: dict[str, Any] = {"type": "tool_call_end", "tool": tool_name, "toolCallId": tool_call_id, "ok": payload.get("ok", False), "result": event_result}
         if payload.get("aborted"):
             tool_call_end["aborted"] = True
         self._emit(tool_call_end)
@@ -1829,6 +1917,7 @@ class AgentSession:
             "_streamedStart": streamed_started,
             "_streamedMessage": streamed_msg,
             "_streamedSuppressed": streamed_suppressed,
+            "_providerToolCallId": self._provider_tool_call_id(res.raw),
         }
 
     @staticmethod
@@ -1954,7 +2043,14 @@ class AgentSession:
 
         self._is_streaming = True
         self._abort_requested = False
-        self._emit({"type": "agent_start"})
+        self._turn_sequence += 1
+        self._active_turn_id = f"turn-{self._turn_sequence}"
+        request_id = options.get("requestId")
+        self._active_request_id = str(request_id)[:128] if request_id is not None and str(request_id) else None
+        start_event: dict[str, Any] = {"type": "agent_start", "turnId": self._active_turn_id}
+        if self._active_request_id:
+            start_event["requestId"] = self._active_request_id
+        self._emit(start_event)
         # Images are transient — stored on the session, never persisted
         # to JSONL or emitted in events (no internal refs / paths leak).
         self._images = images
@@ -2033,13 +2129,14 @@ class AgentSession:
                             if self._abort_requested:
                                 final_assistant = self._abort_assistant_message()
                                 break
+                            provider_tool_call_id = assistant.pop("_providerToolCallId", None)
                             self.messages.append(assistant)
                             assistant_text = self._assistant_text(assistant)
                             # Consume tool-loaded images after the first provider call
                             # in the tool loop — they were attached to the prompt and
                             # should not be re-sent on subsequent provider calls.
                             self._tool_images = []
-                            tool_call = self._try_parse_tool_call(assistant_text)
+                            tool_call = self._try_parse_tool_call(assistant_text, provider_tool_call_id)
                             if tool_call is None and self._should_tool_nudge(assistant_text, step=step, tool_results=tool_results):
                                 self._nudge_fires += 1
                                 # fireCount is per-turn; currently always 1 since _should_tool_nudge fires only at step 0.
@@ -2066,7 +2163,9 @@ class AgentSession:
                                     final_assistant = self._abort_assistant_message()
                                     break
                                 nudged_text = self._assistant_text(nudged)
-                                nudged_tool_call = self._try_parse_tool_call(nudged_text)
+                                nudged_tool_call = self._try_parse_tool_call(
+                                    nudged_text, nudged.pop("_providerToolCallId", None)
+                                )
                                 if nudged_tool_call:
                                     tool_call = nudged_tool_call
                                     assistant = nudged
@@ -2104,7 +2203,10 @@ class AgentSession:
 
                             if tool_call:
                                 sub_timeout = None if tool_call["tool"] == "ask_user" else tool_timeout_sec
-                                tool_payload = await self._run_tool_call(tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout)
+                                tool_payload = await self._run_tool_call(
+                                    tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout,
+                                    tool_call_id=tool_call.get("toolCallId"),
+                                )
                                 tool_results.append(tool_payload)
                                 if tool_call["tool"] == "finish" and tool_payload.get("ok"):
                                     # Terminal tool: end the turn with the summary as the
@@ -2192,7 +2294,7 @@ class AgentSession:
                                 "toolResults": tool_results,
                             }
                         )
-                        self._emit({"type": "agent_end", "messages": [user_msg, final_assistant]})
+                        self._agent_event("agent_end", [user_msg, final_assistant])
                         break
                     except _CapabilityError as e:
                         terminal_error = True
@@ -2218,7 +2320,7 @@ class AgentSession:
                             self._is_streaming = False
                             self._images = None
                             self._tool_images = []
-                            self._emit({"type": "agent_end", "messages": [user_msg]})
+                            self._agent_event("agent_end", [user_msg])
                             raise _CapabilityErrorCooperative(str(e)) from e
                         # Autonomous mode: emit a controlled assistant message.
                         error_msg = {
@@ -2234,7 +2336,7 @@ class AgentSession:
                         self.session_manager.append_message(error_msg)
                         self._emit({"type": "message_start", "message": error_msg})
                         self._emit({"type": "message_end", "message": error_msg})
-                        self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
+                        self._agent_event("agent_end", [user_msg, error_msg])
                         break
                     except Exception as e:
                         retries_enabled = self.settings_manager.get_retry_enabled()
@@ -2273,7 +2375,7 @@ class AgentSession:
                                 }
                             )
                             self._emit({"type": "message_end", "message": error_msg})
-                            self._emit({"type": "agent_end", "messages": [user_msg, error_msg]})
+                            self._agent_event("agent_end", [user_msg, error_msg])
                             break
                         # Context-limit error: compact *before* retrying so the same
                         # logical turn/retry uses a smaller context without duplicating
@@ -2313,7 +2415,7 @@ class AgentSession:
                                     "toolResults": [],
                                 }
                             )
-                            self._emit({"type": "agent_end", "messages": [user_msg, abort_msg]})
+                            self._agent_event("agent_end", [user_msg, abort_msg])
                             self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
                             self._retrying = False
                             break
@@ -2341,7 +2443,7 @@ class AgentSession:
                                     "toolResults": [],
                                 }
                             )
-                            self._emit({"type": "agent_end", "messages": [user_msg, abort_msg]})
+                            self._agent_event("agent_end", [user_msg, abort_msg])
                             self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
                             self._retrying = False
                             break
@@ -2369,8 +2471,13 @@ class AgentSession:
                         "willRetry": False,
                     }
                 )
-                self._emit({"type": "agent_end", "messages": [user_msg]})
+                self._agent_event("agent_end", [user_msg])
             raise
+        finally:
+            # Keep IDs available through every terminal event above, then clear
+            # them before post-turn queue handling or the next prompt.
+            self._active_turn_id = None
+            self._active_request_id = None
 
         self._is_streaming = False
 

@@ -11,6 +11,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.providers.base import ChatResult
 from one.tools.index import all_tools
 from tests.support.agents import _FakeProvider, _Loader
 
@@ -110,6 +111,37 @@ async def test_deferred_action_response_gets_tool_nudge(tmp_path: Path):
     assert len(nudge_start) == 1
     assert len(nudge_end) == 1
     assert nudge_end[0].get("used") is True
+
+
+@pytest.mark.asyncio
+async def test_nudge_propagates_provider_tool_call_id(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory({"tools": {"maxSteps": 3}}),
+        registry, _Loader(), model, "medium", tools=["read"],
+    )
+    agent.providers = {"openai": _FakeProvider([
+        "I will inspect that.",
+        ChatResult(
+            text='{"tool":"read","args":{"path":"a.txt"}}',
+            raw={"choices": [{"message": {"tool_calls": [
+                {"id": "call_nudged", "function": {"name": "read", "arguments": '{"path":"a.txt"}'}}
+            ]}}]}, usage={}, stop_reason="tool_calls",
+        ),
+        "DONE",
+    ])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("inspect")
+
+    start = next(event for event in events if event["type"] == "tool_call_start")
+    assert start["toolCallId"] == "call_nudged"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ class _Loader:
         return "You are a coding agent."
 
 class _FakeProvider:
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(self, responses: list[Any]) -> None:
         self.responses = responses
         self.calls = 0
 
@@ -30,4 +30,7 @@ class _FakeProvider:
 
         idx = min(self.calls, len(self.responses) - 1)
         self.calls += 1
-        return ChatResult(text=self.responses[idx], raw={}, usage={}, stop_reason="stop")
+        response = self.responses[idx]
+        if isinstance(response, ChatResult):
+            return response
+        return ChatResult(text=str(response), raw={}, usage={}, stop_reason="stop")

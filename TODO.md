@@ -1957,7 +1957,7 @@ missing IDs, while genuine mismatches remain detectable.
 
 **Confidence:** High.
 
-- [ ] **Task:** Preserve and emit tool-call correlation IDs.
+- [x] **Task:** Preserve and emit tool-call correlation IDs.
 
   - **Description:** Trace the parsed provider tool-call ID into
     `AgentSession._run_tool_call()` and add it to every `tool_call_start` and
@@ -1991,7 +1991,7 @@ false `duplicate-agent-end` finding.
 
 **Confidence:** High.
 
-- [ ] **Task:** Add turn-aware lifecycle correlation to diagnostics.
+- [x] **Task:** Add turn-aware lifecycle correlation to diagnostics.
 
   - **Description:** Identify the existing event/request/turn boundary exposed by
     the RPC stream. Update `diagnostic_findings.detect()` to group terminal
@@ -2025,7 +2025,7 @@ from the RPC protocol, startup logging, provider output, or the workload driver.
 
 **Confidence:** Medium.
 
-- [ ] **Task:** Preserve bounded redacted malformed-output context.
+- [x] **Task:** Preserve bounded redacted malformed-output context.
 
   - **Description:** Retain the source stream, raw preview, truncation marker,
     sequence index, and nearby event context in temporary artifacts and expose a
@@ -2058,7 +2058,7 @@ timeout, or malformed-response failures without leaking secrets.
 
 **Confidence:** Medium.
 
-- [ ] **Task:** Add structured model-analysis failure diagnostics.
+- [x] **Task:** Add structured model-analysis failure diagnostics.
 
   - **Description:** Capture sanitized subprocess return code, stderr, bounded
     stdout preview, timeout state, selected model, and endpoint reachability
@@ -2089,7 +2089,7 @@ expected multi-turn behavior and records any unresolved issue with evidence.
 
 **Confidence:** Medium.
 
-- [ ] **Task:** Run retained-artifact and normal cleanup diagnostics.
+- [x] **Task:** Run retained-artifact and normal cleanup diagnostics.
 
   - **Description:** Execute short and one-hour-compatible commands on a dedicated
     follow-up branch, first with `--keep-artifacts` for investigation and then
@@ -2107,11 +2107,11 @@ expected multi-turn behavior and records any unresolved issue with evidence.
 
 ### Follow-up Acceptance Criteria
 
-- [ ] Every tool lifecycle event pair contains a stable matching `toolCallId`.
-- [ ] Persistent RPC sessions with multiple valid turns do not trigger a false
+- [x] Every tool lifecycle event pair contains a stable matching `toolCallId`.
+- [x] Persistent RPC sessions with multiple valid turns do not trigger a false
   duplicate-terminal-event finding.
-- [ ] Genuine same-turn lifecycle duplication remains detectable.
-- [ ] Malformed RPC output includes bounded, redacted, source-identifying
+- [x] Genuine same-turn lifecycle duplication remains detectable.
+- [x] Malformed RPC output includes bounded, redacted, source-identifying
   evidence.
-- [ ] Model-analysis failures include actionable non-secret diagnostics.
-- [ ] Full local tests and CI pass on supported platforms.
+- [x] Model-analysis failures include actionable non-secret diagnostics.
+- [x] Full local tests and CI pass on supported platforms.
