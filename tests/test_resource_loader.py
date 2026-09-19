@@ -48,6 +48,44 @@ def test_prompt_includes_plan_completion_and_reporting_integrity_rules():
     assert "Do not claim changes or verification without a successful, observed tool result." in prompt
 
 
+def test_prompt_includes_complexity_aware_planning_policy():
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+    prompt = loader.get_system_prompt(selected_tools=["read", "plan", "finish"])
+
+    assert "the user explicitly requests planning, or the task is genuinely complex" in prompt
+    assert "3+ dependent phases, multiple components or files, security/infrastructure/operational risk, validation or rollback gates, or required approval" in prompt
+    assert "Do NOT plan simple questions, simple single-file fixes with clear requirements, straightforward tests or formatting" in prompt
+    assert "User-provided phases are draft scope, not an already-created persisted plan." in prompt
+    assert "Never claim that a plan exists unless the plan tool succeeded and you observed its result." in prompt
+
+
+def test_prompt_limits_read_only_plan_mode_and_cooperation_approval():
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+    prompt = loader.get_system_prompt(selected_tools=["read", "plan", "finish"])
+
+    assert "Do not assume every request is read-only planning." in prompt
+    assert "only when Plan Mode is explicitly activated or required by task policy" in prompt
+    assert "When Plan Mode is active and cooperation mode is enabled, the existing cooperation approval callback handles the pause after successful plan creation" in prompt
+    assert "Without cooperation mode, continue according to the original execution request" in prompt
+    assert "do not add another approval gate." in prompt
+
+
+def test_planning_policy_precedes_action_strategy():
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+    prompt = loader.get_system_prompt(selected_tools=["read", "plan", "finish"])
+    action_strategy_index = prompt.index("ACTION STRATEGY")
+
+    policy_rules = (
+        "Create a plan ONLY if no active plan exists",
+        "simple single-file fixes with clear requirements",
+        "User-provided phases are draft scope",
+        "Never claim that a plan exists unless the plan tool succeeded",
+        "When Plan Mode is active and cooperation mode is enabled",
+        "After creating a plan, do not call finish immediately.",
+    )
+    assert all(prompt.index(rule) < action_strategy_index for rule in policy_rules)
+
+
 def test_prompt_includes_all_schemas_regression():
     settings = _make_settings()
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)

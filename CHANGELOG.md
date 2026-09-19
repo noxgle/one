@@ -8,6 +8,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Changed
+
+- **Complexity-aware planning policy** — plan-tool usage is limited to explicit
+  or genuinely complex tasks; simple tasks skip planning, and approval prompts
+  occur only when cooperation is enabled.
+
 ### Fixed
 
 - **SSH terminal paste after focus loss** — terminal text paste now restores
