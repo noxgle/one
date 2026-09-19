@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **SSH terminal paste after focus loss** — terminal text paste now restores
+  TUI input focus after a terminal security confirmation clears it, while
+  preserving exactly-once insertion and other widget focus ownership.
 - **Bounded TUI transcript viewport** — long conversations now render only the
   latest 500 display lines while retaining complete session history. Stream
   refreshes coalesce equivalent output, and mouse-selection copying remains

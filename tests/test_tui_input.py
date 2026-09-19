@@ -336,6 +336,73 @@ async def test_tui_paste_via_event_inserts_once(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tui_app_paste_after_focus_loss_refocuses_input_and_inserts_once(tmp_path: Path):
+    """A driver-routed terminal paste reaches the app when focus was cleared."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        app.screen.set_focus(None)
+        assert app.focused is None
+        app.post_message(events.Paste("paste-after-focus-loss"))
+        await pilot.pause()
+        assert app.focused is input_widget
+        assert input_widget.text == "paste-after-focus-loss"
+        assert input_widget.text.count("paste-after-focus-loss") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_app_empty_paste_after_focus_loss_does_not_refocus_or_insert(tmp_path: Path):
+    """An empty app-level paste is consumed without changing focus."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        app.screen.set_focus(None)
+        assert app.focused is None
+        app.post_message(events.Paste(""))
+        await pilot.pause()
+        assert app.focused is None
+        assert input_widget.text == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_app_paste_does_not_steal_other_widget_focus(tmp_path: Path):
+    """The no-focus fallback leaves paste owned by another focused widget."""
+    from textual import events
+    from textual.widgets import Button, TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        button = Button("Other", id="other-focus")
+        await app.mount(button)
+        button.focus()
+        await pilot.pause()
+        assert app.focused is button
+        app.post_message(events.Paste("other-widget-paste"))
+        await pilot.pause()
+        assert app.focused is button
+        assert input_widget.text == ""
+
+
+@pytest.mark.asyncio
 async def test_tui_ctrl_shift_v_uses_terminal_paste_event_once(tmp_path: Path, monkeypatch):
     """SSH terminal paste must not consult a clipboard backend or invoke image paste."""
     from textual import events

@@ -626,12 +626,14 @@ if TEXTUAL_AVAILABLE:
             return True
 
         def action_paste(self) -> None:
-            if self.read_only:
-                return
             text = _paste_from_system_clipboard()
             if not text:
                 text = self.app.clipboard
-            if not text:
+            self._insert_paste_text(text)
+
+        def _insert_paste_text(self, text: str) -> None:
+            """Insert terminal or clipboard text with the common paste guards."""
+            if self.read_only or not text:
                 return
             if len(text) > self._PASTE_MAX_CHARS:
                 text = text[: self._PASTE_MAX_CHARS]
@@ -649,20 +651,7 @@ if TEXTUAL_AVAILABLE:
             Compatible with Textual >= 0.74.0 (where ``_on_paste`` exists)
             and Textual 8.x (installed 8.2.8).
             """
-            # Guard: read-only blocks pasting.
-            if self.read_only:
-                event.stop()
-                event.prevent_default()
-                return
-            text = event.text
-            if not text:
-                event.stop()
-                event.prevent_default()
-                return
-            if len(text) > self._PASTE_MAX_CHARS:
-                text = text[: self._PASTE_MAX_CHARS]
-            if result := self._replace_via_keyboard(text, *self.selection):
-                self.move_cursor(result.end_location)
+            self._insert_paste_text(event.text)
             # Consume the event so Textual's native _on_paste (and any
             # subsequent handlers) do not insert a second copy.
             event.stop()
@@ -2853,6 +2842,25 @@ if TEXTUAL_AVAILABLE:
             # again after this handler (nothing set prevent_default yet),
             # which would fire bubbled bindings (backspace/delete/arrows)
             # a second time. Harmless no-op on older Textual single dispatch.
+            event.prevent_default()
+
+        async def _on_paste(self, event: events.Paste) -> None:
+            """Recover terminal paste when a terminal dialog cleared focus.
+
+            Textual routes a real paste to the active screen when no widget is
+            focused.  Only recover that no-focus case: a different focused
+            widget owns its paste event and must not be redirected to input.
+            """
+            if self.focused is not None:
+                return
+            if not event.text:
+                event.stop()
+                event.prevent_default()
+                return
+            input_widget = self.query_one("#input", _CommandTextArea)
+            input_widget.focus()
+            input_widget._insert_paste_text(event.text)
+            event.stop()
             event.prevent_default()
 
         async def action_abort(self) -> None:

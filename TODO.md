@@ -531,6 +531,9 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
   - **Details:** Reproduced pre-fix via Pilot: `hello@(0,5)+backspace → hel`, `delete → llo`, `left → 2 steps`. Task 14 masked this only for stopped keys.
   - **Details:** Fixed with `event.prevent_default()` after explicit `super()._on_key(event)`; 8 real-dispatch regression tests; full suite 1042 passed, ruff clean.
 
+- [x] **Task 17:** Restore terminal paste after SSH security confirmation clears focus.
+   - **Details:** App-level `events.Paste` fallback refocuses `#input` only when no widget is focused, then uses the command input's guarded insertion path. Focused input remains the sole direct insertion path; other focused widgets retain their paste events.
+
 ### Risks & Mitigations
 
 | Risk | Mitigation |
