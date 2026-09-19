@@ -2278,3 +2278,100 @@ selection remains copyable.
 - [x] Rendering remains coalesced and responsive during high-frequency streaming.
 - [x] Mouse-selected visible transcript text copies reliably and exactly once.
 - [x] Existing clipboard, lifecycle, snapshot, and full-suite tests pass.
+
+## Follow-up: SSH-safe TUI clipboard shortcuts
+
+### Goal
+
+Allow text pasted through the terminal to work reliably when `one` runs on a
+remote host over SSH, while moving image paste to a separate shortcut that does
+not conflict with terminal text paste.
+
+### Confirmed decisions
+
+- Keep `Ctrl+V` for text from the host/system clipboard when available.
+- Reserve `Ctrl+Shift+V` for terminal/bracketed text paste so local terminal
+  paste continues to work over SSH without requiring clipboard access on the
+  remote host.
+- Move image paste to `Ctrl+Alt+V`.
+- Keep `/paste-image` as a discoverable fallback for terminals that intercept
+  `Ctrl+Alt+V`.
+- Do not use `Ctrl+X` (standard cut) or `Ctrl+D` (delete/EOF behavior).
+- Do not change interactive-mode `Ctrl+B` behavior.
+
+### Scope
+
+#### In Scope
+
+- Change the TUI image-paste binding from `Ctrl+Shift+V` to `Ctrl+Alt+V`.
+- Ensure `Ctrl+Shift+V` remains the text paste path, including Textual
+  bracketed-paste event handling and duplicate-insertion protection.
+- Add the `/paste-image` command or equivalent existing command path as a
+  fallback if no such command currently exists.
+- Update TUI shortcut/help text, README documentation, and relevant changelog
+  entry.
+- Add regression coverage for shortcut dispatch, text paste over a paste event,
+  image-paste dispatch, fallback command behavior, and duplicate insertion.
+
+#### Non-Goals
+
+- Do not add SSH clipboard forwarding or require a clipboard daemon on the
+  remote host.
+- Do not change clipboard image acquisition, image attachment validation, or
+  upload behavior beyond shortcut/command routing.
+- Do not change interactive-mode keybindings.
+
+### Intended branch
+
+`fix/tui-ssh-safe-paste-shortcuts`
+
+### Implementation tasks
+
+- [ ] **Task:** Reassign image paste and preserve terminal text paste.
+
+  - **Description:** Update the TUI binding and shortcut table so `Ctrl+Alt+V`
+    invokes image paste and `Ctrl+Shift+V` remains text paste. Verify Textual
+    receives and consumes terminal `events.Paste` exactly once. Preserve the
+    existing `Ctrl+V` host-clipboard fallback.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_input.py`,
+    `tests/test_tui_image_input.py`, and any shared TUI shortcut test files.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** `Ctrl+Shift+V` inserts text exactly once from a
+    terminal paste event; `Ctrl+Alt+V` dispatches image acquisition; `Ctrl+V`
+    still reads the host clipboard; existing editing keys remain unchanged.
+  - **Verification:** Focused Textual pilot tests with mocked clipboard/image
+    backends; assert no duplicate text insertion.
+
+- [ ] **Task:** Add and document the image-paste fallback command.
+
+  - **Description:** Add `/paste-image` if absent, route it through the same
+    image acquisition path as the shortcut, and expose it in `/help` and the
+    TUI shortcut/help presentation. Update all user-facing keyboard shortcut
+    documentation to describe the final mapping explicitly: `Ctrl+V` for host
+    clipboard text, `Ctrl+Shift+V` for terminal/SSH text paste, and
+    `Ctrl+Alt+V` for image paste. Remove stale claims that `Ctrl+Shift+V`
+    pastes an image.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_commands.py`,
+    `tests/test_tui_image_input.py`, `README.md`, `CHANGELOG.md`, and any
+    shortcut/help documentation discovered during implementation.
+  - **Dependencies:** Reassigned shortcut task.
+  - **Acceptance Criteria:** The command queues/imports the same clipboard image
+    as `Ctrl+Alt+V`, reports the existing no-backend/no-image errors, and is
+    documented as the fallback for terminals intercepting the key chord. README,
+    `/help`, TUI shortcut overlay, and changelog all show the same mapping.
+  - **Verification:** Command tests with mocked image acquisition, repository
+    search for stale shortcut descriptions, and README/shortcut/help text review.
+
+- [ ] **Task:** Run integrated verification and refresh snapshots if needed.
+
+  - **Description:** Verify local and SSH-like terminal paste paths, image
+    shortcut routing, command fallback, and unchanged interactive-mode keys.
+    Update only intentional TUI snapshots.
+  - **Files:** `tests/test_tui_snapshots.py`, `tests/snapshots/tui/*`, and
+    relevant test files identified by the preceding tasks.
+  - **Dependencies:** Tasks above.
+  - **Acceptance Criteria:** Existing paste/image behavior remains compatible;
+    text terminal paste works without remote clipboard binaries; image paste is
+    reachable through both `Ctrl+Alt+V` and `/paste-image`.
+  - **Verification:** `pytest -q`, `ruff check .`, `git diff --check`, focused
+    TUI tests, and a manual SSH terminal smoke test where available.
