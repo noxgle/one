@@ -2115,3 +2115,219 @@ expected multi-turn behavior and records any unresolved issue with evidence.
   evidence.
 - [x] Model-analysis failures include actionable non-secret diagnostics.
 - [x] Full local tests and CI pass on supported platforms.
+
+## Follow-up: TUI viewport performance and provider timeout
+
+### Goal
+
+Improve TUI responsiveness and mouse-copy reliability during long conversations
+while preserving the complete logical/session history. The TUI should render only
+the latest 500 display lines, and provider timeout should be increased through
+configuration rather than changing `/retry unlimited` semantics.
+
+### Confirmed decisions
+
+- Do not change `/retry unlimited` behavior in this follow-up.
+- Increase the provider timeout through the existing settings/configuration path;
+  keep retry and abort semantics unchanged.
+- Keep full history in `AgentSession`/session persistence, but render only the
+  latest 500 lines in the TUI viewport.
+- Preserve mouse selection/copy of visible transcript text while streaming.
+
+### Open Questions
+
+- Confirm the exact new default for `providers.timeoutSec` (the implementation
+  must not guess a value without maintainer approval); explicit user overrides
+  remain supported regardless of the chosen default.
+
+### Scope
+
+#### In Scope
+
+- Make the provider timeout configurable at a higher value and document the
+  chosen default/configuration path.
+- Separate logical conversation/session history from the bounded rendered TUI
+  viewport.
+- Keep `_render_stream()` bounded to the latest 500 lines and avoid unnecessary
+  full-widget rebuilds during high-frequency deltas where practical.
+- Snapshot mouse selection immediately on mouse release, with a safe fallback,
+  so stream refreshes cannot erase the selected text before copying.
+- Add TUI performance, viewport, selection, and timeout regression tests.
+
+#### Non-Goals
+
+- Do not redesign retry modes or make unlimited retry truly unbounded in this
+  change.
+- Do not delete or truncate persisted session history.
+- Do not introduce a full virtualized widget framework unless bounded rendering
+  proves insufficient after measurement.
+
+### Architecture and decisions
+
+1. `AgentSession.messages` and session JSONL remain the source of truth for full
+   history. TUI rendering is a presentation cache and may discard old visible
+   lines.
+2. Maintain a bounded rendered tail with `MAX_RENDERED_LINES = 500`. All index
+   bookkeeping for live assistant/tool blocks must be rebased or invalidated
+   whenever the front of the rendered tail is trimmed.
+3. Query and snapshot selected text synchronously in `on_mouse_up` before queued
+   stream refreshes can replace the `Static` content. Retain a deferred fallback
+   only when the immediate selection API returns no text.
+4. Coalesce frequent assistant deltas and render at most once per UI flush/frame;
+   preserve event ordering and visible final output.
+5. Increase `providers.timeoutSec` using the existing settings manager/config
+   contract. The timeout value must remain user-configurable and must not remove
+   manual abort behavior.
+
+### Phases
+
+#### Phase 1: Provider timeout configuration
+
+**Objective:** Prevent ordinary provider calls from stopping prematurely at the
+current timeout while preserving explicit abort and retry behavior.
+
+**Prerequisites:** None.
+
+**Expected outcome:** A configured larger provider timeout is used consistently
+by provider calls and is visible through existing settings/status paths.
+
+**Estimated effort:** 0.25–0.5 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Increase and document the provider timeout.
+
+  - **Description:** Choose and apply the new default timeout through the
+    existing `providers.timeoutSec` setting, update configuration/help
+    documentation, and verify that `/config providers.timeoutSec` or the
+    equivalent settings path persists and takes effect. Do not change
+    `retry.mode`, `maxRetries`, retry backoff, or abort semantics.
+  - **Files:** `one/core/settings_manager.py`, relevant configuration/status
+    documentation, and timeout-focused tests such as
+    `tests/test_agent_timeouts_limits.py` and `tests/test_settings.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** The new default is applied to provider calls;
+    explicit user configuration overrides it; abort still interrupts a pending
+    provider call; existing retry-mode tests remain unchanged.
+  - **Verification:** Settings default/override tests, provider timeout tests,
+    and a fake-provider call asserting the effective timeout.
+
+#### Phase 2: Bounded TUI rendered viewport
+
+**Objective:** Keep TUI rendering fast for long sessions without losing logical
+history.
+
+**Prerequisites:** None.
+
+**Expected outcome:** The TUI always renders at most the latest 500 lines while
+`AgentSession` and persisted session history remain complete.
+
+**Estimated effort:** 1–2 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Separate full logical history from the rendered tail.
+
+  - **Description:** Introduce a clearly named rendered-line cap of 500 and make
+    `_render_stream()` consume only the bounded tail. Keep session messages and
+    persistence untouched. Update `_write`, assistant streaming, thinking,
+    tool-block updates, `/clear`, and trim/rebase helpers so the rendered tail
+    remains internally consistent.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_rendering.py`,
+    `tests/test_tui_streaming.py`, `tests/test_tui_retry.py`, and TUI snapshots
+    only if the visible tail contract changes.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** The rendered list never exceeds 500 lines; the
+    latest 500 lines are visible; old session messages remain available after
+    rendering trim; active assistant/tool/thinking indexes never point to the
+    wrong line after front-trim.
+  - **Verification:** Tests append substantially more than 500 lines and assert
+    the exact visible tail, logical session preservation, live-block updates,
+    tool status updates, thinking spinner behavior, and `/clear` reset.
+
+- [ ] **Task:** Coalesce expensive stream renders.
+
+  - **Description:** Ensure contiguous assistant/thinking deltas update the data
+    model in order but trigger no more than one full `Static` update per UI flush
+    or frame. Avoid rebuilding equivalent `Text` content when no visible line
+    changed. Preserve scroll-to-end, retry indicators, tool output, and final
+    message rendering.
+  - **Files:** `one/modes/tui_mode.py`,
+    `tests/test_tui_streaming.py`, `tests/test_tui_rendering.py`.
+  - **Dependencies:** Rendered viewport task.
+  - **Acceptance Criteria:** High-frequency deltas do not cause one widget update
+    per token; visible text remains complete and ordered; spinner and lifecycle
+    updates still invalidate the widget when required.
+  - **Verification:** Instrument/count render calls during a burst of deltas;
+    assert coalescing and run TUI streaming/retry regression tests.
+
+#### Phase 3: Reliable mouse selection and copy
+
+**Objective:** Preserve copy behavior while the stream is being refreshed.
+
+**Prerequisites:** Phase 2 rendered viewport behavior.
+
+**Expected outcome:** Drag-selecting visible transcript text copies the selected
+text exactly once, even during active streaming or after viewport trimming.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Snapshot selection before stream refresh invalidation.
+
+  - **Description:** Capture `screen.get_selected_text()` synchronously inside
+    `on_mouse_up`, normalize only the copy payload, and use the existing clipboard
+    backend chain. Keep a deferred fallback for terminals/Textual versions where
+    the immediate selection is unavailable. Prevent duplicate copies/toasts and
+    preserve empty-selection behavior.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_rendering.py`,
+    `tests/test_clipboard_image.py` only if shared clipboard behavior is touched,
+    and a focused mouse-selection regression test.
+  - **Dependencies:** Rendered viewport task.
+  - **Acceptance Criteria:** A mouse drag copies exactly the selected visible
+    text; rapid stream updates do not turn a valid selection into an empty copy;
+    plain clicks do not copy; repeated identical selections do not duplicate the
+    clipboard action or toast.
+  - **Verification:** Textual pilot mouse-drag tests with a static transcript,
+    active streaming updates, a 500-line trim boundary, and mocked clipboard
+    backends. Do not assert ambient system clipboard state.
+
+#### Phase 4: Integrated verification
+
+**Objective:** Validate long-session responsiveness, timeout behavior, and copy
+reliability together.
+
+**Prerequisites:** Phases 1–3.
+
+**Expected outcome:** Long histories remain usable, provider calls honor the new
+timeout, and visible transcript selection remains copyable.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Run focused, full, and manual TUI verification.
+
+  - **Description:** Exercise a long fake session with more than 500 rendered
+    lines, a provider call exceeding the old timeout but below the new one,
+    retry/abort controls, mouse selection/copy, streaming deltas, thinking,
+    tool output, and `/clear`. Review snapshots for intentional changes only.
+  - **Files:** Tests and snapshots identified by prior phases; `TODO.md` only for
+    verification evidence.
+  - **Dependencies:** Phases 1–3.
+  - **Acceptance Criteria:** Full logical history remains intact; only the latest
+    500 display lines are rendered; TUI render cost stays bounded; selection copy
+    works; timeout configuration works; retry semantics are unchanged.
+  - **Verification:** Focused TUI/timeout tests, full pytest, Ruff, `git diff --check`,
+    and a manual Textual smoke test with long history and mouse selection.
+
+### Acceptance Criteria
+
+- [ ] `/retry unlimited` semantics are unchanged; provider timeout is increased
+  through configuration and manual abort still works.
+- [ ] The TUI renders no more than 500 transcript lines at once.
+- [ ] Full logical/session history is preserved independently of the rendered cap.
+- [ ] Rendering remains coalesced and responsive during high-frequency streaming.
+- [ ] Mouse-selected visible transcript text copies reliably and exactly once.
+- [ ] Existing retry, clipboard, lifecycle, snapshot, and full-suite tests pass.
