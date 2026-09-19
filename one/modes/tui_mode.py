@@ -130,6 +130,13 @@ _THINKING_FRAMES = "░▒▓█▓▒"
 _THINKING_MARK = "__MK__:"
 _THINKING_TEXT_MARK = "__MK_THINK__: "
 
+# The transcript is a presentation cache.  AgentSession and session JSONL keep
+# the complete conversation; this list is deliberately bounded so rebuilding
+# the Static widget remains predictable during long-running sessions.
+MAX_RENDERED_LINES = 500
+_TRUNCATED_ASSISTANT_MARKER = "[earlier assistant output truncated in viewport]"
+_TRUNCATED_TOOL_MARKER = "[earlier tool output truncated in viewport]"
+
 # Maximum characters for the plan section in the sidebar (truncated with …).
 _PLAN_SIDEBAR_MAX = 200
 
@@ -785,6 +792,7 @@ if TEXTUAL_AVAILABLE:
             self._off_listener = None
             self._assistant_stream = ""
             self._stream_lines: list[str] = []
+            self._rendered_stream_lines: tuple[str, ...] = ()
             self._retry_state = "idle"
             self._last_auto_copied = ""
             self._assistant_has_live_delta = False
@@ -968,6 +976,12 @@ if TEXTUAL_AVAILABLE:
                 self._off_listener = None
 
         def _render_stream(self) -> None:
+            rendered_lines = tuple(self._stream_lines)
+            # A stream update can be requested by several lifecycle paths in a
+            # frame. Rebuilding identical Rich Text is pure wasted work and can
+            # invalidate a mouse selection while output is still streaming.
+            if rendered_lines == self._rendered_stream_lines:
+                return
             try:
                 stream_widget = self.query_one("#stream")
             except Exception:
@@ -984,6 +998,7 @@ if TEXTUAL_AVAILABLE:
                     # Literal text — never parsed by Textual's markup parser.
                     text.append(line + "\n")
             stream_widget.update(text)
+            self._rendered_stream_lines = rendered_lines
             try:
                 self.query_one("#stream_container", VerticalScroll).scroll_end(animate=False)
             except Exception:
@@ -1179,17 +1194,20 @@ if TEXTUAL_AVAILABLE:
                 self._thinking_active = True
 
         def _write(self, text: str, kind: str = "normal", *, render: bool = True) -> None:
-            self._stream_lines.append(sanitize_display_text(text))
+            # Store one logical display line per entry. In particular, a large
+            # tool/error payload with embedded newlines must not bypass the
+            # viewport cap merely because it arrived through _write.
+            self._stream_lines.extend(sanitize_display_text(text).splitlines() or [""])
             self._trim_stream(render=render)
 
         def _trim_stream(self, *, render: bool = True) -> int:
-            """Trim *_stream_lines* to 500 entries.  Returns the number of
+            """Trim *_stream_lines* to ``MAX_RENDERED_LINES`` entries. Returns the number of
             lines dropped from the front (0 if no trim happened) so callers
             can rebase any absolute indexes they hold."""
             before = len(self._stream_lines)
-            if before > 500:
-                dropped = before - 500
-                self._stream_lines = self._stream_lines[-500:]
+            if before > MAX_RENDERED_LINES:
+                dropped = before - MAX_RENDERED_LINES
+                self._stream_lines = self._stream_lines[-MAX_RENDERED_LINES:]
             else:
                 dropped = 0
 
@@ -1300,6 +1318,12 @@ if TEXTUAL_AVAILABLE:
                 self._assistant_has_live_delta = True
             self._assistant_live_buffer += delta
             panel_lines = self._format_chat_panel("assistant", self._assistant_live_buffer)
+            # A single message can be larger than the viewport. Keep its tail
+            # live (so subsequent deltas continue to replace it) and make the
+            # omitted prefix explicit rather than silently presenting a partial
+            # message as complete.
+            if len(panel_lines) > MAX_RENDERED_LINES:
+                panel_lines = [_TRUNCATED_ASSISTANT_MARKER, *panel_lines[-(MAX_RENDERED_LINES - 1) :]]
             if self._assistant_live_start_idx >= 0:
                 tail_start = self._assistant_live_start_idx + self._assistant_live_line_count
                 tail = self._stream_lines[tail_start:]
@@ -1345,13 +1369,20 @@ if TEXTUAL_AVAILABLE:
             self._remove_thinking_line()
             self._stream_lines.append("")
             start = len(self._stream_lines)
-            self._stream_lines.extend(self._format_chat_panel("tool", text, pad_y=0))
+            panel_lines = self._bounded_tool_panel(text)
+            self._stream_lines.extend(panel_lines)
             end = len(self._stream_lines)
             self._stream_lines.append("")
             dropped = self._trim_stream()
             # Return post-trim indices so callers get positions that are
             # valid against the current (trimmed) _stream_lines list.
-            return start + dropped, end + dropped
+            return start - dropped, end - dropped
+
+        def _bounded_tool_panel(self, text: str) -> list[str]:
+            panel_lines = self._format_chat_panel("tool", text, pad_y=0)
+            if len(panel_lines) > MAX_RENDERED_LINES - 2:
+                return [_TRUNCATED_TOOL_MARKER, *panel_lines[-(MAX_RENDERED_LINES - 3) :]]
+            return panel_lines
 
         def _finish_tool_block(self, tool_name: str, status: str) -> bool:
             """Append a completed status to the matching active tool block."""
@@ -1361,8 +1392,9 @@ if TEXTUAL_AVAILABLE:
             active_name, start, end, text = active
             if active_name != tool_name or not (0 <= start <= end <= len(self._stream_lines)):
                 return False
-            self._stream_lines[start:end] = self._format_chat_panel("tool", f"{text} [{status}]", pad_y=0)
+            self._stream_lines[start:end] = self._bounded_tool_panel(f"{text} [{status}]")
             self._active_tool_block = None
+            self._trim_stream(render=False)
             self._render_stream()
             return True
 
@@ -1551,17 +1583,10 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 pass
 
-        def _try_auto_copy_selected_stream_text(self) -> None:
-            # Textual 8 keeps arbitrary text selections in `screen.selections`
-            # (not on the widget); `Static` has no `selected_text` attribute.
-            try:
-                text = str(self.screen.get_selected_text() or "").strip()
-            except Exception:
-                return
-            if not text:
-                return
-            if text == self._last_auto_copied:
-                return
+        def _copy_selected_stream_text(self, text: str) -> bool:
+            """Copy an already-snapshotted selection exactly once."""
+            if not text.strip() or text == self._last_auto_copied:
+                return False
             status, _backend = self._copy_to_clipboard(text)
             if status == "copied":
                 self._last_auto_copied = text
@@ -1570,11 +1595,31 @@ if TEXTUAL_AVAILABLE:
                 self._toast("clipboard request sent to terminal (OSC52). terminal may ignore it.", severity="warning")
             else:
                 self._toast("no clipboard backend. Install wl-clipboard/xclip/xsel or pyperclip.", severity="warning")
+            return True
+
+        def _try_auto_copy_selected_stream_text(self) -> None:
+            # Textual 8 keeps arbitrary text selections in `screen.selections`
+            # (not on the widget); `Static` has no `selected_text` attribute.
+            try:
+                text = str(self.screen.get_selected_text() or "")
+            except Exception:
+                return
+            self._copy_selected_stream_text(text)
 
         def on_mouse_up(self, event: events.MouseUp) -> None:
             # After a drag the screen retains the selection; after a plain
-            # click it is cleared, so this only fires for real selections.
-            self.call_after_refresh(self._try_auto_copy_selected_stream_text)
+            # click it is cleared, so this only fires for real selections. Take
+            # the snapshot before an already-queued stream refresh replaces the
+            # Static content. Some Textual versions expose the selection only
+            # after refresh, for which the old deferred path remains a fallback.
+            try:
+                selected = str(self.screen.get_selected_text() or "")
+            except Exception:
+                selected = ""
+            if selected.strip():
+                self._copy_selected_stream_text(selected)
+            else:
+                self.call_after_refresh(self._try_auto_copy_selected_stream_text)
 
         async def _handle_command(self, cmd: str) -> None:
             session = self.session
@@ -1645,13 +1690,7 @@ if TEXTUAL_AVAILABLE:
                 self._write("/inspect-timeout", "info")
                 return
             if cmd == "/clear":
-                stream_widget = self.query_one("#stream")
-                stream_widget.update("")
-                self._stream_lines = []
-                self._assistant_has_live_delta = False
-                self._assistant_live_start_idx = -1
-                self._assistant_live_buffer = ""
-                self._assistant_live_line_count = 0
+                self.action_clear_stream()
                 return
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
@@ -2870,6 +2909,7 @@ if TEXTUAL_AVAILABLE:
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
             self._stream_lines = []
+            self._rendered_stream_lines = ()
             with self._pending_ui_events_lock:
                 self._pending_ui_events = []
                 self._pending_assistant_deltas = ""
@@ -2880,6 +2920,12 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
             self._assistant_live_line_count = 0
+            self._active_tool_block = None
+            self._thinking_active = False
+            self._thinking_label_shown = False
+            self._thinking_buffer = ""
+            self._thinking_line_idx = None
+            self._last_auto_copied = ""
 
         def action_show_shortcuts(self) -> None:
             """Show one-owned shortcuts rather than Textual's merged key panel."""

@@ -10,6 +10,7 @@ import pytest
 from one.modes.tui_mode import (
     _THINKING_FRAMES,
     _THINKING_MARK,
+    MAX_RENDERED_LINES,
     advance_thinking_frame,
 )
 from tests.support.tui import _mk_app_session, _submit
@@ -1130,8 +1131,149 @@ async def test_tui_clear_stream_discards_buffered_assistant_deltas(tmp_path: Pat
         assert app._stream_lines == []
         assert app._assistant_stream == ""
         assert app._assistant_stream_open is False
+        assert app._active_tool_block is None
+        assert app._thinking_line_idx is None
         with app._pending_assistant_deltas_lock:
             assert app._pending_assistant_deltas == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_clear_command_uses_full_stream_reset(tmp_path: Path):
+    """/clear must reset the same complete viewport state as Ctrl+L."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._write("visible viewport content", "info")
+        app._assistant_stream_open = True
+        app._assistant_stream = "live assistant"
+        app._assistant_has_live_delta = True
+        app._assistant_live_start_idx = 1
+        app._assistant_live_buffer = "live assistant"
+        app._assistant_live_line_count = 1
+        app._active_tool_block = ("read", 1, 2, "tool start: read")
+        app._thinking_active = True
+        app._thinking_label_shown = True
+        app._thinking_buffer = "reasoning"
+        app._thinking_line_idx = 1
+        app._last_auto_copied = "copied selection"
+        with app._pending_ui_events_lock:
+            app._pending_ui_events = [
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "buffered delta"},
+                }
+            ]
+            app._pending_assistant_deltas = "buffered delta"
+            app._ui_flush_wakeup_pending = True
+
+        await app._handle_command("/clear")
+
+        assert app._stream_lines == []
+        assert app._rendered_stream_lines == ()
+        assert str(app.query_one("#stream", Static).content) == ""
+        with app._pending_ui_events_lock:
+            assert app._pending_ui_events == []
+            assert app._pending_assistant_deltas == ""
+            assert app._ui_flush_wakeup_pending is False
+        assert app._assistant_stream_open is False
+        assert app._assistant_stream == ""
+        assert app._assistant_has_live_delta is False
+        assert app._assistant_live_start_idx == -1
+        assert app._assistant_live_buffer == ""
+        assert app._assistant_live_line_count == 0
+        assert app._active_tool_block is None
+        assert app._thinking_active is False
+        assert app._thinking_label_shown is False
+        assert app._thinking_buffer == ""
+        assert app._thinking_line_idx is None
+        assert app._last_auto_copied == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_viewport_keeps_exact_tail_without_touching_session_history(tmp_path: Path):
+    """The bounded presentation cache never truncates AgentSession history."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    original_messages = list(session.messages)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_clear_stream()
+        for index in range(MAX_RENDERED_LINES + 25):
+            app._write(f"viewport-line-{index}", "info")
+
+        assert len(app._stream_lines) == MAX_RENDERED_LINES
+        assert app._stream_lines == [f"viewport-line-{index}" for index in range(25, MAX_RENDERED_LINES + 25)]
+        assert session.messages == original_messages
+
+
+@pytest.mark.asyncio
+async def test_tui_delta_batch_renders_once_and_large_live_block_has_marker(tmp_path: Path):
+    """A delta run paints once and a huge single assistant block stays bounded."""
+    from one.modes.tui_mode import _TRUNCATED_ASSISTANT_MARKER, _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        renders = 0
+        original_render = app._render_stream
+
+        def count_render() -> None:
+            nonlocal renders
+            renders += 1
+            original_render()
+
+        app._render_stream = count_render  # type: ignore[method-assign]
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        for _ in range(100):
+            session._emit(
+                {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "x"}}
+            )
+        app._flush_pending_ui_events()
+        assert renders == 1
+
+        session._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "\n".join(str(i) for i in range(600))},
+            }
+        )
+        app._flush_pending_ui_events()
+        assert len(app._stream_lines) <= MAX_RENDERED_LINES
+        assert _TRUNCATED_ASSISTANT_MARKER in app._stream_lines
+
+
+@pytest.mark.asyncio
+async def test_tui_mouse_up_snapshots_selection_before_stream_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Immediate mouse-up copy survives a deferred refresh and runs once."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        copied: list[str] = []
+        app._copy_to_clipboard = lambda text: (copied.append(text) or ("copied", "fake"))  # type: ignore[method-assign]
+        monkeypatch.setattr(app.screen, "get_selected_text", lambda: " selected tail ")
+
+        # Simulate a queued streaming refresh at a viewport trim boundary.
+        app._stream_lines = [f"line-{i}" for i in range(MAX_RENDERED_LINES)]
+        app._rendered_stream_lines = tuple(app._stream_lines)
+        app._stream_lines.append("new tail")
+        app._trim_stream(render=False)
+        app.on_mouse_up(None)  # type: ignore[arg-type]
+        monkeypatch.setattr(app.screen, "get_selected_text", lambda: "")
+        app._render_stream()
+        await pilot.pause()
+
+        assert copied == [" selected tail "]
 
 
 @pytest.mark.asyncio
