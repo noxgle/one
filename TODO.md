@@ -1393,6 +1393,11 @@ reports by default.
 
 ### Context
 
+**Delivered telemetry follow-up (0.1.24):** the workload now schedules through
+the complete configured duration. Docker reports retain bounded host-side stats
+and disposable mounted-workspace/session-size samples at a configurable cadence;
+unavailable Docker stats are explicit and never read `~/.config/one`.
+
 `scripts/profile_long_session.py` already drives the real RPC runtime and records
 basic event, timing, session, and context metrics. The new runner should extend
 that approach rather than alter the production runtime. The repository has no

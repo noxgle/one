@@ -63,6 +63,23 @@ class _FakeProcess:
         return 0
 
 
+def test_stdout_reader_marks_stream_closed_before_eof_sentinel() -> None:
+    class Process:
+        stdout: list[str] = []
+
+    class Lines:
+        def put(self, item: str | None) -> None:
+            if item is None:
+                assert driver._stream_closed is True
+
+    driver: Any = object.__new__(workload.RpcDriver)
+    driver.process = Process()
+    driver.lines = Lines()
+    driver._stream_closed = False
+
+    driver._read_stdout()
+
+
 def test_persistent_rpc_driver_answers_ask_user_and_collects_events(monkeypatch, tmp_path: Path) -> None:
     fake = _FakeProcess()
     monkeypatch.setattr(workload.subprocess, "Popen", lambda *a, **k: fake)
@@ -121,3 +138,55 @@ def test_workload_records_wait_for_idle_coverage(monkeypatch, tmp_path: Path) ->
     assert result["waitForIdle"]["failed"] > 0
     assert result["coverage"]["wait_for_idle"] == {"kind": "rpc", "expected": True, "observed": False}
     assert "wait_for_idle" in result["missingCoverage"]
+
+
+def test_workload_schedules_scenarios_until_full_duration(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            clock["value"] += 1.0
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    result = workload.run_workload(tmp_path / "fixture", 20, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert result["scenarios"][-1]["startSec"] >= 18
+    assert result["elapsedSec"] >= 20
+    assert len(result["scenarios"]) <= workload.MAX_SCENARIO_RECORDS
+
+
+def test_workload_continues_after_a_prompt_timeout(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+    prompts: list[str] = []
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            clock["value"] += 1.0
+            if body["type"] == "prompt":
+                prompts.append(body["message"])
+                if len(prompts) == 1:
+                    return None
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    result = workload.run_workload(tmp_path / "fixture", 14, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"], sleep=lambda seconds: clock.__setitem__("value", clock["value"] + seconds))
+
+    assert result["scenarios"][0]["status"] == "prompt_timeout"
+    assert len(prompts) > 1
+    assert any(record["id"] == "read_image" for record in result["scenarios"])

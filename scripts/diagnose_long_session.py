@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import uuid
 from collections.abc import Callable
@@ -37,6 +38,8 @@ MAX_ANALYSIS_ARTIFACT_BYTES = 200_000
 MAX_ANALYSIS_ARTIFACT_FILE_BYTES = 48_000
 MAX_SESSION_ARTIFACT_FILES = 32
 MAX_SESSION_ARTIFACT_BYTES = 16_384
+DEFAULT_TELEMETRY_INTERVAL = 5.0
+DEFAULT_MAX_TELEMETRY_SAMPLES = 720
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -51,10 +54,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--analysis-timeout", type=float, default=180, help="Maximum local-model analysis time in seconds")
     parser.add_argument("--docker-network", default="bridge", help="Docker network for the live model endpoint (default: bridge; use a reachable network)")
     parser.add_argument("--skip-analysis", action="store_true", help="Write a heuristic-only report (useful for offline smoke checks)")
+    parser.add_argument("--telemetry-interval", type=float, default=DEFAULT_TELEMETRY_INTERVAL, help="Container/workspace telemetry interval in seconds (default: 5)")
+    parser.add_argument("--max-telemetry-samples", type=int, default=DEFAULT_MAX_TELEMETRY_SAMPLES, help="Maximum retained telemetry samples (default: 720)")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable completion output")
     args = parser.parse_args(argv)
-    if args.duration <= 0 or args.analysis_timeout <= 0:
-        parser.error("--duration and --analysis-timeout must be greater than zero")
+    if args.duration <= 0 or args.analysis_timeout <= 0 or args.telemetry_interval <= 0 or args.max_telemetry_samples <= 0:
+        parser.error("--duration, --analysis-timeout, --telemetry-interval, and --max-telemetry-samples must be greater than zero")
     url = urllib.parse.urlparse(args.llama_cpp_url)
     if url.scheme not in {"http", "https"} or not url.netloc or url.username or url.password:
         parser.error("--llama-cpp-url must be a credential-free http(s) URL")
@@ -216,12 +221,133 @@ def collect_session_artifacts(workspace: Path, artifacts: Path) -> dict[str, Any
     return {"root": "state/sessions", "files": files, "fileLimitReached": len(files) >= MAX_SESSION_ARTIFACT_FILES}
 
 
+def workspace_metrics(workspace: Path) -> dict[str, Any]:
+    """Count only the disposable bind-mounted workload, never user state."""
+    result: dict[str, Any] = {"totalBytes": 0, "fileCount": 0, "jsonlBytes": 0, "jsonlCount": 0, "evidenceBytes": 0, "evidenceCount": 0}
+    try:
+        paths = workspace.rglob("*")
+        for path in paths:
+            if path.is_symlink() or not path.is_file():
+                continue
+            size = path.stat().st_size
+            result["totalBytes"] += size
+            result["fileCount"] += 1
+            if path.name.endswith(".jsonl"):
+                result["jsonlBytes"] += size
+                result["jsonlCount"] += 1
+            if path.name.endswith(".evidence"):
+                result["evidenceBytes"] += size
+                result["evidenceCount"] += 1
+    except OSError as exc:
+        result["unavailable"] = type(exc).__name__
+    return result
+
+
+def parse_docker_stats(stdout: str) -> dict[str, Any] | None:
+    """Parse Docker's JSON stats format into numeric, report-safe values."""
+    try:
+        raw = json.loads(stdout.strip())
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    def number(value: Any) -> float | None:
+        try:
+            return float(str(value).replace("%", "").strip())
+        except ValueError:
+            return None
+    def pair(value: Any) -> tuple[str | None, str | None]:
+        parts = str(value).split(" / ", 1)
+        return (parts[0].strip(), parts[1].strip() if len(parts) == 2 else None)
+    memory_used, memory_limit = pair(raw.get("MemUsage", ""))
+    return {"cpuPercent": number(raw.get("CPUPerc")), "memoryUsed": memory_used, "memoryLimit": memory_limit, "memoryPercent": number(raw.get("MemPerc")), "pids": number(raw.get("PIDs")), "networkIO": pair(raw.get("NetIO", "")), "blockIO": pair(raw.get("BlockIO", ""))}
+
+
+def sample_container_telemetry(container: str, run: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> dict[str, Any] | None:
+    run = run or subprocess.run
+    try:
+        result = run(["docker", "stats", "--no-stream", "--format", "{{json .}}", container], capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return parse_docker_stats(result.stdout) if result.returncode == 0 else None
+
+
+def telemetry_summary(samples: list[dict[str, Any]], workspace_samples: list[dict[str, Any]]) -> dict[str, Any]:
+    """Retain only useful last/max values, while raw samples remain bounded."""
+    summary: dict[str, Any] = {"available": bool(samples), "sampleCount": len(samples), "workspaceSampleCount": len(workspace_samples)}
+    if samples:
+        last = samples[-1]
+        summary["last"] = {key: last.get(key) for key in ("cpuPercent", "memoryUsed", "memoryLimit", "memoryPercent", "pids", "networkIO", "blockIO")}
+        for key in ("cpuPercent", "memoryPercent", "pids"):
+            values = [sample[key] for sample in samples if isinstance(sample.get(key), (int, float))]
+            if values:
+                summary[f"max{key[0].upper()}{key[1:]}"] = max(values)
+    if workspace_samples:
+        summary["workspaceLast"] = workspace_samples[-1].get("metrics", {})
+        summary["workspaceMaxBytes"] = max((sample.get("metrics", {}).get("totalBytes", 0) for sample in workspace_samples), default=0)
+    return summary
+
+
+def _workload_popen_kwargs() -> dict[str, Any]:
+    """Create a process group without passing unsupported options."""
+    if os.name == "posix":
+        return {"start_new_session": True}
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", None)
+    return {"creationflags": creationflags} if creationflags is not None else {}
+
+
+def _terminate_workload_group(process: subprocess.Popen[str], timeout: float = 10) -> None:
+    """Stop the Docker client and its descendants, with portable fallbacks."""
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+    elif hasattr(signal, "CTRL_BREAK_EVENT"):
+        try:
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        except (OSError, AttributeError):
+            process.terminate()
+    else:
+        process.terminate()
+    try:
+        process.communicate(timeout=timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    else:
+        process.kill()
+    try:
+        process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def build_and_run(args: argparse.Namespace, artifacts: Path) -> dict[str, Any]:
     repo = Path(__file__).resolve().parents[1]
     image = f"one-diagnostic:{uuid.uuid4().hex[:12]}"
     workspace = artifacts / "workload"
     workspace.mkdir(parents=True, exist_ok=True)
     container: str | None = None
+    process: subprocess.Popen[str] | None = None
+    workload_started: float | None = None
+    samples: list[dict[str, Any]] = []
+    workspace_samples: list[dict[str, Any]] = []
+    def sample() -> None:
+        if len(workspace_samples) >= args.max_telemetry_samples:
+            return
+        timestamp = round(time.time(), 3)
+        workspace_samples.append({"timestamp": timestamp, "metrics": workspace_metrics(workspace)})
+        stats = sample_container_telemetry(container or "")
+        if stats is not None:
+            samples.append({"timestamp": timestamp, **stats})
     try:
         try:
             build = subprocess.run(["docker", "build", "--pull=false", "-f", str(repo / "docker/diagnostic.Dockerfile"), "-t", image, str(repo)], capture_output=True, text=True, timeout=900, check=False)
@@ -231,7 +357,24 @@ def build_and_run(args: argparse.Namespace, artifacts: Path) -> dict[str, Any]:
             return {"ok": False, "stage": "build", "stderr": redact(build.stderr), "container": None}
         container = f"one-diagnostic-{uuid.uuid4().hex[:12]}"
         command = ["docker", "run", "--name", container, "--network", args.docker_network, "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128", "--memory", "512m", "--cpus", "1", "--user", f"{os.getuid()}:{os.getgid()}", "--mount", f"type=bind,src={workspace.resolve()},dst=/tmp/diagnostic", image, "--workspace", "/tmp/diagnostic", "--duration", str(args.duration), "--workload", args.workload, "--model", args.model.split("/", 1)[-1], "--llama-cpp-url", args.llama_cpp_url]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=args.duration + 60, check=False)
+        workload_started = time.monotonic()
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **_workload_popen_kwargs())
+        deadline = workload_started + args.duration + 60
+        sample()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, args.duration + 60)
+            try:
+                stdout, stderr = process.communicate(timeout=min(args.telemetry_interval, remaining))
+                return_code = process.returncode if process.returncode is not None else 0
+                result = subprocess.CompletedProcess(command, return_code, stdout, stderr)
+                break
+            except subprocess.TimeoutExpired:
+                sample()
+        # Always include an end snapshot when capacity allows, including a run
+        # shorter than the configured telemetry interval.
+        sample()
         events, malformed, workload = collect_workload_output(result.stdout)
         (artifacts / "container.stderr.txt").write_text(str(redact(result.stderr)), encoding="utf-8")
         try:
@@ -257,19 +400,27 @@ def build_and_run(args: argparse.Namespace, artifacts: Path) -> dict[str, Any]:
             "coverage": workload.get("coverage", {}),
             "missingCoverage": missing_coverage,
             "waitForIdle": workload.get("waitForIdle", {}),
+            "scenarios": workload.get("scenarios", []),
             "fixture": workload.get("fixture", {}),
-            "elapsedSec": workload.get("elapsedSec"),
+            "elapsedSec": round(time.monotonic() - workload_started, 3),
+            "workloadElapsedSec": workload.get("elapsedSec"),
             "runtimeFailure": runtime_failure,
             "processReturnCode": process_return_code,
             "processTerminatedByDriver": workload.get("processTerminatedByDriver", False),
             "sessionArtifacts": session_artifacts,
+            "telemetry": {"samples": samples, "workspaceSamples": workspace_samples, "summary": telemetry_summary(samples, workspace_samples), "sampleLimitReached": len(workspace_samples) >= args.max_telemetry_samples},
         }
     except subprocess.TimeoutExpired as exc:
+        if process and process.poll() is None:
+            _terminate_workload_group(process)
         if container:
             subprocess.run(["docker", "kill", container], capture_output=True, text=True, check=False)
-        return {"ok": False, "stage": "run", "timedOut": True, "events": [], "stderr": redact(str(exc)), "container": container, "sessionArtifacts": collect_session_artifacts(workspace, artifacts)}
+        elapsed = round(time.monotonic() - workload_started, 3) if workload_started is not None else 0.0
+        return {"ok": False, "stage": "run", "timedOut": True, "returnCode": process.poll() if process else None, "events": [], "stderr": redact(str(exc)), "container": container, "elapsedSec": elapsed, "sessionArtifacts": collect_session_artifacts(workspace, artifacts), "telemetry": {"samples": samples, "workspaceSamples": workspace_samples, "summary": telemetry_summary(samples, workspace_samples), "sampleLimitReached": len(workspace_samples) >= args.max_telemetry_samples}}
     finally:
         if container:
+            if process and process.poll() is None:
+                _terminate_workload_group(process)
             subprocess.run(["docker", "rm", "--force", container], capture_output=True, text=True, check=False)
         subprocess.run(["docker", "image", "rm", "--force", image], capture_output=True, text=True, check=False)
 
@@ -455,6 +606,19 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines = ["# One diagnostic report", "", f"Schema: `{report['schemaVersion']}`", "", "## Findings"]
     for item in report["findings"]:
         lines.extend([f"- **{item['severity']}** `{item['category']}`: {item['summary']}", f"  Evidence: {', '.join(item['evidence'])}"])
+    telemetry = report.get("run", {}).get("telemetry", {})
+    summary = telemetry.get("summary", {}) if isinstance(telemetry, dict) else {}
+    lines.extend(["", "## Telemetry"])
+    if summary.get("available"):
+        lines.append(f"- Container samples: {summary.get('sampleCount', 0)}; workspace samples: {summary.get('workspaceSampleCount', 0)}")
+        for key in ("maxCpuPercent", "maxMemoryPercent", "maxPids"):
+            if key in summary:
+                lines.append(f"- {key}: {summary[key]}")
+        lines.append(f"- Last container values: `{json.dumps(summary.get('last', {}), ensure_ascii=False, sort_keys=True)}`")
+    else:
+        lines.append("- Container telemetry: not available (Docker stats returned no sample).")
+    workspace = summary.get("workspaceLast")
+    lines.append(f"- Workspace last values: `{json.dumps(workspace, ensure_ascii=False, sort_keys=True)}`" if workspace else "- Workspace telemetry: not available.")
     lines.extend(["", "## Model analysis", str(report["modelAnalysis"].get("summary", "not available")), ""])
     return "\n".join(lines)
 
@@ -504,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
             event for event in run_events
             if isinstance(event, dict) and event.get("type") in {"malformed", "stdout_text", "non_object_output"}
         ][:MAX_MALFORMED]
-        report = {"schemaVersion": SCHEMA_VERSION, "run": {"duration": args.duration, "workload": args.workload, "dockerVersion": docker_version, "completed": run.get("ok", False), "events": run_events, "malformed": malformed_events, "coverage": run.get("coverage", {}), "missingCoverage": run.get("missingCoverage", []), "waitForIdle": run.get("waitForIdle", {}), "fixture": run.get("fixture", {}), "elapsedSec": run.get("elapsedSec"), "runtimeFailure": run.get("runtimeFailure", False), "processReturnCode": run.get("processReturnCode"), "processTerminatedByDriver": run.get("processTerminatedByDriver", False), "sessionArtifacts": run.get("sessionArtifacts", {})}, "findings": findings, "modelAnalysis": analysis, "cleanup": cleanup, "reportPaths": report_paths}
+        report = {"schemaVersion": SCHEMA_VERSION, "run": {"duration": args.duration, "workload": args.workload, "dockerVersion": docker_version, "completed": run.get("ok", False), "events": run_events, "malformed": malformed_events, "coverage": run.get("coverage", {}), "missingCoverage": run.get("missingCoverage", []), "waitForIdle": run.get("waitForIdle", {}), "fixture": run.get("fixture", {}), "elapsedSec": run.get("elapsedSec"), "workloadElapsedSec": run.get("workloadElapsedSec"), "runtimeFailure": run.get("runtimeFailure", False), "processReturnCode": run.get("processReturnCode"), "processTerminatedByDriver": run.get("processTerminatedByDriver", False), "sessionArtifacts": run.get("sessionArtifacts", {}), "telemetry": run.get("telemetry", {"samples": [], "workspaceSamples": [], "summary": {"available": False}}), "scenarios": run.get("scenarios", [])}, "findings": findings, "modelAnalysis": analysis, "cleanup": cleanup, "reportPaths": report_paths}
         validate_report(report)
         atomic_write(report_dir / "report.md", render_markdown(report))
         atomic_json(report_dir / "report.json", report)

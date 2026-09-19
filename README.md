@@ -68,7 +68,11 @@ investigation is needed:
 
 It defaults to a 3600-second session and drives one persistent real RPC process
 with deterministic prompts/control commands, collecting bounded JSON events and
-expected-versus-observed tool coverage. A missing or unreachable model is reported
+expected-versus-observed tool coverage for the full configured duration (while
+still applying the hard deadline and bounded shutdown). The report also contains
+bounded host-side container CPU/memory/PID/network/block-I/O samples and only
+the disposable mounted workspace's total/session JSONL/evidence size metrics;
+missing Docker stats are marked "not available". A missing or unreachable model is reported
 as a workload failure; it is not reported as successful coverage. It analyzes sanitized results with
 the same default `llama.cpp/local` model at `http://192.168.200.19:8089`. This
 same-model analysis is heuristic and can share the workload model's blind spots;
@@ -98,7 +102,9 @@ contain sensitive diagnostic data, so retain them only when necessary with
 Use `--skip-analysis` for heuristic-only runs, `--workload safe|stress|custom`
 to select a workload, and `--prompt-file PATH` with `--workload custom`. `--json`
 prints a machine-readable completion result; `--keep-artifacts` retains the
-otherwise temporary diagnostic artifacts for inspection.
+otherwise temporary diagnostic artifacts for inspection. Telemetry defaults to a
+5-second cadence with at most 720 retained samples; adjust these bounded values
+with `--telemetry-interval` and `--max-telemetry-samples`.
 
 For an opt-in Docker/model smoke test, set
 `ONE_RUN_DOCKER_DIAGNOSTIC_SMOKE=1` and run the diagnostic test suite. It skips

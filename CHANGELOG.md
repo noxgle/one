@@ -16,6 +16,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Diagnostic workload duration** — long Docker diagnostic runs now continue
+  scheduling scenarios through the configured duration instead of stopping at a
+  premature half-duration reserve.
 - **SSH terminal paste after focus loss** — terminal text paste now restores
   TUI input focus after a terminal security confirmation clears it, while
   preserving exactly-once insertion and other widget focus ownership.
@@ -64,6 +67,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   processes are reaped on cancellation.
 
 ### Added
+
+- **Docker diagnostic soak telemetry** — bounded container CPU, memory, PID,
+  network/block-I/O and disposable workspace/session-size samples are included
+  in diagnostic reports, with unavailable stats reported explicitly.
 
 - **llama.cpp configuration guidance** — document remote/custom
   `models.json` entries, context-window alignment, tool parser order, endpoint

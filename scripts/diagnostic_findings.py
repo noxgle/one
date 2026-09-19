@@ -139,3 +139,7 @@ def validate_report(report: dict[str, Any]) -> None:
             raise ValueError("invalid finding text")
         if not isinstance(item["evidence"], list) or not item["evidence"] or not all(isinstance(ref, str) and ref for ref in item["evidence"]):
             raise ValueError("invalid finding evidence")
+    telemetry = report["run"].get("telemetry")
+    if telemetry is not None:
+        if not isinstance(telemetry, dict) or not isinstance(telemetry.get("samples", []), list) or not isinstance(telemetry.get("workspaceSamples", []), list) or not isinstance(telemetry.get("summary", {}), dict):
+            raise ValueError("invalid telemetry")

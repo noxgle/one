@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
 import urllib.error
 import urllib.request
@@ -31,6 +32,31 @@ def test_collector_bounds_malformed_records() -> None:
     _events, malformed = runner.collect_lines("\n".join("token=secret" for _ in range(runner.MAX_EVENTS)))
     assert len(malformed) == runner.MAX_MALFORMED
     assert all("secret" not in item["raw"] for item in malformed)
+
+
+def test_telemetry_parsing_missing_stats_and_workspace_metrics(tmp_path: Path) -> None:
+    workspace = tmp_path / "workload"
+    sessions = workspace / "state" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "a.jsonl").write_text("{}\n", encoding="utf-8")
+    (sessions / "a.jsonl.evidence").write_text("evidence", encoding="utf-8")
+    stats = runner.parse_docker_stats('{"CPUPerc":"12.5%","MemUsage":"10MiB / 512MiB","MemPerc":"2.0%","PIDs":"4","NetIO":"1kB / 2kB","BlockIO":"3kB / 4kB"}')
+    assert stats and stats["cpuPercent"] == 12.5 and stats["memoryLimit"] == "512MiB"
+    assert runner.parse_docker_stats("not-json") is None
+    metrics = runner.workspace_metrics(workspace)
+    assert metrics["jsonlCount"] == 1 and metrics["evidenceCount"] == 1
+    summary = runner.telemetry_summary([], [{"timestamp": 1, "metrics": metrics}])
+    assert summary["available"] is False and summary["workspaceLast"]["totalBytes"] > 0
+    assert runner.sample_container_telemetry("fake", lambda *a, **k: subprocess.CompletedProcess(a[0], 1, "", "unavailable")) is None
+
+    def stats_timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("docker stats", 1)
+    assert runner.sample_container_telemetry("fake", stats_timeout) is None
+
+
+def test_telemetry_markdown_not_available_is_concise() -> None:
+    report = {"schemaVersion": runner.SCHEMA_VERSION, "findings": [], "modelAnalysis": {"summary": "skipped"}, "run": {"telemetry": {"summary": {"available": False}}}}
+    assert "not available" in runner.render_markdown(report)
 
 
 def test_collector_unwraps_summary_and_merges_nested_records_once() -> None:
@@ -101,7 +127,7 @@ def test_analysis_failure_details_are_structured_and_redacted(monkeypatch, tmp_p
 def test_heuristic_only_report_cleanup(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(runner, "docker_preflight", lambda: (True, "test"))
     monkeypatch.setattr(runner, "docker_network_preflight", lambda network: (True, network))
-    monkeypatch.setattr(runner, "build_and_run", lambda args, artifacts: {"ok": True, "events": [{"type": "agent_start"}, {"type": "agent_end"}], "coverage": {"read": {"expected": True, "observed": True}}, "missingCoverage": [], "waitForIdle": {"requested": 1, "completed": 1}, "fixture": {"workspace": "fixture"}, "elapsedSec": 1.5, "runtimeFailure": False, "processReturnCode": 0})
+    monkeypatch.setattr(runner, "build_and_run", lambda args, artifacts: {"ok": True, "events": [{"type": "agent_start"}, {"type": "agent_end"}], "coverage": {"read": {"expected": True, "observed": True}}, "missingCoverage": [], "waitForIdle": {"requested": 1, "completed": 1}, "fixture": {"workspace": "fixture"}, "elapsedSec": 1.5, "workloadElapsedSec": 1.25, "runtimeFailure": False, "processReturnCode": 0})
     result = runner.main(["--report-dir", str(tmp_path), "--skip-analysis", "--json"])
     assert result == runner.EXIT_OK
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
@@ -110,6 +136,7 @@ def test_heuristic_only_report_cleanup(monkeypatch, tmp_path: Path) -> None:
     assert report["run"]["waitForIdle"] == {"requested": 1, "completed": 1}
     assert report["run"]["fixture"] == {"workspace": "fixture"}
     assert report["run"]["elapsedSec"] == 1.5
+    assert report["run"]["workloadElapsedSec"] == 1.25
     assert report["run"]["runtimeFailure"] is False
     assert report["run"]["processReturnCode"] == 0
     assert not list(tmp_path.glob("one-diagnostic-*"))
@@ -138,37 +165,102 @@ def test_build_failure_and_timeout_cleanup(monkeypatch, tmp_path: Path) -> None:
     failed = runner.build_and_run(args, tmp_path)
     assert failed["stage"] == "build" and not failed["ok"]
 
+    class TimeoutProcess:
+        returncode = None
+        pid = 999_999
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(["docker", "run"], timeout or 0)
+        def poll(self):
+            return None
+        def kill(self):
+            self.returncode = -9
     def timeout(command, **kwargs):
         calls.append(command)
-        if command[:2] == ["docker", "run"]:
-            raise subprocess.TimeoutExpired(command, 1)
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
     monkeypatch.setattr(runner.subprocess, "run", timeout)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: TimeoutProcess())
+    ticks = iter((0.0, 62.0, 62.0))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
     timed_out = runner.build_and_run(args, tmp_path)
     assert timed_out["timedOut"]
+    assert timed_out["elapsedSec"] == 62.0
     assert any(call[:2] == ["docker", "kill"] for call in calls)
     assert any(call[:3] == ["docker", "rm", "--force"] for call in calls)
 
 
-def test_run_mounts_only_artifact_workspace_and_collects_bounded_session_files(monkeypatch, tmp_path: Path) -> None:
+def test_timeout_terminates_docker_workload_process_group(monkeypatch, tmp_path: Path) -> None:
+    if runner.os.name != "posix":
+        pytest.skip("process-group signal assertions are POSIX-specific")
     args = runner.parse_args(["--duration", "1"])
+    calls: list[list[str]] = []
+    groups: list[tuple[int, signal.Signals]] = []
+
+    class TimeoutProcess:
+        pid = 12345
+        returncode = None
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(["docker", "run"], timeout or 0)
+
+        def poll(self):
+            return self.returncode
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    popen_kwargs: dict[str, Any] = {}
+    def fake_popen(*_args, **kwargs):
+        popen_kwargs.update(kwargs)
+        return TimeoutProcess()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: groups.append((pid, sig)))
+    ticks = iter((0.0, 62.0, 62.0))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+
+    result = runner.build_and_run(args, tmp_path)
+
+    assert result["timedOut"]
+    assert result["elapsedSec"] == 62.0
+    assert popen_kwargs["start_new_session"] is True
+    assert groups == [
+        (12345, signal.SIGTERM), (12345, signal.SIGKILL),
+        (12345, signal.SIGTERM), (12345, signal.SIGKILL),
+    ]
+
+
+def test_run_mounts_only_artifact_workspace_and_collects_bounded_session_files(monkeypatch, tmp_path: Path) -> None:
+    args = runner.parse_args(["--duration", "1", "--max-telemetry-samples", "1"])
     calls: list[list[str]] = []
 
     def fake_run(command, **_kwargs):
         calls.append(command)
         if command[:2] == ["docker", "build"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if command[:2] == ["docker", "run"]:
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    class CompletedProcess:
+        returncode = 4
+        def __init__(self, command):
             mount = next(part for part in command if part.startswith("type=bind,"))
             source = Path(dict(item.split("=", 1) for item in mount.split(",") if "=" in item)["src"])
             sessions = source / "state" / "sessions" / "fixture"
             sessions.mkdir(parents=True)
             (sessions / "session.jsonl").write_text('{"token":"secret", "value":"ok"}\n', encoding="utf-8")
             (sessions / "session.jsonl.evidence").write_text('{"api_key":"secret", "value":"evidence"}\n', encoding="utf-8")
-            return subprocess.CompletedProcess(command, 4, stdout='{"type":"agent_end"}\n{"type":"diagnostic_workload","events":[{"type":"agent_end"},{"type":"provider_error","message":"model failed"}],"coverage":{"read":{"expected":true,"observed":false}},"missingCoverage":["read"],"waitForIdle":{"requested":1,"failed":1},"fixture":{"workspace":"fixture"},"elapsedSec":1.0,"runtimeFailure":true,"processReturnCode":0}\n', stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        def communicate(self, timeout=None):
+            return ('{"type":"agent_end"}\n{"type":"diagnostic_workload","events":[{"type":"agent_end"},{"type":"provider_error","message":"model failed"}],"coverage":{"read":{"expected":true,"observed":false}},"missingCoverage":["read"],"waitForIdle":{"requested":1,"failed":1},"fixture":{"workspace":"fixture"},"elapsedSec":1.0,"runtimeFailure":true,"processReturnCode":0}\n', "")
+        def poll(self):
+            return self.returncode
+        def kill(self):
+            self.returncode = -9
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda command, **kwargs: (calls.append(command) or CompletedProcess(command)))
+    ticks = iter((0.0, 1.0, 2.0))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
     result = runner.build_and_run(args, tmp_path)
     command = next(call for call in calls if call[:2] == ["docker", "run"])
     mount = next(part for part in command if part.startswith("type=bind,"))
@@ -185,10 +277,13 @@ def test_run_mounts_only_artifact_workspace_and_collects_bounded_session_files(m
     assert result["missingCoverage"] == ["read"]
     assert result["waitForIdle"]["failed"] == 1
     assert result["fixture"] == {"workspace": "fixture"}
-    assert result["elapsedSec"] == 1.0
+    assert result["elapsedSec"] == 2.0
+    assert result["workloadElapsedSec"] == 1.0
     assert result["runtimeFailure"] is True
     assert result["processReturnCode"] == 0
     assert result["ok"] is False
+    assert len(result["telemetry"]["workspaceSamples"]) == 1
+    assert result["telemetry"]["sampleLimitReached"] is True
     assert [event["type"] for event in result["events"]].count("agent_end") == 1
     assert any(event["type"] == "provider_error" for event in result["events"])
     assert all(event["type"] != "diagnostic_workload" for event in result["events"])

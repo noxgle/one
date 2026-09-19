@@ -23,6 +23,7 @@ SCENARIOS = (
 MAX_EVENTS = 2_000
 MAX_MALFORMED = 100
 MAX_AUTO_ANSWERS = 100
+MAX_SCENARIO_RECORDS = 200
 
 
 def create_fixture(workspace: Path) -> dict[str, str]:
@@ -75,6 +76,7 @@ class RpcDriver:
         self.responses: dict[str, dict[str, Any]] = {}
         self.emit = emit
         self.terminated_by_driver = False
+        self._stream_closed = False
         self._answered_questions: set[str] = set()
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
@@ -83,6 +85,7 @@ class RpcDriver:
         assert self.process.stdout is not None
         for line in self.process.stdout:
             self.lines.put(line.rstrip("\n"))
+        self._stream_closed = True
         self.lines.put(None)
 
     def _record(self, line: str) -> dict[str, Any] | None:
@@ -105,9 +108,15 @@ class RpcDriver:
 
     def command(self, body: dict[str, Any], deadline: float) -> dict[str, Any] | None:
         assert self.process.stdin is not None
+        if self._stream_closed:
+            return None
         request_id = body.setdefault("id", f"diagnostic-{len(self.events)}")
-        self.process.stdin.write(json.dumps(body) + "\n")
-        self.process.stdin.flush()
+        try:
+            self.process.stdin.write(json.dumps(body) + "\n")
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self._stream_closed = True
+            return None
         while time.monotonic() < deadline:
             if (saved := self.responses.pop(str(request_id), None)) is not None:
                 return saved
@@ -116,6 +125,7 @@ class RpcDriver:
             except queue.Empty:
                 continue
             if line is None:
+                self._stream_closed = True
                 return None
             event = self._record(line)
             if event and event.get("type") == "ask_user" and isinstance(event.get("id"), str):
@@ -147,49 +157,69 @@ class RpcDriver:
         self._reader.join(timeout=1)
 
 
-def run_workload(workspace: Path, duration: float, provider: str, model: str, endpoint: str, emit: Any = print) -> dict[str, Any]:
+def run_workload(workspace: Path, duration: float, provider: str, model: str, endpoint: str, emit: Any = print, monotonic: Any = time.monotonic, sleep: Any = time.sleep) -> dict[str, Any]:
     fixture = create_fixture(workspace)
     env = os.environ.copy()
     env["ONE_CODING_AGENT_DIR"] = str(workspace / "state")
     command = [sys.executable, "-m", "one.cli.main", "--mode", "rpc", "--provider", provider, "--model", model, "--llama-cpp-url", endpoint, "--no-extensions", "--no-mcp"]
-    deadline = time.monotonic() + duration
+    started = monotonic()
+    deadline = started + duration
     # The fixture is both the tool workspace and the child cwd: scenario prompts
     # intentionally use relative paths such as ``notes.txt``.
     driver = RpcDriver(command, env, cwd=workspace, emit=emit)
     requested: list[str] = []
     control_observed: set[str] = set()
     idle = {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}
+    scenarios: list[dict[str, Any]] = []
     result: dict[str, Any]
     try:
         # Controls are real RPC commands; unavailable model failures remain visible.
         controls = [("retry", {"type": "set_auto_retry", "mode": "on"}), ("timeout", {"type": "inspect_subagent_timeout"}), ("steering", {"type": "steer", "message": "diagnostic steering"}), ("follow_up", {"type": "follow_up", "message": "diagnostic follow up"}), ("compaction", {"type": "compact"}), ("reload", {"type": "reload_resources"})]
         for name, body in controls:
-            if time.monotonic() >= deadline:
+            if monotonic() >= deadline:
                 break
             requested.append(name)
             response = driver.command(body, deadline)
             if response and response.get("success") is True:
                 control_observed.add(name)
         index = 0
-        while time.monotonic() < deadline:
-            # Leave enough time to finish the request already in flight rather
-            # than declaring an extra scenario missing at the hard deadline.
-            if duration >= 10 and deadline - time.monotonic() < max(2.0, duration / 2):
-                break
+        while monotonic() < deadline:
             name = SCENARIOS[index % len(SCENARIOS)]
+            scenario_started = monotonic()
             response = driver.command({"type": "prompt", "message": scenario_prompt(name), "streamingBehavior": "queue"}, deadline)
+            record: dict[str, Any] = {"id": name, "startSec": round(scenario_started - started, 3), "waitForIdle": {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}}
             if response is None:
-                break
+                record.update(status="prompt_timeout", endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
+                if len(scenarios) < MAX_SCENARIO_RECORDS:
+                    scenarios.append(record)
+                index += 1
+                # A closed RPC stream can return immediately. Yield before the
+                # next scheduled attempt so it cannot spin until the deadline.
+                remaining = deadline - monotonic()
+                if remaining > 0:
+                    sleep(min(0.2, remaining))
+                continue
             idle["requested"] += 1
+            record["waitForIdle"]["requested"] = 1
             idle_response = driver.command({"type": "wait_for_idle"}, deadline)
             if idle_response is None:
                 idle["timedOut"] += 1
+                record["waitForIdle"]["timedOut"] = 1
+                record["status"] = "idle_timeout"
             elif idle_response.get("success") is True:
                 idle["completed"] += 1
+                record["waitForIdle"]["completed"] = 1
+                record["status"] = "completed"
                 if name not in requested:
                     requested.append(name)
             else:
                 idle["failed"] += 1
+                record["waitForIdle"]["failed"] = 1
+                record["status"] = "idle_failed"
+            scenario_ended = monotonic()
+            record.update(endSec=round(scenario_ended - started, 3), elapsedSec=round(scenario_ended - scenario_started, 3))
+            if len(scenarios) < MAX_SCENARIO_RECORDS:
+                scenarios.append(record)
             index += 1
         observed = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_start"}
         controls = {name for name, _body in controls}
@@ -201,7 +231,7 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
             for name in SCENARIOS
         }
         coverage["wait_for_idle"] = {"kind": "rpc", "expected": idle["requested"] > 0, "observed": idle["requested"] > 0 and not idle["failed"] and not idle["timedOut"]}
-        result = {"type": "diagnostic_workload", "fixture": fixture, "elapsedSec": round(duration - max(0, deadline - time.monotonic()), 3), "events": driver.events, "malformed": driver.malformed, "coverage": coverage, "missingCoverage": sorted(name for name, state in coverage.items() if state["expected"] and not state["observed"]), "waitForIdle": idle}
+        result = {"type": "diagnostic_workload", "fixture": fixture, "elapsedSec": round(monotonic() - started, 3), "events": driver.events, "malformed": driver.malformed, "coverage": coverage, "missingCoverage": sorted(name for name, state in coverage.items() if state["expected"] and not state["observed"]), "waitForIdle": idle, "scenarios": scenarios, "scenarioRecordsDropped": max(0, index - len(scenarios))}
     finally:
         driver.close()
     result["processReturnCode"] = driver.process.poll()
