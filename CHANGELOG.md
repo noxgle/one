@@ -79,11 +79,14 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   (abort, budget limits, `finish`, and normal completion still end the turn).
 - **TUI additions** — version line in the sidebar and `one v<version>` CLI banner;
   effective timeout in tool lines (`tool start (timeout Ns): bash {...}`);
-  shortcuts overlay entries for Ctrl+Shift+V (paste image) and Ctrl+R;
+  shortcuts overlay entries for SSH-safe text/image paste shortcuts and Ctrl+R;
   cooperation toggle moved from Ctrl+A to Ctrl+Z in the TUI.
 - **TUI reliability fixes** — no more duplicated assistant/tool output across
   streamed retries and history trimming; single-insert paste; working waiting
   spinner; backspace/delete/arrows fire once.
+- **SSH-safe TUI paste shortcuts** — Ctrl+V retains host/system clipboard text;
+  Ctrl+Shift+V accepts terminal bracketed text paste without remote clipboard
+  binaries; image paste moved to Ctrl+Alt+V, with `/paste-image` as a fallback.
 - **`/login` help** — all help outputs show the `[subscription]` argument.
 - **Skills system** — modular, discoverable instruction sets via `SKILL.md` files
   with YAML frontmatter (name, description, optional license/compatibility/metadata/allowed-tools/disable-model-invocation).

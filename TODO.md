@@ -72,8 +72,9 @@ P0 (maintainer decisions: contact, repo+tag) and P2 remain open.
   `tui_mode.py:2756-2760`) — note it is TUI-only.
 - [x] **P1-15:** Version display (TUI sidebar `tui_mode.py:1307`, CLI banner
   `cli/main.py:467`, `--version`).
-- [x] **P1-16:** TUI shortcut table/pointer (`Ctrl+R`, `Ctrl+Shift+V`, `Ctrl+V`,
-  `Ctrl+Z` from `TUI_SHORTCUTS`, `tui_mode.py:129-142`).
+- [x] **P1-16:** TUI shortcut table/pointer (`Ctrl+R`, `Ctrl+Shift+V` terminal
+  text paste, `Ctrl+Alt+V` image paste, `Ctrl+V`, `Ctrl+Z` from
+  `TUI_SHORTCUTS`, `tui_mode.py:129-142`).
 - [x] **P1-17:** `CHANGELOG.md` Unreleased: add all user-visible tui-ux-batch changes
   (retry unlimited + `/retry-cycle` + `Ctrl+R`, Codex `input_image`, `Ctrl+Z`,
   `Ctrl+Shift+V`, `maxSteps=0`, timeout display, `/login [subscription]` help,
@@ -406,11 +407,11 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
   - **Details:** Initial implementation added `get_retry_mode` / `set_retry_mode` and `/retry`/`/retry-cycle`; follow-up work is required only for the binding change to `Ctrl+R` (not `Ctrl+Shift+R`). `maxSteps` remains an independent setting.
 
 - [x] **Task 4:** List Ctrl+Shift+V in TUI shortcuts.
-  - **Description:** The existing paste-image binding (`action_paste_image`) is missing from the shortcuts overlay/help; add it.
+  - **Description:** Historical record: the then-existing paste-image binding (`action_paste_image`) was missing from the shortcuts overlay/help. The current mapping is Ctrl+Shift+V for terminal text paste and Ctrl+Alt+V for image paste.
   - **Files:** `one/modes/tui_mode.py` (shortcuts overlay), TUI snapshot files if changed.
-  - **Acceptance:** Overlay lists Ctrl+Shift+V with image-paste description.
+  - **Acceptance:** Historical acceptance was an image-paste description for Ctrl+Shift+V; the current overlay instead lists Ctrl+Shift+V for terminal text paste and Ctrl+Alt+V for image paste.
   - **Verification:** Snapshot/command-list test update.
-  - **Details:** `TUI_SHORTCUTS` tuple extended with `("Ctrl+Shift+V", "paste image from the system clipboard")` and `("Ctrl+Shift+R", "cycle retry mode")`; bindings registered in the keymap.
+  - **Details:** Historical implementation extended `TUI_SHORTCUTS` with `("Ctrl+Shift+V", "paste image from the system clipboard")` and `("Ctrl+Shift+R", "cycle retry mode")`; the current mapping is Ctrl+Shift+V terminal text paste and Ctrl+Alt+V image paste.
 
 - [x] **Task 5:** Codex image support.
   - **Description:** Serialize current-turn images in `codex_responses` native format; if the API cannot carry images, reject image-bearing requests with a clear unsupported-image error (never silent text-only).
@@ -486,7 +487,7 @@ Task 16 in `29a17a5`); the branch is kept for reference. No push without approva
 
 - [x] **Task 14:** Prevent duplicated text when pasting into the TUI.
    - **Details:** ctrl+v consumed at widget level (stop+prevent) plus _on_paste override with shared truncation; 5 real-dispatch regression tests; image paste untouched.
-  - **Description:** Trace and fix the interaction between the custom `Ctrl+V`/clipboard action and Textual's native `events.Paste`/`TextArea._on_paste()` path. A single terminal paste must insert the clipboard contents exactly once, without breaking multiline paste, truncation, keyboard typing, or submit behavior. Preserve image-paste handling on `Ctrl+Shift+V`.
+   - **Description:** Trace and fix the interaction between the custom `Ctrl+V`/clipboard action and Textual's native `events.Paste`/`TextArea._on_paste()` path. A single terminal paste must insert the clipboard contents exactly once, without breaking multiline paste, truncation, keyboard typing, or submit behavior. Preserve image-paste handling on Ctrl+Alt+V; Ctrl+Shift+V is terminal text paste.
   - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_input.py`, possibly Textual-version compatibility code only if required.
   - **Dependencies:** None.
   - **Acceptance Criteria:** One user paste produces one text insertion; a paste followed by Enter submits one prompt containing the text once; multiline and 10,240-character truncation behavior remain correct; image paste remains separate and functional.
@@ -2327,7 +2328,7 @@ not conflict with terminal text paste.
 
 ### Implementation tasks
 
-- [ ] **Task:** Reassign image paste and preserve terminal text paste.
+- [x] **Task:** Reassign image paste and preserve terminal text paste.
 
   - **Description:** Update the TUI binding and shortcut table so `Ctrl+Alt+V`
     invokes image paste and `Ctrl+Shift+V` remains text paste. Verify Textual
@@ -2342,7 +2343,7 @@ not conflict with terminal text paste.
   - **Verification:** Focused Textual pilot tests with mocked clipboard/image
     backends; assert no duplicate text insertion.
 
-- [ ] **Task:** Add and document the image-paste fallback command.
+- [x] **Task:** Add and document the image-paste fallback command.
 
   - **Description:** Add `/paste-image` if absent, route it through the same
     image acquisition path as the shortcut, and expose it in `/help` and the
@@ -2362,7 +2363,7 @@ not conflict with terminal text paste.
   - **Verification:** Command tests with mocked image acquisition, repository
     search for stale shortcut descriptions, and README/shortcut/help text review.
 
-- [ ] **Task:** Run integrated verification and refresh snapshots if needed.
+- [x] **Task:** Run integrated verification and refresh snapshots if needed.
 
   - **Description:** Verify local and SSH-like terminal paste paths, image
     shortcut routing, command fallback, and unchanged interactive-mode keys.

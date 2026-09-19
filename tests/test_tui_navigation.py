@@ -423,7 +423,7 @@ async def test_tui_history_records_alias_as_typed(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_shortcuts_overlay_contains_new_shortcuts(tmp_path: Path):
-    """The shortcuts panel (Ctrl+F1) must show Ctrl+Shift+V and Ctrl+R."""
+    """The shortcuts panel (Ctrl+F1) must show the final paste mapping."""
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -435,6 +435,8 @@ async def test_tui_shortcuts_overlay_contains_new_shortcuts(tmp_path: Path):
         overlay = app.query_one("#shortcuts_overlay")
         content = str(overlay.content)
         assert "Ctrl+Shift+V" in content
+        assert "paste terminal text (SSH-safe)" in content
+        assert "Ctrl+Alt+V" in content
         assert "paste image from the system clipboard" in content
         assert "Ctrl+R" in content
         assert "cycle retry mode" in content

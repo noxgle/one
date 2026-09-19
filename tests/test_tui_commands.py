@@ -145,8 +145,31 @@ async def test_tui_command_help_lists_all_commands(tmp_path: Path):
             "/cooperation [on|off]",
             "/mcp [list|enable|disable]",
             "/bash <command>",
+            "/paste-image",
         ]:
             assert token in stream, token
+
+
+@pytest.mark.asyncio
+async def test_tui_paste_image_command_uses_shortcut_action_and_preserves_errors(tmp_path: Path, monkeypatch):
+    from one.core import clipboard_image
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    toasts: list[tuple[str, str]] = []
+    image = b"clipboard-image"
+    clipboard_values = iter([image, None])
+    monkeypatch.setattr(clipboard_image, "acquire_clipboard_image", lambda: next(clipboard_values))
+    monkeypatch.setattr(app, "_toast", lambda message, severity="info": toasts.append((message, severity)))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._handle_command("/paste-image")
+        assert app._pending_clipboard_image_bytes == image
+        await app._handle_command("/paste-image")
+        assert toasts == [
+            ("Image queued — submit to attach", "info"),
+            ("No image data in clipboard", "warning"),
+        ]
 
 
 @pytest.mark.asyncio

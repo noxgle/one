@@ -7,7 +7,7 @@ from pathlib import Path
 
 APP_NAME = "one"
 LEGACY_CONFIG_DIR_NAME = ".one"
-VERSION = "0.1.20"
+VERSION = "0.1.21"
 ENV_AGENT_DIR = f"{APP_NAME.upper()}_CODING_AGENT_DIR"
 
 

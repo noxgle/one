@@ -1,4 +1,4 @@
-"""Tests for clipboard image acquisition (Ctrl+Shift+V / /paste-image)."""
+"""Tests for clipboard image acquisition (Ctrl+Alt+V / /paste-image)."""
 
 from __future__ import annotations
 

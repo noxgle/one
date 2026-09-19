@@ -269,10 +269,13 @@ TUI keyboard shortcuts (also listed in the in-app shortcuts overlay):
 | `Ctrl+Z` | Toggle cooperation mode |
 | `Ctrl+S` | Toggle subagents |
 | `Ctrl+O` | Toggle bash output |
-| `Ctrl+V` | Paste text from the system clipboard |
-| `Ctrl+Shift+V` | Paste image from the system clipboard |
+| `Ctrl+V` | Paste text from the host/system clipboard |
+| `Ctrl+Shift+V` | Paste terminal text (SSH-safe; no remote clipboard backend required) |
+| `Ctrl+Alt+V` | Paste image from the system clipboard |
 | `Ctrl+R` | Cycle retry mode (`off` → `on` → `unlimited`) |
 | `Ctrl+F1` | Show slash-command help |
+
+Use `/paste-image` when the terminal intercepts `Ctrl+Alt+V`.
 - subscription login via `/login chatgpt subscription` / `/login anthropic subscription` (OAuth loopback/paste)
 - cooperation approval / `ask_user` pauses the spinner and shows a waiting indicator plus a toast notification
 

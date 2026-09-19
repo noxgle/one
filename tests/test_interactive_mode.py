@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +12,29 @@ import pytest
 
 from one.core.types import ModelInfo
 from one.modes.interactive_mode import InteractiveMode
+
+
+def test_raw_interactive_ctrl_b_moves_cursor_left(monkeypatch) -> None:
+    """The SSH-safe TUI shortcut changes must not alter interactive Ctrl+B."""
+    from one.modes import interactive_mode
+
+    reads = iter([b"a", b"b", b"\x02", b"c", b"\n"])
+    stdout = types.SimpleNamespace(write=lambda _text: None, flush=lambda: None)
+    termios = types.SimpleNamespace(
+        TCSANOW=0,
+        TCSADRAIN=1,
+        tcgetattr=lambda _fd: [],
+        tcsetattr=lambda _fd, _when, _attrs: None,
+    )
+    tty = types.SimpleNamespace(setraw=lambda _fd, _when: None)
+
+    monkeypatch.setitem(sys.modules, "termios", termios)
+    monkeypatch.setitem(sys.modules, "tty", tty)
+    monkeypatch.setattr(interactive_mode.sys, "stdin", types.SimpleNamespace(fileno=lambda: 7))
+    monkeypatch.setattr(interactive_mode.sys, "stdout", stdout)
+    monkeypatch.setattr(interactive_mode.os, "read", lambda _fd, _size: next(reads))
+
+    assert interactive_mode._raw_readline("one> ", lambda: None) == "acb"
 
 
 @pytest.fixture(autouse=True)

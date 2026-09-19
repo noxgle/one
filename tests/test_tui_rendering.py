@@ -133,7 +133,9 @@ def test_tui_shortcuts_are_single_source_of_truth() -> None:
 
     assert ("Ctrl+P", "command palette") in TUI_SHORTCUTS
     assert "Ctrl+P command palette" in rendered
-    assert "Ctrl+V paste from the system clipboard" in rendered
+    assert "Ctrl+V paste text from the host/system clipboard" in rendered
+    assert "Ctrl+Shift+V paste terminal text (SSH-safe)" in rendered
+    assert "Ctrl+Alt+V paste image from the system clipboard" in rendered
     assert "Ctrl+F1 show slash-command help" in rendered
 
 

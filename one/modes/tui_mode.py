@@ -151,8 +151,9 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+Z", "toggle cooperation"),
     ("Ctrl+S", "toggle subagents"),
     ("Ctrl+O", "toggle bash output"),
-    ("Ctrl+V", "paste from the system clipboard"),
-    ("Ctrl+Shift+V", "paste image from the system clipboard"),
+    ("Ctrl+V", "paste text from the host/system clipboard"),
+    ("Ctrl+Shift+V", "paste terminal text (SSH-safe)"),
+    ("Ctrl+Alt+V", "paste image from the system clipboard"),
     ("Ctrl+R", "cycle retry mode"),
     ("Ctrl+F1", "show slash-command help"),
     ("Esc", "close the shortcuts panel"),
@@ -391,6 +392,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/history",
     "/bash",
     "/inspect-timeout",
+    "/paste-image",
 )
 
 
@@ -554,9 +556,8 @@ if TEXTUAL_AVAILABLE:
                 event.stop()
                 return
             if event.key == "ctrl+v":
-                # Prevent double-dispatch: let the binding fire, then stop
-                # so _OneTextualApp._on_key → App._on_key doesn't check
-                # bindings a second time (which would call action_paste again).
+                # Ctrl+V is intercepted directly, not via a Binding, to prevent
+                # duplicate app-level handling.
                 self.action_paste()
                 event.stop()
                 event.prevent_default()
@@ -771,8 +772,9 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle bash output", priority=True),
             Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
-            # Ctrl+Shift+V: paste image from clipboard (queued for import).
-            Binding("ctrl+shift+v", "paste_image", "Paste image from clipboard", priority=True),
+            # Ctrl+Shift+V is intentionally unbound: terminals turn it into a
+            # bracketed events.Paste event, which _CommandTextArea consumes.
+            Binding("ctrl+alt+v", "paste_image", "Paste image from clipboard", priority=True),
             ("ctrl+f1", "help", "Help"),
             # Keep this non-priority: the CommandPalette must retain Esc to
             # close itself while this action closes one's shortcuts overlay.
@@ -1684,13 +1686,16 @@ if TEXTUAL_AVAILABLE:
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
                 )
                 self._write(
-                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>",
+                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command> | /paste-image",
                     "info",
                 )
                 self._write("/inspect-timeout", "info")
                 return
             if cmd == "/clear":
                 self.action_clear_stream()
+                return
+            if cmd == "/paste-image":
+                self.action_paste_image()
                 return
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
@@ -2949,7 +2954,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list|name [args]] /config /extui /cooperation /subagents /bash-show /history /mcp /bash /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list|name [args]] /config /extui /cooperation /subagents /bash-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 

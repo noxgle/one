@@ -260,7 +260,7 @@ async def test_tui_paste_from_system_clipboard(tmp_path: Path, monkeypatch):
     async with app.run_test() as pilot:
         await pilot.pause()
         input_widget = app.query_one("#input")
-        input_widget.action_paste()
+        await pilot.press("ctrl+v")
         await pilot.pause()
         assert input_widget.text == "pasted-text"
 
@@ -333,6 +333,43 @@ async def test_tui_paste_via_event_inserts_once(tmp_path: Path, monkeypatch):
         # Must appear exactly once — no double-insert.
         assert input_widget.text == "paste-from-event"
         assert input_widget.text.count("paste-from-event") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_shift_v_uses_terminal_paste_event_once(tmp_path: Path, monkeypatch):
+    """SSH terminal paste must not consult a clipboard backend or invoke image paste."""
+    from textual import events
+    from textual.widgets import TextArea
+
+    from one.modes import tui_mode
+
+    session = _mk_app_session(tmp_path)
+    app = tui_mode._OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "_paste_from_system_clipboard", lambda: pytest.fail("clipboard read"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget: TextArea = app.query_one("#input", TextArea)
+        input_widget.post_message(events.Paste("ssh-terminal-paste"))
+        await pilot.pause()
+        assert input_widget.text == "ssh-terminal-paste"
+        assert input_widget.text.count("ssh-terminal-paste") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_alt_v_dispatches_image_paste(tmp_path: Path, monkeypatch):
+    """Ctrl+Alt+V is the only app binding that dispatches image paste."""
+    from one.modes import tui_mode
+
+    session = _mk_app_session(tmp_path)
+    app = tui_mode._OneTextualApp(session)
+    calls: list[None] = []
+    monkeypatch.setattr(app, "action_paste_image", lambda: calls.append(None))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+alt+v")
+        await pilot.pause()
+        assert calls == [None]
+        assert all(getattr(binding, "key", None) != "ctrl+shift+v" for binding in app.BINDINGS)
 
 
 @pytest.mark.asyncio
