@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Bounded TUI transcript viewport** — long conversations now render only the
+  latest 500 display lines while retaining complete session history. Stream
+  refreshes coalesce equivalent output, and mouse-selection copying remains
+  reliable during streaming and viewport trimming.
 - **Tool/MCP evidence preservation** — provider requests retain bounded tool
   previews. Complete sanitized results are kept in durable session evidence and
   can be read by the model after reload through `evidence_read`; optional stale
