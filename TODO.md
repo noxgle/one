@@ -2283,6 +2283,53 @@ selection remains copyable.
 - [x] Mouse-selected visible transcript text copies reliably and exactly once.
 - [x] Existing clipboard, lifecycle, snapshot, and full-suite tests pass.
 
+## Follow-up: Complexity-aware planning policy
+
+### Goal
+
+Ensure the agent invokes the `plan` tool for explicitly planning-oriented or
+genuinely complex tasks, without forcing a planning phase for every simple
+prompt.
+
+### Confirmed decisions
+
+- Use `plan` for explicit planning requests and tasks with multiple dependent
+  phases, multiple components, security/infrastructure risk, validation gates,
+  rollback planning, or required user approval.
+- Do not create plans for simple questions, single-step edits, one-file fixes
+  with clear requirements, or straightforward test/formatting changes.
+- Treat user-provided phases as draft scope; for complex tasks, convert them
+  into a structured plan through the `plan` tool.
+- Do not claim that a plan exists unless the `plan` tool completed successfully.
+- After creating a plan in explicitly activated Plan Mode, present it and wait
+  for approval before execution only when cooperation mode is enabled. Without
+  cooperation mode, continue according to the user's original execution
+  request after the plan is created.
+- Do not infer that every user request requires read-only planning; Plan Mode
+  must be explicitly activated or required by task policy.
+
+### Implementation tasks
+
+- [ ] **Task:** Update the planning system prompt and activation policy.
+
+  - **Description:** Separate complexity-based Plan Mode activation from the
+    active read-only Plan Mode reminder. Require the `plan` tool for complex
+    tasks, preserve direct execution for simple tasks, and remove the false
+    assumption that every user has requested no execution. State that a
+    user-supplied phase list is not itself a persisted plan.
+  - **Files:** System prompt/runtime prompt source and its tests; exact paths
+    to be identified during implementation.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Complex multi-phase/security prompts invoke
+    `plan` before execution; simple prompts do not invoke `plan`; Plan Mode
+    remains read-only; plans are not reported as created without a successful
+    `plan` tool result; approval is required before execution when Plan Mode is
+    explicitly active; in cooperation mode execution pauses for approval after
+    plan creation, while normal mode continues according to the user's request.
+  - **Verification:** Prompt/runtime tests covering simple, complex,
+    security-assessment, explicit-plan, and user-provided-phase prompts, plus
+    a manual smoke test for both execution paths.
+
 ## Follow-up: SSH-safe TUI clipboard shortcuts
 
 ### Goal
