@@ -12,6 +12,7 @@ one.egg-info/
 dist/
 build/
 *.egg-info/
+diagnostic-reports/
 
 *.log
 *.tmp
