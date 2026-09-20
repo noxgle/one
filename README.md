@@ -16,6 +16,7 @@ steering, questions, sessions, MCP tools, extensions, skills, and image input.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
+- [Updating](#updating)
 - [Choose a mode](#choose-a-mode)
 - [Headless tasks with `one run`](#headless-tasks-with-one-run)
 - [Providers and authentication](#providers-and-authentication)
@@ -67,6 +68,40 @@ The distribution name is `one-agent`; the import and console-script name are
 
 Verify an installation with `one --version`, `one --help`, or
 `python -m one --help`.
+
+## Updating
+
+### Installation from PyPI
+
+Upgrade the installed distribution with:
+
+```bash
+python -m pip install --upgrade one-agent
+one --version
+```
+
+On Windows PowerShell, use the same command with the Python launcher if needed:
+
+```powershell
+py -3.12 -m pip install --upgrade one-agent
+one --version
+```
+
+### Installation from source
+
+Pull the latest changes and refresh the editable installation:
+
+```bash
+git pull
+python -m pip install -e '.[dev]'
+one --version
+```
+
+Updating the package does not remove user configuration, credentials, or saved
+sessions. These are stored outside the repository under `~/.config/one` by
+default (or under `ONE_CODING_AGENT_DIR` when configured). For a virtual
+environment, activate it before running the commands above or use that
+environment's Python executable explicitly.
 
 ## Choose a mode
 
@@ -367,8 +402,10 @@ git diff --check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor conventions and focused
-test commands. Linux and macOS are supported in CI. Windows is best-effort:
-shell-oriented behavior remains experimental pending Windows CI.
+test commands. Linux and macOS are supported in CI. Windows is currently
+best-effort and is not an officially supported platform yet; shell-oriented
+behavior remains experimental pending Windows CI. Windows 11 is the planned
+future target, while Windows 10 support is deferred.
 
 ## References
 
