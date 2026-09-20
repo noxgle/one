@@ -3016,3 +3016,86 @@ attempting full Windows shell/clipboard parity.
 | Process cancellation behaves differently | Use Windows-specific process-tree implementation and child-process tests |
 | TUI behavior varies by console | Standardize on Windows Terminal for CI/manual acceptance and document limitations |
 | Scope expands into full platform rewrite | Keep Windows 11 phases separate; defer Windows 10 and image clipboard parity |
+
+## Future Fix: Thinking levels and persistence
+
+### Problem
+
+Changing `/thinking` to a level other than `off` is not consistently honored
+across providers. The current OpenAI-compatible adapter collapses most levels to
+`medium` and can send reasoning configuration even for `off`; Anthropic and
+Gemini adapters currently ignore `thinking_level` in their request payloads.
+Additionally, `AgentSession.set_thinking_level()` records the change only in the
+active session JSONL, while the global `defaultThinkingLevel` setting is not
+updated, so new sessions do not retain the user's selection.
+
+### Scope
+
+- Preserve the six supported levels: `off`, `minimal`, `low`, `medium`, `high`,
+  and `xhigh`.
+- Map levels to each provider's native reasoning/thinking request fields.
+- Ensure `off` disables or omits provider reasoning configuration.
+- Persist the selected level as the global default while retaining the
+  per-session history entry.
+- Keep restored session-specific thinking levels stronger than the global
+  default for that session.
+- Preserve non-reasoning model behavior, tool loops, streaming, images, and
+  existing event contracts.
+
+### Implementation Tasks
+
+- [ ] **Provider payload mappings:** Update OpenAI-compatible, Anthropic,
+  Gemini, and Codex adapters as appropriate. Use provider-safe mappings for
+  unsupported `minimal`/`xhigh` values and deterministic token budgets where an
+  API uses a budget instead of an effort enum.
+  - **Files:** `one/providers/openai_compatible.py`,
+    `one/providers/anthropic.py`, `one/providers/gemini.py`,
+    `one/providers/codex_responses.py`, provider payload tests.
+  - **Acceptance:** Every supported level produces the expected native payload;
+    `off` produces no enabled-reasoning payload; adapters configured without
+    reasoning support remain unchanged.
+  - **Verification:** Fake transport/payload tests for all six levels and every
+    provider family; no real provider requests.
+
+- [ ] **Thinking stream handling:** Parse provider-native thinking deltas for
+  Anthropic and Gemini separately from visible answer text and route them via
+  the existing `on_thinking_delta` callback without contaminating final text or
+  tool-call parsing.
+  - **Files:** `one/providers/anthropic.py`, `one/providers/gemini.py`,
+    provider streaming tests, event tests if the contract is touched.
+  - **Acceptance:** Thinking output is emitted as thinking events, visible text
+    remains answer text, and existing stream/tool behavior is unchanged.
+  - **Verification:** Fake SSE/stream fixtures containing interleaved thought
+    and text blocks.
+
+- [ ] **Persist the default level:** Make `AgentSession.set_thinking_level()`
+  validate the level, append the session history entry, and persist the global
+  `defaultThinkingLevel`. Ensure `/new` does not reuse a stale startup override,
+  while loading an existing session restores its recorded level.
+  - **Files:** `one/core/agent_session.py`, `one/core/settings_manager.py`,
+    `one/core/agent_session_runtime.py`, relevant TUI/CLI command paths.
+  - **Acceptance:** A changed level survives process restart and applies to new
+    sessions; an existing session's recorded level takes precedence; invalid
+    levels fail clearly without mutating settings.
+  - **Verification:** Settings JSON round-trip tests, runtime new-session and
+    restore tests, and `/thinking`/`/thinking-cycle` command tests.
+
+- [ ] **Documentation and release metadata:** Document provider limitations and
+  persistence behavior, add an `Unreleased` changelog entry, and bump the
+  version with regenerated TUI snapshots if required by the user-visible-change
+  policy.
+  - **Files:** `README.md`, `CHANGELOG.md`, `one/config.py`,
+    `tests/snapshots/tui/*` when applicable.
+  - **Acceptance:** Documentation accurately describes levels, provider-specific
+    behavior, and the fact that new sessions inherit the saved default.
+  - **Verification:** Repository search for stale thinking descriptions,
+    snapshot review, full test suite, Ruff, and `git diff --check`.
+
+### Risks
+
+| Risk | Mitigation |
+|------|------------|
+| Provider APIs use incompatible effort/budget semantics | Keep mappings in adapters and test exact wire payloads per provider |
+| Thinking budget leaves too little output capacity | Enforce provider-specific max-token relationships and test boundary values |
+| Session restore overrides the intended global default incorrectly | Test fresh-session versus existing-session precedence explicitly |
+| Hidden reasoning leaks into visible/tool-call parsing | Route only provider-marked thought deltas to `on_thinking_delta` |
