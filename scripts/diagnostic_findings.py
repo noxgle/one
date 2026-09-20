@@ -95,7 +95,7 @@ def detect(events: list[dict[str, Any]], diagnostics: dict[str, Any] | None = No
         for name, state in coverage.items():
             if isinstance(state, dict) and state.get("expected") is True and state.get("kind") != "rpc":
                 requested.add(str(name))
-                if state.get("observed") is not True:
+                if state.get("observed") is not True and state.get("category") != "capability_unavailable":
                     unobserved.add(str(name))
     if isinstance(missing, list):
         listed = {str(name) for name in missing if isinstance(name, str) and name}
@@ -110,6 +110,17 @@ def detect(events: list[dict[str, Any]], diagnostics: dict[str, Any] | None = No
             "The model, RPC process, or workload deadline did not produce the expected built-in scenario activity.",
             "high",
         ))
+    warnings = diagnostics.get("coverageWarnings")
+    if isinstance(warnings, list):
+        unavailable = [item for item in warnings if isinstance(item, dict) and item.get("category") == "capability_unavailable"]
+        if unavailable:
+            output.append(finding(
+                "coverage-capability-unavailable", "low", "coverage",
+                "Expected scenario coverage was unavailable because the capability is disabled or unadvertised.",
+                [f"coverage:{item.get('scenario', 'unknown')}:capability_unavailable" for item in unavailable[:20]],
+                "The diagnostic retained the unavailable scenario as configuration evidence rather than treating it as model/tool coverage failure.",
+                "high",
+            ))
     if context_evidence:
         output.append(finding(
             "context-window-exhaustion", "high", "context",

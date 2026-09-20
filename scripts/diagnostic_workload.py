@@ -20,10 +20,36 @@ SCENARIOS = (
     "evidence_read", "plan", "finish", "ask_user", "spawn_subagent", "retry", "timeout",
     "steering", "follow_up", "compaction", "reload",
 )
+# ``None`` identifies scenarios driven by RPC controls rather than a tool call.
+# Keep this explicit: control IDs happen to resemble tool names in some cases,
+# but are not part of the advertised get_tools capability set.
+SCENARIO_REQUIRED_TOOLS: dict[str, str | None] = {
+    "read": "read",
+    "read_image": "read_image",
+    "bash": "bash",
+    "write": "write",
+    "edit": "edit",
+    "apply_patch": "apply_patch",
+    "grep": "grep",
+    "find": "find",
+    "ls": "ls",
+    "evidence_read": "evidence_read",
+    "plan": "plan",
+    "finish": "finish",
+    "ask_user": "ask_user",
+    "spawn_subagent": "spawn_subagent",
+    "retry": None,
+    "timeout": None,
+    "steering": None,
+    "follow_up": None,
+    "compaction": None,
+    "reload": None,
+}
 MAX_EVENTS = 2_000
 MAX_MALFORMED = 100
 MAX_AUTO_ANSWERS = 100
 MAX_SCENARIO_RECORDS = 200
+MAX_COVERAGE_WARNINGS = 50
 
 
 def create_fixture(workspace: Path) -> dict[str, str]:
@@ -56,13 +82,61 @@ def scenario_prompt(name: str) -> str:
         "grep": "Call grep for `alpha` in notes.txt, then finish.",
         "find": "Call find for *.txt, then finish.",
         "ls": "Call ls on ., then finish.",
-        "evidence_read": "Call evidence_read with a bounded recent range if evidence is available, then finish.",
-        "plan": "Call plan with a one-step diagnostic plan, then finish.",
+        "evidence_read": "First call read on notes.txt. Use the diagnostic evidenceId returned by that read to call evidence_read with offset 0 and maxChars 256. Do not read host state. Then finish.",
+        "plan": "This is a genuinely complex diagnostic with three dependent phases: inspect notes.txt, verify the fixture image, and patch patch-target.txt, followed by validation. Call plan with those 3+ phases, execute the fixture-only steps, verify them, then finish.",
         "finish": "Call finish with a concise completion summary.",
-        "ask_user": "Call ask_user with one yes/no question, wait for the supplied answer, then call finish.",
-        "spawn_subagent": "Call spawn_subagent with a tiny read-only task to list notes.txt, then finish.",
+        "ask_user": "Call ask_user with the harmless diagnostic question `Should the fixture-only diagnostic continue?` and timeoutSec 30. Wait for the automatic answer, then call finish.",
+        "spawn_subagent": "Call spawn_subagent with task `In the fixture workspace only, read notes.txt and return its two lines; do not modify files or inspect host state.` and tools [\"read\"]. If the tool is unavailable, report that it is unavailable; otherwise report the child result. Then call finish exactly once.",
     }
     return f"Work only in this fixture workspace. {details.get(name, f'Call {tool}, then finish.')}"
+
+
+def _available_tools(response: dict[str, Any] | None) -> set[str] | None:
+    """Extract advertised RPC tools without treating an unavailable query as evidence."""
+    data = response.get("data") if isinstance(response, dict) else None
+    tools = data.get("tools") if isinstance(data, dict) else None
+    if not isinstance(tools, list):
+        return None
+    names: set[str] = set()
+    for tool in tools:
+        if isinstance(tool, str):
+            names.add(tool)
+        elif isinstance(tool, dict) and isinstance(name := tool.get("name"), str):
+            names.add(name)
+    return names
+
+
+def classify_coverage(
+    attempted: set[str], observed: set[str], available_tools: set[str] | None,
+    idle: dict[str, int], final_idle_deadline_truncated: bool,
+) -> tuple[dict[str, dict[str, object]], list[str], list[dict[str, str]]]:
+    """Classify coverage without conflating disabled tools or deadline cleanup with misses."""
+    coverage: dict[str, dict[str, object]] = {}
+    warnings: list[dict[str, str]] = []
+    missing: list[str] = []
+    for name in SCENARIOS:
+        expected = name in attempted
+        state: dict[str, object] = {"expected": expected, "observed": name in observed}
+        required_tool = SCENARIO_REQUIRED_TOOLS[name]
+        if expected and not state["observed"]:
+            if required_tool is not None and available_tools is not None and required_tool not in available_tools:
+                state["category"] = "capability_unavailable"
+                warnings.append({"scenario": name, "category": "capability_unavailable", "detail": f"{required_tool} was not advertised by the RPC session configuration."})
+            else:
+                state["category"] = "missing_model_or_tool_coverage"
+                missing.append(name)
+        coverage[name] = state
+    idle_expected = idle["requested"] > 0
+    idle_observed = idle_expected and not idle["failed"] and not idle["timedOut"]
+    idle_state: dict[str, object] = {"kind": "rpc", "expected": idle_expected, "observed": idle_observed}
+    if idle_expected and not idle_observed and final_idle_deadline_truncated:
+        idle_state["category"] = "deadline_truncated"
+        warnings.append({"scenario": "wait_for_idle", "category": "deadline_truncated", "detail": "The final wait_for_idle reached the outer workload deadline after all planned scenarios were attempted."})
+    elif idle_expected and not idle_observed:
+        idle_state["category"] = "missing_model_or_tool_coverage"
+        missing.append("wait_for_idle")
+    coverage["wait_for_idle"] = idle_state
+    return coverage, missing, warnings[:MAX_COVERAGE_WARNINGS]
 
 
 class RpcDriver:
@@ -168,9 +242,13 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
     # intentionally use relative paths such as ``notes.txt``.
     driver = RpcDriver(command, env, cwd=workspace, emit=emit)
     requested: list[str] = []
+    attempted: set[str] = set()
     control_observed: set[str] = set()
     idle = {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}
     scenarios: list[dict[str, Any]] = []
+    available_tools: set[str] | None = None
+    final_idle_deadline_truncated = False
+    execution_failed = False
     result: dict[str, Any]
     try:
         # Controls are real RPC commands; unavailable model failures remain visible.
@@ -182,13 +260,19 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
             response = driver.command(body, deadline)
             if response and response.get("success") is True:
                 control_observed.add(name)
+            else:
+                execution_failed = True
+        if monotonic() < deadline:
+            available_tools = _available_tools(driver.command({"type": "get_tools"}, deadline))
         index = 0
         while monotonic() < deadline:
             name = SCENARIOS[index % len(SCENARIOS)]
             scenario_started = monotonic()
+            attempted.add(name)
             response = driver.command({"type": "prompt", "message": scenario_prompt(name), "streamingBehavior": "queue"}, deadline)
             record: dict[str, Any] = {"id": name, "startSec": round(scenario_started - started, 3), "waitForIdle": {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}}
             if response is None:
+                execution_failed = True
                 record.update(status="prompt_timeout", endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
                 if len(scenarios) < MAX_SCENARIO_RECORDS:
                     scenarios.append(record)
@@ -199,13 +283,21 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 if remaining > 0:
                     sleep(min(0.2, remaining))
                 continue
+            if response.get("success") is not True:
+                execution_failed = True
             idle["requested"] += 1
             record["waitForIdle"]["requested"] = 1
             idle_response = driver.command({"type": "wait_for_idle"}, deadline)
             if idle_response is None:
+                execution_failed = True
                 idle["timedOut"] += 1
                 record["waitForIdle"]["timedOut"] = 1
-                record["status"] = "idle_timeout"
+                all_planned_attempted = set(SCENARIOS) <= attempted
+                final_idle_deadline_truncated = (
+                    monotonic() >= deadline and all_planned_attempted
+                    and idle["failed"] == 0 and idle["timedOut"] == 1
+                )
+                record["status"] = "incomplete_at_deadline" if final_idle_deadline_truncated else "idle_timeout"
             elif idle_response.get("success") is True:
                 idle["completed"] += 1
                 record["waitForIdle"]["completed"] = 1
@@ -213,6 +305,7 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 if name not in requested:
                     requested.append(name)
             else:
+                execution_failed = True
                 idle["failed"] += 1
                 record["waitForIdle"]["failed"] = 1
                 record["status"] = "idle_failed"
@@ -222,16 +315,16 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 scenarios.append(record)
             index += 1
         observed = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_start"}
-        controls = {name for name, _body in controls}
-        coverage: dict[str, dict[str, object]] = {
-            name: {
-                "expected": name in requested,
-                "observed": name in (control_observed if name in controls else observed),
-            }
-            for name in SCENARIOS
+        attempted.update(requested)
+        observed.update(control_observed)
+        coverage, missing_coverage, coverage_warnings = classify_coverage(
+            attempted, observed, available_tools, idle, final_idle_deadline_truncated,
+        )
+        incomplete_at_deadline = {
+            "finalWaitForIdle": final_idle_deadline_truncated,
+            "allPlannedScenariosAttempted": set(SCENARIOS) <= attempted,
         }
-        coverage["wait_for_idle"] = {"kind": "rpc", "expected": idle["requested"] > 0, "observed": idle["requested"] > 0 and not idle["failed"] and not idle["timedOut"]}
-        result = {"type": "diagnostic_workload", "fixture": fixture, "elapsedSec": round(monotonic() - started, 3), "events": driver.events, "malformed": driver.malformed, "coverage": coverage, "missingCoverage": sorted(name for name, state in coverage.items() if state["expected"] and not state["observed"]), "waitForIdle": idle, "scenarios": scenarios, "scenarioRecordsDropped": max(0, index - len(scenarios))}
+        result = {"type": "diagnostic_workload", "fixture": fixture, "elapsedSec": round(monotonic() - started, 3), "events": driver.events, "malformed": driver.malformed, "coverage": coverage, "missingCoverage": missing_coverage, "coverageWarnings": coverage_warnings, "incompleteAtDeadline": incomplete_at_deadline, "completed": incomplete_at_deadline["allPlannedScenariosAttempted"] and not execution_failed, "waitForIdle": idle, "scenarios": scenarios, "scenarioRecordsDropped": max(0, index - len(scenarios))}
     finally:
         driver.close()
     result["processReturnCode"] = driver.process.poll()

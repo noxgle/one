@@ -48,6 +48,22 @@ def test_coverage_and_context_findings_reference_recorded_evidence() -> None:
     assert by_id["context-window-exhaustion"]["evidence"] == ["events[0]"]
 
 
+def test_coverage_findings_distinguish_disabled_capability_from_missing_tool() -> None:
+    findings = detect([], {
+        "coverage": {
+            "read": {"expected": True, "observed": False, "category": "missing_model_or_tool_coverage"},
+            "spawn_subagent": {"expected": True, "observed": False, "category": "capability_unavailable"},
+        },
+        "missingCoverage": ["read"],
+        "coverageWarnings": [{"scenario": "spawn_subagent", "category": "capability_unavailable"}],
+    })
+    by_id = {item["id"]: item for item in findings}
+    assert "missing_model_or_tool_coverage" not in by_id["tool-coverage"]["summary"]
+    assert "were not observed" in by_id["tool-coverage"]["summary"]
+    assert by_id["tool-coverage"]["evidence"] == ["coverage:read"]
+    assert by_id["coverage-capability-unavailable"]["severity"] == "low"
+
+
 def test_report_validation() -> None:
     report = {"schemaVersion": SCHEMA_VERSION, "run": {}, "findings": [], "modelAnalysis": {}, "cleanup": {}, "reportPaths": {}}
     validate_report(report)

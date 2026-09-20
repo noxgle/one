@@ -16,6 +16,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Docker diagnostic coverage** — special diagnostic scenarios now explicitly
+  request their safe tools, disabled capabilities are reported separately, and
+  a final idle wait truncated only by the outer deadline no longer fails an
+  otherwise completed workload.
 - **Diagnostic workload duration** — long Docker diagnostic runs now continue
   scheduling scenarios through the configured duration instead of stopping at a
   premature half-duration reserve.

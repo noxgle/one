@@ -399,6 +399,9 @@ def build_and_run(args: argparse.Namespace, artifacts: Path) -> dict[str, Any]:
             "timedOut": False,
             "coverage": workload.get("coverage", {}),
             "missingCoverage": missing_coverage,
+            "coverageWarnings": workload.get("coverageWarnings", []),
+            "incompleteAtDeadline": workload.get("incompleteAtDeadline", {}),
+            "completed": workload.get("completed", False),
             "waitForIdle": workload.get("waitForIdle", {}),
             "scenarios": workload.get("scenarios", []),
             "fixture": workload.get("fixture", {}),
@@ -654,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
         print("diagnostic progress: starting bounded Docker RPC workload", file=sys.stderr)
         run = build_and_run(args, artifacts)
         atomic_json(artifacts / "manifest.json", {"schemaVersion": SCHEMA_VERSION, "dockerVersion": docker_version, "configuration": {"duration": args.duration, "workload": args.workload, "model": args.model, "endpoint": args.llama_cpp_url}, "run": run})
-        findings = detect(run.get("events", []), {"timedOut": run.get("timedOut", False), "coverage": run.get("coverage"), "missingCoverage": run.get("missingCoverage")})
+        findings = detect(run.get("events", []), {"timedOut": run.get("timedOut", False), "coverage": run.get("coverage"), "missingCoverage": run.get("missingCoverage"), "coverageWarnings": run.get("coverageWarnings")})
         analysis_dir = artifacts / "analysis-workspace"
         print("diagnostic progress: collecting heuristic findings", file=sys.stderr)
         analysis = (
@@ -668,7 +671,7 @@ def main(argv: list[str] | None = None) -> int:
             event for event in run_events
             if isinstance(event, dict) and event.get("type") in {"malformed", "stdout_text", "non_object_output"}
         ][:MAX_MALFORMED]
-        report = {"schemaVersion": SCHEMA_VERSION, "run": {"duration": args.duration, "workload": args.workload, "dockerVersion": docker_version, "completed": run.get("ok", False), "events": run_events, "malformed": malformed_events, "coverage": run.get("coverage", {}), "missingCoverage": run.get("missingCoverage", []), "waitForIdle": run.get("waitForIdle", {}), "fixture": run.get("fixture", {}), "elapsedSec": run.get("elapsedSec"), "workloadElapsedSec": run.get("workloadElapsedSec"), "runtimeFailure": run.get("runtimeFailure", False), "processReturnCode": run.get("processReturnCode"), "processTerminatedByDriver": run.get("processTerminatedByDriver", False), "sessionArtifacts": run.get("sessionArtifacts", {}), "telemetry": run.get("telemetry", {"samples": [], "workspaceSamples": [], "summary": {"available": False}}), "scenarios": run.get("scenarios", [])}, "findings": findings, "modelAnalysis": analysis, "cleanup": cleanup, "reportPaths": report_paths}
+        report = {"schemaVersion": SCHEMA_VERSION, "run": {"duration": args.duration, "workload": args.workload, "dockerVersion": docker_version, "completed": run.get("completed", run.get("ok", False)), "events": run_events, "malformed": malformed_events, "coverage": run.get("coverage", {}), "missingCoverage": run.get("missingCoverage", []), "coverageWarnings": run.get("coverageWarnings", []), "incompleteAtDeadline": run.get("incompleteAtDeadline", {}), "waitForIdle": run.get("waitForIdle", {}), "fixture": run.get("fixture", {}), "elapsedSec": run.get("elapsedSec"), "workloadElapsedSec": run.get("workloadElapsedSec"), "runtimeFailure": run.get("runtimeFailure", False), "processReturnCode": run.get("processReturnCode"), "processTerminatedByDriver": run.get("processTerminatedByDriver", False), "sessionArtifacts": run.get("sessionArtifacts", {}), "telemetry": run.get("telemetry", {"samples": [], "workspaceSamples": [], "summary": {"available": False}}), "scenarios": run.get("scenarios", [])}, "findings": findings, "modelAnalysis": analysis, "cleanup": cleanup, "reportPaths": report_paths}
         validate_report(report)
         atomic_write(report_dir / "report.md", render_markdown(report))
         atomic_json(report_dir / "report.json", report)

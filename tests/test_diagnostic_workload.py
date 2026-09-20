@@ -4,8 +4,17 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import scripts.diagnostic_workload as workload
-from scripts.diagnostic_workload import SCENARIOS, create_fixture, scenario_prompt, workload_plan
+from scripts.diagnostic_workload import (
+    SCENARIOS,
+    _available_tools,
+    classify_coverage,
+    create_fixture,
+    scenario_prompt,
+    workload_plan,
+)
 
 
 def test_fixture_is_deterministic_and_contains_image(tmp_path: Path) -> None:
@@ -21,9 +30,22 @@ def test_workload_plan_covers_builtin_scenarios() -> None:
     assert {"read", "read_image", "apply_patch", "ask_user", "evidence_read", "reload"} <= names
 
 
-def test_prompts_force_tools_and_ask_user_is_explicit() -> None:
+def test_special_prompts_explicitly_request_safe_valid_tool_calls() -> None:
     assert "Call read" in scenario_prompt("read")
-    assert "ask_user" in scenario_prompt("ask_user")
+    plan = scenario_prompt("plan")
+    assert "3+ phases" in plan and "execute" in plan and "verify" in plan
+    ask_user = scenario_prompt("ask_user")
+    assert "ask_user" in ask_user and "timeoutSec 30" in ask_user and "automatic answer" in ask_user
+    evidence = scenario_prompt("evidence_read")
+    assert "read on notes.txt" in evidence and "evidenceId" in evidence and "maxChars 256" in evidence
+    subagent = scenario_prompt("spawn_subagent")
+    assert "spawn_subagent" in subagent and "tools [\"read\"]" in subagent and "host state" in subagent
+    assert subagent.count("finish") == 1
+
+
+def test_available_tools_extracts_names_from_dicts_and_strings() -> None:
+    response = {"data": {"tools": [{"name": "read", "description": "read files"}, "bash", {"name": 1}, {"description": "missing"}]}}
+    assert _available_tools(response) == {"read", "bash"}
 
 
 class _FakeStdout:
@@ -136,8 +158,75 @@ def test_workload_records_wait_for_idle_coverage(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(workload, "RpcDriver", Driver)
     result = workload.run_workload(tmp_path / "fixture", 0.01, "llama.cpp", "local", "http://example.test", emit=lambda _line: None)
     assert result["waitForIdle"]["failed"] > 0
-    assert result["coverage"]["wait_for_idle"] == {"kind": "rpc", "expected": True, "observed": False}
+    assert result["coverage"]["wait_for_idle"] == {"kind": "rpc", "expected": True, "observed": False, "category": "missing_model_or_tool_coverage"}
     assert "wait_for_idle" in result["missingCoverage"]
+    assert result["completed"] is False
+
+
+@pytest.mark.parametrize("idle_response", [{"success": False}, None])
+def test_completed_is_false_after_failed_or_timed_out_scenario(monkeypatch, tmp_path: Path, idle_response: dict[str, bool] | None) -> None:
+    clock = {"value": 0.0}
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            if body["type"] == "wait_for_idle":
+                clock["value"] = 1.0
+                return idle_response
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("read",))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    result = workload.run_workload(tmp_path / "fixture", 1, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert result["incompleteAtDeadline"]["allPlannedScenariosAttempted"] is True
+    assert result["completed"] is False
+
+
+def test_coverage_classifies_unavailable_arbitrary_tool_as_warning_not_missing() -> None:
+    coverage, missing, warnings = classify_coverage(
+        {"read_image"}, set(), {"read", "finish"},
+        {"requested": 1, "completed": 1, "failed": 0, "timedOut": 0}, False,
+    )
+    assert coverage["read_image"]["category"] == "capability_unavailable"
+    assert missing == []
+    assert warnings == [{"scenario": "read_image", "category": "capability_unavailable", "detail": "read_image was not advertised by the RPC session configuration."}]
+
+
+def test_coverage_does_not_misclassify_available_tools_or_controls() -> None:
+    coverage, missing, warnings = classify_coverage(
+        {"read", "retry"}, set(), {"read"},
+        {"requested": 1, "completed": 1, "failed": 0, "timedOut": 0}, False,
+    )
+    assert coverage["read"]["category"] == "missing_model_or_tool_coverage"
+    assert coverage["retry"]["category"] == "missing_model_or_tool_coverage"
+    assert missing == ["read", "retry"]
+    assert warnings == []
+
+
+def test_coverage_excludes_final_idle_truncated_by_outer_deadline() -> None:
+    coverage, missing, warnings = classify_coverage(
+        set(SCENARIOS), set(SCENARIOS), set(SCENARIOS),
+        {"requested": 1, "completed": 0, "failed": 0, "timedOut": 1}, True,
+    )
+    assert coverage["wait_for_idle"]["category"] == "deadline_truncated"
+    assert "wait_for_idle" not in missing
+    assert warnings[-1]["scenario"] == "wait_for_idle"
+
+
+def test_coverage_keeps_true_missing_tool_coverage_as_failure() -> None:
+    coverage, missing, _warnings = classify_coverage(
+        {"read"}, set(), {"read"},
+        {"requested": 1, "completed": 1, "failed": 0, "timedOut": 0}, False,
+    )
+    assert coverage["read"]["category"] == "missing_model_or_tool_coverage"
+    assert missing == ["read"]
 
 
 def test_workload_schedules_scenarios_until_full_duration(monkeypatch, tmp_path: Path) -> None:
@@ -188,5 +277,6 @@ def test_workload_continues_after_a_prompt_timeout(monkeypatch, tmp_path: Path) 
     result = workload.run_workload(tmp_path / "fixture", 14, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"], sleep=lambda seconds: clock.__setitem__("value", clock["value"] + seconds))
 
     assert result["scenarios"][0]["status"] == "prompt_timeout"
+    assert result["completed"] is False
     assert len(prompts) > 1
     assert any(record["id"] == "read_image" for record in result["scenarios"])
