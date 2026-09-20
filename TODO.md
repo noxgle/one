@@ -2335,6 +2335,122 @@ prompt.
     security-assessment, explicit-plan, and user-provided-phase prompts, plus
     a manual smoke test for both execution paths.
 
+## Follow-up: README restructure and mode documentation
+
+### Goal
+
+Reorganize `README.md` with a table of contents, clearer onboarding, and an
+accurate explanation of all currently supported execution modes, their input
+and output contracts, automation use cases, and exit codes.
+
+### Confirmed decisions
+
+- Document only behavior that is currently implemented.
+- `--mode text` is documented as non-interactive one-shot print mode, not as an
+  interactive REPL.
+- `--mode json` is documented as structured one-shot output and distinguished
+  from JSON-RPC.
+- `--mode rpc` is documented as a long-lived JSONL stdin/stdout protocol.
+- TUI is documented as the primary interactive Textual interface.
+- The existing `InteractiveMode`/REPL implementation is documented only where
+  its current invocation is accurate; adding an explicit `--mode cli` is a
+  separate future task and is out of scope here.
+- Do not claim that `--mode cli` currently works.
+
+### Scope
+
+#### In Scope
+
+- Add a README table of contents with stable section anchors.
+- Reorder the README around overview, installation, quick start, mode choice,
+  automation, providers, sessions, safety, integrations, diagnostics, and
+  development.
+- Add a mode comparison table covering `tui`, `text`, `json`, and `rpc`:
+  interactivity, input source, output format, banner behavior, image support,
+  and intended use.
+- Add separate examples and behavioral notes for each supported mode.
+- Correct the current misleading `--mode text` interactive-REPL description.
+- Explain the distinction between `--mode json`, `one run --json`, and
+  `--mode rpc`.
+- Document stdin/stdout contracts, `ask_user`/steering channels, and exit codes.
+- Consolidate and cross-link existing provider, session, cooperation, image,
+  MCP, extension, skill, security, diagnostics, and development information.
+- Validate command examples, links, headings, and mode claims against the
+  current CLI/parser/source behavior.
+
+#### Non-Goals
+
+- Do not add or expose `--mode cli` in this documentation change.
+- Do not modify CLI mode dispatch or validation.
+- Do not redesign provider, session, RPC, TUI, MCP, or extension behavior.
+- Do not duplicate the full contracts already maintained in dedicated docs.
+
+### Architecture and documentation decisions
+
+1. Human-facing modes (`tui` and the currently reachable interactive fallback)
+   are described separately from machine-facing modes (`text`, `json`, `rpc`).
+2. `text` means one-shot print execution with a prompt supplied as a message;
+   it is not described as an interactive stdin REPL.
+3. `json` is one-shot structured output, while RPC is a line-oriented,
+   long-lived protocol whose stdout must remain machine-readable.
+4. `one run` is documented as a separate headless autonomy command rather than
+   being conflated with `--mode text`.
+
+### Implementation tasks
+
+- [x] **Task:** Rebuild README structure and add the table of contents.
+
+  - **Description:** Reorganize the document without losing useful existing
+    content. Add Overview, Quick Start, Installation, Choose a Mode, Providers,
+    Sessions, Safety, Integrations, Diagnostics, Development, and References
+    sections with stable anchors and concise cross-links.
+  - **Files:** `README.md`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** README has a usable table of contents; headings
+    are ordered logically; links resolve; duplicated or contradictory guidance
+    is removed; existing security warnings remain prominent.
+  - **Verification:** Markdown/link review and repository-relative link check.
+
+- [x] **Task:** Document current modes and automation contracts accurately.
+
+  - **Description:** Add the mode comparison table and detailed sections for
+    `tui`, `text`, `json`, `rpc`, and `one run`. Include copy-paste examples,
+    stdin/stdout behavior, banner behavior, image support, cooperation behavior,
+    JSON formats, and exit codes. Explicitly state that `--mode cli` is not yet
+    an available option and is planned separately.
+  - **Files:** `README.md`, with source references to
+    `one/cli/args.py`, `one/cli/main.py`, `one/modes/print_mode.py`,
+    `one/modes/rpc_mode.py`, `one/modes/interactive_mode.py`, and
+    `one/modes/tui_mode.py` for implementation verification only.
+  - **Dependencies:** README structure task.
+  - **Acceptance Criteria:** Every documented command matches current parser
+    validation and dispatch; `text` is not described as interactive; `json`,
+    `one run --json`, and RPC have distinct examples and contracts; exit codes
+    are documented consistently.
+  - **Verification:** Compare examples with `one --help`, CLI source, and
+    existing mode/CLI tests; run the relevant CLI test suite.
+
+- [x] **Task:** Consolidate supporting documentation and perform final review.
+
+  - **Description:** Refresh links and concise summaries for providers,
+    authentication, sessions, cooperation, images, slash commands, MCP,
+    extensions, skills, Docker diagnostics, security, and development. Keep
+    detailed contracts in their dedicated documents and remove stale claims.
+  - **Files:** `README.md`; only update other documentation if a stale
+    cross-reference must be corrected.
+  - **Dependencies:** Mode documentation task.
+  - **Acceptance Criteria:** README has no stale mode/shortcut/security claims,
+    all important project docs are discoverable, and no implementation behavior
+    changes are introduced.
+  - **Verification:** Full documentation review, link check, `git diff --check`,
+    and relevant CLI/documentation tests.
+
+### Future follow-up
+
+- Add an official `--mode cli` alias/entry point for the interactive
+  `InteractiveMode`, with parser validation, help text, tests, and README
+  updates. This is intentionally not part of the current README restructure.
+
 ## Follow-up: SSH-safe TUI clipboard shortcuts
 
 ### Goal

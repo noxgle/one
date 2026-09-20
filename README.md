@@ -4,769 +4,356 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 
-```text
- ██████╗ ███╗   ██╗███████╗
-██╔═══██╗████╗  ██║██╔════╝
-██║   ██║██╔██╗ ██║█████╗
-██║   ██║██║╚██╗██║██╔══╝
-╚██████╔╝██║ ╚████║███████╗
- ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+`one` is an autonomous Python terminal agent. It can plan, use files and shell
+tools, verify work, and report a result. It also supports approval gates,
+steering, questions, sessions, MCP tools, extensions, skills, and image input.
 
-███████╗ ██████╗ ██████╗
-██╔════╝██╔═══██╗██╔══██╗
-█████╗  ██║   ██║██████╔╝
-██╔══╝  ██║   ██║██╔══██╗
-██║     ╚██████╔╝██║  ██║
-╚═╝      ╚═════╝ ╚═╝  ╚═╝
+> **Maturity:** Alpha (`0.1.x`). Public APIs, tool contracts, and storage
+> formats may change in `0.1` releases. See [CHANGELOG.md](CHANGELOG.md) and
+> [TODO.md](TODO.md).
 
-███████╗██╗   ██╗███████╗██████╗ ██╗   ██╗ ██████╗ ███╗   ██╗███████╗
-██╔════╝██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔═══██╗████╗  ██║██╔════╝
-█████╗  ██║   ██║█████╗  ██████╔╝ ╚████╔╝ ██║   ██║██╔██╗ ██║█████╗
-██╔══╝  ╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  ██║   ██║██║╚██╗██║██╔══╝
-███████╗ ╚████╔╝ ███████╗██║  ██║   ██║   ╚██████╔╝██║ ╚████║███████╗
-╚══════╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚══════╝
-```
+## Table of contents
 
-Autonomous terminal agent written in Python: it executes assigned tasks on its own
-(shell / files / code) — plan, run tools, verify, report — and can optionally work
-in a **cooperation mode** where a human approves mutating tools, steers or aborts
-mid-task, and answers agent questions.
+- [Quick start](#quick-start)
+- [Installation](#installation)
+- [Choose a mode](#choose-a-mode)
+- [Headless tasks with `one run`](#headless-tasks-with-one-run)
+- [Providers and authentication](#providers-and-authentication)
+- [Sessions and configuration](#sessions-and-configuration)
+- [Images](#images)
+- [Cooperation and safety](#cooperation-and-safety)
+- [Integrations](#integrations)
+- [Diagnostics](#diagnostics)
+- [Development](#development)
+- [References](#references)
 
-The project started as a re-implementation of the `pi` coding agent and is now an
-independent project with its own roadmap — see `TODO.md`. Completed work is
-recorded in `DONE.md`.
-
-`one` — *one for everyone* — builds on the experience gained while creating
-[`term_agent`](https://github.com/noxgle/term_agent).
-
-> **Maturity:** Alpha (`0.1.x`). The public API, tool contract, and storage formats may
-> change in `0.1` releases. See `CHANGELOG.md` and `TODO.md` for the roadmap.
-
-## ⚠️ Workspace trust warning
-
-Running `one` inside a repository can execute arbitrary Python code from
-`.one/extensions/*.py` and can launch shell commands from MCP server
-configurations in `.one/settings.json`. **Only start `one` in repositories you
-trust.** If you need to inspect an untrusted repository, use the safe startup:
+## Quick start
 
 ```bash
-one --no-extensions --no-mcp
+export OPENAI_API_KEY=sk-...
+one run "summarize README.md" --provider openai --model gpt-4o-mini
 ```
 
-Extensions and MCP servers are **not sandboxed** — they run with the same
-permissions as `one` itself. Cooperation mode is **not** a security boundary or
-sandbox; it is an approval gate only.
-
-## Docker diagnostic session (agents)
-
-Run the opt-in, non-interactive diagnostic runner when a long RPC-session
-investigation is needed:
-
-```bash
-.venv/bin/python scripts/diagnose_long_session.py --json
-```
-
-It defaults to a 3600-second session and drives one persistent real RPC process
-with deterministic prompts/control commands, collecting bounded JSON events and
-expected-versus-observed tool coverage for the full configured duration (while
-still applying the hard deadline and bounded shutdown). The report also contains
-bounded host-side container CPU/memory/PID/network/block-I/O samples and only
-the disposable mounted workspace's total/session JSONL/evidence size metrics;
-missing Docker stats are marked "not available". A missing or unreachable model is reported
-as a workload failure; it is not reported as successful coverage. It analyzes sanitized results with
-the same default `llama.cpp/local` model at `http://192.168.200.19:8089`. This
-same-model analysis is heuristic and can share the workload model's blind spots;
-its conclusions are not independent verification. Docker must be installed and
-its daemon usable; the endpoint and model can be changed with
-`--llama-cpp-url` and `--model`. The container is unprivileged, has no Docker
-socket, no host repository/credential mounts, no MCP/extensions, and uses a
-synthetic workspace. Docker remains a containment aid, not a security boundary.
-The default Docker `bridge` network is intentionally enabled so the container can
-reach the configured endpoint; use `--docker-network` for an appropriate reachable
-network. `--docker-network none` is rejected because it cannot run a live model
-workload. The root filesystem is read-only; only the writable diagnostic bind
-mount and a bounded `/tmp` tmpfs are available. CPU, memory, PID, dropped-capability, and no-new-privileges
-limits are applied; container/image cleanup is attempted on normal exit, timeout,
-and signals.
-
-`report.md` and machine-readable `report.json` are atomically written below
-`diagnostic-reports/`. Raw events, logs, fixtures, and the disposable analysis
-workspace are deleted after successful report creation by default. They may
-contain sensitive diagnostic data, so retain them only when necessary with
-`--keep-artifacts`. A short run is useful for a local smoke check:
-
-```bash
-.venv/bin/python scripts/diagnose_long_session.py --duration 10 --skip-analysis --json
-```
-
-Use `--skip-analysis` for heuristic-only runs, `--workload safe|stress|custom`
-to select a workload, and `--prompt-file PATH` with `--workload custom`. `--json`
-prints a machine-readable completion result; `--keep-artifacts` retains the
-otherwise temporary diagnostic artifacts for inspection. Telemetry defaults to a
-5-second cadence with at most 720 retained samples; adjust these bounded values
-with `--telemetry-interval` and `--max-telemetry-samples`.
-
-For an opt-in Docker/model smoke test, set
-`ONE_RUN_DOCKER_DIAGNOSTIC_SMOKE=1` and run the diagnostic test suite. It skips
-when Docker, its daemon, or the configured model endpoint is unavailable.
-
-## Your Agent Needs Eyes
-
-Give `one` web search and full-page content extraction with the
-[web-deepsearch MCP server](https://github.com/noxgle/mcp-web-deepsearch).
-It uses DuckDuckGo, requires no API key, and can run locally over stdio.
-
-### Fast setup
-
-After installing `one`, start it and enter this prompt:
+For an interactive terminal UI, start `one` (the default mode is TUI) or use
+`one --mode tui`. To authenticate interactively, start the TUI and use:
 
 ```text
-Install and configure web-deepsearch from https://github.com/noxgle/mcp-web-deepsearch use stdio.
+/login openai sk-... gpt-4o-mini
+/login status
 ```
-
-The agent installs and configures the server itself — picking the setup that
-fits your environment (for example Docker-based stdio on a host with Docker,
-or a local setup when `one` runs inside a container without Docker access) —
-and then verifies the connection.
-
-After the agent reports success, check `/mcp list` and ask a test question
-that requires web search. Ask the agent to show what it configured (without
-secrets) if you want to review or reproduce the setup later. Use
-`one --no-mcp` whenever MCP servers should be disabled for a run.
-
-> **Trust and network notice:** MCP servers are not sandboxed and the
-> web-deepsearch container requires outbound internet access. Only configure
-> MCP servers from repositories you trust.
 
 ## Installation
 
-### From source (recommended for development)
+### From source
 
 ```bash
 git clone https://github.com/noxgle/one.git
 cd one
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+pip install -e '.[dev]'
 one --help
-# also works as a module:
-python -m one --help
 ```
 
-### From PyPI (when published)
+### From PyPI
 
 ```bash
 pip install one-agent
 one --help
 ```
 
-> The distribution name is `one-agent` (PyPI), the import name and console script
-> remain `one`. The single version source is `one/config.py:VERSION`.
+The distribution name is `one-agent`; the import and console-script name are
+`one`. The version source is `one/config.py:VERSION`.
 
-### Verify installation
+Verify an installation with `one --version`, `one --help`, or
+`python -m one --help`.
 
-```bash
-one --version
-one --help
-python -m one --help
-python -c "import one; print(one.VERSION)"
-```
+## Choose a mode
 
-## Configure a provider
+`--mode` accepts exactly `tui`, `text`, `json`, or `rpc`. `one run <task>` is a
+distinct headless subcommand outside `--mode` routing, not a `--mode` value.
+The default settings select the TUI.
 
-`one` supports OpenAI-compatible providers, Anthropic, Gemini, and the local
-`llama.cpp`/`Ollama` backends. Three ways to provide credentials (highest
-precedence first):
+| Interface | Interactive | Input | Output | Startup banner | Images | Best for |
+| --- | --- | --- | --- | --- | --- | --- |
+| `--mode tui` | Yes | Textual editor and slash commands | Rendered stream | Yes | `--image`, pasted/path images, `read_image` | Human-driven work |
+| `--mode text` | No | Positional messages | Last assistant text | Yes, unless `quietStartup` is set | Startup `--image` | Simple one-shot text output |
+| `--mode json` | No | Positional messages | JSON object containing session `messages` | Yes, unless `quietStartup` is set | Startup `--image` | One-shot session data |
+| `--mode rpc` | Yes, protocol-driven | One JSON object per stdin line | JSON event/response object per stdout line | No | Startup `--image`; prompt `attachments` | Orchestrators and UI clients |
+| `one run` | No | Required task argument | Summary, or a result JSON object with `--json` | Yes unless `--json` or `quietStartup` suppresses it | Startup `--image` | Autonomous CI/headless tasks |
 
-1. **Runtime** — CLI flag (`--api-key`), set programmatically, or via the provider
-   adapter at session start.
-2. **Stored** — key persisted by `/login` in `auth.json`.
-3. **Environment variable** — `<PROVIDER>_API_KEY` (e.g. `OPENAI_API_KEY`,
-   `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
-   `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`,
-   `OLLAMA_CLOUD_API_KEY`). Environment keys cannot be removed by `/logout`
-   (they are runtime-supplied, not one-managed).
+`--mode text` is **not** an interactive REPL. It sends the supplied positional
+message or messages and prints after they finish. Do not use `--mode cli`:
+it is not an accepted CLI mode.
 
-**Quick start with an API key:**
-
-```bash
-# via environment (recommended for CI/headless)
-export OPENAI_API_KEY=sk-...
-one run "summarize README.md" --provider openai --model gpt-4o-mini
-
-# via /login (interactive or TUI) — validates and fetches the model list:
-one
-# then in the REPL/TUI:
-/login openai sk-... gpt-4o-mini
-/login status
-```
-
-`/login` validates the key before storing it (`401/403` → `Authorization failed`,
-key is **not** stored). On success it fetches the provider's model list
-(`GET {base}/v1/models` for OpenAI-compatible, `GET /v1beta/models?key=…` for
-Gemini, probe chat for Anthropic which has no public list endpoint), registers
-models in-memory and persists them to `models.json`.
-
-For local models no key is needed:
-
-```bash
-# llama.cpp (OpenAI-compatible, default http://127.0.0.1:8080)
-LLAMA_CPP_BASE_URL=http://127.0.0.1:8080 one --provider llama.cpp --model local
-# or per-model url in models.json — see "Local llama.cpp provider" below
-```
-
-Subscription login (OAuth) for Anthropic and ChatGPT/Codex is documented in
-"Subscription login (OAuth)" below. It is a supported production feature, but
-the underlying provider endpoints are externally controlled and may change.
-
-## Run a task
-
-### Headless one-shot (`one run`)
-
-```bash
-one run "fix the failing tests and summarize the changes"
-one run "refactor the auth module" --provider openai --model gpt-4o --json
-one run "implement feature X" --answer-file /tmp/answer.txt --steer-file /tmp/steer.txt
-```
-
-- `one run "<task>"` runs the full autonomy loop to `finish` (result summary +
-  exit code `0` success / `1` failure, token/time/budget limits respected).
-- `--json` prints the structured result `{summary, goalSuccess, finished}`.
-- `--answer-file` / `--steer-file` enable headless `ask_user` and steering while
-  the run is active (polled files).
-- Other useful flags: `--thinking`, `--models`, `--tools`, `--cooperation`,
-  `--no-subagents`, `--continue`/`--resume`/`--fork`.
-
-In headless mode the task can also come from a file: `one run @task.txt` or
-`@file` arguments are expanded and templated via `--param name=value`.
-
-### Interactive REPL
+### TUI
 
 ```bash
 one
-# or explicitly:
-one --mode text
+one --mode tui --provider openai --model gpt-4o-mini
+one --mode tui --image screenshot.png
 ```
 
-### TUI (Textual)
+The Textual TUI is the human-facing interface. It streams responses, displays
+tool lifecycle status, retains sessions, and accepts slash commands such as
+`/help`, `/steer`, `/follow`, `/abort`, `/login`, and `/mcp list`. It displays a
+startup banner and the version in its sidebar.
 
-```bash
-one --mode tui
-```
-
-Built-in TUI themes: `default`, `light`, `hacker`, `solarized`, `fallout`.
-Switch in-app: `/theme solarized`.
-
-TUI highlights:
-
-- live response streaming (provider-dependent; OpenAI-compatible/Anthropic/Gemini/Codex supported)
-- scrollable main stream with scrollbar, simplified view (`> ...` for user messages)
-- tool lifecycle visible in stream (`tool start (timeout Ns)`, `tool ok/err`)
-- app version in the sidebar (`Version: …`, from the single source `one/config.py:VERSION`; CLI prints `one v…` at startup)
-
-TUI keyboard shortcuts (also listed in the in-app shortcuts overlay):
+Current application shortcuts are:
 
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+P` | Command palette |
-| `Ctrl+C` | Abort turn / reject pending approval |
+| `Ctrl+C` | Abort turn; reject a pending approval |
 | `Ctrl+L` | Clear stream |
 | `Ctrl+Q` | Quit |
-| `Ctrl+Z` | Toggle cooperation mode |
+| `Ctrl+Z` | Toggle cooperation |
 | `Ctrl+S` | Toggle subagents |
 | `Ctrl+O` | Toggle bash output |
-| `Ctrl+V` | Paste text from the host/system clipboard |
-| `Ctrl+Shift+V` | Paste terminal text (SSH-safe; no remote clipboard backend required) |
-| `Ctrl+Alt+V` | Paste image from the system clipboard |
-| `Ctrl+R` | Cycle retry mode (`off` → `on` → `unlimited`) |
+| `Ctrl+V` | Paste host/system clipboard text |
+| `Ctrl+Shift+V` | Paste terminal text (SSH-safe) |
+| `Ctrl+Alt+V` | Paste an image from the system clipboard |
+| `Ctrl+R` | Cycle retry mode (`off` → `on` → `unlimited` → `off`) |
 | `Ctrl+F1` | Show slash-command help |
+| `Esc` | Close the shortcuts panel |
 
-Use `/paste-image` when the terminal intercepts `Ctrl+Alt+V`.
-- subscription login via `/login chatgpt subscription` / `/login anthropic subscription` (OAuth loopback/paste)
-- cooperation approval / `ask_user` pauses the spinner and shows a waiting indicator plus a toast notification
+Use `/paste-image` if the terminal intercepts `Ctrl+Alt+V`.
 
-### JSON-RPC (`--mode rpc`)
+### One-shot text and JSON
 
-JSON-RPC over stdin/stdout for external orchestration (sessions, events,
-extension UI). See `one/modes/rpc_mode.py` and `tests/snapshots/rpc/*.jsonl`.
+```bash
+# Prints the final assistant text after the prompt completes.
+one --mode text "summarize README.md"
 
-#### `/inspect-timeout` — subagent timeout diagnostic
+# --print is the same one-shot print path.
+one --print "summarize README.md"
 
-The RPC ctype `inspect_subagent_timeout` returns a **read-only** snapshot of the
-last subagent timeout event (same data as the interactive `/inspect-timeout` and
-TUI `/inspect-timeout` slash commands).
+# Serializes the full session message list.
+one --mode json "summarize README.md"
 
-- **Response schema (no diagnostic yet):**
+```
 
-  ```json
-  {"type":"response","success":true,"data":{"available":false,"diagnostic":{}}}
-  ```
+Text and JSON modes consume positional messages; they do not read prompts from
+stdin and do not offer an interactive approval, question, or steering channel.
+The one-shot JSON shape is `{"messages": [...]}`. It is not the result schema
+of `one run --json` and it is not JSON-RPC. `--mode json` still shows the
+startup banner unless `quietStartup` is configured. A print-mode invocation
+with images but no text fails rather than silently succeeding.
 
-- **Response schema (diagnostic available):**
+### RPC
 
-  ```json
-  {"type":"response","success":true,"data":{"available":true,"diagnostic":{
-    "operation": "timed out",
-    "errorType": "SubagentTimeout",
-    "externalState": "unknown",
-    "sessionId": "<subagent-id>",
-    "elapsedSec": 60.5,
-    "lastTool": "bash",
-    "lastEvent": "message",
-    "error": "...",
-    "summary": "...",
-    "lastAssistantText": "...",
-    "actionableHint": "..."
-  }}}
-  ```
+```bash
+one --mode rpc
+```
 
-- **`externalState`** is always `"unknown"` because the session has no visibility
-  into the OS-level state of the timed-out subagent process.
-- **Read-only** — this command never mutates session state, never performs
-  recovery, and never attempts to kill or clean up the subagent.  It is purely
-  diagnostic.
-
-## Vision / images (multimodal)
-
-`one` supports image input via the `read_image` tool or the `--image` CLI flag.
-
-### How it works
-
-- **`read_image {path}`** — loads a local PNG/JPEG/WebP file, imports it into the
-  session's private blob store, and returns a transient reference. The image is sent
-  to the vision model on the next step.
-- **`--image <path>`** — equivalent convenience flag (repeatable); same limits apply.
-
-### Supported formats & limits
-
-| format | limit |
-|--------|-------|
-| PNG, JPEG, WebP | 4 images per prompt |
-| Source file | 10 MB (decoded Base64 ≤ 5 MiB) |
-
-### Capability behavior
-
-- `input.image` on the model definition signals vision support.
-- **Cooperation mode** — if the provider lacks image support, the tool call is denied
-  *before* the HTTP request; the reason is fed back to the model.
-- **Autonomous mode** — the session catches the rejection and returns controlled
-  feedback without crashing.
-- **Retention** — image blobs are transient per-turn: they are never persisted to
-  JSONL, never emit a blob-hash reference, and are auto-collected when the turn ends.
-
-### Privacy
-
-Error messages and event payloads log only the **basename** of the source image — the
-full filesystem path is never written to JSONL or emitted in events.
-
-### Supported modes & limitations
-
-- `one run`, `--mode text`, `--mode tui`, interactive mode: `read_image` / `--image` work.
-- `--mode rpc`: images are supported when the JSON-RPC request includes an `images` array.
-- **Steer / follow-up messages** are text-only (the steer queue does not forward images).
-- **Codex provider** supports image input via the Responses API (`input_image`
-  parts); invalid or missing attachments are rejected before any HTTP request.
-- **Print mode (`--print`)** with image-only input (no task text) is unsupported — a text
-  message is required even when images are supplied.
-
-## Cooperation mode
-
-By default `one` works autonomously. With `--cooperation` (or `/cooperation` —
-Ctrl+Z in the TUI, Ctrl+A in interactive mode) it asks before running mutating tools
-(`bash`, `write`, `edit`, `plan`, `apply_patch`); rejections require a reason that is
-fed back to the model.
-Mid-task steering (`/steer`, `/follow`) and abort (Ctrl+C) work in every interactive mode.
-
-`--cooperation` is an approval gate, not a sandbox. See the trust warning above.
-
-## Apply patch safety
-
-`apply_patch` applies unified-diff hunks via a staged, transactional workflow:
-
-- **Collision policy:** Add and Delete/Update target the same path is a cross-role conflict
-  (rejected). Duplicate sources, duplicate targets, and hardlink aliases are rejected.
-- **Symlink policy:** Any existing symlink component (leaf or ancestor) for a source or
-  target causes rejection.
-- **Staged backup/rollback:** All outputs are computed and staged to temp files before any
-  mutation. Original files are evacuated to same-directory backups. On commit failure,
-  installed outputs are unlinked (if identity unchanged), backups are restored only when
-  the original path is absent, and stages/dirs are cleaned. Retained backups are reported
-  for manual recovery.
-- **Path support:** Absolute and `..` paths are supported. Cross-filesystem Move is staged
-  as copy+delete (not inode-preserving).
-- **Explicit non-guarantees:** `apply_patch` provides no guarantee against crash/power-loss,
-  concurrent hostile filesystem modification, or rollback I/O failure. In such cases,
-  backups may remain and must be handled manually.
-
-## Tool and MCP evidence retention
-
-Tool and MCP results use a bounded 12,000-character preview in provider context.
-When a durable session is enabled, the complete sanitized normalized result is
-also appended to its private evidence sidecar. Tool-result previews include an
-`evidenceId`; the model can call read-only `evidence_read` with that ID, an
-optional `offset`, and `maxChars` (up to 8,000) to retrieve successive chunks
-after reload without re-running the original tool. Evidence is session-scoped,
-has a 2 MB per-record and 32 MB per-session limit, and is unavailable for
-in-memory sessions or failed writes.
-
-To opt into stale-result pruning, set
-`one config toolOutputPruning.enabled true` or
-`/config toolOutputPruning.enabled true`; the setting persists like other config
-values. Pruning can reduce request size, while durable evidence remains outside
-provider context.
-
-Session JSONL, evidence, and active provider context are distinct. Evidence is
-append-only and is never included by `build_session_context`; compaction and
-pruning therefore do not grow provider context. Malformed or missing evidence
-does not prevent legacy sessions from loading.
-
-## Slash commands
-
-Available in the TUI and interactive mode (type `/help` in the app):
-
-| Command | Description |
-| --- | --- |
-| `/help` | List all commands |
-| `/stats` | Session statistics (tokens, cost) |
-| `/state`, `/status` | Current session state |
-| `/queue [clear [all|steering|follow]]` | Show or clear the steering/follow-up queues |
-| `/tools` | List active tools |
-| `/clear` | Clear the stream |
-| `/abort` | Abort the current turn |
-| `/model [provider/model]` | Show or switch the model |
-| `/model-cycle` | Cycle to the next available model |
-| `/thinking [level]` | Show or set the thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
-| `/thinking-cycle` | Cycle the thinking level |
-| `/theme [name]` | Show or switch the TUI theme |
-| `/steer <text>` | Send a steering message to the agent |
-| `/follow <text>` | Send a follow-up message |
-| `/compact [instructions]` | Compact the session context |
-| `/tree` | Show the session tree |
-| `/navigate <id> [--summary <text>]` | Navigate to a session entry |
-| `/fork <id>` | Fork the session at an entry |
-| `/new` | Start a new session |
-| `/providers [name|#] [model|#]` | List logged-in providers, models, and switch |
-| `/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]` | Show or configure provider credentials (subscription = OAuth login flow) |
-| `/logout <provider>` | Remove runtime API key, stored API key, and OAuth token for a provider locally |
-| `/retry <on|off|unlimited>` | Set auto-retry mode (`unlimited` retries provider calls without a cap) |
-| `/retry-cycle` | Cycle retry mode `off` → `on` → `unlimited` (Ctrl+R in TUI) |
-| `/config [key] [value]` | Show or set a config value (e.g. `tools.maxSteps`; `0` = unlimited tool steps) |
-| `/extui <list|request|respond|cancel|clear>` | Extension UI control |
-| `/cooperation [on|off]` | Toggle cooperation mode (approval gates) |
-| `/subagents [on|off]` | Enable/disable subagents (Ctrl+S in TUI) |
-| `/bash-show [on|off]` | Show/hide tool output in the main window (bash, ls, read, grep, find, edit, write; only tool status when off) (Ctrl+O) |
-| `/history [n]` | List recent slash commands (last 50); `/history N` prints `-> <cmd>` (interactive) or fills input (TUI) |
-| `/mcp [list|enable <name>|disable <name>]` | List, enable, or disable MCP servers (tools are added/removed live) |
-| `/bash <command>` | Run a shell command directly |
-| `/exit`, `/quit` | Quit the app |
-
-CLI flags: `--no-subagents` disables subagents, `--no-bash-output` hides bash output (exit code only).
-
-## Subscription login (OAuth)
-
-`one` supports subscription-based login for Anthropic and ChatGPT/Codex providers via
-OAuth. No API keys required — just your account credentials.
-
-**Anthropic subscription login:**
-
-1. Run `/login anthropic subscription` (TUI/interactive).
-2. The app opens your browser to `console.anthropic.com` for authorization (loopback flow)
-   or shows a paste code for manual authorization (paste flow).
-3. On success the access token and refresh token are stored in `auth.json` under the
-   `oauth.anthropic` key with `type: "oauth"`.
-   For plain API keys (`/login anthropic sk-ant-...`) the key is stored under
-   `apiKeys.anthropic`. Anthropic API keys have **no public `GET /v1/models` endpoint** —
-   validation uses a minimal chat probe (`max_tokens=1`) instead.
-4. Models are fetched from `api.anthropic.com/v1/models` **only for OAuth tokens**
-   and registered in the local registry + persisted to `models.json`.
-5. Use `/logout anthropic` to remove the stored OAuth token locally.
-
-**ChatGPT/Codex subscription login:**
-
-1. Run `/login chatgpt subscription` — the app opens your browser to `chatgpt.com` for
-   OAuth authorization (loopback flow).
-2. The access token is stored in `auth.json` under the `oauth.chatgpt` key; the `accountId`
-   (required for the Codex backend) is extracted from the JWT claims.
-3. Models are fetched from `chatgpt.com/backend-api/codex/models` (Responses API) and
-   registered in the local registry. If the endpoint returns zero models the server may
-   be gating the list behind a newer `client_version` header.
-4. Run `/login refresh chatgpt` to re-fetch the live model list without re-entering
-   credentials.
-5. Fallback seed models (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) are used when
-   no models have been fetched yet.
-6. Use `/logout chatgpt` to remove the stored OAuth token locally.
-
-`/logout <provider>` removes one-managed runtime API key, stored API key, and stored
-OAuth credentials from memory and `auth.json`. It does **not** call any provider
-revocation endpoint and cannot remove credentials that were supplied externally
-(e.g. via environment variables).
-
-OAuth tokens are automatically refreshed before expiry. The provider name in `auth.json`
-maps to the Responses API backend for ChatGPT and the Anthropic Messages API for
-Anthropic.
-
-> **Provider-controlled endpoints:** the OAuth flows for Anthropic and ChatGPT/Codex
-> use reverse-engineered endpoints that are not part of a public API. They may change
-> without notice and third-party use may be subject to the provider's Terms of Service.
-> See `SECURITY.md` for details.
-
-## MCP servers
-
-`one` can connect to Model Context Protocol (MCP) servers and expose their tools to the agent.
-Configure servers in `settings.json`:
-
-- **Agent dir** — global: `~/.config/one/settings.json` (or `ONE_CODING_AGENT_DIR`)
-- **Project dir** — per-project: `.one/settings.json` (checked after the agent dir)
-
-The agent-dir file is the canonical location shown in examples; the project file
-is useful for per-repository MCP setup and is merged with the same `mcpServers`
-shape. Use `one --no-mcp` to disable all MCP servers for a run.
-
-**stdio transport** (spawns the server per session):
+RPC is a long-lived JSON-lines protocol: write one JSON command per stdin line;
+read JSON event and response objects from stdout, one per line. It emits no
+startup banner, so stdout remains protocol data. A `prompt` command is accepted
+before its asynchronous work completes; session events follow on stdout. Include
+an `id` to correlate responses and request events.
 
 ```json
-"mcpServers": {
-  "filesystem": {
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-    "enabled": true
-  }
-}
+{"id":"p1","type":"prompt","message":"summarize README.md"}
+{"id":"idle","type":"wait_for_idle"}
 ```
 
-**streamable HTTP transport** (single long-lived HTTP connection):
+The first command receives a successful response, then prompt/tool/message
+events; `wait_for_idle` receives its response after work completes. Use `steer`,
+`follow_up`, `abort`, `answer_question`, and `get_pending_questions` for the
+corresponding control channels. RPC prompt images use an `attachments` array of
+paths. `steer` and `follow_up` reject image attachments. See
+[`one/modes/rpc_mode.py`](one/modes/rpc_mode.py) and RPC snapshots under
+[`tests/snapshots/rpc/`](tests/snapshots/rpc/) for the implemented command set
+and event shapes.
+
+## Headless tasks with `one run`
+
+```bash
+one run "fix the failing tests and summarize the changes"
+one run "refactor the auth module" --provider openai --model gpt-4o --json
+one run @task.txt --param component=auth
+one run "implement feature X" --answer-file /tmp/answer.txt --steer-file /tmp/steer.txt
+```
+
+`one run <task>` runs the autonomy loop and prints its final summary. It is a
+subcommand, not a `--mode` route. `@task.txt` expands the task from that file;
+`--param name=value` substitutes `{{name}}` in the expanded task file. For this
+subcommand, `--json` is a separate clean-output contract: it suppresses the
+startup banner and instead prints exactly:
 
 ```json
-"mcpServers": {
-  "web-deepsearch": {
-    "url": "http://127.0.0.1:8000/mcp",
-    "enabled": true
-  }
-}
+{"summary":"...","goalSuccess":true,"finished":true}
 ```
 
-- `url` — streamable HTTP transport; the server must be reachable (e.g. `docker compose up -d` for `web-deepsearch`).
-- `command` — stdio transport; spawns the server as a child process per session.
-- `enabled: false` keeps the config but skips the server at startup.
-- `--no-mcp` disables MCP entirely for a run.
-- Manage servers at runtime: `/mcp list`, `/mcp enable <name>`, `/mcp disable <name>` (TUI and interactive mode). Changes take effect immediately and persist to settings.json.
-- MCP tools are documented automatically in the agent's system prompt.
+The task command can cooperate with a human without an interactive UI:
 
-## Extensions
+- `--cooperation` prompts on stdin before mutating tools; EOF rejects.
+- `--answer-file PATH` writes an `ask_user` question to the file and polls until
+  its content changes to an answer. Without it, questions receive a deterministic
+  “proceed with best judgment” answer.
+- `--steer-file PATH` polls for text, submits non-empty contents as steering,
+  then clears the file. These channels are text-only.
 
-`one` discovers extensions, skills, prompts, and themes via `one/resources/resource_loader.py`.
-See [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) for the full extension contract:
+Exit status is `0` only when the agent finishes with `goalSuccess`; `1` means a
+failed, unfinished, aborted, or resumed-without-task result; `2` is usage or
+validation failure. More generally, CLI validation errors use `2`; normal
+subcommand failures use `1`. TUI and RPC processes normally exit `0` when
+closed. `one run` writes a report to `reports.jsonl` when it has an agent dir.
 
-- discovery paths (`<agent_dir>/extensions/`, `<cwd>/.one/extensions/`, `--extension <path>`)
-- package manager (`one install/remove/update/list`)
-- hook contract (`tool.execute.before/after`, `chat.message`, `experimental.session.compacting`, `dispose`)
+## Providers and authentication
 
-Project extensions in `.one/extensions/` are not sandboxed — see the trust warning.
+Supported backends include OpenAI-compatible providers, Anthropic, Gemini,
+llama.cpp, Ollama, and ChatGPT/Codex. Credential precedence is runtime input,
+then stored `auth.json`, then the provider environment variable. Common
+variables include `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GEMINI_API_KEY`.
 
-## Resources and skills
-
-`one` discovers **skills** (modular instruction sets) alongside extensions, prompts, and
-themes. Skills follow a YAML frontmatter + Markdown format (`SKILL.md` files) and are
-loaded on demand — not injected into the system prompt. Full specification is in
-[`docs/SKILLS.md`](docs/SKILLS.md).
-
-### Discovery
-
-Skills are discovered from:
-
-1. `~/.config/one/skills/` — global agent skills
-2. `~/.agents/skills/` — platform-wide skills
-3. `.one/skills/` — per-project skills
-4. Explicit paths via `--skill <path>` CLI flag
-
-The system prompt lists all discovered skills (metadata only). The full skill body is
-loaded on demand.
-
-### Invocation
-
-| Command | Description |
-| --- | --- |
-| `/skill` | List all discovered skills |
-| `/skill:<name> [args]` | Load the full skill and append `[args]` as user input |
-| `/reload` | Reload all resources (skills, extensions, prompts) |
-
-> **Note:** `/skill:<name>` is a TUI/interactive **UI command** typed by the user. It is NOT a filesystem path. When the model uses a skill autonomously, it calls `read` with the skill's exact `filePath` (shown in the system prompt metadata under `# Skills`). See [`docs/SKILLS.md`](docs/SKILLS.md) for full details.
-
-### Project vs global skills
-
-- **Global skills** live in the agent directory (`~/.config/one/skills/`) and apply to
-  every project.
-- **Project skills** live in `.one/skills/` (per-project, gitignored) and only apply
-  when working inside that repository.
-- Duplicate names: the first valid skill wins; subsequent duplicates produce diagnostics.
-
-### Trust warning
-
-Skills are loaded as **user input** — not as system instructions. This means:
-
-1. The agent can review skill content before executing actions.
-2. Cooperation mode approval gates apply to mutating tools invoked by skill instructions.
-3. A trust warning is displayed before the first invocation of any skill.
-
-Skills are **never auto-executed**. They are listed in the system prompt (metadata only)
-and loaded explicitly via `/skill:<name>` or RPC `invoke_skill`.
-
-See [`docs/SKILLS.md`](docs/SKILLS.md) for the full specification including frontmatter
-schema, error handling, and examples.
-
-## Global install (run `one` from any directory)
-
-The installer is Unix-specific (Linux, macOS) and requires a source checkout
-(it installs the current tree editable). On Windows use `pip install one-agent`
-or `pipx install one-agent`.
+For local models, no key is required:
 
 ```bash
-chmod +x scripts/install.sh
-./scripts/install.sh
+LLAMA_CPP_BASE_URL=http://127.0.0.1:8080 one --provider llama.cpp --model local
+one --provider ollama --model local --ollama-url http://localhost:11434/v1
 ```
 
-Installer creates:
+`/login` validates credentials before storing them and refreshes available
+models. Anthropic and ChatGPT/Codex also support subscription OAuth login; see
+[Subscription login](#subscription-login-oauth). Provider-controlled OAuth
+endpoints can change without notice.
 
-- virtualenv in `~/.one/venv`
-- launcher in `~/.local/bin/one`
+### Subscription login (OAuth)
 
-The config dir (`~/.config/one`, or legacy `~/.one/agent` if already present) is
-created lazily on first run, not by the installer.
+- `/login anthropic subscription` starts Anthropic OAuth. `/login refresh anthropic`
+  refreshes models; `/logout anthropic` removes local stored credentials.
+- `/login chatgpt subscription` starts ChatGPT/Codex OAuth. Seed Codex models
+  are available before a live model list is fetched; `/login refresh chatgpt`
+  refreshes it.
 
-After that, `one` works from any directory (if `~/.local/bin` is on your `PATH`).
+`/logout <provider>` removes one-managed runtime/stored credentials locally. It
+does not revoke a provider account token or remove environment credentials.
 
-You can override config location with:
+## Sessions and configuration
+
+By default state is private under `~/.config/one` (override with
+`ONE_CODING_AGENT_DIR`): `auth.json`, `models.json`, `settings.json`, sessions,
+and reports. A project `.one/` directory supplies per-project MCP and extension
+configuration. Use `--no-session`, `--session`, `--continue`, `--resume`, or
+`--fork` to control session use.
+
+Session JSONL, durable evidence, and provider context are separate. Provider
+context receives bounded tool/MCP previews; durable sessions can retain complete
+sanitized results in an evidence sidecar retrievable by the `evidence_read` tool.
+See [Cooperation and safety](#cooperation-and-safety) and the slash-command
+help for configuration such as `tools.maxSteps` (`0` means unlimited tool steps)
+and optional `toolOutputPruning`.
+
+## Images
+
+Image input supports PNG, JPEG, and WebP: at most four images per prompt, with
+a 10 MB source-file limit and decoded Base64 limited to 5 MiB. Use startup
+`--image` (repeatable) or TUI image paste:
 
 ```bash
-export ONE_CODING_AGENT_DIR=/custom/path
+one run "describe this diagram" --image diagram.png
+one --mode text "describe this diagram" --image diagram.png
 ```
 
-### Configuration files
+Images are transient for the current turn and are not persisted in session JSONL.
+Errors and events use only source basenames. Vision-incapable models reject
+images before an HTTP request. ChatGPT/Codex vision-capable models send native
+Responses API `input_image` parts; invalid or missing blobs fail explicitly.
 
-- **Agent dir** (default `~/.config/one`, override via `ONE_CODING_AGENT_DIR`):
-  `auth.json`, `models.json`, `settings.json`, `sessions/*.jsonl`, `reports.jsonl`,
-  `extensions/`. One-time auto-migration from legacy `~/.one/agent`.
-- **Project dir** (`.one/` in the current working directory): per-project MCP
-  and extension configuration. Ignored by git (`.gitignore` covers `.one/`).
-- If the global agent dir is not writable (e.g. read-only home), `one` falls back
-  to `<cwd>/.one/agent` for that run and sets `ONE_CODING_AGENT_DIR` accordingly.
-- All sensitive files are written atomically with restrictive permissions (`0700` for
-  directories, `0600` for `auth.json`/`settings.json`/`models.json`/`sessions/*.jsonl`
-  on POSIX).
+TUI, text/json, and `one run` accept startup `--image`; RPC accepts startup
+images and prompt `attachments`. `read_image` is a runtime tool the agent can
+call during its turn to inspect a file; it is not a startup image-input channel
+for `--mode text` or `one run`. Steering and follow-up messages are text-only.
 
-## Local llama.cpp provider
+## Cooperation and safety
 
-`one` supports local `llama.cpp` server mode via OpenAI-compatible API.
+> ## ⚠️ Workspace trust warning
+>
+> Starting `one` in a repository can execute arbitrary Python from
+> `.one/extensions/*.py` and shell commands from MCP configuration in
+> `.one/settings.json`. **Use it only in repositories you trust.** To inspect an
+> untrusted repository, start with:
+>
+> ```bash
+> one --no-extensions --no-mcp
+> ```
+>
+> Extensions and MCP servers are not sandboxed; they run with `one`’s
+> permissions. Cooperation mode is an approval gate, not a sandbox or security
+> boundary.
 
-1. Start `llama.cpp` server with OpenAI endpoint enabled.
-2. Optionally set base URL (default is `http://127.0.0.1:8080`):
+`--cooperation` requests approval before mutating tools (`bash`, `write`,
+`edit`, `plan`, and `apply_patch`). In the TUI, toggle it with `Ctrl+Z`; use
+`Ctrl+A` in the interactive fallback. Rejections include a reason returned to
+the agent. Interactive modes provide `/steer`, `/follow`, and abort controls;
+RPC and `one run` provide the channels described above.
+
+`apply_patch` validates collisions and symlink paths and uses staging/rollback,
+but it cannot guarantee recovery from power loss, hostile concurrent filesystem
+changes, or rollback I/O failure. Review changes and retained backups when an
+error is reported.
+
+## Integrations
+
+### MCP servers
+
+MCP servers can be configured in global or project `settings.json` with
+`mcpServers`. Stdio servers run as child processes; streamable HTTP servers use
+their configured URL. Use `--no-mcp` to disable all of them for a run and
+`/mcp list|enable|disable` in the TUI. MCP tools are added to the agent prompt.
+
+For web search, the [web-deepsearch MCP server](https://github.com/noxgle/mcp-web-deepsearch)
+uses DuckDuckGo and can run over stdio. It needs no API key, but its server is
+not sandboxed and may require outbound network access.
+
+### Extensions and skills
+
+Extensions, themes, prompts, and skills are discovered by the resource loader.
+See [docs/EXTENSIONS.md](docs/EXTENSIONS.md) for discovery paths, `--extension`,
+package commands, and hooks. See [docs/SKILLS.md](docs/SKILLS.md) for skill
+frontmatter, discovery, trust prompts, and invocation. Skills are metadata in
+the system prompt and load only when invoked with `/skill:<name>` or RPC
+`invoke_skill`; they are not auto-executed.
+
+## Diagnostics
+
+The opt-in Docker diagnostic runner drives a persistent RPC session in an
+isolated disposable workspace and produces bounded telemetry and reports:
 
 ```bash
-export LLAMA_CPP_BASE_URL=http://127.0.0.1:8080
+.venv/bin/python scripts/diagnose_long_session.py --json
+.venv/bin/python scripts/diagnose_long_session.py --duration 10 --skip-analysis --json
 ```
 
-3. Use model/provider in CLI or interactive mode:
+It requires Docker and a reachable configured model. Its container is a
+containment aid, not a security boundary. Reports may contain sensitive
+diagnostic data; artifacts are removed after a successful report unless
+`--keep-artifacts` is used. See `--help` for workload, network, endpoint, and
+telemetry options.
+
+## Development
 
 ```bash
-one --provider llama.cpp --model local
-# custom endpoint:
-one --provider llama.cpp --model local --llama-cpp-url http://127.0.0.1:8089
-# or in interactive mode:
-# /model llama.cpp/local
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/python -m pytest -q
+.venv/bin/ruff check .
+git diff --check
 ```
 
-`llama.cpp` local provider does not require an API key by default.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor conventions and focused
+test commands. Linux and macOS are supported in CI. Windows is best-effort:
+shell-oriented behavior remains experimental pending Windows CI.
 
-For a remote or custom `llama.cpp` server, add the model entry to
-`~/.config/one/models.json` (or to `$ONE_CODING_AGENT_DIR/models.json` when that
-variable is set):
+## References
 
-```json
-{
-  "providers": {
-    "llama.cpp": [
-      {
-        "id": "local",
-        "reasoning": true,
-        "contextWindow": 122880,
-        "url": "http://<LLAMA_CPP_HOST>:8089",
-        "toolParser": [
-          { "type": "raw-function-call" },
-          { "type": "json" }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Replace `<LLAMA_CPP_HOST>` with the hostname or IP address reachable from the
-machine running `one`. The URL should be the server root (for example,
-`http://127.0.0.1:8089`), not the `/v1` path; `one` calls the OpenAI-compatible
-`/v1/chat/completions` endpoint itself. `contextWindow` must match the context
-size configured in `llama-server` (for example, `--ctx-size 122880`); do not
-claim a larger window than the server actually allocates. `toolParser` tries
-raw function-call output first and JSON output second. Set `reasoning` to
-`true` only when the selected model/server exposes reasoning output.
-
-Verify that the endpoint and model are reachable before starting a session:
-
-```bash
-curl http://<LLAMA_CPP_HOST>:8089/v1/models
-one --provider llama.cpp --model local
-```
-
-If the server runs on another machine, bind `llama-server` to an address
-reachable from the client (for example, with its `--host` option) and allow TCP
-port `8089` through the host firewall. Keep the server off the public internet
-unless it is protected separately.
-
-### Ollama
-
-Same pattern as `llama.cpp`, default `http://localhost:11434/v1`, override via
-`OLLAMA_BASE_URL` or `--ollama-url`. No API key required for local Ollama.
-
-## Upgrade and uninstall
-
-```bash
-# upgrade from source
-cd one && git pull && .venv/bin/pip install -e .[dev]
-
-# upgrade from PyPI
-pip install --upgrade one-agent
-
-# upgrade global install
-./scripts/install.sh   # re-creates ~/.one/venv from the current checkout
-
-# uninstall (pip)
-pip uninstall one-agent
-
-# uninstall global install
-rm -rf ~/.one/venv ~/.local/bin/one
-# config/data remain in ~/.config/one — remove manually if desired:
-# rm -rf ~/.config/one
-```
-
-The version is defined once in `one/config.py:VERSION` and drives both the
-package metadata (`pyproject.toml` dynamic version) and `one --version`.
-
-## Platform support
-
-- **Linux and macOS** — fully supported (CI runs on `ubuntu-latest` and `macos-latest`
-  for Python 3.12 and 3.13).
-- **Windows** — best-effort: core agent, TUI, and file tools work; shell-dependent
-  features (`bash` quoting, pipelines, `command_prefix`, process groups) are POSIX-oriented
-  and some tests skip on Windows. Windows is declared in package classifiers but treated as
-  experimental until shell behavior is fully validated on Windows CI.
-
-## Documentation
-
-- `TODO.md` — open roadmap items
-- `DONE.md` — delivered functionality and release-preparation record
-- `docs/EXTENSIONS.md` — extension hook contract
-- `docs/SKILLS.md` — skill discovery, frontmatter, and invocation contract
-- `docs/RELEASE_CHECKLIST.md` — reproducible release verification steps
-- `CONTRIBUTING.md` — development setup, testing, conventions
-- `SECURITY.md` — supported versions, reporting, trust boundaries
-- `CHANGELOG.md` — release notes
-- `CODE_OF_CONDUCT.md` — community guidelines
+- [TODO.md](TODO.md) — roadmap
+- [DONE.md](DONE.md) — delivered work
+- [CHANGELOG.md](CHANGELOG.md) — release notes
+- [CONTRIBUTING.md](CONTRIBUTING.md) — development guide
+- [SECURITY.md](SECURITY.md) — security policy and reporting
+- [docs/EXTENSIONS.md](docs/EXTENSIONS.md) — extension contract
+- [docs/SKILLS.md](docs/SKILLS.md) — skills contract
+- [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) — release verification
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community guidelines

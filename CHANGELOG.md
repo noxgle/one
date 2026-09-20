@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **README mode documentation** — reorganized onboarding and added an accurate
+  mode/automation reference distinguishing TUI, one-shot text/JSON, JSON-RPC,
+  and `one run`.
 - **Complexity-aware planning policy** — plan-tool usage is limited to explicit
   or genuinely complex tasks; simple tasks skip planning, and approval prompts
   occur only when cooperation is enabled.
