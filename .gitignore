@@ -16,3 +16,5 @@ diagnostic-reports/
 
 *.log
 *.tmp
+
+fix_bugs_idea.txt
