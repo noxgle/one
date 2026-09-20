@@ -3099,3 +3099,180 @@ updated, so new sessions do not retain the user's selection.
 | Thinking budget leaves too little output capacity | Enforce provider-specific max-token relationships and test boundary values |
 | Session restore overrides the intended global default incorrectly | Test fresh-session versus existing-session precedence explicitly |
 | Hidden reasoning leaks into visible/tool-call parsing | Route only provider-marked thought deltas to `on_thinking_delta` |
+
+## Follow-up Fix: Provider-specific TUI thinking support
+
+### Problem
+
+The generic thinking-level fix is not sufficient for three providers tested in
+the TUI: ChatGPT/Codex, OpenRouter, and Ollama Cloud. Llama.cpp still appears to
+work because local models can emit their own `<think>` trace without a native
+provider reasoning field.
+
+- **ChatGPT/Codex:** the request includes a Responses API `reasoning` effort,
+  but the adapter does not translate streamed Responses reasoning events into
+  the existing `thinking_delta` event, so TUI thinking output is invisible.
+- **OpenRouter:** the OpenAI-compatible adapter sends top-level
+  `reasoning_effort`; OpenRouter requires its provider-specific `reasoning`
+  object/effort form for the supported reasoning models.
+- **Ollama Cloud:** its registry intentionally disables
+  `supports_reasoning_effort`, so no thinking control is sent. Ollama uses a
+  top-level `think` value and returns the trace in `message.thinking`.
+
+### Scope
+
+- Keep llama.cpp behavior unchanged.
+- Add provider-specific request and streaming handling instead of widening the
+  generic OpenAI-compatible assumption.
+- Preserve the six TUI levels and global/session persistence already planned in
+  the preceding thinking fix.
+- Do not expose raw reasoning as ordinary assistant text or tool-call input.
+
+### Implementation Tasks
+
+- [x] **ChatGPT/Codex Responses streaming:** Parse the provider's reasoning
+  summary/delta event variants and route them to `on_thinking_delta`; keep
+  `response.output_text.delta` on `on_delta` and preserve response completion,
+  tool, and error handling.
+  - **Files:** `one/providers/codex_responses.py`, provider streaming tests,
+    TUI/event tests if the existing event contract needs coverage.
+  - **Acceptance:** A fake Responses stream containing reasoning and visible
+    output produces separate thinking and answer callbacks; final `ChatResult`
+    contains visible output only.
+  - **Verification:** Fake SSE fixtures covering reasoning summary deltas,
+    output deltas, completion, and failure events.
+
+- [x] **OpenRouter reasoning dialect:** Add an explicit OpenRouter adapter mode
+  or provider capability so its payload uses the documented `reasoning` object
+  and effort mapping, while ordinary OpenAI-compatible providers retain their
+  own `reasoning_effort` behavior.
+  - **Files:** `one/providers/registry.py`,
+    `one/providers/openai_compatible.py`, `tests/test_provider_payloads.py`.
+  - **Acceptance:** OpenRouter sends the expected reasoning object for enabled
+    levels and omits enabled reasoning for `off`; OpenAI and other compatible
+    adapters remain unchanged.
+  - **Verification:** Exact fake payload assertions for all six levels and
+    regression tests for OpenAI, llama.cpp, and Ollama Cloud adapter modes.
+
+- [x] **Ollama Cloud thinking:** Implement the Ollama-native `think` request
+  field for supported levels and parse `message.thinking` in both non-streaming
+  and streaming responses. Map `off` to the provider's supported disabled form
+  and keep visible `message.content` separate.
+  - **Files:** `one/providers/ollama.py` or a dedicated Ollama adapter,
+    `one/providers/registry.py`, provider payload/stream tests.
+  - **Acceptance:** Ollama Cloud receives the correct top-level thinking control;
+    TUI receives thinking deltas separately; answer text and tool-call parsing
+    remain unaffected.
+  - **Verification:** Fake Ollama chat payload and stream fixtures for `off`,
+    low/medium/high effort, thinking chunks, answer chunks, and errors.
+
+- [x] **End-to-end TUI provider matrix:** Add a no-network TUI/provider matrix
+  test proving that `/thinking high` reaches each adapter with the expected
+  dialect and that the TUI receives a separate thinking stream.
+  - **Files:** `tests/test_tui_commands.py`, provider fake helpers, relevant
+    event tests.
+  - **Dependencies:** Provider-specific tasks above.
+  - **Acceptance:** ChatGPT/Codex, OpenRouter, Ollama Cloud, and llama.cpp each
+    have explicit request/stream expectations; no provider silently falls back
+    to generic OpenAI reasoning behavior.
+  - **Verification:** Focused provider/TUI tests, full pytest suite, Ruff, and
+    `git diff --check`.
+
+### Risks
+
+| Risk | Mitigation |
+|------|------------|
+| Provider event names differ across API versions | Accept documented variants and ignore unknown events safely |
+| OpenRouter model capabilities vary | Keep reasoning capability metadata model-aware and fail clearly on unsupported models |
+| Ollama Cloud OpenAI-compatible endpoint differs from native chat endpoint | Verify the exact wire contract with fake fixtures before changing the endpoint or auth flow |
+| Raw reasoning leaks into visible output | Maintain separate `on_thinking_delta` and `on_delta` paths with end-to-end assertions |
+
+## Follow-up Fix: ChatGPT/Codex thinking summaries not visible
+
+### Diagnosis
+
+The original issue was that ChatGPT/Codex sent only `reasoning.effort`. The
+Responses API can perform hidden reasoning without emitting readable
+reasoning-summary events, leaving the TUI with no `thinking_delta` events.
+The implementation now requests provider-generated summaries and routes their
+readable summary events separately from visible output.
+
+The supported UI output is a provider-generated reasoning summary, not raw
+chain-of-thought. The implementation requests and renders summaries when the
+backend/model makes them available.
+
+### Implementation Tasks
+
+- [x] **Request Codex reasoning summaries:** Extend the enabled-level Codex
+  payload to include `reasoning.summary: "auto"` alongside the mapped effort;
+  preserve omission of the reasoning configuration for `off`.
+  - **Files:** `one/providers/codex_responses.py`,
+    `tests/test_provider_payloads.py`, `tests/test_tui_commands.py`.
+  - **Dependencies:** Existing provider-specific thinking implementation.
+  - **Acceptance Criteria:** Enabled ChatGPT/Codex requests contain both the
+    expected effort and `summary: "auto"`; `off` does not request reasoning.
+   - [x] **Verification:** Exact payload assertions for all six levels and a
+    regression assertion that llama.cpp/OpenAI-compatible payloads are
+    unchanged.
+
+- [x] **Harden Codex summary event parsing:** Parse explicit Responses summary
+  event variants, route only incremental summary text to `on_thinking_delta`,
+  and avoid appending `.done` full-summary text after already streamed deltas.
+  Support nested completed summary parts where present and preserve visible
+  `response.output_text.delta` handling.
+  - **Files:** `one/providers/codex_responses.py`, `tests/test_providers.py`.
+  - **Dependencies:** Request summary payload task.
+  - **Acceptance Criteria:** `response.reasoning_summary_text.delta` appears
+    once in thinking output; `.done` does not duplicate it; nested
+    `part.text` is handled when no deltas were emitted; visible answer text
+    remains separate.
+   - [x] **Verification:** Realistic fake SSE fixtures containing required event
+    metadata, delta/done pairs, nested summary parts, visible output, and
+    unknown events.
+
+- [x] **Handle non-streaming and incomplete Codex responses:** Extract
+  available reasoning summaries from non-streaming Responses output and report
+  `response.incomplete` with a useful error rather than silently returning an
+  incomplete answer.
+  - **Files:** `one/providers/codex_responses.py`, `tests/test_providers.py`.
+  - **Dependencies:** Codex summary event parsing task.
+  - **Acceptance Criteria:** Non-streaming summaries reach
+  `on_thinking_delta` when a callback is supplied; incomplete responses have a
+  deterministic failure path; tool-call behavior remains intact.
+   - [x] **Verification:** Fake non-streaming response fixtures with summary items,
+    output text, tool calls, and incomplete details.
+
+- [x] **Fix effective-level reporting and model capability edge cases:** Make
+  `/thinking` report `session.thinking_level` after capability coercion, and
+  verify that persisted ChatGPT model metadata cannot incorrectly downgrade a
+  built-in reasoning-capable model to `off`.
+  - **Files:** `one/modes/tui_mode.py`, `one/core/model_registry.py`,
+    `tests/test_tui_commands.py`, model-registry tests.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** The TUI message reflects the effective level;
+  `/thinking high` remains effective for a built-in ChatGPT reasoning model
+  despite stale persisted metadata; genuinely non-reasoning models remain
+  `off`.
+   - [x] **Verification:** Tests covering model metadata merge, model switching,
+    capability coercion, and exact TUI command output.
+
+- [x] **Add true Codex TUI integration coverage:** Exercise the path from
+  `/thinking high` through the Codex adapter's fake HTTP/SSE response into the
+  TUI's rendered thinking block, rather than only calling adapter payload
+  builders directly.
+  - **Files:** `tests/test_tui_streaming.py`, `tests/test_tui_commands.py`,
+    provider fake helpers as needed.
+  - **Dependencies:** All preceding Codex tasks.
+  - **Acceptance Criteria:** A realistic Codex reasoning-summary stream
+  produces a visible `Thinking:` section and a separate final answer without
+  leaking summary text into assistant/tool-call parsing.
+   - [x] **Verification:** Focused TUI/provider tests, full pytest suite, Ruff, and
+     `git diff --check`.
+
+### Additional Risks
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Codex backend/model returns encrypted reasoning or no readable summary | Thinking panel can remain empty despite reasoning tokens | Document that only provider summaries are renderable; add diagnostics/tests for empty-summary responses |
+| Summary `.done` events repeat text already delivered by deltas | Duplicated thinking output | Track whether deltas were emitted per summary item and prefer incremental text |
+| Persisted model metadata marks ChatGPT as non-reasoning | `/thinking` appears enabled but effective request is `off` | Protect built-in capability metadata during merge and test stale persisted entries |

@@ -755,14 +755,14 @@ def test_codex_payload_building():
     assert p["instructions"] == "be terse"
     assert p["store"] is False and p["stream"] is False
     assert p["max_output_tokens"] == 77
-    assert p["reasoning"] == {"effort": "high"}
+    assert p["reasoning"] == {"effort": "high", "summary": "auto"}
     # HOTFIX-5: backend requires Responses message items with explicit type.
     assert all(i["type"] == "message" for i in p["input"])
     assert [i["content"][0]["type"] for i in p["input"]] == ["input_text", "output_text"]
     assert [i["role"] for i in p["input"]] == ["user", "assistant"]
     # xhigh clamps to high; off omits reasoning entirely.
     p2 = ad._build_payload("m", messages, "xhigh", stream=True)
-    assert p2["reasoning"] == {"effort": "high"}
+    assert p2["reasoning"] == {"effort": "high", "summary": "auto"}
     assert p2["stream"] is True and "max_output_tokens" not in p2
     p3 = ad._build_payload("m", messages, "off", stream=False)
     assert "reasoning" not in p3

@@ -18,7 +18,7 @@ from typing import Any
 from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.session_manager import SessionManager
-from one.core.settings_manager import SettingsManager
+from one.core.settings_manager import THINKING_LEVELS, SettingsManager
 from one.core.tool_output_pruning import prune_stale_tool_outputs
 from one.core.types import ModelInfo
 from one.mcp import McpManager
@@ -125,7 +125,9 @@ class AgentSession:
         self.model_registry = model_registry
         self.resource_loader = resource_loader
         self.model = _with_fallback_context(model)
-        self.thinking_level = thinking_level
+        if thinking_level not in THINKING_LEVELS:
+            raise ValueError(f"Invalid thinking level: {thinking_level}")
+        self.thinking_level = "off" if self.model and not self.model.reasoning else thinking_level
         self.scoped_models = scoped_models or []
         self.providers = build_provider_registry()
         self.messages: list[dict[str, Any]] = self.session_manager.build_session_context()["messages"]
@@ -1739,13 +1741,25 @@ class AgentSession:
     async def set_model(self, model: ModelInfo) -> None:
         self.model = _with_fallback_context(model)
         self.session_manager.append_model_change(model.provider, model.id)
+        if not model.reasoning and self.thinking_level != "off":
+            # This is session state, not a preference change: retain the user's
+            # global default for a future reasoning-capable model/session.
+            self.thinking_level = "off"
+            self.session_manager.append_thinking_level_change("off")
 
     def set_thinking_level(self, level: str) -> None:
+        if level not in THINKING_LEVELS:
+            raise ValueError(f"Invalid thinking level: {level}")
+        if self.model and not self.model.reasoning:
+            level = "off"
+        # Persist before changing local/session state: a malformed locked global
+        # settings file must not leave a partially applied command behind.
+        self.settings_manager.set_default_thinking_level(level)
         self.thinking_level = level
         self.session_manager.append_thinking_level_change(level)
 
     def cycle_thinking_level(self) -> str:
-        levels = ["off", "minimal", "low", "medium", "high", "xhigh"]
+        levels = list(THINKING_LEVELS)
         idx = levels.index(self.thinking_level) if self.thinking_level in levels else 0
         next_level = levels[(idx + 1) % len(levels)]
         self.set_thinking_level(next_level)

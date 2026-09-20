@@ -448,7 +448,7 @@ async def test_codex_adapter_nonstream_payloads_images_as_input_image(tmp_path: 
         assert image_parts[0]["image_url"].startswith("data:image/png;base64,")
         # store:false and reasoning must still be present.
         assert payload["store"] is False
-        assert payload["reasoning"] == {"effort": "medium"}
+        assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
     finally:
         httpx.AsyncClient = original_client
 
@@ -618,6 +618,20 @@ def test_persisted_false_does_not_downgrade_builtin_vision(tmp_path: Path):
     registry = ModelRegistry.create(auth, models_path)
     sol = registry.find("chatgpt", "gpt-5.6-sol")
     assert sol is not None and sol.input_image is True
+
+
+def test_persisted_false_does_not_downgrade_builtin_chatgpt_reasoning(tmp_path: Path):
+    """A stale models.json must not disable built-in Codex summaries."""
+    import json
+
+    models_path = tmp_path / "models.json"
+    models_path.write_text(json.dumps({"providers": {"chatgpt": [
+        {"id": "gpt-5.6-sol", "reasoning": False, "inputImage": True},
+    ]}}))
+    model = ModelRegistry.create(AuthStorage.in_memory(), str(models_path)).find(
+        "chatgpt", "gpt-5.6-sol"
+    )
+    assert model is not None and model.reasoning is True
 
 
 def test_persisted_true_preserved(tmp_path: Path):

@@ -16,6 +16,14 @@ from .base import ChatResult, ProviderAdapter
 # of no data. Must stay < the outer 300 s provider deadline.
 _IDLE_SSE_TIMEOUT = 120
 
+_THINKING_BUDGET_BY_LEVEL = {
+    "minimal": 1024,
+    "low": 2048,
+    "medium": 4096,
+    "high": 8192,
+    "xhigh": 16384,
+}
+
 
 def _is_oauth_token(api_key: str | None) -> bool:
     """Subscription access token (Claude Pro/Max login), not an API key."""
@@ -221,11 +229,18 @@ class AnthropicAdapter(ProviderAdapter):
                         break
                 content_messages[last_user]["content"] = parts
 
+        thinking_budget = _THINKING_BUDGET_BY_LEVEL.get(thinking_level)
+        output_tokens = max_tokens or 4096
+        # Anthropic requires max_tokens to exceed the enabled thinking budget.
+        if thinking_budget:
+            output_tokens = max(output_tokens, thinking_budget + 1024)
         payload: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens or 4096,
+            "max_tokens": output_tokens,
             "messages": content_messages,
         }
+        if thinking_budget:
+            payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
         if payload_system is not None:
             payload["system"] = payload_system
         req_headers = {
@@ -282,12 +297,17 @@ class AnthropicAdapter(ProviderAdapter):
                     raw_last = chunk
                     ctype = chunk.get("type")
                     if ctype == "content_block_delta":
-                        delta = (chunk.get("delta") or {}).get("text")
+                        delta_obj = chunk.get("delta") or {}
+                        delta = delta_obj.get("thinking") if delta_obj.get("type") == "thinking_delta" else delta_obj.get("text")
                         if delta:
                             delta_s = str(delta)
-                            text_parts.append(delta_s)
                             try:
-                                on_delta(delta_s)
+                                if delta_obj.get("type") == "thinking_delta":
+                                    if on_thinking_delta:
+                                        on_thinking_delta(delta_s)
+                                else:
+                                    text_parts.append(delta_s)
+                                    on_delta(delta_s)
                             except Exception:
                                 pass
                     if ctype == "message_start":

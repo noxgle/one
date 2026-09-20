@@ -45,19 +45,20 @@ BASE_URL = "https://chatgpt.com/backend-api/codex"
 CLIENT_VERSION = "1.0.0"
 ORIGINATOR = "codex_cli_rs"
 
-_EFFORT_BY_LEVEL = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high"}
+# Responses does not expose minimal/xhigh; use its nearest supported bounds.
+_EFFORT_BY_LEVEL = {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high"}
 
 # Backend rejects requests with empty `instructions`; sessions that carry no
 # system message fall back to this Codex-flavored base prompt.
-# Idle timeout for per-line SSE reads — aborts a stalled stream after 120 s
-# of no data. Must stay < the outer 300 s provider deadline.
-_IDLE_SSE_TIMEOUT = 120
-
 _BASE_INSTRUCTIONS = (
     "You are Codex, based on GPT-5. You are running as a coding agent inside "
     "the `one` terminal agent. Help the user with software engineering tasks: "
     "read and edit code, run commands, and explain your work concisely."
 )
+
+# Idle timeout for per-line SSE reads — aborts a stalled stream after 120 s
+# of no data. Must stay < the outer 300 s provider deadline.
+_IDLE_SSE_TIMEOUT = 120
 
 
 def _error_with_body(status_code: int, body: str) -> RuntimeError:
@@ -201,21 +202,82 @@ class CodexResponsesAdapter(ProviderAdapter):
             payload["max_output_tokens"] = max_tokens
         effort = _EFFORT_BY_LEVEL.get(thinking_level)
         if effort:
-            payload["reasoning"] = {"effort": effort}
+            # Request readable summaries rather than only invisible reasoning.
+            payload["reasoning"] = {"effort": effort, "summary": "auto"}
         return payload
 
     @staticmethod
     def _extract_output(data: dict[str, Any]) -> tuple[str, dict[str, Any], str | None]:
         text_parts: list[str] = []
-        for item in data.get("output", []):
+        output = data.get("output", [])
+        if not isinstance(output, list):
+            output = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
             if item.get("type") != "message":
                 continue
-            for part in item.get("content", []) or []:
-                if part.get("type") == "output_text":
-                    text_parts.append(str(part.get("text", "")))
+            content = item.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "output_text":
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        text_parts.append(text)
         usage = data.get("usage") or {}
         status = data.get("status")
-        return "".join(text_parts), usage if isinstance(usage, dict) else {}, status
+        return "".join(text_parts), usage if isinstance(usage, dict) else {}, status if isinstance(status, str) else None
+
+    @staticmethod
+    def _extract_reasoning_summaries(data: dict[str, Any]) -> list[str]:
+        """Extract only human-readable reasoning summaries from Responses output."""
+        summaries: list[str] = []
+        output = data.get("output", [])
+        if not isinstance(output, list):
+            return summaries
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "reasoning":
+                continue
+            summary = item.get("summary")
+            if summary is None:
+                continue
+            entries = summary if isinstance(summary, list) else [summary]
+            for entry in entries:
+                if isinstance(entry, str):
+                    summaries.append(entry)
+                elif isinstance(entry, dict):
+                    text = entry.get("text")
+                    if isinstance(text, str) and (
+                        entry.get("type") in (None, "summary_text")
+                    ):
+                        summaries.append(text)
+        return summaries
+
+    @staticmethod
+    def _summary_key(chunk: dict[str, Any]) -> tuple[Any, ...]:
+        """Return the stable identity supplied by Responses for a summary part."""
+        return tuple(
+            chunk.get(name)
+            for name in ("item_id", "output_index", "summary_index", "content_index")
+        )
+
+    @staticmethod
+    def _summary_text(value: Any) -> str | None:
+        """Accept a textual summary value, never event metadata."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            text = value.get("text")
+            return text if isinstance(text, str) else None
+        return None
+
+    @staticmethod
+    def _incomplete_error(response: Any) -> RuntimeError:
+        details = response.get("incomplete_details") if isinstance(response, dict) else None
+        if not details and isinstance(response, dict):
+            details = response.get("error")
+        return RuntimeError(f"chatgpt responses incomplete: {details or 'response ended before completion'}")
 
     async def chat(
         self,
@@ -246,6 +308,16 @@ class CodexResponsesAdapter(ProviderAdapter):
                     raise _error_with_body(resp.status_code, resp.text)
                 data = resp.json()
             text, usage, status = self._extract_output(data)
+            if status == "failed":
+                raise RuntimeError(f"chatgpt responses failed: {data.get('error')}")
+            if status == "incomplete":
+                raise self._incomplete_error(data)
+            if on_thinking_delta:
+                for summary in self._extract_reasoning_summaries(data):
+                    try:
+                        on_thinking_delta(summary)
+                    except Exception:
+                        pass
             return ChatResult(text=text, raw=data, usage=usage, stop_reason=status)
 
         payload["stream"] = True
@@ -253,6 +325,7 @@ class CodexResponsesAdapter(ProviderAdapter):
         usage: dict[str, Any] = {}
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
+        summary_delta_keys: set[tuple[Any, ...]] = set()
 
         async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream("POST", url, json=payload, headers=req_headers) as resp:
@@ -281,6 +354,8 @@ class CodexResponsesAdapter(ProviderAdapter):
                         chunk = json.loads(data_str)
                     except Exception:
                         continue
+                    if not isinstance(chunk, dict):
+                        continue
                     ctype = chunk.get("type")
                     raw_last = chunk
                     if ctype == "response.output_text.delta":
@@ -292,17 +367,59 @@ class CodexResponsesAdapter(ProviderAdapter):
                                 on_delta(delta_s)
                             except Exception:
                                 pass
+                    elif ctype in {
+                        "response.reasoning_summary_text.delta",
+                        "response.reasoning_text.delta",
+                    }:
+                        reasoning_delta = self._summary_text(chunk.get("delta"))
+                        if reasoning_delta:
+                            summary_delta_keys.add(self._summary_key(chunk))
+                        if reasoning_delta and on_thinking_delta:
+                            try:
+                                on_thinking_delta(reasoning_delta)
+                            except Exception:
+                                pass
+                    elif ctype == "response.reasoning_summary_text.done":
+                        # A done event repeats the complete text after delta
+                        # events. Emit it only when it was not streamed.
+                        key = self._summary_key(chunk)
+                        summary_text = self._summary_text(chunk.get("text"))
+                        if summary_text and key not in summary_delta_keys and on_thinking_delta:
+                            try:
+                                on_thinking_delta(summary_text)
+                            except Exception:
+                                pass
+                    elif ctype == "response.reasoning_summary_part.done":
+                        # Older part events carry the completed text nested in
+                        # `part`, with the same no-duplicate fallback.
+                        key = self._summary_key(chunk)
+                        summary_text = self._summary_text(chunk.get("part"))
+                        if summary_text and key not in summary_delta_keys and on_thinking_delta:
+                            try:
+                                on_thinking_delta(summary_text)
+                            except Exception:
+                                pass
                     elif ctype == "response.completed":
                         response_obj = chunk.get("response") or {}
+                        if not isinstance(response_obj, dict):
+                            response_obj = {}
                         u = response_obj.get("usage")
                         if isinstance(u, dict):
                             usage.update(u)
-                        stop_reason = response_obj.get("status")
+                        status = response_obj.get("status")
+                        stop_reason = status if isinstance(status, str) else None
                         raw_last = response_obj or chunk
+                        if stop_reason == "incomplete":
+                            raise self._incomplete_error(response_obj)
                         break
                     elif ctype == "response.failed":
-                        err = chunk.get("response", {}).get("error") or chunk.get("error")
+                        response_obj = chunk.get("response")
+                        err = (
+                            response_obj.get("error") if isinstance(response_obj, dict) else None
+                        ) or chunk.get("error")
                         raise RuntimeError(f"chatgpt responses failed: {err}")
+                    elif ctype == "response.incomplete":
+                        raise self._incomplete_error(chunk.get("response") or chunk)
 
         return ChatResult(text="".join(text_parts), raw=raw_last, usage=usage, stop_reason=stop_reason)
 

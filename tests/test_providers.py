@@ -12,6 +12,10 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from one.providers.anthropic import AnthropicAdapter
+from one.providers.codex_responses import CodexResponsesAdapter
+from one.providers.gemini import GeminiAdapter
+from one.providers.ollama import OllamaCloudAdapter
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -41,6 +45,9 @@ class _StreamContext:
     async def aread(self) -> bytes:
         return b"error"
 
+    def raise_for_status(self) -> None:
+        pass
+
 
 class _PostResp:
     """Stand-in for a non-stream httpx response."""
@@ -55,6 +62,196 @@ class _PostResp:
 
     def json(self) -> dict[str, Any]:
         return self._data
+
+
+async def _stream_with(adapter: Any, lines: list[str]) -> tuple[Any, list[str], list[str]]:
+    """Run an adapter against fake SSE and return result/text/thinking deltas."""
+    visible: list[str] = []
+    thinking: list[str] = []
+    stream_ctx = _StreamContext(lines)
+    with patch.object(httpx, "AsyncClient") as MockClient:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.stream = lambda *a, **k: stream_ctx
+        MockClient.return_value = mock_client
+        result = await adapter.chat(
+            "key", "test-model", [{"role": "user", "content": "hello"}], "medium",
+            on_delta=visible.append, on_thinking_delta=thinking.append,
+        )
+    return result, visible, thinking
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_routes_thinking_blocks_separately() -> None:
+    result, visible, thinking = await _stream_with(AnthropicAdapter(), _sse(
+        {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hidden"}},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "answer"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+    ))
+    assert thinking == ["hidden"]
+    assert visible == ["answer"]
+    assert result.text == "answer"
+
+
+@pytest.mark.asyncio
+async def test_gemini_stream_routes_thought_parts_separately() -> None:
+    result, visible, thinking = await _stream_with(GeminiAdapter(), _sse(
+        {"candidates": [{"content": {"parts": [{"text": "hidden", "thought": True}, {"text": "answer"}]}, "finishReason": "STOP"}]},
+    ))
+    assert thinking == ["hidden"]
+    assert visible == ["answer"]
+    assert result.text == "answer"
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_stream_routes_reasoning_summary_delta_separately() -> None:
+    result, visible, thinking = await _stream_with(CodexResponsesAdapter(), _sse(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "plan",
+        },
+        {
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "text": "plan",
+        },
+        {
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_2",
+            "output_index": 0,
+            "summary_index": 1,
+            "part": {"type": "summary_text", "text": "fallback"},
+        },
+        {
+            "type": "response.reasoning_text.delta",
+            "item_id": "r_1",
+            "output_index": 1,
+            "delta": " useful",
+        },
+        {"type": "response.reasoning_summary_part.added", "item_id": "rs_3"},
+        {"type": "response.output_text.delta", "delta": "answer"},
+        {"type": "response.completed", "response": {"status": "completed", "usage": {"output_tokens": 2}}},
+    ))
+    assert thinking == ["plan", "fallback", " useful"]
+    assert visible == ["answer"]
+    assert result.text == "answer"
+    assert result.stop_reason == "completed"
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_stream_emits_summary_text_done_without_delta() -> None:
+    result, visible, thinking = await _stream_with(CodexResponsesAdapter(), _sse(
+        {
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "text": "complete plan",
+        },
+        {"type": "response.completed", "response": {"status": "completed"}},
+    ))
+    assert thinking == ["complete plan"]
+    assert visible == []
+    assert result.text == ""
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_stream_raises_on_failed_event() -> None:
+    with pytest.raises(RuntimeError, match="responses failed"):
+        await _stream_with(CodexResponsesAdapter(), _sse(
+            {"type": "response.failed", "response": {"error": {"message": "nope"}}},
+        ))
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_stream_raises_on_incomplete_event() -> None:
+    with pytest.raises(RuntimeError, match="responses incomplete.*max_output_tokens"):
+        await _stream_with(CodexResponsesAdapter(), _sse(
+            {
+                "type": "response.incomplete",
+                "response": {"incomplete_details": {"reason": "max_output_tokens"}},
+            },
+        ))
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_non_stream_emits_summary_but_not_result_text() -> None:
+    adapter = CodexResponsesAdapter()
+    post_resp = _PostResp({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [
+                {"type": "summary_text", "text": "first"}, " second",
+            ]},
+            {"type": "function_call", "name": "read", "arguments": "{}"},
+            {"type": "message", "content": [{"type": "output_text", "text": "answer"}]},
+        ],
+    })
+    thinking: list[str] = []
+    with patch.object(httpx, "AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=post_resp)
+        mock_client_class.return_value = mock_client
+        result = await adapter.chat(
+            "key", "test-model", [{"role": "user", "content": "hello"}], "medium",
+            on_thinking_delta=thinking.append,
+        )
+    assert thinking == ["first", " second"]
+    assert result.text == "answer"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_stream_routes_reasoning_fields_without_final_text() -> None:
+    adapter = OpenAICompatibleAdapter(
+        "openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter"
+    )
+    result, visible, thinking = await _stream_with(adapter, _sse(
+        {"choices": [{"delta": {"reasoning": "plan"}}]},
+        {"choices": [{"delta": {"reasoning_content": " more"}}]},
+        {"choices": [{"delta": {"content": "answer"}, "finish_reason": "stop"}]},
+    ))
+    assert thinking == ["plan", " more"]
+    assert visible == ["answer"]
+    assert result.text == "answer"
+
+
+@pytest.mark.asyncio
+async def test_ollama_cloud_stream_routes_message_thinking_separately() -> None:
+    result, visible, thinking = await _stream_with(OllamaCloudAdapter("https://ollama.com"), [
+        json.dumps({"message": {"thinking": "plan", "content": ""}, "done": False}),
+        json.dumps({"message": {"content": "answer"}, "done": True}),
+    ])
+    assert thinking == ["plan"]
+    assert visible == ["answer"]
+    assert result.text == "answer"
+    assert result.stop_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_ollama_cloud_non_stream_routes_message_thinking_separately() -> None:
+    adapter = OllamaCloudAdapter("https://ollama.com")
+    post_resp = _PostResp({"message": {"thinking": "plan", "content": "answer"}, "done": True})
+    thinking: list[str] = []
+    with patch.object(httpx, "AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=post_resp)
+        mock_client_class.return_value = mock_client
+        result = await adapter.chat(
+            "key", "glm-5:cloud", [{"role": "user", "content": "hello"}], "high",
+            on_thinking_delta=thinking.append,
+        )
+    assert thinking == ["plan"]
+    assert result.text == "answer"
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────

@@ -17,6 +17,17 @@ from .base import ChatResult, ProviderAdapter
 # (get_provider_timeout_sec), otherwise the outer deadline fires first.
 _IDLE_SSE_TIMEOUT = 120
 
+# Chat Completions reasoning effort supports minimal through high.  ``xhigh``
+# has no equivalent there, so it deliberately uses the strongest supported
+# effort rather than silently collapsing every non-high selection to medium.
+_REASONING_EFFORT_BY_LEVEL = {
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+}
+
 
 class MissingBlobError(AttachmentStorageError):
     """Raised when a required image blob is missing or corrupt before HTTP."""
@@ -31,12 +42,17 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         *,
         supports_reasoning_effort: bool = True,
         default_temperature: float | None = 0.1,
+        reasoning_mode: str = "openai",
     ) -> None:
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.endpoint = endpoint
         self.supports_reasoning_effort = supports_reasoning_effort
         self.default_temperature = default_temperature
+        # OpenRouter uses the OpenAI wire format for chat, but its reasoning
+        # control and trace fields are provider-specific.  Keep this opt-in so
+        # local llama.cpp and every other compatible endpoint retain behavior.
+        self.reasoning_mode = reasoning_mode
 
     def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
         """Build an ``image_url`` part from an image reference.
@@ -135,8 +151,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         }
         if self.default_temperature is not None:
             payload["temperature"] = self.default_temperature
-        if self.supports_reasoning_effort:
-            payload["reasoning_effort"] = "high" if thinking_level in {"high", "xhigh"} else "medium"
+        if self.reasoning_mode == "openrouter":
+            effort = _REASONING_EFFORT_BY_LEVEL.get(thinking_level)
+            if effort:
+                payload["reasoning"] = {"effort": effort}
+        elif self.supports_reasoning_effort:
+            effort = _REASONING_EFFORT_BY_LEVEL.get(thinking_level)
+            if effort:
+                payload["reasoning_effort"] = effort
         return payload
 
     def with_base_url(self, base_url: str) -> OpenAICompatibleAdapter:
@@ -146,6 +168,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             endpoint=self.endpoint,
             supports_reasoning_effort=self.supports_reasoning_effort,
             default_temperature=self.default_temperature,
+            reasoning_mode=self.reasoning_mode,
         )
 
     def _build_headers(self, api_key: str, headers: dict[str, str] | None = None) -> dict[str, str]:
@@ -235,9 +258,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
             choice = (data.get("choices") or [{}])[0]
             msg = choice.get("message", {})
-            thinking = msg.get("reasoning_content") or ""
             content = msg.get("content") or ""
-            text = (thinking + "\n\n" + content) if thinking else content
+            # OpenRouter traces are not assistant output.  Generic compatible
+            # endpoints intentionally retain their legacy combined result.
+            if self.reasoning_mode == "openrouter":
+                text = content
+            else:
+                thinking = msg.get("reasoning_content") or ""
+                text = (thinking + "\n\n" + content) if thinking else content
             usage = data.get("usage") or {}
             stop = choice.get("finish_reason")
             return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop)
@@ -289,10 +317,21 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                             on_delta(str(piece))
                         except Exception:
                             pass
-                    piece_reasoning = delta.get("reasoning_content")
+                    if self.reasoning_mode == "openrouter":
+                        # Prefer delta fields, then top-level fallbacks used by
+                        # different OpenRouter upstream providers.
+                        piece_reasoning = (
+                            delta.get("reasoning")
+                            or delta.get("reasoning_content")
+                            or chunk.get("reasoning")
+                            or chunk.get("reasoning_content")
+                        )
+                    else:
+                        piece_reasoning = delta.get("reasoning_content")
                     if piece_reasoning:
                         reasoning_str = str(piece_reasoning)
-                        text_parts.append(reasoning_str)
+                        if self.reasoning_mode != "openrouter":
+                            text_parts.append(reasoning_str)
                         # Forward raw reasoning_content exactly as-is (no synthetic spacing).
                         try:
                             if on_thinking_delta:

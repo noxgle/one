@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,127 @@ class _StreamingProvider:
                 on_delta(d)
             await asyncio.sleep(0.005)
         return ChatResult(text="".join(self.deltas), raw={}, usage={}, stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_tui_renders_codex_reasoning_summary_sse_separately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A no-network Codex SSE stream reaches the adapter, session, and TUI.
+
+    The matching ``.done`` event must not duplicate the summary that was
+    already delivered by ``response.reasoning_summary_text.delta``.
+    """
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers import codex_responses
+    from one.providers.codex_responses import CodexResponsesAdapter
+
+    summary = "I will inspect the relevant files first."
+    answer = (
+        "The visible answer arrives separately after the reasoning summary, "
+        "and has enough detail to be treated as a final response rather than "
+        "a request to use a tool. It confirms the adapter preserved the "
+        "visible output channel independently from the thinking channel. "
+        "This regression fixture intentionally uses a complete prose response "
+        "so the session does not issue its short-response tool nudge."
+    )
+    sse_lines = [
+        "data: " + json.dumps(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_123",
+                "output_index": 0,
+                "summary_index": 0,
+                "content_index": 0,
+                "delta": summary,
+            }
+        ),
+        "data: " + json.dumps(
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs_123",
+                "output_index": 0,
+                "summary_index": 0,
+                "content_index": 0,
+                "text": summary,
+            }
+        ),
+        "data: " + json.dumps({"type": "response.output_text.delta", "delta": answer}),
+        "data: " + json.dumps(
+            {"type": "response.completed", "response": {"status": "completed"}}
+        ),
+    ]
+
+    class _SseResponse:
+        is_error = False
+
+        async def __aenter__(self) -> _SseResponse:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def aiter_lines(self):
+            for line in sse_lines:
+                yield line
+
+        async def aread(self) -> bytes:
+            return b""
+
+    class _NoNetworkClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
+            pass
+
+        async def __aenter__(self) -> _NoNetworkClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        def stream(self, *args: Any, **kwargs: Any) -> _SseResponse:  # noqa: ARG002
+            return _SseResponse()
+
+    monkeypatch.setattr(codex_responses.httpx, "AsyncClient", _NoNetworkClient)
+    session = _mk_app_session(tmp_path)
+    session.model_registry._auth.set_runtime_api_key("chatgpt", "test-token")
+    model = session.model_registry.find("chatgpt", "gpt-5.6-sol")
+    assert model is not None
+    session.model = model
+    session.providers = {"chatgpt": CodexResponsesAdapter()}
+    session.settings_manager.set_retry_enabled(False)
+    events: list[dict[str, Any]] = []
+    session.subscribe(events.append)
+
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/thinking high")
+        assert session.thinking_level == "high"
+        await _submit(app, pilot, "Summarize your approach")
+        for _ in range(300):
+            await pilot.pause()
+            if not session.is_streaming and not app._turn_active:
+                break
+
+        thinking_events = [event for event in events if event.get("type") == "thinking_delta"]
+        visible_events = [
+            event
+            for event in events
+            if event.get("type") == "message_update"
+            and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
+        ]
+        assert [event["delta"] for event in thinking_events] == [summary]
+        assert "".join(event["assistantMessageEvent"]["delta"] for event in visible_events) == answer
+
+        stream = "\n".join(app._stream_lines)
+        rendered = str(app.query_one("#stream", Static).content)
+        assert "Thinking:" in stream
+        assert summary in stream
+        assert summary in rendered
+        assert "The visible answer" in stream
+        assert "The visible answer" in rendered
 
 
 def test_thinking_frames_are_single_width() -> None:

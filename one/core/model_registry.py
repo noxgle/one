@@ -166,16 +166,19 @@ class ModelRegistry:
                 out.append(m)
             else:
                 # Later definitions (e.g. models.json) override builtin entries,
-                # BUT known built-in vision capability wins over a persisted false.
+                # BUT known built-in capabilities win over stale persisted false.
                 builtin = next(
                     (b for b in BUILTIN_MODELS if b.provider == m.provider and b.id == m.id),
                     None,
                 )
-                if builtin and builtin.input_image and not m.input_image:
+                if builtin and (
+                    (builtin.input_image and not m.input_image)
+                    or (builtin.provider == "chatgpt" and builtin.reasoning and not m.reasoning)
+                ):
                     out[idx] = ModelInfo(
                         provider=m.provider,
                         id=m.id,
-                        reasoning=m.reasoning,
+                        reasoning=builtin.reasoning or m.reasoning,
                         context_window=m.context_window,
                         base_url=m.base_url,
                         tool_parser=m.tool_parser,

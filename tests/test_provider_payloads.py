@@ -6,6 +6,9 @@ from typing import Any
 import pytest
 
 from one.providers.anthropic import AnthropicAdapter
+from one.providers.codex_responses import CodexResponsesAdapter
+from one.providers.gemini import GeminiAdapter
+from one.providers.ollama import OllamaCloudAdapter
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
 
@@ -61,6 +64,17 @@ def test_openai_compatible_payload_without_reasoning() -> None:
     assert "temperature" not in payload
 
 
+@pytest.mark.parametrize(
+    ("level", "effort"),
+    [("off", None), ("minimal", "minimal"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
+)
+def test_openai_compatible_reasoning_effort_maps_every_level(level: str, effort: str | None) -> None:
+    payload = OpenAICompatibleAdapter("openai", "https://api.openai.com")._build_payload(
+        "gpt", [{"role": "user", "content": "hi"}], level
+    )
+    assert payload.get("reasoning_effort") == effort
+
+
 def test_openai_compatible_headers_without_api_key() -> None:
     adapter = OpenAICompatibleAdapter("llama.cpp", "http://127.0.0.1:8080")
     headers = adapter._build_headers("")
@@ -94,6 +108,39 @@ def test_openai_compatible_with_base_url_returns_reconfigured_adapter() -> None:
     assert changed.default_temperature is None
 
 
+@pytest.mark.parametrize(
+    ("level", "effort"),
+    [("off", None), ("minimal", "minimal"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
+)
+def test_openrouter_uses_native_reasoning_object(level: str, effort: str | None) -> None:
+    payload = OpenAICompatibleAdapter(
+        "openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter"
+    )._build_payload("provider/model", [{"role": "user", "content": "hi"}], level)
+    assert payload.get("reasoning") == ({"effort": effort} if effort else None)
+    assert "reasoning_effort" not in payload
+
+
+@pytest.mark.parametrize(
+    ("level", "think"),
+    [("off", False), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
+)
+def test_ollama_cloud_uses_native_think(level: str, think: bool | str) -> None:
+    payload = OllamaCloudAdapter("https://ollama.com")._build_payload(
+        "glm-5:cloud", [{"role": "user", "content": "hi"}], level
+    )
+    assert payload["think"] == think
+    assert "reasoning_effort" not in payload
+    assert "reasoning" not in payload
+
+
+def test_registry_keeps_llama_cpp_compatible_and_uses_native_cloud_adapter() -> None:
+    registry = build_provider_registry()
+    assert type(registry["ollama-cloud"]).__name__ == "OllamaCloudAdapter"
+    assert getattr(registry["ollama-cloud"], "endpoint") == "/api/chat"
+    assert isinstance(registry["llama.cpp"], OpenAICompatibleAdapter)
+    assert registry["llama.cpp"].reasoning_mode == "openai"
+
+
 def test_openai_compatible_payload_without_images_works() -> None:
     """When no images are present, payload is built normally (phase-free behavior)."""
     adapter = OpenAICompatibleAdapter("openai", "https://api.openai.com")
@@ -116,6 +163,16 @@ def test_openai_compatible_payload_without_images_works() -> None:
 
 
 class TestCodexPayload:
+    @pytest.mark.parametrize(
+        ("level", "effort"),
+        [("off", None), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
+    )
+    def test_codex_reasoning_maps_every_level(self, level: str, effort: str | None) -> None:
+        payload = CodexResponsesAdapter()._build_payload(
+            "gpt", [{"role": "user", "content": "hi"}], level, stream=False
+        )
+        assert payload.get("reasoning") == ({"effort": effort, "summary": "auto"} if effort else None)
+
     def test_codex_text_only_payload(self) -> None:
         """Text-only payload: input_text content part, no image parts."""
         from one.providers.codex_responses import CodexResponsesAdapter
@@ -131,7 +188,7 @@ class TestCodexPayload:
         assert payload["instructions"] == "be terse"
         assert payload["store"] is False and payload["stream"] is False
         assert payload["max_output_tokens"] == 77
-        assert payload["reasoning"] == {"effort": "high"}
+        assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
         # HOTFIX-5: backend requires Responses message items with explicit type.
         assert all(i["type"] == "message" for i in payload["input"])
         assert [i["content"][0]["type"] for i in payload["input"]] == ["input_text", "output_text"]
@@ -432,6 +489,55 @@ class TestAnthropicCacheControl:
                 pass  # no content
         # Only system + last user = 2 breakpoints (well under 4)
         assert bp_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("level", "budget"),
+        [("off", None), ("minimal", 1024), ("low", 2048), ("medium", 4096), ("high", 8192), ("xhigh", 16384)],
+    )
+    async def test_thinking_payload_maps_every_level(self, monkeypatch, level: str, budget: int | None) -> None:
+        adapter = AnthropicAdapter()
+        _, captured = _anthropic_fake_client(monkeypatch)
+        await adapter.chat("sk-1", "claude", [{"role": "user", "content": "hi"}], level, max_tokens=8)
+        body = captured["body"]
+        assert body.get("thinking") == ({"type": "enabled", "budget_tokens": budget} if budget else None)
+        assert body["max_tokens"] >= (budget + 1024 if budget else 8)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("level", "budget"),
+    [("off", None), ("minimal", 1024), ("low", 2048), ("medium", 4096), ("high", 8192), ("xhigh", 16384), ("invalid", None)],
+)
+async def test_gemini_thinking_payload_maps_every_level(monkeypatch, level: str, budget: int | None) -> None:
+    from one.providers import gemini as gemini_mod
+
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, Any]:
+            return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def post(self, url: str, **kwargs: Any) -> _Resp:  # noqa: ARG002
+            captured["body"] = kwargs["json"]
+            return _Resp()
+
+    monkeypatch.setattr(gemini_mod.httpx, "AsyncClient", lambda *args, **kwargs: _Client())
+    await GeminiAdapter().chat("key", "gemini-2.5-flash", [{"role": "user", "content": "hi"}], level)
+    generation_config = captured["body"]["generationConfig"]
+    assert generation_config.get("thinkingConfig") == (
+        {"thinkingBudget": budget} if budget is not None else None
+    )
 
 
 def test_other_adapters_unchanged_by_cache_control(monkeypatch) -> None:

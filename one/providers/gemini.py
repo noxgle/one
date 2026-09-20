@@ -16,6 +16,14 @@ from .base import ChatResult, ProviderAdapter
 # of no data. Must stay < the outer 300 s provider deadline.
 _IDLE_SSE_TIMEOUT = 120
 
+_THINKING_BUDGET_BY_LEVEL = {
+    "minimal": 1024,
+    "low": 2048,
+    "medium": 4096,
+    "high": 8192,
+    "xhigh": 16384,
+}
+
 
 class MissingBlobError(AttachmentStorageError):
     """Raised when a required image blob is missing or corrupt before HTTP."""
@@ -150,6 +158,13 @@ class GeminiAdapter(ProviderAdapter):
             contents.append({"role": role, "parts": parts})
 
         generation_config: dict[str, Any] = {"temperature": 0.1}
+        # Gemini 2.5 Pro rejects a zero thinking budget, so omit the field to
+        # disable thinking; recognized non-off levels use deterministic budgets.
+        budget = _THINKING_BUDGET_BY_LEVEL.get(thinking_level)
+        if budget is not None:
+            generation_config["thinkingConfig"] = {
+                "thinkingBudget": budget
+            }
         if max_tokens is not None:
             generation_config["maxOutputTokens"] = max_tokens
         payload = {
@@ -175,7 +190,8 @@ class GeminiAdapter(ProviderAdapter):
             text = ""
             if candidates:
                 for part in (candidates[0].get("content", {}).get("parts") or []):
-                    text += part.get("text", "")
+                    if not part.get("thought"):
+                        text += part.get("text", "")
             usage = data.get("usageMetadata") or {}
             stop = candidates[0].get("finishReason") if candidates else None
             return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop)
@@ -220,11 +236,17 @@ class GeminiAdapter(ProviderAdapter):
                         continue
                     c0 = candidates[0]
                     parts = (c0.get("content") or {}).get("parts") or []
-                    piece = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict))
-                    if piece:
-                        text_parts.append(piece)
+                    for part in parts:
+                        if not isinstance(part, dict) or not part.get("text"):
+                            continue
+                        piece = str(part["text"])
                         try:
-                            on_delta(piece)
+                            if part.get("thought"):
+                                if on_thinking_delta:
+                                    on_thinking_delta(piece)
+                            else:
+                                text_parts.append(piece)
+                                on_delta(piece)
                         except Exception:
                             pass
                     if c0.get("finishReason"):

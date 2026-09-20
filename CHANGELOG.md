@@ -19,6 +19,17 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Thinking levels and persistence** — `/thinking` and `/thinking-cycle` now
+  save the selected level for new sessions while retaining each session's own
+  recorded choice. OpenAI-compatible, Anthropic, Gemini, and Codex adapters
+  now map supported levels to their native reasoning controls; `off` avoids
+  enabled reasoning configuration and provider thought streams stay separate
+  from visible answers.
+- **Provider-native TUI thinking** — ChatGPT/Codex Responses summary deltas,
+  OpenRouter reasoning traces, and Ollama Cloud native thinking now render
+  separately from visible answers; OpenRouter and Ollama Cloud use their native
+  reasoning request controls.
+
 - **Docker diagnostic coverage** — special diagnostic scenarios now explicitly
   request their safe tools, disabled capabilities are reported separately, and
   a final idle wait truncated only by the outer deadline no longer fails an

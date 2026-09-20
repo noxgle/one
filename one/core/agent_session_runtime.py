@@ -112,8 +112,15 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
     if model and not model_registry.has_configured_auth(model):
         model_fallback_message = f"No auth configured for {model.provider}/{model.id}"
 
-    thinking_level = bootstrap.get("thinkingLevel") or settings_manager.get_default_thinking_level()
-    if options.get("sessionManager") is not None:
+    thinking_level = (
+        settings_manager.get_default_thinking_level()
+        if options.get("freshSession")
+        else bootstrap.get("thinkingLevel") or settings_manager.get_default_thinking_level()
+    )
+    has_recorded_thinking_level = any(
+        entry.get("type") == "thinking_level_change" for entry in session_manager.get_branch()
+    )
+    if options.get("restoreSession") or has_recorded_thinking_level:
         thinking_level = str(restored.get("thinkingLevel") or thinking_level)
     if model and not model.reasoning:
         thinking_level = "off"
@@ -156,13 +163,17 @@ class AgentSessionRuntimeHost:
     def session(self) -> AgentSession:
         return self._runtime.session
 
-    async def _replace(self, session_manager: SessionManager, cwd: str | None = None) -> dict[str, Any]:
+    async def _replace(
+        self, session_manager: SessionManager, cwd: str | None = None, *, fresh_session: bool = False
+    ) -> dict[str, Any]:
         runtime = await create_agent_session_runtime(
             self._bootstrap,
             {
                 "cwd": cwd or session_manager.cwd,
                 "sessionManager": session_manager,
                 "resourceLoader": self._runtime.resource_loader,
+                "freshSession": fresh_session,
+                "restoreSession": not fresh_session,
             },
         )
         self._runtime = runtime
@@ -185,7 +196,7 @@ class AgentSessionRuntimeHost:
         if options.get("parentSession"):
             manager.get_header()["parentSession"] = options["parentSession"]
             manager._rewrite()  # noqa: SLF001
-        return await self._replace(manager)
+        return await self._replace(manager, fresh_session=True)
 
     async def switch_session(self, session_path: str) -> dict[str, Any]:
         manager = SessionManager.open(session_path, self._runtime.session_manager.session_dir)

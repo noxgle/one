@@ -205,6 +205,75 @@ async def test_tui_command_model_cycle_and_thinking_cycle(tmp_path: Path):
         assert "Model cycled to" in stream
         assert "Thinking level cycled to high" in stream
         assert session.thinking_level == "high"
+        assert session.settings_manager.get_default_thinking_level() == "high"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("level", "reasoning"),
+    [
+        ("off", None),
+        ("minimal", {"effort": "low", "summary": "auto"}),
+        ("low", {"effort": "low", "summary": "auto"}),
+        ("medium", {"effort": "medium", "summary": "auto"}),
+        ("high", {"effort": "high", "summary": "auto"}),
+        ("xhigh", {"effort": "high", "summary": "auto"}),
+    ],
+)
+async def test_tui_thinking_uses_provider_native_payloads(
+    tmp_path: Path, level: str, reasoning: dict[str, str] | None
+) -> None:
+    """The TUI command's persisted level reaches each provider wire dialect."""
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.codex_responses import CodexResponsesAdapter
+    from one.providers.ollama import OllamaCloudAdapter
+    from one.providers.openai_compatible import OpenAICompatibleAdapter
+
+    session = _mk_app_session(tmp_path, runtime_key="dummy")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, f"/thinking {level}")
+        assert session.thinking_level == level
+
+    messages = [{"role": "user", "content": "hi"}]
+    codex = CodexResponsesAdapter()._build_payload("gpt", messages, session.thinking_level, stream=True)
+    openrouter = OpenAICompatibleAdapter(
+        "openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter"
+    )._build_payload("provider/model", messages, session.thinking_level)
+    ollama_cloud = OllamaCloudAdapter("https://ollama.com")._build_payload(
+        "glm-5:cloud", messages, session.thinking_level
+    )
+    llama_cpp = OpenAICompatibleAdapter(
+        "llama.cpp", "http://localhost:8080", supports_reasoning_effort=False,
+        default_temperature=None,
+    )._build_payload("local", messages, session.thinking_level)
+
+    assert codex.get("reasoning") == reasoning
+    openrouter_effort = {
+        "minimal": "minimal", "low": "low", "medium": "medium",
+        "high": "high", "xhigh": "high",
+    }.get(level)
+    assert openrouter.get("reasoning") == (
+        {"effort": openrouter_effort} if openrouter_effort else None
+    )
+    assert "reasoning_effort" not in openrouter
+    assert ollama_cloud["think"] == (False if level == "off" else ("low" if level == "minimal" else level if level != "xhigh" else "high"))
+    assert "reasoning_effort" not in llama_cpp
+
+
+@pytest.mark.asyncio
+async def test_tui_thinking_command_reports_capability_coerced_level(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="dummy")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/model llama.cpp/local")
+        await _submit(app, pilot, "/thinking high")
+        assert session.thinking_level == "off"
+        assert "Thinking level set to off" in "\n".join(app._stream_lines)
 
 
 @pytest.mark.asyncio

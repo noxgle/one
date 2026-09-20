@@ -48,6 +48,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "budget": {"maxTokens": 0, "maxTimeSec": 0},
 }
 
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+
 
 def _deep_merge(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     out = deepcopy(a)
@@ -161,7 +163,8 @@ class SettingsManager:
         return self.merged().get("defaultModel")
 
     def get_default_thinking_level(self) -> str:
-        return self.merged().get("defaultThinkingLevel", "medium")
+        level = self.merged().get("defaultThinkingLevel", "medium")
+        return level if level in THINKING_LEVELS else "medium"
 
     def get_enabled_models(self) -> list[str]:
         return list(self.merged().get("enabledModels", []))
@@ -409,6 +412,8 @@ class SettingsManager:
 
     def set_default_thinking_level(self, level: str) -> None:
         self._require_writable_global()
+        if level not in THINKING_LEVELS:
+            raise ValueError(f"Invalid thinking level: {level}")
         self._global["defaultThinkingLevel"] = level
         self._save_global()
 

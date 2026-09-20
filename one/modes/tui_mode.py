@@ -2056,7 +2056,7 @@ if TEXTUAL_AVAILABLE:
             if cmd.startswith("/thinking "):
                 level = cmd[len("/thinking ") :].strip()
                 session.set_thinking_level(level)
-                self._write(f"Thinking level set to {level}", "info")
+                self._write(f"Thinking level set to {session.thinking_level}", "info")
                 self._refresh_sidebar()
                 return
             if cmd == "/thinking-cycle":

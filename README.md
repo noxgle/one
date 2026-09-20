@@ -242,6 +242,24 @@ llama.cpp, Ollama, and ChatGPT/Codex. Credential precedence is runtime input,
 then stored `auth.json`, then the provider environment variable. Common
 variables include `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GEMINI_API_KEY`.
 
+### Thinking levels
+
+`/thinking <off|minimal|low|medium|high|xhigh>` and `/thinking-cycle` save the
+selected level as the default for future sessions; a loaded session continues
+to use its recorded level. Models without reasoning capability remain at
+`off`. `off` omits enabled reasoning where supported. OpenAI-compatible and
+Codex APIs use their available effort enums (their highest/lowest available
+effort may be used for `xhigh`/`minimal`); Anthropic and Gemini 2.5 use
+deterministic thinking-token budgets. Provider and model API restrictions still
+determine which controls a request accepts.
+
+OpenRouter uses its native `reasoning: {"effort": ...}` request dialect and
+streams reasoning separately. Ollama Cloud uses native `think`; `minimal` and
+`low` map to `"low"`, `medium` to `"medium"`, `high` and `xhigh` to `"high"`,
+and `off` to `false`. ChatGPT/Codex Responses reasoning summaries
+also render separately from answer text. Local Ollama and llama.cpp retain their
+OpenAI-compatible/local behavior.
+
 For local models, no key is required:
 
 ```bash

@@ -6,6 +6,7 @@ from .anthropic import AnthropicAdapter
 from .base import ProviderAdapter
 from .codex_responses import CodexResponsesAdapter
 from .gemini import GeminiAdapter
+from .ollama import OllamaCloudAdapter
 from .openai_compatible import OpenAICompatibleAdapter
 
 
@@ -27,14 +28,10 @@ def build_provider_registry() -> dict[str, ProviderAdapter]:
         "gemini": GeminiAdapter(),
         # ChatGPT/Codex subscription backend (Responses API, OAuth only).
         "chatgpt": CodexResponsesAdapter(),
-        "openrouter": OpenAICompatibleAdapter("openrouter", openrouter_base),
-        # Ollama Cloud rejects some OpenAI-specific fields like reasoning_effort.
-        "ollama-cloud": OpenAICompatibleAdapter(
-            "ollama-cloud",
-            ollama_cloud_base,
-            supports_reasoning_effort=False,
-            default_temperature=None,
+        "openrouter": OpenAICompatibleAdapter(
+            "openrouter", openrouter_base, reasoning_mode="openrouter"
         ),
+        "ollama-cloud": OllamaCloudAdapter(ollama_cloud_base),
         # llama.cpp server mode (OpenAI-compatible endpoint, typically local).
         "llama.cpp": OpenAICompatibleAdapter(
             "llama.cpp",
