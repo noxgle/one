@@ -2547,3 +2547,389 @@ not conflict with terminal text paste.
     reachable through both `Ctrl+Alt+V` and `/paste-image`.
   - **Verification:** `pytest -q`, `ruff check .`, `git diff --check`, focused
     TUI tests, and a manual SSH terminal smoke test where available.
+
+## Project: TUI session browser and lifecycle management
+
+### Goal
+
+Make persisted TUI sessions easy to discover, name, load, rename, and delete
+through a single `/sessions` command family.
+
+### Context
+
+`SessionManager` already persists JSONL sessions, supports `list`, `open`,
+`continue_recent`, and stores names through `session_info` entries. The TUI
+currently exposes `/new`, `/tree`, `/navigate`, and `/fork`, but it does not
+provide a numbered session list, direct loading of a selected session, or
+session deletion. The session evidence sidecar (`*.jsonl.evidence`) must remain
+consistent with the session file during deletion.
+
+### Scope
+
+#### In Scope
+
+- `/sessions` listing for the current project/session directory.
+- Numbered selection with `/sessions <number>`.
+- Loading by exact, full session-name match with `/sessions <name>`.
+- Automatic names derived from the first user prompt, normalized and limited to
+  64 characters.
+- Manual rename using `/sessions rename <number|exact name> <new name>`.
+- Deletion using `/sessions delete <number|exact name>` with confirmation.
+- Loading a selected session into the existing TUI instance while correctly
+  rebinding event listeners and refreshing transcript/sidebar state.
+- Deleting the JSONL session and its evidence sidecar together.
+
+#### Non-Goals
+
+- Cross-project session search in the initial implementation.
+- Fuzzy or partial name matching.
+- Cloud synchronization, trash/recovery, or session export redesign.
+- Changing the JSONL message/history format beyond the existing
+  `session_info` mechanism.
+
+### Assumptions
+
+- Session names are unique within the current project directory; duplicate
+  names are rejected or reported as ambiguous rather than selected randomly.
+- Numeric indexes are temporary display indexes and are resolved against the
+  current `/sessions` listing, sorted by most recently modified.
+- Automatic naming does not require an additional provider/model call: derive
+  the name locally from the first user prompt.
+- A name must be non-empty after trimming and may contain at most 64 Unicode
+  characters. Manual names over the limit are rejected; automatic names are
+  truncated safely.
+- Loading or deleting while a turn is streaming is disallowed until the turn
+  is stopped/completed.
+
+### Open Questions
+
+- Whether deleting the active session should immediately create a new empty
+  session (recommended) or require the user to run `/new`.
+- Whether rename/delete should accept numeric indexes only, or both indexes and
+  exact names. The recommended interface supports both, with numeric input
+  taking precedence.
+- Whether `/sessions` should show the full path/session id in addition to name,
+  timestamp, and message count when names are missing or duplicated.
+
+### Tech Stack
+
+- **Python/Textual:** TUI command dispatch, modal/confirmation interaction if
+  needed, and widget refresh.
+- **`SessionManager`:** session discovery, metadata persistence, loading, and
+  safe deletion of JSONL/evidence files.
+- **Existing `AgentSession`:** session-name API and runtime/session state.
+
+### Constraints
+
+- Preserve the existing session event contract and session JSONL compatibility.
+- Preserve `/resume`, `/continue`, `/session`, `/fork`, `/new`, and existing
+  branch-navigation behavior.
+- Never delete an evidence sidecar without deleting or intentionally retaining
+  its owning session according to the documented operation.
+- Avoid exposing absolute paths or sensitive session contents in the list.
+
+### Architecture
+
+`SessionManager` remains the persistence boundary. Extend its session metadata
+operations with validated naming and an atomic lifecycle operation for deletion
+of a session file plus its evidence sidecar. Keep listing as a value-object
+operation returning `SessionInfo`; the TUI should format the list and resolve
+the displayed number to a path only for the current command invocation.
+
+The TUI command parser handles `/sessions` as follows:
+
+- no argument: list sessions with number, name, relative age, and message
+  count;
+- integer argument: load that numbered session;
+- exact non-command argument: load the uniquely matching full name;
+- `rename`: validate and append a new `session_info` entry;
+- `delete`: resolve the target, request confirmation, then delete it.
+
+Loading should reuse the existing session-switch lifecycle used by `/fork`:
+stop/deny active streaming, detach the old listener, instantiate/open the
+target `AgentSession` state, bind the new listener, rebuild the transcript, and
+refresh sidebar/status state. The implementation must not leave events from the
+old session attached to the TUI.
+
+### Architecture Decisions
+
+#### ADR-001: One `/sessions` command family
+
+**Decision:** Use `/sessions` for listing, numeric/exact-name loading, rename,
+and delete rather than adding separate top-level commands.
+
+**Alternatives:** Separate `/load-session`, `/rename-session`, and
+`/delete-session` commands; a dedicated interactive browser modal.
+
+**Rationale:** This matches the existing provider-style interaction requested
+by the user, remains usable over SSH, and keeps the common path keyboard-only.
+
+**Trade-offs:** The command grammar needs clear error messages and careful
+disambiguation between a number, a name, and a subcommand.
+
+#### ADR-002: Local first-prompt automatic naming
+
+**Decision:** Generate the initial name locally from the first user prompt,
+normalize whitespace/control characters, and cap it at 64 characters. Permit
+manual replacement through `rename`.
+
+**Alternatives:** Ask the model to generate a title; use only timestamps/IDs;
+require every user to name sessions manually.
+
+**Rationale:** No extra latency/cost, deterministic behavior, works offline,
+and produces useful names immediately.
+
+**Trade-offs:** Local truncation may produce less polished titles than a model;
+the UI should make manual rename easy.
+
+#### ADR-003: Exact-name matching only
+
+**Decision:** A textual load/delete target matches only an exact full session
+name. Partial matches are not loaded implicitly.
+
+**Alternatives:** Prefix/fuzzy matching; interactive disambiguation for partial
+matches.
+
+**Rationale:** Prevents accidentally opening or deleting the wrong session and
+keeps pasted names predictable.
+
+**Trade-offs:** Users must type/paste the complete name or use the displayed
+number.
+
+### Phases
+
+#### Phase 1: Persistence and naming contract
+
+**Objective:** Make name validation, automatic first-prompt naming, listing,
+and safe deletion explicit at the persistence boundary.
+
+**Prerequisites:** Existing `SessionManager` and `session_info` support.
+
+**Expected outcome:** Session metadata operations are deterministic, bounded,
+and independently testable without Textual.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High
+
+- [ ] **Task:** Add validated session-name and deletion operations.
+
+  - **Description:** Extend the session manager/agent session API to enforce the
+    64-character trimmed non-empty name rule, derive a name from the first user
+    prompt once, and delete a target JSONL plus matching evidence sidecar with
+    clear missing/already-deleted handling. Reject unsafe paths outside the
+    managed session directory.
+
+  - **Files:** `one/core/session_manager.py`, `one/core/agent_session.py`,
+    `tests/test_session_manager.py`, relevant agent-session tests.
+
+  - **Dependencies:** None.
+
+  - **Acceptance Criteria:** Names are persisted and read consistently; automatic
+    naming happens at most once; manual names over 64 characters are rejected;
+    deletion removes both session artifacts and does not affect another session.
+
+  - **Verification:** Unit tests for whitespace/control normalization, 64-character
+    boundaries, duplicate names, missing sidecars, path containment, and
+    JSONL/evidence deletion.
+
+#### Phase 2: `/sessions` command grammar and listing
+
+**Objective:** Expose a provider-style numbered session browser in TUI.
+
+**Prerequisites:** Phase 1 naming/listing contract.
+
+**Expected outcome:** `/sessions` prints a stable, readable list and validates
+all load/rename/delete target forms without mutating state unexpectedly.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High
+
+- [ ] **Task:** Implement `/sessions` list, exact-name resolution, rename, and
+  delete command handling.
+
+  - **Description:** Add help text and parser branches for `/sessions`,
+    `/sessions <number>`, `/sessions <exact name>`,
+    `/sessions rename <number|exact name> <new name>`, and
+    `/sessions delete <number|exact name>`. Display number, name (or a clear
+    unnamed placeholder), relative modification time, and message count. Use
+    explicit errors for invalid indexes, missing exact names, duplicate names,
+    malformed subcommands, and streaming-state restrictions.
+
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_commands.py`,
+    `README.md`, `CHANGELOG.md`.
+
+  - **Dependencies:** Phase 1.
+
+  - **Acceptance Criteria:** `/sessions` lists only current-project sessions;
+    numeric selection resolves the displayed item; full-name matching is exact;
+    rename validates the new name; delete requires confirmation; command help
+    documents the grammar.
+
+  - **Verification:** TUI command tests for empty/single/multiple lists,
+    numeric selection, exact-name selection, partial-name rejection, rename,
+    duplicate-name handling, invalid input, and delete confirmation/cancellation.
+
+#### Phase 3: Runtime session switching and deletion UX
+
+**Objective:** Load and delete sessions without stale listeners, stale transcript
+  content, or inconsistent sidebar state.
+
+**Prerequisites:** Phases 1–2.
+
+**Expected outcome:** A selected session becomes the active TUI session and the
+  user can safely remove sessions, including the active one according to the
+  chosen policy.
+
+**Estimated effort:** 1–2 days.
+
+**Confidence:** Medium
+
+- [ ] **Task:** Integrate session loading with the existing TUI lifecycle.
+
+  - **Description:** Reuse/refactor the existing session rebind path used by
+    fork/switch behavior so `/sessions <number|exact name>` opens the target,
+    detaches the previous listener, rebuilds the transcript, refreshes sidebar
+    metadata, and updates the active session identity/path. Ensure old-session
+    events cannot mutate the new view.
+
+  - **Files:** `one/modes/tui_mode.py`, `one/cli/main.py` if startup/session
+    construction needs a shared helper, `tests/test_tui_commands.py`,
+    `tests/test_tui_input.py` or session-switch tests.
+
+  - **Dependencies:** Phase 2.
+
+  - **Acceptance Criteria:** Loading displays the target history and name;
+    subsequent messages append only to the loaded session; old events are
+    ignored; loading is blocked while streaming; `/new`, `/fork`, `/resume`,
+    and `/continue` remain compatible.
+
+  - **Verification:** Async Textual tests switch between two fixture sessions,
+    assert transcript/sidebar/session-file changes, emit an old-session event,
+    and verify it is not rendered; run existing session and event snapshot tests.
+
+- [ ] **Task:** Complete deletion confirmation and active-session behavior.
+
+  - **Description:** Add the confirmed delete flow, remove the evidence sidecar,
+    refresh the list, and implement the selected policy for deleting the active
+    session (recommended: open a new empty session). Preserve user-visible
+    success/failure messages and avoid deleting during an active turn.
+
+  - **Files:** `one/modes/tui_mode.py`, `one/core/session_manager.py`,
+    `tests/test_tui_commands.py`, session persistence tests.
+
+  - **Dependencies:** Session switching task and Phase 1 deletion API.
+
+  - **Acceptance Criteria:** Cancellation leaves all files untouched; confirmed
+    deletion removes JSONL and evidence; deleting an inactive session leaves the
+    active session unchanged; deleting the active session leaves TUI usable and
+    creates/opens the documented replacement session.
+
+  - **Verification:** End-to-end temporary-directory tests covering inactive,
+    active, cancelled, already-missing, and sidecar-present deletion cases.
+
+#### Phase 4: Documentation and regression verification
+
+**Objective:** Document the command family and verify compatibility.
+
+**Prerequisites:** Phases 1–3.
+
+**Expected outcome:** Users can discover and operate session management without
+  knowing implementation details.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** High
+
+- [ ] **Task:** Document session naming and lifecycle commands.
+
+  - **Description:** Treat README session documentation as a required user-facing
+    deliverable, not incidental release-note work. Add a dedicated, prominent
+    section explaining persistent TUI sessions and copy-pasteable examples for
+    `/sessions`, `/sessions <number>`, `/sessions <full exact name>`, rename,
+    delete confirmation, automatic first-prompt naming, the 64-character name
+    limit, active-session deletion behavior, and startup recovery with
+    `--resume`/`--continue`. Keep TUI `/help`, README, and changelog wording
+    consistent.
+
+  - **Files:** `README.md`, `CHANGELOG.md`, `one/modes/tui_mode.py`.
+
+  - **Dependencies:** Phases 2–3.
+
+  - **Acceptance Criteria:** README clearly explains how to discover, load,
+    rename, delete, and resume sessions without reading source code;
+    documentation matches the implemented grammar and contains no claims about
+    fuzzy matching or unsupported recovery.
+
+  - **Verification:** Repository search for `/sessions` examples and stale
+    session-command descriptions; review the README section as a new user;
+    manual TUI smoke test following only the documented commands.
+
+- [ ] **Task:** Run integrated regression verification.
+
+  - **Description:** Run focused session/TUI tests and the complete project
+    verification suite, reviewing any snapshot changes for intentional session
+    metadata/help updates only.
+
+  - **Files:** `tests/test_session_manager.py`, `tests/test_tui_commands.py`,
+    `tests/test_tui_snapshots.py`, and snapshots only if intentionally changed.
+
+  - **Dependencies:** All previous tasks.
+
+  - **Acceptance Criteria:** Existing session persistence, fork, resume,
+    navigation, TUI event ordering, and CLI modes remain green.
+
+  - **Verification:** `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check .`,
+    and `git diff --check`.
+
+### Rollout & Rollback
+
+Roll out as a backward-compatible TUI feature. Existing sessions without a
+name remain loadable and display an unnamed placeholder. If switching or
+deletion proves unsafe, disable the new command branches while retaining the
+existing `--resume`/`--continue` paths; do not alter or migrate existing JSONL
+history unnecessarily.
+
+### Observability
+
+Show concise TUI success/error messages for list, load, rename, and delete.
+Include session id/path only in diagnostic output, not normal lists. Log no
+session contents or names beyond the existing local session files.
+
+### Security Considerations
+
+Validate all targets against the managed session directory, do not accept
+arbitrary filesystem paths through `/sessions`, preserve private file modes,
+and delete only the evidence sidecar associated with the resolved session.
+Confirmation is mandatory for deletion.
+
+### Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Stale listener after loading | Old session corrupts new transcript | Medium | Reuse generation-token/unbind lifecycle and add cross-session event tests |
+| Accidental deletion | Permanent loss of session/evidence | Medium | Exact matching, confirmation, bounded paths, explicit result messages |
+| Duplicate names | Wrong session loaded/deleted | Medium | Detect duplicates and require numeric selection |
+| Automatic names are noisy | Poor discoverability | Medium | Normalize/truncate first prompt and provide manual rename |
+| Large session list | Unreadable TUI output | Low | Current-directory scope, concise rows, bounded name display |
+
+### Project Acceptance Criteria
+
+- [ ] `/sessions` lists current-project sessions with numeric indexes.
+- [ ] `/sessions <number>` loads the selected session into the current TUI.
+- [ ] `/sessions <exact name>` loads only a unique full-name match.
+- [ ] Names are automatically derived from the first prompt or manually renamed,
+  with a strict 64-character maximum.
+- [ ] Rename and delete operations have validation and clear error handling.
+- [ ] Delete confirmation protects the session and removes its evidence sidecar
+  together with the JSONL file.
+- [ ] Existing resume, fork, branch navigation, event ordering, and full test
+  suite remain compatible.
+
+### Estimated Timeline
+
+Approximately 2.5–4.5 engineering days: persistence contract, command grammar,
+runtime switching/deletion, then documentation and regression verification. The
+main uncertainty is the amount of refactoring needed to share the existing TUI
+fork/rebind lifecycle safely.
