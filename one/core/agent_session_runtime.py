@@ -83,6 +83,20 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         )
 
     model = bootstrap.get("model")
+    # A loaded session's latest persisted model/thinking choice is its runtime
+    # state, not merely display metadata.  Fresh sessions retain bootstrap
+    # selection/default behavior.
+    restored = session_manager.build_session_context()
+    restored_model = restored.get("model") if options.get("sessionManager") is not None else None
+    if isinstance(restored_model, dict) and restored_model.get("provider") and restored_model.get("modelId"):
+        try:
+            restored_candidate = model_registry.resolve(
+                str(restored_model["provider"]), str(restored_model["modelId"])
+            )
+        except (KeyError, TypeError, ValueError):
+            restored_candidate = None
+        if restored_candidate is not None:
+            model = restored_candidate
     if not model:
         avail = model_registry.get_available()
         if avail:
@@ -99,6 +113,8 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         model_fallback_message = f"No auth configured for {model.provider}/{model.id}"
 
     thinking_level = bootstrap.get("thinkingLevel") or settings_manager.get_default_thinking_level()
+    if options.get("sessionManager") is not None:
+        thinking_level = str(restored.get("thinkingLevel") or thinking_level)
     if model and not model.reasoning:
         thinking_level = "off"
 

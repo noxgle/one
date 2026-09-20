@@ -75,6 +75,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **TUI session browser** — `/sessions` lists current-project sessions and loads
+  by number or unique full exact name; it supports validated rename and
+  confirmation-protected deletion of a session JSONL plus its evidence sidecar.
+  New sessions receive a locally derived, normalized first-prompt title (64
+  Unicode characters maximum).
+
 - **Docker diagnostic soak telemetry** — bounded container CPU, memory, PID,
   network/block-I/O and disposable workspace/session-size samples are included
   in diagnostic reports, with unavailable stats reported explicitly.

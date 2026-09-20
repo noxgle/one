@@ -20,6 +20,7 @@ from one.config import VERSION
 from one.core.oauth import OAuthError
 from one.core.provider_login import entry_id as fetched_entry_id
 from one.core.provider_login import run_oauth_login, validate_and_fetch
+from one.core.session_manager import SessionInfo, SessionManager, normalize_session_name
 from one.core.types import ModelInfo
 from one.tools.common import sanitize_display_text
 
@@ -377,6 +378,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/navigate",
     "/fork",
     "/new",
+    "/sessions",
     "/login",
     "/logout",
     "/reload",
@@ -822,6 +824,7 @@ if TEXTUAL_AVAILABLE:
             self._login_pending: dict[str, Any] | None = None
             self._ask_user_pending: dict[str, Any] | None = None
             self._pending_clipboard_image_bytes: bytes | None = None
+            self._session_delete_pending: SessionInfo | None = None
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
@@ -957,6 +960,97 @@ if TEXTUAL_AVAILABLE:
                                 self._ui_flush_wakeup_pending = False
 
             self._off_listener = self.session.subscribe(_listener)
+
+        def _rebuild_session_transcript(self) -> None:
+            """Replace the viewport cache with the loaded durable transcript."""
+            self._stream_lines = []
+            self._rendered_stream_lines = ()
+            self._assistant_stream = ""
+            self._assistant_stream_open = False
+            self._assistant_has_live_delta = False
+            self._assistant_live_start_idx = -1
+            self._assistant_live_buffer = ""
+            self._assistant_live_line_count = 0
+            self._active_tool_block = None
+            self._remove_thinking_line()
+            for message in self.session.messages:
+                role = message.get("role")
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    content = "".join(str(part.get("text", "")) for part in content if part.get("type") == "text")
+                if role in {"user", "assistant"}:
+                    self._write_chat_block(role, str(content))
+                elif role == "toolResult":
+                    self._write_tool_block(str(content))
+                elif role == "custom":
+                    self._write_chat_block("custom", str(content))
+            self._render_stream()
+
+        def _session_infos(self) -> list[SessionInfo]:
+            manager = self.session.session_manager
+            return SessionManager.list(manager.cwd, manager.session_dir)
+
+        def _resolve_session_target(self, target: str) -> tuple[SessionInfo | None, str | None]:
+            infos = self._session_infos()
+            target = target.strip()
+            matches = [info for info in infos if info.name == target]
+            if matches:
+                if len(matches) != 1:
+                    return None, "Session name is ambiguous; use its number from /sessions."
+                return matches[0], None
+            if target.isdigit():
+                index = int(target)
+                if not 1 <= index <= len(infos):
+                    return None, f"Session number out of range (1..{len(infos)})"
+                return infos[index - 1], None
+            return None, "No session has that exact name. Use /sessions to list sessions."
+
+        def _parse_session_rename_target(self, rename_rest: str) -> tuple[str | None, str | None, str | None]:
+            """Return a target and replacement, rejecting overlapping-name ambiguity."""
+            target, separator, new_name = rename_rest.partition(" ")
+            if not separator or not new_name.strip():
+                return None, None, "Usage: /sessions rename <number|full exact name> <new name>"
+            if target.isdigit():
+                return target, new_name, None
+
+            names = {info.name for info in self._session_infos() if info.name and rename_rest.startswith(info.name + " ")}
+            if not names:
+                return target, new_name, None
+            if len(names) != 1:
+                return None, None, "Session rename target is ambiguous; use its number from /sessions."
+            name = names.pop()
+            return name, rename_rest[len(name) + 1 :], None
+
+        def _list_sessions(self) -> None:
+            infos = self._session_infos()
+            if not infos:
+                self._write("No persisted sessions in this project.", "info")
+                return
+            now = time.time()
+            lines = ["Sessions (newest first):"]
+            for index, info in enumerate(infos, 1):
+                seconds = max(0, int(now - info.modified.timestamp()))
+                age = f"{seconds // 86400}d ago" if seconds >= 86400 else f"{seconds // 3600}h ago" if seconds >= 3600 else f"{seconds // 60}m ago"
+                name = info.name or "(unnamed)"
+                active = " *" if info.id == self.session.session_id else ""
+                lines.append(f"{index}. {name} — {age}, {info.message_count} messages{active}")
+            lines.append("Load: /sessions <number|full exact name>")
+            self._write("\n".join(lines), "info")
+
+        async def _switch_to_session(self, info: SessionInfo) -> None:
+            if self.session.is_streaming:
+                self._write("Stop or wait for the active turn before loading a session.", "error")
+                return
+            if self.runtime_host is None:
+                self._write("Runtime host unavailable: session loading is not supported in this context.", "error")
+                return
+            await self.runtime_host.switch_session(info.path)
+            self.session = self.runtime_host.session
+            self._bind_session()
+            self._clear_extension_ui_state()
+            self._rebuild_session_transcript()
+            self._write(f"Loaded session: {info.name or '(unnamed)'}.", "info")
+            self._refresh_sidebar()
 
         def on_unmount(self) -> None:
             if callable(self._off_listener):
@@ -1668,7 +1762,11 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write(
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>",
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /sessions [number|full exact name] | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>",
+                    "info",
+                )
+                self._write(
+                    "/sessions rename <number|full exact name> <new name> | /sessions delete <number|full exact name>",
                     "info",
                 )
                 self._write(
@@ -1726,6 +1824,60 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd == "/tools":
                 self._write(json.dumps({"tools": session.active_tools}, ensure_ascii=False), "info")
+                return
+            if cmd == "/sessions":
+                self._list_sessions()
+                return
+            if cmd.startswith("/sessions "):
+                rest = cmd[len("/sessions ") :].strip()
+                if rest.startswith("delete "):
+                    target, error = self._resolve_session_target(rest[len("delete ") :])
+                    if error:
+                        self._write(error, "error")
+                    elif session.is_streaming:
+                        self._write("Stop or wait for the active turn before deleting a session.", "error")
+                    else:
+                        self._session_delete_pending = target
+                        self._write(f"Delete session '{target.name or '(unnamed)'}'? Type yes to confirm, anything else cancels.", "warn")
+                    return
+                if rest.startswith("rename "):
+                    rename_rest = rest[len("rename ") :].strip()
+                    target_text, new_name, error = self._parse_session_rename_target(rename_rest)
+                    if error:
+                        self._write(error, "error")
+                        return
+                    target, error = self._resolve_session_target(target_text)
+                    if error:
+                        self._write(error, "error")
+                        return
+                    if session.is_streaming:
+                        self._write("Stop or wait for the active turn before renaming a session.", "error")
+                        return
+                    try:
+                        normalized = normalize_session_name(new_name)
+                        duplicate = next(
+                            (info for info in self._session_infos() if info.path != target.path and info.name == normalized),
+                            None,
+                        )
+                        if duplicate is not None:
+                            raise ValueError("A session with that name already exists")
+                        if target.id == session.session_id:
+                            session.set_session_name(normalized)
+                            manager = session.session_manager
+                        else:
+                            manager = SessionManager.open(target.path, session.session_manager.session_dir)
+                            manager.set_session_name(normalized)
+                    except ValueError as exc:
+                        self._write(str(exc), "error")
+                        return
+                    self._write(f"Renamed session to: {manager.get_session_name()}.", "info")
+                    self._refresh_sidebar()
+                    return
+                target, error = self._resolve_session_target(rest)
+                if error:
+                    self._write(error, "error")
+                    return
+                await self._switch_to_session(target)
                 return
             if cmd == "/inspect-timeout":
                 diag = session.inspect_subagent_timeout()
@@ -2442,6 +2594,35 @@ if TEXTUAL_AVAILABLE:
             if self._approval_pending is not None:
                 await self._handle_approval_answer(text)
                 return
+            if self._session_delete_pending is not None:
+                target = self._session_delete_pending
+                self._session_delete_pending = None
+                if text.lower() != "yes":
+                    self._write("Session deletion cancelled.", "info")
+                    return
+                if self.session.is_streaming:
+                    self._write("Stop or wait for the active turn before deleting a session.", "error")
+                    return
+                try:
+                    active = target.id == self.session.session_id
+                    if active:
+                        if self.runtime_host is None:
+                            self._write("Runtime host unavailable: cannot replace the active session.", "error")
+                            return
+                        await self.runtime_host.new_session({})
+                        self.session = self.runtime_host.session
+                        self._bind_session()
+                        self._rebuild_session_transcript()
+                        self._clear_extension_ui_state()
+                    SessionManager.delete(target.path, self.session.session_manager.session_dir)
+                except (OSError, ValueError) as exc:
+                    self._write(f"Session deletion failed: {exc}", "error")
+                    return
+                self._write(f"Deleted session: {target.name or '(unnamed)'}.", "info")
+                if active:
+                    self._write("New session started.", "info")
+                self._refresh_sidebar()
+                return
 
             image_paths: list[Path] = []
             clean_text: str = ""
@@ -2962,7 +3143,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list|name [args]] /config /extui /cooperation /subagents /bash-show /history /mcp /bash /paste-image /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list|name [args]] /config /extui /cooperation /subagents /bash-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 

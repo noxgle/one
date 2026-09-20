@@ -774,3 +774,152 @@ async def test_tui_retry_cycle_command(tmp_path: Path):
         stream = "\n".join(app._stream_lines)
         assert "Auto-retry set to on." in stream
         assert session.settings_manager.get_retry_mode() == "on"
+
+
+def _persistent_tui_session(tmp_path: Path, name: str, message: str):
+    from one.core.agent_session import AgentSession
+    from one.core.session_manager import SessionManager
+
+    template = _mk_app_session(tmp_path)
+    manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    manager.set_session_name(name)
+    manager.append_message({"role": "user", "content": message})
+    return AgentSession(
+        manager,
+        template.settings_manager,
+        template.model_registry,
+        template.resource_loader,
+        template.model,
+        "medium",
+    )
+
+
+@pytest.mark.asyncio
+async def test_tui_sessions_lists_renames_and_confirms_delete(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _persistent_tui_session(tmp_path, "First session", "first")
+    other = _persistent_tui_session(tmp_path, "Second session", "second")
+    assert other.session_file is not None
+    other_path = Path(other.session_file)
+    sidecar = Path(str(other_path) + ".evidence")
+    sidecar.write_text("sidecar\n", encoding="utf-8")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/sessions")
+        stream = "\n".join(app._stream_lines)
+        assert "First session" in stream and "Second session" in stream
+        await _submit(app, pilot, "/sessions rename First session Renamed session")
+        assert "Renamed session" in "\n".join(app._stream_lines)
+        await _submit(app, pilot, "/sessions delete Second session")
+        await _submit(app, pilot, "no")
+        assert other_path.exists()
+        await _submit(app, pilot, "/sessions delete Second session")
+        await _submit(app, pilot, "yes")
+        assert not other_path.exists()
+        assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+async def test_tui_sessions_load_exact_name_and_ignore_old_listener(tmp_path: Path):
+    from one.core.agent_session import AgentSession
+    from one.core.session_manager import SessionManager
+    from one.modes.tui_mode import _OneTextualApp
+
+    first = _persistent_tui_session(tmp_path, "First session", "first transcript")
+    second = _persistent_tui_session(tmp_path, "Second session", "second transcript")
+    second.session_manager.append_custom_message("compaction_summary", "compaction transcript", True)
+    second.session_manager.append_branch_summary(second.session_manager.get_leaf_id(), "branch transcript")
+
+    class Host:
+        def __init__(self):
+            self.session = first
+
+        async def switch_session(self, path: str):
+            manager = SessionManager.open(path, self.session.session_manager.session_dir)
+            self.session = AgentSession(
+                manager,
+                first.settings_manager,
+                first.model_registry,
+                first.resource_loader,
+                first.model,
+                "medium",
+            )
+
+        async def new_session(self, options):  # noqa: ARG002
+            manager = SessionManager.create(str(tmp_path), self.session.session_manager.session_dir)
+            self.session = AgentSession(
+                manager,
+                first.settings_manager,
+                first.model_registry,
+                first.resource_loader,
+                first.model,
+                "medium",
+            )
+
+    host = Host()
+    app = _OneTextualApp(first, runtime_host=host)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/sessions Second session")
+        assert app.session.session_id == second.session_id
+        assert "second transcript" in "\n".join(app._stream_lines)
+        assert "compaction transcript" in "\n".join(app._stream_lines)
+        assert "branch transcript" in "\n".join(app._stream_lines)
+        first_number = next(str(i) for i, info in enumerate(app._session_infos(), 1) if info.id == first.session_id)
+        await _submit(app, pilot, f"/sessions {first_number}")
+        assert app.session.session_id == first.session_id
+        first._emit({"type": "message_end", "message": {"role": "assistant", "content": "stale old event"}})
+        await pilot.pause()
+        assert "stale old event" not in "\n".join(app._stream_lines)
+        await _submit(app, pilot, "/sessions Second")
+        assert "No session has that exact name" in "\n".join(app._stream_lines)
+        first_path = Path(first.session_file or "")
+        await _submit(app, pilot, "/sessions delete First session")
+        await _submit(app, pilot, "yes")
+        assert not first_path.exists()
+        assert app.session.session_id != first.session_id
+
+
+@pytest.mark.asyncio
+async def test_tui_sessions_target_names_precede_indexes_and_rename_is_unambiguous(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _persistent_tui_session(tmp_path, "Current", "current")
+    numeric_name = _persistent_tui_session(tmp_path, "42", "numeric name")
+    _persistent_tui_session(tmp_path, "Project", "short")
+    _persistent_tui_session(tmp_path, "Project Notes", "long")
+    _persistent_tui_session(tmp_path, "Name With Spaces", "spaces")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        target, error = app._resolve_session_target("42")
+        assert error is None
+        assert target is not None and target.id == numeric_name.session_id
+        indexed, error = app._resolve_session_target("1")
+        assert error is None
+        assert indexed is not None and indexed.id == app._session_infos()[0].id
+        _persistent_tui_session(tmp_path, "42", "duplicate numeric name")
+        target, error = app._resolve_session_target("42")
+        assert target is None
+        assert error == "Session name is ambiguous; use its number from /sessions."
+
+        await _submit(app, pilot, "/sessions rename Project Notes renamed")
+        assert "Session rename target is ambiguous" in "\n".join(app._stream_lines)
+        await _submit(app, pilot, "/sessions rename Name With Spaces renamed")
+        assert any(info.name == "renamed" for info in app._session_infos())
+
+
+@pytest.mark.asyncio
+async def test_tui_sessions_rename_is_blocked_while_streaming(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _persistent_tui_session(tmp_path, "Current", "current")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._is_streaming = True
+        await _submit(app, pilot, "/sessions rename Current renamed")
+        assert "before renaming" in "\n".join(app._stream_lines)
+        assert session.session_manager.get_session_name() == "Current"

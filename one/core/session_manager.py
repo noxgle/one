@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ CURRENT_SESSION_VERSION = 4
 EVIDENCE_VERSION = 1
 EVIDENCE_MAX_RECORD_BYTES = 2_000_000
 EVIDENCE_MAX_SESSION_BYTES = 32_000_000
+SESSION_NAME_MAX_CHARS = 64
 
 
 def _now_iso() -> str:
@@ -29,6 +31,25 @@ def _now_iso() -> str:
 
 def _id() -> str:
     return uuid.uuid4().hex[:8]
+
+
+def normalize_session_name(name: str, *, truncate: bool = False) -> str:
+    """Normalize a local session title without changing existing JSONL shape."""
+    if not isinstance(name, str):
+        raise ValueError("Session name must be text")
+    cleaned = "".join(
+        " " if char.isspace() else char
+        for char in name
+        if not unicodedata.category(char).startswith("C") or char.isspace()
+    )
+    cleaned = " ".join(cleaned.split())
+    if truncate:
+        return cleaned[:SESSION_NAME_MAX_CHARS]
+    if not cleaned:
+        raise ValueError("Session name cannot be empty")
+    if len(cleaned) > SESSION_NAME_MAX_CHARS:
+        raise ValueError(f"Session name must be at most {SESSION_NAME_MAX_CHARS} characters")
+    return cleaned
 
 
 def get_default_session_dir(cwd: str, agent_dir: str | None = None) -> str:
@@ -349,13 +370,16 @@ class SessionManager:
         )
 
     def append_session_info(self, name: str | None) -> str:
+        # Keep the historical session_info entry format.  ``None`` remains
+        # accepted for old callers, while user-provided names are validated.
+        normalized = None if name is None else normalize_session_name(name)
         return self._append(
             {
                 "type": "session_info",
                 "id": _id(),
                 "parentId": self._leaf_id,
                 "timestamp": _now_iso(),
-                "name": (name or "").strip() or None,
+                "name": normalized,
             }
         )
 
@@ -364,6 +388,19 @@ class SessionManager:
             if e.get("type") == "session_info":
                 return e.get("name") or None
         return None
+
+    def set_session_name(self, name: str) -> str:
+        return self.append_session_info(name)
+
+    def set_automatic_name_from_prompt(self, prompt: str) -> bool:
+        """Persist a local title from the first user prompt, once only."""
+        if self.get_session_name() is not None:
+            return False
+        name = normalize_session_name(prompt, truncate=True)
+        if not name:
+            return False
+        self.append_session_info(name)
+        return True
 
     def get_last_compaction(self) -> dict[str, Any] | None:
         for e in reversed(self._entries[1:]):
@@ -649,3 +686,25 @@ class SessionManager:
                 out.extend(cls.list(cwd="", session_dir=str(d)))
         out.sort(key=lambda x: x.modified, reverse=True)
         return out
+
+    @classmethod
+    def delete(cls, path: str, session_dir: str) -> None:
+        """Delete one managed session and its associated evidence sidecar.
+
+        This deliberately accepts no arbitrary path outside *session_dir*.
+        Filesystem deletion of two paths is not atomic, so all validation occurs
+        first and the sidecar is removed before the owning JSONL; a failure can
+        therefore never leave an orphaned sidecar for a deleted session.
+        """
+        directory = Path(session_dir).resolve()
+        candidate = Path(path).resolve()
+        if candidate.parent != directory or candidate.suffix != ".jsonl":
+            raise ValueError("Session path is outside the managed session directory")
+        if not candidate.exists() or not candidate.is_file():
+            raise FileNotFoundError("Session no longer exists")
+        evidence = candidate.with_suffix(candidate.suffix + ".evidence")
+        if evidence.exists():
+            if not evidence.is_file() or evidence.parent != directory:
+                raise ValueError("Invalid session evidence sidecar")
+            evidence.unlink()
+        candidate.unlink()

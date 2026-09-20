@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from one.core.session_manager import SessionManager
+import pytest
+
+from one.core.session_manager import SESSION_NAME_MAX_CHARS, SessionManager, normalize_session_name
 
 
 def test_session_append_and_context(tmp_path: Path):
@@ -206,3 +208,38 @@ def test_export_to_jsonl_round_trip(tmp_path: Path):
     reopened = SessionManager.open(out, str(tmp_path))
     ctx = reopened.build_session_context()
     assert [m["content"] for m in ctx["messages"]] == ["u1", "a1"]
+
+
+def test_session_names_normalize_validate_and_auto_name_once(tmp_path: Path):
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    assert sm.set_automatic_name_from_prompt("  first\n\tprompt\x00  ") is True
+    assert sm.get_session_name() == "first prompt"
+    assert sm.set_automatic_name_from_prompt("later prompt") is False
+    assert sm.get_session_name() == "first prompt"
+
+    sm.set_session_name("  renamed\n title  ")
+    assert sm.get_session_name() == "renamed title"
+    with pytest.raises(ValueError, match="cannot be empty"):
+        sm.set_session_name("\x00 \t")
+    with pytest.raises(ValueError, match="at most"):
+        sm.set_session_name("x" * (SESSION_NAME_MAX_CHARS + 1))
+    assert normalize_session_name("é" * (SESSION_NAME_MAX_CHARS + 3), truncate=True) == "é" * SESSION_NAME_MAX_CHARS
+
+
+def test_delete_managed_session_removes_only_matching_sidecar(tmp_path: Path):
+    directory = tmp_path / "sessions"
+    first = SessionManager.create(str(tmp_path), str(directory))
+    first.append_message({"role": "user", "content": "one"})
+    second = SessionManager.create(str(tmp_path), str(directory))
+    second.append_message({"role": "user", "content": "two"})
+    assert first.session_file and second.session_file
+    sidecar = Path(first.session_file + ".evidence")
+    sidecar.write_text("evidence\n", encoding="utf-8")
+
+    SessionManager.delete(first.session_file, str(directory))
+
+    assert not Path(first.session_file).exists()
+    assert not sidecar.exists()
+    assert Path(second.session_file).exists()
+    with pytest.raises(ValueError, match="outside"):
+        SessionManager.delete(str(tmp_path / "outside.jsonl"), str(directory))

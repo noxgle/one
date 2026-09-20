@@ -245,6 +245,30 @@ See [Cooperation and safety](#cooperation-and-safety) and the slash-command
 help for configuration such as `tools.maxSteps` (`0` means unlimited tool steps)
 and optional `toolOutputPruning`.
 
+### TUI session browser
+
+Persisted sessions are scoped to the current project/session directory. In the
+TUI, `/sessions` lists them newest first with a temporary number, name, age, and
+message count. The first user prompt automatically becomes the local session
+name after whitespace/control-character normalization (up to 64 Unicode
+characters); rename it when needed.
+
+```text
+/sessions
+/sessions 2
+/sessions Fix the parser error
+/sessions rename 2 Parser investigation
+/sessions delete Parser investigation
+yes
+```
+
+Names in load, rename, and delete commands must be the **full exact name**—no
+partial or fuzzy matching is performed. `delete` always asks for `yes`; any
+other reply cancels it. It deletes the JSONL and its matching durable-evidence
+sidecar. Deleting the active session opens a new empty session so the TUI stays
+usable. Loading or deleting waits until an active turn has stopped. Use
+`--continue` or `--resume` at startup to open the most recently modified session.
+
 ## Images
 
 Image input supports PNG, JPEG, and WebP: at most four images per prompt, with

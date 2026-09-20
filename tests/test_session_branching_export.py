@@ -165,6 +165,19 @@ async def test_runtime_host_new_session_uses_model_changed_during_session(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_runtime_host_falls_back_when_restored_model_is_unavailable(tmp_path):
+    host, sm = await _make_host(tmp_path)
+    sm.append_model_change("retired-provider", "retired-model")
+    assert sm.session_file is not None
+
+    await host.switch_session(sm.session_file)
+
+    model = host.session.model
+    assert model is not None
+    assert (model.provider, model.id) == ("openai", "gpt-4.1")
+
+
+@pytest.mark.asyncio
 async def test_runtime_host_fork_returns_user_text(tmp_path):
     host, sm = await _make_host(tmp_path)
     sm.append_message({"role": "user", "content": "u1"})

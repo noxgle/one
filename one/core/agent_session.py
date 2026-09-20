@@ -1734,7 +1734,7 @@ class AgentSession:
         self.settings_manager.set_follow_up_mode(mode)
 
     def set_session_name(self, name: str) -> None:
-        self.session_manager.append_session_info(name)
+        self.session_manager.set_session_name(name)
 
     async def set_model(self, model: ModelInfo) -> None:
         self.model = _with_fallback_context(model)
@@ -2056,6 +2056,10 @@ class AgentSession:
         self._images = images
         self._tool_images = []
         user_msg = {"role": "user", "content": text, "timestamp": int(time.time() * 1000)}
+        # Titles are local metadata, derived once from the first real prompt.
+        # Queued steering and plan custom messages intentionally do not name a
+        # session.
+        self.session_manager.set_automatic_name_from_prompt(text)
         self.messages.append(user_msg)
         self.session_manager.append_message(user_msg)
         self._emit({"type": "message_start", "message": user_msg})
