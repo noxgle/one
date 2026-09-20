@@ -2933,3 +2933,86 @@ Approximately 2.5–4.5 engineering days: persistence contract, command grammar,
 runtime switching/deletion, then documentation and regression verification. The
 main uncertainty is the amount of refactoring needed to share the existing TUI
 fork/rebind lifecycle safely.
+
+## Future Project: Windows 11 compatibility
+
+### Goal
+
+Make `one` reliably installable and testable on Windows 11, prioritizing CLI,
+session persistence, providers, basic TUI operation, and package builds before
+attempting full Windows shell/clipboard parity.
+
+### Priority and Deferral
+
+- **Windows 11:** supported future target.
+- **Windows 10:** deferred and best-effort for now; do not block Windows 11 work
+  on a dedicated Windows 10 CI guarantee.
+- **WSL2:** document as the recommended path for users who need POSIX `bash`
+  semantics before native Windows shell support is complete.
+
+### Initial Scope
+
+- Add a GitHub Actions Windows runner matrix for supported Python versions.
+- Verify installation, CLI help/version, configuration paths, sessions,
+  persistence, provider adapters, basic TUI startup/exit, and wheel builds.
+- Make tests distinguish portable behavior from POSIX-only shell, process,
+  permission, Docker, and clipboard assumptions.
+- Provide PowerShell setup and verification instructions.
+
+### Deferred Scope
+
+- Native `cmd.exe`/PowerShell/Bash shell selection and complete command parity.
+- Windows process-tree termination for shell timeout/cancellation.
+- Native Windows clipboard image acquisition.
+- Full raw-terminal/editor keybinding parity across Windows consoles.
+- Dedicated Windows 10 CI and support guarantees.
+
+### Planned Phases
+
+#### Windows 11 Phase 1: CI and portable smoke tests
+
+- [ ] Add `windows-latest` CI jobs for the supported Python versions.
+- [ ] Use Windows-native commands and paths in setup, test, build, and wheel
+  smoke checks.
+- [ ] Add coverage for Unicode/spaced paths, CRLF files, session persistence,
+  CLI startup, basic TUI startup/exit, and installed entry points.
+- [ ] Mark or isolate tests that require POSIX commands, permissions, Docker,
+  or Unix process-group semantics.
+
+#### Windows 11 Phase 2: Process and shell boundary
+
+- [ ] Audit `one/tools/bash.py` and define the supported Windows shell contract.
+- [ ] Prevent POSIX-only `start_new_session`/`os.killpg` behavior from crashing
+  on Windows.
+- [ ] Add Windows timeout/cancellation tests using Python child processes.
+- [ ] Decide whether native shell support is `cmd.exe`, PowerShell, Git Bash,
+  or documented WSL2 delegation before implementing command translation.
+
+#### Windows 11 Phase 3: TUI and clipboard parity
+
+- [ ] Test TUI behavior in Windows Terminal, including paste, control keys,
+  focus restoration, resize, and clean shutdown.
+- [ ] Implement a Windows clipboard-image backend or explicitly report image
+  paste as unsupported on native Windows.
+- [ ] Document supported versus unsupported shortcuts and shell behavior.
+
+### Acceptance Criteria
+
+- [ ] Fresh Windows 11 setup can install `one` using documented PowerShell
+  commands.
+- [ ] Windows CI passes portable tests, CLI smoke tests, TUI startup/exit, and
+  package/wheel validation.
+- [ ] Session creation, naming, listing, loading, and persistence work on
+  Windows 11 paths containing spaces and Unicode.
+- [ ] POSIX-only limitations are explicit and do not cause uncaught crashes.
+- [ ] Windows 10 remains clearly documented as best-effort until separately
+  prioritized.
+
+### Risks
+
+| Risk | Mitigation |
+|------|------------|
+| POSIX shell assumptions leak into Windows | Isolate shell tests and define a Windows shell contract before parity work |
+| Process cancellation behaves differently | Use Windows-specific process-tree implementation and child-process tests |
+| TUI behavior varies by console | Standardize on Windows Terminal for CI/manual acceptance and document limitations |
+| Scope expands into full platform rewrite | Keep Windows 11 phases separate; defer Windows 10 and image clipboard parity |
