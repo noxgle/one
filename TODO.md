@@ -3276,3 +3276,73 @@ backend/model makes them available.
 | Codex backend/model returns encrypted reasoning or no readable summary | Thinking panel can remain empty despite reasoning tokens | Document that only provider summaries are renderable; add diagnostics/tests for empty-summary responses |
 | Summary `.done` events repeat text already delivered by deltas | Duplicated thinking output | Track whether deltas were emitted per summary item and prefer incremental text |
 | Persisted model metadata marks ChatGPT as non-reasoning | `/thinking` appears enabled but effective request is `off` | Protect built-in capability metadata during merge and test stale persisted entries |
+
+## Feature: TUI input history navigation
+
+### Goal
+
+Allow the TUI input field to navigate through a bounded history containing
+both slash commands and ordinary user prompts.
+
+### Scope
+
+- `Ctrl+ArrowUp` selects the older history entry.
+- `Ctrl+ArrowDown` selects the newer history entry.
+- Store submitted slash commands and ordinary prompts in the same history.
+- Keep at most 50 history entries, dropping the oldest entry first.
+- Preserve multiline prompt content when restoring an entry.
+- Keep `/history` compatible while including prompts in its displayed entries.
+
+### Implementation Tasks
+
+- [ ] **Unify and bound TUI input history:** Record every non-empty submitted
+  input, including slash commands and ordinary prompts, in a 50-entry history.
+  Avoid recording `/history` inspection commands themselves unless explicitly
+  required by the existing behavior; preserve the current command alias and
+  command execution semantics.
+  - **Files:** `one/modes/tui_mode.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Repeated submissions retain the newest 50 entries;
+    the oldest entries are evicted; multiline entries remain intact; empty
+    submissions are not stored.
+  - **Verification:** Unit tests submit 51 mixed commands/prompts, assert the
+    stored length is 50, verify first/last retained values, and restore a
+    multiline prompt exactly.
+
+- [ ] **Add Ctrl+Up/Ctrl+Down history navigation:** Track a navigation cursor
+  independently from text editing and implement older/newer traversal in
+  `_CommandTextArea` or the owning TUI app, using Textual's actual key names
+  for Ctrl+ArrowUp and Ctrl+ArrowDown. Reset navigation appropriately when the
+  user edits or submits text; moving newer than the latest entry restores an
+  empty input.
+  - **Files:** `one/modes/tui_mode.py`.
+  - **Dependencies:** Unify and bound TUI input history.
+  - **Acceptance Criteria:** Ctrl+Up walks toward older entries, Ctrl+Down
+    walks toward newer entries, boundaries are safe, and restored multiline
+    text is inserted without starting a turn.
+  - **Verification:** Textual pilot tests cover both directions, oldest/newest
+    boundaries, empty-input behavior, edits resetting navigation, and
+    multiline restoration.
+
+- [ ] **Update `/history` behavior and documentation:** Include ordinary
+  prompts in `/history` output while retaining numbering and lookup semantics;
+  update help/shortcut text to document Ctrl+ArrowUp/Ctrl+ArrowDown and the
+  50-entry limit without exposing prompt contents beyond existing local UI
+  history behavior.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_navigation.py`,
+    `README.md` or relevant user documentation if shortcut documentation is
+    maintained there.
+  - **Dependencies:** Unify and bound TUI input history.
+  - **Acceptance Criteria:** `/history` shows mixed entries consistently with
+    `/history <n>` lookup; help documents the shortcuts; no history command is
+    accidentally recorded as a new entry during inspection.
+  - **Verification:** Tests cover mixed numbering, lookup after eviction,
+    `/history` and `/history <n>`, help output, and exact shortcut behavior.
+
+### Risks & Decisions
+
+| Risk | Mitigation |
+|------|------------|
+| Textual reports Ctrl+Arrow keys under version-specific names | Test with the project's pinned Textual version and isolate key handling in the input widget |
+| Multiline text changes widget height or cursor state | Restore via the existing `TextArea.text` setter and add pilot tests for exact text/cursor behavior |
+| Prompts may contain sensitive content | Keep the existing local-only history behavior and 50-entry cap; do not add new persistence unless explicitly requested |
