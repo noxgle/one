@@ -105,6 +105,9 @@ tracked files). `MANIFEST.in` packaging claims verified clean.
 
 ## Next engineering work
 
+- [x] **Manual versus automatic compaction:** `/compact` forces a summary for
+  non-empty history below the automatic threshold; automatic and recovery paths
+  remain threshold-driven.
 - [ ] **Normalize provider-native tool calls.** Evaluate a common adapter layer
   for native OpenAI-compatible, Anthropic, and Gemini function/tool-call
   payloads. The current JSON-in-text parser remains the production contract

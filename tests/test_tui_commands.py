@@ -318,6 +318,28 @@ async def test_tui_command_steer_follow_compact_tree(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_manual_compact_short_history_with_custom_instructions(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(
+        tmp_path,
+        settings_override={"compaction": {"summarizeWithModel": False}},
+    )
+    for role, content in [("user", "Please inspect the parser."), ("assistant", "I will inspect it.")]:
+        session.session_manager.append_message({"role": role, "content": content})
+    session.messages = session.session_manager.build_session_context()["messages"]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/compact Preserve the parser investigation.")
+        stream = "\n".join(app._stream_lines)
+        assert '"skipped": false' in stream
+        assert "Preserve the parser investigation." in stream
+        assert '"tokensBefore": 0' not in stream
+        assert session.session_manager.get_last_compaction() is not None
+
+
+@pytest.mark.asyncio
 async def test_tui_command_login_inline_stores_key(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 

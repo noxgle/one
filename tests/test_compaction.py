@@ -153,14 +153,91 @@ async def test_compact_keeps_recent_window_and_summary_message(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_compact_skips_when_nothing_to_drop(tmp_path):
+async def test_auto_compact_skips_when_nothing_to_drop(tmp_path):
     agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}})
     agent.session_manager.append_message({"role": "user", "content": "small"})
     agent.messages = agent.session_manager.build_session_context()["messages"]
+    original = list(agent.messages)
+
+    result = await agent.compact(reason="auto")
+    assert result["skipped"] is True
+    assert agent.messages == original
+    assert agent.session_manager.get_last_compaction() is None
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_empty_history_still_skips(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}})
 
     result = await agent.compact()
+
     assert result["skipped"] is True
+    assert result["summary"] == ""
     assert agent.session_manager.get_last_compaction() is None
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_summarizes_short_history_and_persists(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}})
+    _seed(agent, count=2)
+    original = list(agent.messages)
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    result = await agent.compact()
+
+    assert result["skipped"] is False
+    assert result["summary"]
+    assert result["tokensBefore"] > 0
+    # Short manual compaction retains every raw message plus the summary so it
+    # does not trade the only detailed context for a lossy summary.
+    assert result["kept"] == len(original) + 1
+    assert agent.messages[0]["customType"] == "compaction_summary"
+    assert agent.messages[1:] == original
+    persisted = agent.session_manager.get_last_compaction()
+    assert persisted is not None
+    assert persisted["summary"] == result["summary"]
+    assert any(e["type"] == "compaction_start" and e["reason"] == "manual" for e in events)
+    assert any(e["type"] == "compaction_end" and e["reason"] == "manual" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_repeated_manual_compact_short_history_replaces_summary_and_reconstructs(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}})
+    _seed(agent, count=2)
+    original = list(agent.messages)
+
+    first = await agent.compact("First manual summary.")
+    second = await agent.compact("Second manual summary.")
+
+    assert first["skipped"] is False
+    assert second["skipped"] is False
+    assert second["tokensBefore"] > 0
+    assert [m.get("customType") for m in agent.messages].count("compaction_summary") == 1
+    assert agent.messages[0]["content"] == "Second manual summary."
+    assert agent.messages[1:] == original
+    persisted = agent.session_manager.get_last_compaction()
+    assert persisted is not None
+    assert persisted["summary"] == "Second manual summary."
+    assert agent.session_manager.build_session_context()["messages"] == agent.messages
+
+
+@pytest.mark.asyncio
+async def test_context_limit_retry_skips_short_history_without_mutation(tmp_path):
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": False, "recentTokens": 100_000}},
+    )
+    _seed(agent, count=2)
+    original = list(agent.messages)
+
+    result = await agent.compact(reason="context_limit_retry", allow_during_prompt=True)
+
+    assert result["skipped"] is True
+    assert result["tokensBefore"] == 0
+    assert agent.messages == original
+    assert agent.session_manager.get_last_compaction() is None
+    assert agent.session_manager.build_session_context()["messages"] == original
 
 
 @pytest.mark.asyncio
@@ -176,6 +253,41 @@ async def test_compact_custom_instructions_skips_model(tmp_path):
     result = await agent.compact("My custom instructions summary")
     assert result["summary"] == "My custom instructions summary"
     assert provider.calls == 0  # model summarizer never invoked
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_custom_instructions_summarizes_short_history(tmp_path):
+    provider = _Provider(["MODEL SUMMARY"])
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": True}},
+        provider=provider,
+    )
+    _seed(agent, count=2)
+
+    result = await agent.compact("Keep the implementation decision.")
+
+    assert result["skipped"] is False
+    assert result["summary"] == "Keep the implementation decision."
+    assert result["tokensBefore"] > 0
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_short_history_uses_model_summary(tmp_path):
+    provider = _Provider(["MODEL SUMMARY"])
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": True}},
+        provider=provider,
+    )
+    _seed(agent, count=2)
+
+    result = await agent.compact()
+
+    assert result["skipped"] is False
+    assert result["summary"] == "MODEL SUMMARY"
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio

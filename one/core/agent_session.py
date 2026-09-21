@@ -2623,13 +2623,22 @@ class AgentSession:
                     keep_start = min(i + 1, max_keep_start)
                     break
 
-            if keep_start == 0:
-                # Nothing to drop: there is no meaningful compaction to perform.
+            manual = reason == "manual"
+            if keep_start == 0 and not manual:
+                # auto_preflight, auto, and context_limit_retry only reduce
+                # context; when the raw recent window already contains
+                # everything, do not summarize.
                 result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total, "skipped": True}
                 self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                 return result
 
-            dropped = self.messages[:keep_start]
+            # A manual compaction is an explicit request for a summary, even for a
+            # short history that entirely fits the recent-token budget. In that
+            # case retain the full raw history alongside the new summary rather
+            # than replacing the only useful context with a summary. Replace an
+            # existing synthetic summary so repeated manual compactions do not
+            # accumulate summaries that cannot be reconstructed from persistence.
+            dropped = self.messages if keep_start == 0 else self.messages[:keep_start]
             tokens_before = sum(self._approx_message_tokens(m) for m in dropped)
 
             # Extension hooks: experimental.session.compacting (opencode contract).
@@ -2658,16 +2667,27 @@ class AgentSession:
             # indexes in self.messages are aligned with message-producing entries
             # except for the synthetic compaction summary (at most one, at index 0).
             entry_ids = self.session_manager.get_message_entry_ids()
+            retained_short_history = keep_start == 0 and manual
             offset = len(entry_ids) - total
             first_kept_id = "root"
-            idx = keep_start + offset
+            idx = 0 if retained_short_history else keep_start + offset
             if 0 <= idx < len(entry_ids):
                 first_kept_id = entry_ids[idx]
             elif entry_ids:
                 first_kept_id = entry_ids[0]
 
-            self.session_manager.append_compaction(summary_text, first_kept_id, tokens_before=tokens_before)
-            self.messages = self.messages[keep_start:]
+            compaction_id = self.session_manager.append_compaction(summary_text, first_kept_id, tokens_before=tokens_before)
+            if retained_short_history:
+                self.messages = [
+                    message
+                    for message in self.messages
+                    if not (
+                        message.get("role") == "custom"
+                        and message.get("customType") == "compaction_summary"
+                    )
+                ]
+            else:
+                self.messages = self.messages[keep_start:]
             # Keep the summary in the live context (rolling two-tier schema):
             # new_summary + last ~recentTokens raw messages.
             self.messages.insert(
@@ -2677,7 +2697,7 @@ class AgentSession:
                     "customType": "compaction_summary",
                     "content": summary_text,
                     "tokensBefore": tokens_before,
-                    "timestamp": int(time.time() * 1000),
+                    "timestamp": self.session_manager.get_entry(compaction_id).get("timestamp"),
                 },
             )
             result = {

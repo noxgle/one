@@ -19,6 +19,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Manual context compaction** — `/compact` now forces a summary below the
+  automatic threshold; automatic and recovery compaction remain threshold-driven.
 - **TUI slash completion focus** — Tab no longer moves focus out of the command
   input when slash completion has no match; slash completion remains functional.
 - **Thinking levels and persistence** — `/thinking` and `/thinking-cycle` now
