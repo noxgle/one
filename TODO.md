@@ -3295,7 +3295,7 @@ both slash commands and ordinary user prompts.
 
 ### Implementation Tasks
 
-- [ ] **Unify and bound TUI input history:** Record every non-empty submitted
+- [x] **Unify and bound TUI input history:** Record every non-empty submitted
   input, including slash commands and ordinary prompts, in a 50-entry history.
   Avoid recording `/history` inspection commands themselves unless explicitly
   required by the existing behavior; preserve the current command alias and
@@ -3309,7 +3309,7 @@ both slash commands and ordinary user prompts.
     stored length is 50, verify first/last retained values, and restore a
     multiline prompt exactly.
 
-- [ ] **Add Ctrl+Up/Ctrl+Down history navigation:** Track a navigation cursor
+- [x] **Add Ctrl+Up/Ctrl+Down history navigation:** Track a navigation cursor
   independently from text editing and implement older/newer traversal in
   `_CommandTextArea` or the owning TUI app, using Textual's actual key names
   for Ctrl+ArrowUp and Ctrl+ArrowDown. Reset navigation appropriately when the
@@ -3324,7 +3324,7 @@ both slash commands and ordinary user prompts.
     boundaries, empty-input behavior, edits resetting navigation, and
     multiline restoration.
 
-- [ ] **Update `/history` behavior and documentation:** Include ordinary
+- [x] **Update `/history` behavior and documentation:** Include ordinary
   prompts in `/history` output while retaining numbering and lookup semantics;
   update help/shortcut text to document Ctrl+ArrowUp/Ctrl+ArrowDown and the
   50-entry limit without exposing prompt contents beyond existing local UI

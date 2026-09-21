@@ -156,6 +156,7 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+Shift+V", "paste terminal text (SSH-safe)"),
     ("Ctrl+Alt+V", "paste image from the system clipboard"),
     ("Ctrl+R", "cycle retry mode"),
+    ("Ctrl+Up / Ctrl+Down", "navigate input history (50 entries)"),
     ("Ctrl+F1", "show slash-command help"),
     ("Esc", "close the shortcuts panel"),
 )
@@ -518,6 +519,7 @@ if TEXTUAL_AVAILABLE:
             self._completion_matches: list[str] = []
             self._completion_index = -1
             self._completion_locked = False  # locked after first completion
+            self._history_index: int | None = None
 
         BINDINGS = [
             ("ctrl+j", "submit", "Submit"),
@@ -533,6 +535,15 @@ if TEXTUAL_AVAILABLE:
                 event.prevent_default()
                 self.post_message(InputSubmitted(self.text))
                 return
+            if event.key in {"ctrl+up", "ctrl+down"}:
+                self._navigate_history(older=event.key == "ctrl+up")
+                event.stop()
+                event.prevent_default()
+                return
+            # A fresh edit (or a normal cursor/navigation key) begins a new
+            # history-navigation cycle. Ctrl+Up/Ctrl+Down above are the only
+            # keys that retain the selected history position.
+            self.reset_history_navigation()
             if event.key == "tab":
                 if self._complete_slash_command():
                     event.stop()
@@ -570,7 +581,33 @@ if TEXTUAL_AVAILABLE:
             self.post_message(InputSubmitted(self.text))
 
         def action_newline(self) -> None:
+            self.reset_history_navigation()
             self.insert("\n")
+
+        def reset_history_navigation(self) -> None:
+            self._history_index = None
+
+        def _navigate_history(self, *, older: bool) -> None:
+            history = getattr(self.app, "_command_history", [])
+            if older:
+                if not history:
+                    return
+                if self._history_index is None:
+                    self._history_index = len(history) - 1
+                else:
+                    self._history_index = max(0, self._history_index - 1)
+                self.text = history[self._history_index]
+                self.move_cursor(self.document.end)
+                return
+            if self._history_index is None:
+                return
+            if self._history_index >= len(history) - 1:
+                self._history_index = None
+                self.text = ""
+                return
+            self._history_index += 1
+            self.text = history[self._history_index]
+            self.move_cursor(self.document.end)
 
         @property
         def text(self) -> str:
@@ -637,6 +674,7 @@ if TEXTUAL_AVAILABLE:
             """Insert terminal or clipboard text with the common paste guards."""
             if self.read_only or not text:
                 return
+            self.reset_history_navigation()
             if len(text) > self._PASTE_MAX_CHARS:
                 text = text[: self._PASTE_MAX_CHARS]
             if result := self._replace_via_keyboard(text, *self.selection):
@@ -1728,7 +1766,7 @@ if TEXTUAL_AVAILABLE:
             # Handle /history BEFORE recording (don't record the query itself).
             if cmd == "/history":
                 if not self._command_history:
-                    self._write("No commands yet.", "info")
+                    self._write("No history yet.", "info")
                 else:
                     recent = self._command_history[-50:]
                     for i, entry in enumerate(recent, 1):
@@ -1750,11 +1788,10 @@ if TEXTUAL_AVAILABLE:
                 input_widget.text = history_cmd
                 input_widget.focus()
                 return
-            # Record slash commands only (not plain prompts).
+            # Record slash commands, retaining their typed alias. /history is
+            # handled above so inspecting history never records itself.
             if original.startswith("/"):
-                self._command_history.append(original)
-                if len(self._command_history) > 200:
-                    self._command_history.pop(0)
+                self._record_input_history(original)
             if cmd == "/help":
                 self._write("/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort", "info")
                 self._write(
@@ -1773,7 +1810,7 @@ if TEXTUAL_AVAILABLE:
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
                 )
                 self._write(
-                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command> | /paste-image",
+                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] (last 50 inputs; Ctrl+Up/Down) | /mcp [list|enable|disable] | /bash <command> | /paste-image",
                     "info",
                 )
                 self._write("/inspect-timeout", "info")
@@ -2588,9 +2625,19 @@ if TEXTUAL_AVAILABLE:
 
             self._write(f"Unknown command: {cmd}. Use /help.", "error")
 
+        def _record_input_history(self, value: str) -> None:
+            """Store a non-empty submitted input in the local 50-entry history."""
+            if not value.strip():
+                return
+            self._command_history.append(value)
+            if len(self._command_history) > 50:
+                del self._command_history[:-50]
+
         async def on_input_submitted(self, event: InputSubmitted) -> None:
             text = event.value.strip()
-            self.query_one("#input", TextArea).text = ""
+            input_widget = self.query_one("#input", _CommandTextArea)
+            input_widget.text = ""
+            input_widget.reset_history_navigation()
             if self._approval_pending is not None:
                 await self._handle_approval_answer(text)
                 return
@@ -2640,6 +2687,11 @@ if TEXTUAL_AVAILABLE:
                     await self._handle_command(text)
                     return
                 # Standalone absolute image path: fall through to image import.
+
+            # Slash commands are recorded by _handle_command so /history can
+            # remain excluded. Ordinary prompts retain their original multiline
+            # content rather than the stripped dispatch value.
+            self._record_input_history(event.value)
 
             # ------------------------------------------------------------------
             # Pending clipboard image import runs after slash-command check.

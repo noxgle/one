@@ -86,6 +86,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **TUI input history** — local history now combines prompts and slash commands,
+  retains the latest 50 entries, restores multiline input, and supports
+  Ctrl+Up/Ctrl+Down navigation.
 - **TUI session browser** — `/sessions` lists current-project sessions and loads
   by number or unique full exact name; it supports validated rename and
   confirmation-protected deletion of a session JSONL plus its evidence sidecar.

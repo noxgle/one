@@ -203,9 +203,8 @@ async def test_extension_panels_hide_on_new_session(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_tui_history_records_commands_only(tmp_path: Path):
-    """Submit /theme then /history — stream contains "1. /theme".
-    Plain prompt "hello" must NOT appear in /history output."""
+async def test_tui_history_records_mixed_inputs_but_not_inspection(tmp_path: Path):
+    """Commands and prompts share history; /history queries do not."""
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -218,11 +217,9 @@ async def test_tui_history_records_commands_only(tmp_path: Path):
         await _submit(app, pilot, "/history")
         stream = "\n".join(app._stream_lines)
         assert "1. /theme fallout" in stream
-        assert "2. /help" in stream
-        # "hello" must NOT be in the numbered history entries
-        assert "1. hello" not in stream
-        assert "2. hello" not in stream
-        assert "3. hello" not in stream
+        assert "2. hello" in stream
+        assert "3. /help" in stream
+        assert app._command_history == ["/theme fallout", "hello", "/help"]
 
 
 @pytest.mark.asyncio
@@ -258,7 +255,7 @@ async def test_tui_history_out_of_range(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_history_empty(tmp_path: Path):
-    """With no commands yet, /history prints 'No commands yet.'"""
+    """With no input yet, /history prints its empty-state message."""
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -267,7 +264,7 @@ async def test_tui_history_empty(tmp_path: Path):
         await pilot.pause()
         await _submit(app, pilot, "/history")
         stream = "\n".join(app._stream_lines)
-        assert "No commands yet." in stream
+        assert "No history yet." in stream
 
 
 @pytest.mark.asyncio
@@ -314,9 +311,8 @@ async def test_tui_command_help_includes_history(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_tui_history_capped_at_200(tmp_path: Path):
-    """Submitting more than 200 slash commands caps the history at 200.
-    /history displays the last 50; lookup is on the SAME window."""
+async def test_tui_history_capped_at_50(tmp_path: Path):
+    """Submitting 51 mixed entries evicts the oldest entry."""
     from textual.widgets import TextArea
 
     from one.modes.tui_mode import _OneTextualApp
@@ -325,27 +321,29 @@ async def test_tui_history_capped_at_200(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        for i in range(205):
-            await app._handle_command(f"/config test{i} val{i}")
+        for i in range(51):
+            if i % 2:
+                app._record_input_history(f"prompt {i}")
+            else:
+                await app._handle_command(f"/config test{i} val{i}")
         await pilot.pause()
-        # 205 submitted, cap at 200 → first 5 dropped → history = test5..test204
-        assert len(app._command_history) == 200
-        # /history displays last 50 (test155..test204) numbered 1..50
+        assert len(app._command_history) == 50
+        assert app._command_history[0] == "prompt 1"
+        assert app._command_history[-1] == "/config test50 val50"
         await app._handle_command("/history")
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "1. /config test155 val155" in stream
-        assert "50. /config test204 val204" in stream
-        # /history 1 → oldest of the displayed window (test155)
+        assert "1. prompt 1" in stream
+        assert "50. /config test50 val50" in stream
         await app._handle_command("/history 1")
         await pilot.pause()
         input_widget = app.query_one("#input", TextArea)
-        assert input_widget.text == "/config test155 val155"
+        assert input_widget.text == "prompt 1"
         # /history 50 → newest of the displayed window (test204)
         await app._handle_command("/history 50")
         await pilot.pause()
         input_widget = app.query_one("#input", TextArea)
-        assert input_widget.text == "/config test204 val204"
+        assert input_widget.text == "/config test50 val50"
         # /history 51 → out of range (window is 1..50)
         await app._handle_command("/history 51")
         await pilot.pause()
@@ -365,9 +363,9 @@ async def test_tui_history_numbering_matches_lookup_beyond_50(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        # Append 60 fake commands directly to the history list
+        # Use the recording path so the 50-entry cap is applied.
         for i in range(1, 61):
-            app._command_history.append(f"/model m{i}")
+            app._record_input_history(f"/model m{i}")
         # /history → displays last 50 numbered 1..50
         # Entry 1 should be the oldest of the last 50 = /model m11 (index 10 of the full list)
         await app._handle_command("/history")
@@ -422,6 +420,64 @@ async def test_tui_history_records_alias_as_typed(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_history_navigation_restores_multiline_and_resets_after_edit(tmp_path: Path):
+    """Ctrl+Up/Down traverses input history without submitting a turn."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        app._record_input_history("/help")
+        app._record_input_history("first line\nsecond line")
+        app._record_input_history("latest prompt")
+        input_widget.focus()
+
+        await pilot.press("ctrl+up")
+        assert input_widget.text == "latest prompt"
+        await pilot.press("ctrl+up")
+        assert input_widget.text == "first line\nsecond line"
+        await pilot.press("ctrl+up")
+        assert input_widget.text == "/help"
+        await pilot.press("ctrl+up")
+        assert input_widget.text == "/help"  # oldest boundary
+        await pilot.press("ctrl+down")
+        assert input_widget.text == "first line\nsecond line"
+        await pilot.press("ctrl+down")
+        assert input_widget.text == "latest prompt"
+        await pilot.press("ctrl+down")
+        assert input_widget.text == ""  # newer than newest
+        await pilot.press("ctrl+down")
+        assert input_widget.text == ""
+
+        await pilot.press("ctrl+up")
+        await pilot.press("x")
+        await pilot.press("ctrl+up")
+        assert input_widget.text == "latest prompt"  # edit reset navigation
+
+
+@pytest.mark.asyncio
+async def test_tui_history_skips_empty_submissions_and_help_documents_navigation(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "")
+        await _submit(app, pilot, "  \n  ")
+        assert app._command_history == []
+        await _submit(app, pilot, "first line\nsecond line")
+        assert app._command_history == ["first line\nsecond line"]
+        await _submit(app, pilot, "/help")
+        stream = "\n".join(app._stream_lines)
+        assert "last 50 inputs; Ctrl+Up/Down" in stream
+
+
+@pytest.mark.asyncio
 async def test_tui_shortcuts_overlay_contains_new_shortcuts(tmp_path: Path):
     """The shortcuts panel (Ctrl+F1) must show the final paste mapping."""
     from one.modes.tui_mode import _OneTextualApp
@@ -440,3 +496,5 @@ async def test_tui_shortcuts_overlay_contains_new_shortcuts(tmp_path: Path):
         assert "paste image from the system clipboard" in content
         assert "Ctrl+R" in content
         assert "cycle retry mode" in content
+        assert "Ctrl+Up / Ctrl+Down" in content
+        assert "navigate input history (50 entries)" in content

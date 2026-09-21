@@ -149,6 +149,7 @@ Current application shortcuts are:
 | `Ctrl+Shift+V` | Paste terminal text (SSH-safe) |
 | `Ctrl+Alt+V` | Paste an image from the system clipboard |
 | `Ctrl+R` | Cycle retry mode (`off` → `on` → `unlimited` → `off`) |
+| `Ctrl+Up` / `Ctrl+Down` | Navigate the local input history (up to 50 prompts and commands) |
 | `Ctrl+F1` | Show slash-command help |
 | `Esc` | Close the shortcuts panel |
 
