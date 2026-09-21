@@ -312,7 +312,8 @@ async def test_tui_command_steer_follow_compact_tree(tmp_path: Path):
         stream = "\n".join(app._stream_lines)
         assert "Queued steering message." in stream
         assert "Queued follow-up message." in stream
-        assert '"skipped": true' in stream
+        assert "Compaction skipped: the history is already within the configured limit." in stream
+        assert '"skipped"' not in stream
         # The tree renders session entries with a '*' marker on the leaf.
         assert "model_change" in stream
         assert "* thinking_level_change" in stream
@@ -336,10 +337,48 @@ async def test_tui_manual_compact_short_history_with_custom_instructions(tmp_pat
         await pilot.pause()
         await _submit(app, pilot, "/compact Preserve the parser investigation.")
         stream = "\n".join(app._stream_lines)
-        assert '"skipped": false' in stream
+        assert "Compaction complete." in stream
+        assert "Summary:" in stream
         assert "Preserve the parser investigation." in stream
+        assert "Tokens before:" in stream
+        assert "Messages kept:" in stream
+        assert '"tokensBefore"' not in stream
         assert '"tokensBefore": 0' not in stream
         assert session.session_manager.get_last_compaction() is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            {"aborted": True, "summary": "", "tokensBefore": 0, "kept": 0, "skipped": False},
+            "Compaction aborted.",
+        ),
+        (
+            {"aborted": False, "summary": "", "tokensBefore": 0, "kept": 0, "skipped": True, "busy": True},
+            "Compaction skipped: the session is busy.",
+        ),
+    ],
+)
+async def test_tui_compact_renders_non_success_results(
+    tmp_path: Path, result: dict[str, object], expected: str
+) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+
+    async def fake_compact(_instructions: str | None = None) -> dict[str, object]:
+        return result
+
+    session.compact = fake_compact  # type: ignore[method-assign]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/compact")
+        stream = "\n".join(app._stream_lines)
+        assert expected in stream
+        assert '"aborted"' not in stream
 
 
 @pytest.mark.asyncio

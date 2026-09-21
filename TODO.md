@@ -3349,3 +3349,25 @@ both slash commands and ordinary user prompts.
 | Textual reports Ctrl+Arrow keys under version-specific names | Test with the project's pinned Textual version and isolate key handling in the input widget |
 | Multiline text changes widget height or cursor state | Restore via the existing `TextArea.text` setter and add pilot tests for exact text/cursor behavior |
 | Prompts may contain sensitive content | Keep the existing local-only history behavior and 50-entry cap; do not add new persistence unless explicitly requested |
+
+## Follow-up: TUI compact result rendering
+
+- [x] **Format `/compact` output in the TUI instead of displaying raw JSON.**
+  - **Description:** Update only the TUI command handler in
+    `one/modes/tui_mode.py` so a successful compaction displays a readable
+    status, summary, and relevant counters (`tokensBefore`, `kept`) rather than
+    the complete result object. Render skipped/busy/aborted outcomes as concise
+    status messages. Preserve the underlying `session.compact()` result,
+    persistence, event payloads, and interactive-mode JSON output unchanged.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_commands.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** `/compact` in TUI never prints the raw JSON wrapper;
+    the summary remains visible; skipped, busy, and aborted results are
+    distinguishable; interactive `/compact` behavior is unchanged.
+  - **Verification:** Add/update TUI command tests for successful, skipped, busy,
+    and aborted results; run `.venv/bin/python -m pytest -q
+    tests/test_tui_commands.py` and the full test suite, then
+    `.venv/bin/ruff check .`.
+  - **Details:** Added `_write_compaction_result()` for readable completion,
+    skipped, busy, and aborted messages; interactive-mode JSON output remains
+    unchanged. Targeted TUI tests and Ruff pass.

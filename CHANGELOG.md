@@ -19,6 +19,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI compaction output** — `/compact` now displays a readable status,
+  summary, and counters instead of exposing the raw JSON result object.
 - **llama.cpp thinking off** — `/thinking off` now passes llama.cpp's
   `chat_template_kwargs.enable_thinking=false` request control for compatible
   chat templates, preventing unwanted reasoning output where the server and

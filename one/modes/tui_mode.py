@@ -1325,6 +1325,31 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.extend(sanitize_display_text(text).splitlines() or [""])
             self._trim_stream(render=render)
 
+        def _write_compaction_result(self, result: dict[str, Any]) -> None:
+            """Render a compact human-readable result for the TUI."""
+            if result.get("aborted"):
+                self._write("Compaction aborted.", "warn")
+                return
+
+            if result.get("skipped"):
+                reason = (
+                    "the session is busy"
+                    if result.get("busy")
+                    else "the history is already within the configured limit"
+                )
+                self._write(f"Compaction skipped: {reason}.", "info")
+                return
+
+            summary = str(result.get("summary") or "").strip()
+            lines = ["Compaction complete."]
+            if summary:
+                lines.extend(["Summary:", summary])
+            if "tokensBefore" in result:
+                lines.append(f"Tokens before: {result['tokensBefore']}")
+            if "kept" in result:
+                lines.append(f"Messages kept: {result['kept']}")
+            self._write("\n".join(lines), "info")
+
         def _trim_stream(self, *, render: bool = True) -> int:
             """Trim *_stream_lines* to ``MAX_RENDERED_LINES`` entries. Returns the number of
             lines dropped from the front (0 if no trim happened) so callers
@@ -2151,7 +2176,7 @@ if TEXTUAL_AVAILABLE:
             if cmd.startswith("/compact"):
                 instructions = cmd[len("/compact") :].strip() or None
                 result = await session.compact(instructions)
-                self._write(json.dumps(result, ensure_ascii=False), "info")
+                self._write_compaction_result(result)
                 self._refresh_sidebar()
                 return
             if cmd.strip() == "/tree":
