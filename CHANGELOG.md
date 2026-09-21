@@ -19,6 +19,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI slash completion focus** — Tab no longer moves focus out of the command
+  input when slash completion has no match; slash completion remains functional.
 - **Thinking levels and persistence** — `/thinking` and `/thinking-cycle` now
   save the selected level for new sessions while retaining each session's own
   recorded choice. OpenAI-compatible, Anthropic, Gemini, and Codex adapters

@@ -17,6 +17,7 @@ Run regression::
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -115,6 +116,20 @@ class _DummySession:
 # ---------------------------------------------------------------------------
 
 GOLDEN_EXT = ".txt"  # .txt is the committed extension (contains SVG text).
+_SVG_TERMINAL_ID = re.compile(
+    r'(?P<prefix>\.terminal-|id="terminal-|class="terminal-|url\(#terminal-)\d+(?=-)'
+)
+_STABLE_TERMINAL_ID_SUFFIX = "SNAPSHOT"
+
+
+def _normalize_svg_terminal_ids(content: str) -> str:
+    """Replace Rich's process-dependent SVG terminal ID prefix.
+
+    Text fallback snapshots are deliberately left untouched.
+    """
+    if not content.lstrip().startswith("<svg"):
+        return content
+    return _SVG_TERMINAL_ID.sub(rf"\g<prefix>{_STABLE_TERMINAL_ID_SUFFIX}", content)
 
 
 def _check_snapshot(
@@ -128,6 +143,7 @@ def _check_snapshot(
     When ``update`` is True the golden file is created/overwritten.
     Otherwise the test fails on missing or differing content.
     """
+    content = _normalize_svg_terminal_ids(content)
     golden = SNAPSHOT_DIR / f"{name}{GOLDEN_EXT}"
     if update:
         golden.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +156,7 @@ def _check_snapshot(
             f"Generate it with: ONE_UPDATE_SNAPSHOTS=1 pytest -q {__file__}"
         )
 
-    existing = golden.read_text(encoding="utf-8")
+    existing = _normalize_svg_terminal_ids(golden.read_text(encoding="utf-8"))
     if content != existing:
         pytest.fail(
             f"Snapshot mismatch for '{name}' ({golden.name}):\n"
@@ -148,6 +164,21 @@ def _check_snapshot(
             f"  captured bytes: {len(content.encode('utf-8'))}\n"
             f"Generate with: ONE_UPDATE_SNAPSHOTS=1 pytest -q {__file__}"
         )
+
+
+def test_normalize_svg_terminal_ids() -> None:
+    svg = (
+        '<svg><style>.terminal-123-r1 {}</style>'
+        '<g class="terminal-123-r1" id="terminal-123-line-0" '
+        'clip-path="url(#terminal-123-line-0)">terminal-123-r1</g></svg>'
+    )
+
+    assert _normalize_svg_terminal_ids(svg) == (
+        '<svg><style>.terminal-SNAPSHOT-r1 {}</style>'
+        '<g class="terminal-SNAPSHOT-r1" id="terminal-SNAPSHOT-line-0" '
+        'clip-path="url(#terminal-SNAPSHOT-line-0)">terminal-123-r1</g></svg>'
+    )
+    assert _normalize_svg_terminal_ids("terminal-123-r1") == "terminal-123-r1"
 
 
 # ---------------------------------------------------------------------------

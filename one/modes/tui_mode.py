@@ -540,21 +540,23 @@ if TEXTUAL_AVAILABLE:
                 event.stop()
                 event.prevent_default()
                 return
+            if event.key == "tab":
+                # Tab is reserved for slash completion in this input.  Consume
+                # it even if nothing can be completed so Textual does not use
+                # its default focus traversal to move out of the command box.
+                self._complete_slash_command()
+                event.stop()
+                event.prevent_default()
+                return
             # A fresh edit (or a normal cursor/navigation key) begins a new
             # history-navigation cycle. Ctrl+Up/Ctrl+Down above are the only
             # keys that retain the selected history position.
             self.reset_history_navigation()
-            if event.key == "tab":
-                if self._complete_slash_command():
-                    event.stop()
-                    event.prevent_default()
-                    return
-            else:
-                # Any edit/navigation invalidates the current completion cycle.
-                self._completion_prefix = ""
-                self._completion_matches = []
-                self._completion_index = -1
-                self._completion_locked = False
+            # Any edit/navigation invalidates the current completion cycle.
+            self._completion_prefix = ""
+            self._completion_matches = []
+            self._completion_index = -1
+            self._completion_locked = False
             # shift+enter and ctrl+v are handled here so they don't reach
             # App._on_key through _OneTextualApp (would cause double fire).
             # ctrl+v is intercepted in _on_key — it is not a

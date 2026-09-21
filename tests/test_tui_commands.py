@@ -774,6 +774,29 @@ async def test_tui_slash_completion_tab_cycles(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["ordinary text", "/not-a-command"])
+async def test_tui_tab_without_completion_keeps_command_input_focused(tmp_path: Path, text: str):
+    """Tab must not fall through to Textual's default focus traversal."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.focus()
+        input_widget.text = text
+        input_widget.move_cursor((0, len(text)))
+
+        await pilot.press("tab")
+
+        assert app.focused is input_widget
+        assert input_widget.text == text
+
+
+@pytest.mark.asyncio
 async def test_tui_slash_completion_single_match(tmp_path: Path):
     from textual.widgets import TextArea
 
