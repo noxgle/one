@@ -82,6 +82,31 @@ def test_openai_compatible_headers_without_api_key() -> None:
     assert headers["Content-Type"] == "application/json"
 
 
+@pytest.mark.parametrize(
+    ("level", "template_kwargs"),
+    [
+        ("off", {"enable_thinking": False}),
+        ("minimal", None),
+        ("low", None),
+        ("medium", None),
+        ("high", None),
+        ("xhigh", None),
+    ],
+)
+def test_llama_cpp_disables_thinking_only_when_requested(
+    level: str, template_kwargs: dict[str, bool] | None
+) -> None:
+    payload = OpenAICompatibleAdapter(
+        "llama.cpp",
+        "http://127.0.0.1:8080",
+        supports_reasoning_effort=False,
+        default_temperature=None,
+    )._build_payload("local", [{"role": "user", "content": "hi"}], level)
+    assert payload.get("chat_template_kwargs") == template_kwargs
+    assert "reasoning_effort" not in payload
+    assert "temperature" not in payload
+
+
 def test_provider_registry_includes_llama_cpp() -> None:
     registry = build_provider_registry()
     assert "llama.cpp" in registry

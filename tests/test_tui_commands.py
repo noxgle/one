@@ -260,6 +260,9 @@ async def test_tui_thinking_uses_provider_native_payloads(
     assert "reasoning_effort" not in openrouter
     assert ollama_cloud["think"] == (False if level == "off" else ("low" if level == "minimal" else level if level != "xhigh" else "high"))
     assert "reasoning_effort" not in llama_cpp
+    assert llama_cpp.get("chat_template_kwargs") == (
+        {"enable_thinking": False} if level == "off" else None
+    )
 
 
 @pytest.mark.asyncio

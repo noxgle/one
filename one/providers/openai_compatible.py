@@ -159,6 +159,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             effort = _REASONING_EFFORT_BY_LEVEL.get(thinking_level)
             if effort:
                 payload["reasoning_effort"] = effort
+        # llama.cpp chat templates such as Qwen use this template argument to
+        # suppress their reasoning block. It is deliberately provider-specific:
+        # OpenAI-compatible APIs do not share this extension.
+        if self.name == "llama.cpp" and thinking_level == "off":
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         return payload
 
     def with_base_url(self, base_url: str) -> OpenAICompatibleAdapter:

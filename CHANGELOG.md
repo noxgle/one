@@ -19,6 +19,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **llama.cpp thinking off** — `/thinking off` now passes llama.cpp's
+  `chat_template_kwargs.enable_thinking=false` request control for compatible
+  chat templates, preventing unwanted reasoning output where the server and
+  model support that option.
 - **Manual context compaction** — `/compact` now forces a summary below the
   automatic threshold; automatic and recovery compaction remain threshold-driven.
 - **TUI slash completion focus** — Tab no longer moves focus out of the command
