@@ -10,6 +10,7 @@ import scripts.diagnostic_workload as workload
 from scripts.diagnostic_workload import (
     SCENARIOS,
     _available_tools,
+    _capabilities,
     classify_coverage,
     create_fixture,
     scenario_prompt,
@@ -46,6 +47,11 @@ def test_special_prompts_explicitly_request_safe_valid_tool_calls() -> None:
 def test_available_tools_extracts_names_from_dicts_and_strings() -> None:
     response = {"data": {"tools": [{"name": "read", "description": "read files"}, "bash", {"name": 1}, {"description": "missing"}]}}
     assert _available_tools(response) == {"read", "bash"}
+
+
+def test_capabilities_extracts_explicit_boolean_values_only() -> None:
+    response = {"data": {"capabilities": {"inputImage": False, "invalid": "false"}}}
+    assert _capabilities(response) == {"inputImage": False}
 
 
 class _FakeStdout:
@@ -163,8 +169,8 @@ def test_workload_records_wait_for_idle_coverage(monkeypatch, tmp_path: Path) ->
     assert result["completed"] is False
 
 
-@pytest.mark.parametrize("idle_response", [{"success": False}, None])
-def test_completed_is_false_after_failed_or_timed_out_scenario(monkeypatch, tmp_path: Path, idle_response: dict[str, bool] | None) -> None:
+@pytest.mark.parametrize(("idle_response", "completed"), [({"success": False}, False), (None, True)])
+def test_completed_is_false_after_failed_or_timed_out_scenario(monkeypatch, tmp_path: Path, idle_response: dict[str, bool] | None, completed: bool) -> None:
     clock = {"value": 0.0}
 
     class Driver:
@@ -186,7 +192,7 @@ def test_completed_is_false_after_failed_or_timed_out_scenario(monkeypatch, tmp_
     monkeypatch.setattr(workload, "RpcDriver", Driver)
     result = workload.run_workload(tmp_path / "fixture", 1, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
     assert result["incompleteAtDeadline"]["allPlannedScenariosAttempted"] is True
-    assert result["completed"] is False
+    assert result["completed"] is completed
 
 
 def test_coverage_classifies_unavailable_arbitrary_tool_as_warning_not_missing() -> None:
@@ -197,6 +203,17 @@ def test_coverage_classifies_unavailable_arbitrary_tool_as_warning_not_missing()
     assert coverage["read_image"]["category"] == "capability_unavailable"
     assert missing == []
     assert warnings == [{"scenario": "read_image", "category": "capability_unavailable", "detail": "read_image was not advertised by the RPC session configuration."}]
+
+
+def test_coverage_classifies_known_unavailable_image_capability_as_warning() -> None:
+    coverage, missing, warnings = classify_coverage(
+        {"read_image"}, set(), {"read_image"},
+        {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}, False,
+        {"inputImage": False},
+    )
+    assert coverage["read_image"]["category"] == "capability_unavailable"
+    assert missing == []
+    assert warnings == [{"scenario": "read_image", "category": "capability_unavailable", "detail": "inputImage is unavailable for the selected model."}]
 
 
 def test_coverage_does_not_misclassify_available_tools_or_controls() -> None:
@@ -218,6 +235,95 @@ def test_coverage_excludes_final_idle_truncated_by_outer_deadline() -> None:
     assert coverage["wait_for_idle"]["category"] == "deadline_truncated"
     assert "wait_for_idle" not in missing
     assert warnings[-1]["scenario"] == "wait_for_idle"
+
+
+def test_workload_treats_final_idle_deadline_as_completed_warning(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            if body["type"] == "get_tools":
+                return {"success": True, "data": {"tools": ["read"], "capabilities": {"inputImage": False}}}
+            if body["type"] == "wait_for_idle":
+                clock["value"] = 1.0
+                return None
+            if body["type"] == "prompt":
+                self.events.append({"type": "tool_call_start", "toolName": "read"})
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("read",))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    result = workload.run_workload(tmp_path / "fixture", 1, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert result["completed"] is True
+    assert result["missingCoverage"] == []
+    assert result["coverage"]["wait_for_idle"]["category"] == "deadline_truncated"
+
+
+def test_workload_skips_known_unavailable_image_scenario(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+    prompts: list[str] = []
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            if body["type"] == "get_tools":
+                return {"success": True, "data": {"tools": ["read_image"], "capabilities": {"inputImage": False}}}
+            if body["type"] == "prompt":
+                prompts.append(body["message"])
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("read_image",))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    workload.run_workload(tmp_path / "fixture", 0.01, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"], sleep=lambda seconds: clock.__setitem__("value", clock["value"] + seconds))
+    assert prompts == []
+
+
+def test_advertised_tool_dispatch_failure_remains_a_runtime_failure(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            if body["type"] == "get_tools":
+                return {"success": True, "data": {"tools": ["apply_patch"]}}
+            if body["type"] == "prompt":
+                self.events.extend((
+                    {"type": "tool_call_start", "tool": "apply_patch"},
+                    {"type": "tool_call_end", "tool": "apply_patch", "ok": False, "error": "Unsupported tool: apply_patch"},
+                ))
+            if body["type"] == "wait_for_idle":
+                clock["value"] = 1.0
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("apply_patch",))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    result = workload.run_workload(tmp_path / "fixture", 1, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert result["toolPreflight"]["apply_patch"] == "advertised"
+    assert result["coverage"]["apply_patch"]["observed"] is True
+    assert result["completed"] is False
+    assert workload._runtime_failure(result["events"], 0, False) is True
 
 
 def test_coverage_keeps_true_missing_tool_coverage_as_failure() -> None:

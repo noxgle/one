@@ -34,6 +34,7 @@ EXIT_INTERNAL = 5
 MAX_EVENTS = 2_000
 MAX_MALFORMED = 100
 MAX_ANALYSIS_INPUT = 200_000
+MAX_ANALYSIS_PROMPT_SUMMARY = 16_000
 MAX_ANALYSIS_ARTIFACT_BYTES = 200_000
 MAX_ANALYSIS_ARTIFACT_FILE_BYTES = 48_000
 MAX_SESSION_ARTIFACT_FILES = 32
@@ -431,7 +432,9 @@ def build_and_run(args: argparse.Namespace, artifacts: Path) -> dict[str, Any]:
 def analysis_prompt(artifact: dict[str, Any], prompt_file: str | None, artifact_paths: list[str] | None = None) -> str:
     template = (Path(__file__).with_name("diagnostic_analysis_prompt.md")).read_text(encoding="utf-8")
     extra = Path(prompt_file).read_text(encoding="utf-8") if prompt_file else ""
-    payload = json.dumps(redact(artifact), ensure_ascii=False)[:MAX_ANALYSIS_INPUT]
+    # Detailed sanitized data lives in the analysis workspace.  Keep argv well
+    # below exec argument limits instead of duplicating the full report here.
+    payload = json.dumps(redact(artifact), ensure_ascii=False)[:MAX_ANALYSIS_PROMPT_SUMMARY]
     paths = artifact_paths or ["diagnostic-input.json"]
     available = "\n".join(f"- `{path}`" for path in paths)
     return (

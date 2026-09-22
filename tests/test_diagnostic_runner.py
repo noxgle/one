@@ -370,6 +370,21 @@ def test_analysis_workspace_exposes_only_bounded_redacted_inputs(monkeypatch, tm
     assert "inputs/session-excerpts/session/record.evidence" in prompt
 
 
+def test_analysis_uses_bounded_prompt_while_retaining_large_artifact_file(monkeypatch, tmp_path: Path) -> None:
+    args = runner.parse_args([])
+    captured: dict[str, Any] = {}
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, "DIAGNOSTIC_JSON_BEGIN\n{\"summary\": \"ok\", \"findings\": []}\nDIAGNOSTIC_JSON_END", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    large_artifact = {"run": {"events": [{"message": "x" * 200_000}]}, "findings": []}
+    assert runner.run_analysis(args, large_artifact, tmp_path)["status"] == "completed"
+    assert len(captured["command"][4]) < 40_000
+    assert (tmp_path / "diagnostic-input.json").is_file()
+
+
 def test_opt_in_docker_smoke(tmp_path: Path) -> None:
     if os.environ.get("ONE_RUN_DOCKER_DIAGNOSTIC_SMOKE") != "1":
         pytest.skip("set ONE_RUN_DOCKER_DIAGNOSTIC_SMOKE=1 to run Docker smoke")

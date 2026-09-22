@@ -882,6 +882,8 @@ class AgentSession:
             result = fn(cwd, path_arg or "", content_arg)
         elif tool_name == "edit":
             result = fn(cwd, path_arg or "", args.get("edits", []))
+        elif tool_name == "apply_patch":
+            result = fn(cwd, args.get("patchText", ""))
         elif tool_name == "grep":
             result = fn(cwd, args.get("pattern", ""), args.get("path", "."))
         elif tool_name == "find":

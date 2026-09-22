@@ -281,7 +281,12 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
             elif ctype == "get_queue":
                 output(success(cid, ctype, session.get_pending_queues()))
             elif ctype == "get_tools":
-                output(success(cid, ctype, {"tools": session.active_tools}))
+                output(success(cid, ctype, {
+                    "tools": session.active_tools,
+                    "capabilities": {
+                        "inputImage": bool(session.model and session.model.input_image),
+                    },
+                }))
             elif ctype == "get_commands":
                 skills = session.resource_loader.get_skills().get("skills", [])
                 prompts = session.resource_loader.get_prompts().get("prompts", [])

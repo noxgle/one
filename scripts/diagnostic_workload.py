@@ -45,6 +45,7 @@ SCENARIO_REQUIRED_TOOLS: dict[str, str | None] = {
     "compaction": None,
     "reload": None,
 }
+SCENARIO_REQUIRED_CAPABILITIES = {"read_image": "inputImage"}
 MAX_EVENTS = 2_000
 MAX_MALFORMED = 100
 MAX_AUTO_ANSWERS = 100
@@ -106,9 +107,37 @@ def _available_tools(response: dict[str, Any] | None) -> set[str] | None:
     return names
 
 
+def _capabilities(response: dict[str, Any] | None) -> dict[str, bool] | None:
+    """Extract explicitly reported boolean RPC capabilities."""
+    data = response.get("data") if isinstance(response, dict) else None
+    capabilities = data.get("capabilities") if isinstance(data, dict) else None
+    if not isinstance(capabilities, dict):
+        return None
+    return {name: value for name, value in capabilities.items() if isinstance(name, str) and isinstance(value, bool)}
+
+
+def _scenario_unavailable(name: str, available_tools: set[str] | None, capabilities: dict[str, bool] | None) -> str | None:
+    required_tool = SCENARIO_REQUIRED_TOOLS[name]
+    if required_tool is not None and available_tools is not None and required_tool not in available_tools:
+        return f"{required_tool} was not advertised by the RPC session configuration."
+    required_capability = SCENARIO_REQUIRED_CAPABILITIES.get(name)
+    if required_capability and capabilities is not None and capabilities.get(required_capability) is False:
+        return f"{required_capability} is unavailable for the selected model."
+    return None
+
+
+def _tool_preflight_status(name: str, available_tools: set[str] | None, capabilities: dict[str, bool] | None) -> str:
+    if detail := _scenario_unavailable(name, available_tools, capabilities):
+        return detail
+    if available_tools is None:
+        return "unknown (get_tools did not return an advertised tool list)"
+    return "advertised"
+
+
 def classify_coverage(
     attempted: set[str], observed: set[str], available_tools: set[str] | None,
     idle: dict[str, int], final_idle_deadline_truncated: bool,
+    capabilities: dict[str, bool] | None = None,
 ) -> tuple[dict[str, dict[str, object]], list[str], list[dict[str, str]]]:
     """Classify coverage without conflating disabled tools or deadline cleanup with misses."""
     coverage: dict[str, dict[str, object]] = {}
@@ -119,9 +148,9 @@ def classify_coverage(
         state: dict[str, object] = {"expected": expected, "observed": name in observed}
         required_tool = SCENARIO_REQUIRED_TOOLS[name]
         if expected and not state["observed"]:
-            if required_tool is not None and available_tools is not None and required_tool not in available_tools:
+            if detail := _scenario_unavailable(name, available_tools, capabilities):
                 state["category"] = "capability_unavailable"
-                warnings.append({"scenario": name, "category": "capability_unavailable", "detail": f"{required_tool} was not advertised by the RPC session configuration."})
+                warnings.append({"scenario": name, "category": "capability_unavailable", "detail": detail})
             else:
                 state["category"] = "missing_model_or_tool_coverage"
                 missing.append(name)
@@ -247,6 +276,7 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
     idle = {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}
     scenarios: list[dict[str, Any]] = []
     available_tools: set[str] | None = None
+    capabilities: dict[str, bool] | None = None
     final_idle_deadline_truncated = False
     execution_failed = False
     result: dict[str, Any]
@@ -263,14 +293,25 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
             else:
                 execution_failed = True
         if monotonic() < deadline:
-            available_tools = _available_tools(driver.command({"type": "get_tools"}, deadline))
+            tools_response = driver.command({"type": "get_tools"}, deadline)
+            available_tools = _available_tools(tools_response)
+            capabilities = _capabilities(tools_response)
         index = 0
         while monotonic() < deadline:
             name = SCENARIOS[index % len(SCENARIOS)]
             scenario_started = monotonic()
             attempted.add(name)
-            response = driver.command({"type": "prompt", "message": scenario_prompt(name), "streamingBehavior": "queue"}, deadline)
             record: dict[str, Any] = {"id": name, "startSec": round(scenario_started - started, 3), "waitForIdle": {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}}
+            if detail := _scenario_unavailable(name, available_tools, capabilities):
+                record.update(status="capability_unavailable", detail=detail, endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
+                if len(scenarios) < MAX_SCENARIO_RECORDS:
+                    scenarios.append(record)
+                index += 1
+                remaining = deadline - monotonic()
+                if remaining > 0:
+                    sleep(min(0.2, remaining))
+                continue
+            response = driver.command({"type": "prompt", "message": scenario_prompt(name), "streamingBehavior": "queue"}, deadline)
             if response is None:
                 execution_failed = True
                 record.update(status="prompt_timeout", endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
@@ -289,7 +330,6 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
             record["waitForIdle"]["requested"] = 1
             idle_response = driver.command({"type": "wait_for_idle"}, deadline)
             if idle_response is None:
-                execution_failed = True
                 idle["timedOut"] += 1
                 record["waitForIdle"]["timedOut"] = 1
                 all_planned_attempted = set(SCENARIOS) <= attempted
@@ -297,6 +337,8 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                     monotonic() >= deadline and all_planned_attempted
                     and idle["failed"] == 0 and idle["timedOut"] == 1
                 )
+                if not final_idle_deadline_truncated:
+                    execution_failed = True
                 record["status"] = "incomplete_at_deadline" if final_idle_deadline_truncated else "idle_timeout"
             elif idle_response.get("success") is True:
                 idle["completed"] += 1
@@ -315,21 +357,39 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 scenarios.append(record)
             index += 1
         observed = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_start"}
+        # A tool advertised by get_tools but ending unsuccessfully is a real
+        # dispatch/runtime failure, not a disabled capability.  Optional
+        # scenarios are skipped above, so they cannot be mistaken for this.
+        if any(event.get("type") == "tool_call_end" and event.get("ok") is False for event in driver.events):
+            execution_failed = True
         attempted.update(requested)
         observed.update(control_observed)
         coverage, missing_coverage, coverage_warnings = classify_coverage(
-            attempted, observed, available_tools, idle, final_idle_deadline_truncated,
+            attempted, observed, available_tools, idle, final_idle_deadline_truncated, capabilities,
         )
         incomplete_at_deadline = {
             "finalWaitForIdle": final_idle_deadline_truncated,
             "allPlannedScenariosAttempted": set(SCENARIOS) <= attempted,
         }
-        result = {"type": "diagnostic_workload", "fixture": fixture, "elapsedSec": round(monotonic() - started, 3), "events": driver.events, "malformed": driver.malformed, "coverage": coverage, "missingCoverage": missing_coverage, "coverageWarnings": coverage_warnings, "incompleteAtDeadline": incomplete_at_deadline, "completed": incomplete_at_deadline["allPlannedScenariosAttempted"] and not execution_failed, "waitForIdle": idle, "scenarios": scenarios, "scenarioRecordsDropped": max(0, index - len(scenarios))}
+        tool_preflight = {name: _tool_preflight_status(name, available_tools, capabilities) for name in SCENARIOS if SCENARIO_REQUIRED_TOOLS[name] is not None}
+        result = {"type": "diagnostic_workload", "fixture": fixture, "elapsedSec": round(monotonic() - started, 3), "events": driver.events, "malformed": driver.malformed, "coverage": coverage, "missingCoverage": missing_coverage, "coverageWarnings": coverage_warnings, "toolPreflight": tool_preflight, "incompleteAtDeadline": incomplete_at_deadline, "completed": incomplete_at_deadline["allPlannedScenariosAttempted"] and not execution_failed, "waitForIdle": idle, "scenarios": scenarios, "scenarioRecordsDropped": max(0, index - len(scenarios))}
     finally:
         driver.close()
     result["processReturnCode"] = driver.process.poll()
     result["processTerminatedByDriver"] = getattr(driver, "terminated_by_driver", False)
     return result
+
+
+def _runtime_failure(events: list[dict[str, Any]], process_return_code: int | None, terminated_by_driver: bool) -> bool:
+    return (
+        any(
+            event.get("type") in {"error", "provider_error"}
+            or event.get("success") is False
+            or (event.get("type") == "tool_call_end" and event.get("ok") is False)
+            for event in events
+        )
+        or (process_return_code not in (None, 0) and not terminated_by_driver)
+    )
 
 
 def main() -> int:
@@ -345,9 +405,8 @@ def main() -> int:
         parser.error("--duration must be greater than zero")
     workload_plan(args.duration, args.workload)
     result = run_workload(Path(args.workspace), args.duration, args.provider, args.model, args.llama_cpp_url)
-    result["runtimeFailure"] = (
-        any(event.get("type") in {"error", "provider_error"} or event.get("success") is False for event in result["events"])
-        or (result["processReturnCode"] not in (None, 0) and not result["processTerminatedByDriver"])
+    result["runtimeFailure"] = _runtime_failure(
+        result["events"], result["processReturnCode"], result["processTerminatedByDriver"],
     )
     print(json.dumps(result, sort_keys=True))
     return 4 if result["runtimeFailure"] or result["missingCoverage"] else 0

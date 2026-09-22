@@ -6,11 +6,24 @@ from pathlib import Path
 
 import pytest
 
+from one.core.agent_session import AgentSession
 from one.tools.apply_patch import apply_patch_tool
 
 
 def _cwd(tmp_path: Path) -> str:
     return str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_registered_apply_patch_dispatches_from_agent_session(tmp_path: Path) -> None:
+    session = object.__new__(AgentSession)
+    session._active_tools = ["apply_patch"]
+    session.session_manager = type("SessionManager", (), {"cwd": str(tmp_path)})()
+    result = await session._execute_tool_by_name(
+        "apply_patch", {"patchText": "*** Begin Patch\n*** Add File: dispatched.txt\n+ok\n*** End Patch\n"},
+    )
+    assert result["content"][0]["text"].startswith("Success.")
+    assert (tmp_path / "dispatched.txt").read_text(encoding="utf-8") == "ok\n"
 
 
 # ── Add File ──────────────────────────────────────────────────────────────────
