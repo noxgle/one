@@ -139,7 +139,9 @@ async def test_tui_command_help_lists_all_commands(tmp_path: Path):
             "/fork <id>",
             "/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]",
             "/logout <provider>",
-                "/retry <on|off|unlimited>",
+            "/retry <on|off|unlimited>",
+            "/skill [list]",
+            "/skill:<name> [args]",
             "/config [key] [value]",
             "/extui <list|request|respond|cancel|clear>",
             "/cooperation [on|off]",
@@ -148,6 +150,74 @@ async def test_tui_command_help_lists_all_commands(tmp_path: Path):
             "/paste-image",
         ]:
             assert token in stream, token
+
+
+@pytest.mark.asyncio
+async def test_tui_skill_commands_list_and_invoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skill command listings accept the documented syntax and preserve invocation."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    monkeypatch.setattr(
+        session.resource_loader,
+        "get_skills",
+        lambda: {"skills": [{"name": "demo", "description": "Demo skill"}]},
+        raising=False,
+    )
+    invoked: list[tuple[str, str]] = []
+
+    async def invoke_skill(name: str, args: str) -> dict[str, object]:
+        invoked.append((name, args))
+        return {"ok": True, "bodyLength": 42}
+
+    monkeypatch.setattr(session, "invoke_skill", invoke_skill)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for command in ("/skill", "/skill list", "/skill:"):
+            await _submit(app, pilot, command)
+        await _submit(app, pilot, "/skill:demo example args")
+
+    stream = "\n".join(app._stream_lines)
+    assert stream.count("Available skills:") == 3
+    assert invoked == [("demo", "example args")]
+    assert "Skill 'demo' loaded (42 chars)." in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_skill_listing_handles_empty_discovery_and_whitespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    monkeypatch.setattr(session.resource_loader, "get_skills", lambda: {"skills": []}, raising=False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for command in ("/skill", "/skill list", "/skill: \t"):
+            await app._handle_command(command)
+
+    assert "\n".join(app._stream_lines).count("No skills discovered.") == 3
+
+
+@pytest.mark.asyncio
+async def test_tui_skill_invocation_error_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+
+    async def invoke_skill(name: str, args: str) -> dict[str, object]:
+        return {"ok": False, "errorType": "BusySessionError" if name == "busy" else "SkillError", "error": "failed"}
+
+    monkeypatch.setattr(session, "invoke_skill", invoke_skill)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/skill:missing")
+        await _submit(app, pilot, "/skill:busy")
+
+    stream = "\n".join(app._stream_lines)
+    assert "Skill error: failed" in stream
+    assert "BusySessionError: failed" in stream
 
 
 @pytest.mark.asyncio
@@ -583,6 +653,8 @@ def test_slash_commands_include_providers():
     from one.modes.tui_mode import _SLASH_COMMANDS
 
     assert "/providers" in _SLASH_COMMANDS
+    assert "/skill" in _SLASH_COMMANDS
+    assert "/skill list" in _SLASH_COMMANDS
 
 
 @pytest.mark.asyncio
@@ -878,6 +950,25 @@ async def test_tui_slash_completion_single_match(tmp_path: Path):
         assert input_widget.text == "/new"
         stream = "\n".join(app._stream_lines)
         assert "[completion]" not in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_slash_completion_includes_skill_list(tmp_path: Path):
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.focus()
+        input_widget.text = "/skill"
+        input_widget.move_cursor((0, 6))
+        await pilot.press("tab")
+        assert input_widget.text == "/skill"
+        await pilot.press("tab")
+        assert input_widget.text == "/skill list"
 
 
 @pytest.mark.asyncio

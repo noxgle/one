@@ -386,6 +386,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/retry",
     "/retry-cycle",
     "/skill",
+    "/skill list",
     "/config",
     "/extui",
     "/cooperation",
@@ -1909,7 +1910,7 @@ if TEXTUAL_AVAILABLE:
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
                 )
                 self._write(
-                    "/cooperation [on|off] | /subagents [on|off] | /details-show [on|off] | /history [n] (last 50 inputs; Ctrl+Up/Down) | /mcp [list|enable|disable] | /bash <command> | /paste-image",
+                    "/skill [list] | /skill:<name> [args] | /cooperation [on|off] | /subagents [on|off] | /details-show [on|off] | /history [n] (last 50 inputs; Ctrl+Up/Down) | /mcp [list|enable|disable] | /bash <command> | /paste-image",
                     "info",
                 )
                 self._write("/inspect-timeout", "info")
@@ -2047,11 +2048,21 @@ if TEXTUAL_AVAILABLE:
                         self._write(f"  ⚠ {d}", "warn")
                 self._refresh_sidebar()
                 return
+            # /skill and /skill list list available skills; /skill: remains an alias.
+            if cmd in {"/skill", "/skill list"}:
+                skills_info = session.resource_loader.get_skills()
+                skills = skills_info.get("skills", [])
+                if not skills:
+                    self._write("No skills discovered. Place SKILL.md files in project/global skill directories.", "info")
+                else:
+                    self._write("Available skills:", "info")
+                    for s in skills:
+                        self._write(f"  {s['name']}: {s['description'][:80]}", "info")
+                return
             # /skill:<name> [args] — explicit skill invocation.
             if cmd.startswith("/skill:"):
                 rest = cmd[len("/skill:") :].strip()
                 if not rest:
-                    # No name → list available skills.
                     skills_info = session.resource_loader.get_skills()
                     skills = skills_info.get("skills", [])
                     if not skills:
@@ -3297,7 +3308,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list|name [args]] /config /extui /cooperation /subagents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 
