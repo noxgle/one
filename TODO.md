@@ -3663,7 +3663,7 @@ JSON arguments plain and safely literal.
 
 **Confidence:** High.
 
-- [ ] **Task:** Add segmented Rich rendering for tool lines.
+- [x] **Task:** Add segmented Rich rendering for tool lines.
   - **Description:** Update the TUI stream renderer to identify tool status
     lines, split the heading, JSON argument suffix, and terminal status suffix,
     and append each segment with the required style. Keep non-tool lines and
@@ -3695,7 +3695,7 @@ status block, with normal scrolling/trimming behavior.
 **Confidence:** Medium; automatic preflight compaction and direct `/compact`
 events must be checked for ordering and duplicate delivery.
 
-- [ ] **Task:** Add the width-aware transcript separator helper.
+- [x] **Task:** Add the width-aware transcript separator helper.
   - **Description:** Implement a display-only helper that inserts a single
     horizontal rule through the normal stream trim/render path. Use the current
     panel width with a deterministic fallback and avoid adding blank duplicate
@@ -3710,7 +3710,7 @@ events must be checked for ordering and duplicate delivery.
     ordering and exactly one rule; test automatic/preflight and `/compact`
     paths where practical; inspect updated TUI snapshots.
 
-- [ ] **Task:** Update snapshot and regression coverage.
+- [x] **Task:** Update snapshot and regression coverage.
   - **Description:** Update only snapshots affected by the new bold rendering
     and separator lines, and add assertions that ordinary tool output,
     compaction summaries, and terminal finish status remain present.
@@ -3739,9 +3739,9 @@ events must be checked for ordering and duplicate delivery.
 
 ### Project Acceptance Criteria
 
-- [ ] Tool heading and terminal `[ok]`/`[err]` are bold in the TUI.
-- [ ] Tool JSON arguments beginning with `{` remain unbolded and literal.
-- [ ] A horizontal rule appears before compaction and before `finish`.
-- [ ] No execution, persistence, provider-context, or event-contract behavior
+- [x] Tool heading and terminal `[ok]`/`[err]` are bold in the TUI.
+- [x] Tool JSON arguments beginning with `{` remain unbolded and literal.
+- [x] A horizontal rule appears before compaction and before `finish`.
+- [x] No execution, persistence, provider-context, or event-contract behavior
   changes.
-- [ ] Focused tests, full pytest, Ruff, diff check, and snapshot review pass.
+- [x] Focused tests, full pytest, Ruff, diff check, and snapshot review pass.

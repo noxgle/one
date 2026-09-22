@@ -964,6 +964,66 @@ async def test_tui_tool_call_start_with_effective_timeout(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_tool_status_uses_literal_segmented_bold_styles(tmp_path: Path):
+    """Tool headings/statuses are bold while JSON remains literal and plain."""
+    from rich.console import Console
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        args = {"x": "[b]"}
+        session._emit({"type": "tool_call_start", "tool": "read", "args": args, "effectiveTimeout": 30})
+        await pilot.pause()
+        session._emit({"type": "tool_call_end", "tool": "read", "ok": True, "result": {}})
+        await pilot.pause()
+        session._emit({"type": "tool_call_start", "tool": "read", "args": {"x": "bad"}})
+        await pilot.pause()
+        session._emit({"type": "tool_call_end", "tool": "read", "ok": False, "result": {}})
+        await pilot.pause()
+
+        content = app.query_one("#stream", Static).content
+        heading = next(line for line in app._stream_lines if line.startswith("tool (timeout 30s): read"))
+        args_line = next(line for line in app._stream_lines if "[b]" in line)
+        status_line = next(line for line in app._stream_lines if line.endswith(" [ok]"))
+        error_line = next(line for line in app._stream_lines if line.endswith("[err]"))
+        heading_start = content.plain.index(heading)
+        args_start = content.plain.index(args_line)
+        status_start = content.plain.index(status_line) + status_line.rindex(" [ok]")
+        error_start = content.plain.index(error_line) + error_line.rindex("[err]")
+
+        console = Console()
+        assert content.get_style_at_offset(console, heading_start).bold is True
+        assert not content.get_style_at_offset(console, args_start).bold
+        assert not content.get_style_at_offset(console, args_start + args_line.index("[b]")).bold
+        assert content.get_style_at_offset(console, status_start + 1).bold is True
+        assert content.get_style_at_offset(console, error_start + 1).bold is True
+
+
+@pytest.mark.asyncio
+async def test_tui_lifecycle_separators_are_ordered_once_and_narrow_safe(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(10, 20)) as pilot:
+        await pilot.pause()
+        session._emit({"type": "compaction_start", "reason": "manual"})
+        await pilot.pause()
+        session._emit({"type": "tool_call_start", "tool": "finish", "args": {"summary": "done"}})
+        await pilot.pause()
+
+        separators = [i for i, line in enumerate(app._stream_lines) if set(line) == {"─"}]
+        assert len(separators) == 2
+        assert all(len(app._stream_lines[index]) >= 1 for index in separators)
+        finish = next(i for i, line in enumerate(app._stream_lines) if line.startswith("tool: finish"))
+        assert separators[0] < separators[1] < finish
+
+
+@pytest.mark.asyncio
 async def test_tui_tool_call_start_per_call_override_shows_override(tmp_path: Path):
     """When the agent overrides the timeout per-call, the override value must
     appear in the TUI line."""

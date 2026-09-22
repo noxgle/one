@@ -1113,6 +1113,7 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 return
             text = Text()
+            in_tool_block = False
             for line in self._stream_lines:
                 if line.startswith(_THINKING_MARK):
                     # Intentional markup (colour + spinner frame).
@@ -1123,14 +1124,43 @@ if TEXTUAL_AVAILABLE:
                 elif line in {"Thinking:", "Thought:"}:
                     text.append(line + "\n", style="italic")
                 else:
-                    # Literal text — never parsed by Textual's markup parser.
-                    text.append(line + "\n")
+                    is_tool_line = line.startswith(("tool: ", "tool (", "tool start ", "tool ok: ", "tool err: "))
+                    in_tool_block = is_tool_line or (in_tool_block and bool(line))
+                    self._append_stream_line(text, line, in_tool_block=in_tool_block)
+                    if not line:
+                        in_tool_block = False
             stream_widget.update(text)
             self._rendered_stream_lines = rendered_lines
             try:
                 self.query_one("#stream_container", VerticalScroll).scroll_end(animate=False)
             except Exception:
                 pass
+
+        @staticmethod
+        def _append_stream_line(text: Text, line: str, *, in_tool_block: bool = False) -> None:
+            """Append a literal transcript line, styling recognized tool status."""
+            is_tool_line = line.startswith(("tool: ", "tool (", "tool start ", "tool ok: ", "tool err: "))
+            status_start = len(line)
+            if is_tool_line or in_tool_block:
+                for suffix in (" [ok]", " [err]", "[ok]", "[err]"):
+                    if line.endswith(suffix):
+                        status_start = len(line) - len(suffix)
+                        break
+
+            if not is_tool_line:
+                text.append(line[:status_start])
+            else:
+                args_start = line.find("{")
+                if args_start < 0 or args_start > status_start:
+                    text.append(line[:status_start], style="bold")
+                else:
+                    text.append(line[:args_start], style="bold")
+                    # Arguments are literal text, not Rich markup, and intentionally
+                    # have no inherited bold style.
+                    text.append(line[args_start:status_start])
+            if status_start < len(line):
+                text.append(line[status_start:], style="bold")
+            text.append("\n")
 
         def _flush_pending_ui_events(self) -> None:
             """Drain ordered session events without creating a token-rate UI backlog."""
@@ -1376,6 +1406,18 @@ if TEXTUAL_AVAILABLE:
             if "kept" in result:
                 lines.append(f"Messages kept: {result['kept']}")
             self._write("\n".join(lines), "info")
+
+        def _write_lifecycle_separator(self) -> None:
+            """Insert a display-only horizontal rule through the normal stream path."""
+            width = 84
+            try:
+                stream_widget = self.query_one("#stream_container")
+                current_width = int(getattr(getattr(stream_widget, "size", None), "width", 0) or 0)
+                if current_width > 0:
+                    width = max(1, current_width - 6)
+            except Exception:
+                pass
+            self._write("─" * width)
 
         def _trim_stream(self, *, render: bool = True) -> int:
             """Trim *_stream_lines* to ``MAX_RENDERED_LINES`` entries. Returns the number of
@@ -3372,6 +3414,8 @@ if TEXTUAL_AVAILABLE:
                 # on_input_submitted.
                 self._turn_active = True
                 self._finalize_thinking_block()
+            elif et == "compaction_start":
+                self._write_lifecycle_separator()
             elif et == "tool_call_start":
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
@@ -3389,6 +3433,8 @@ if TEXTUAL_AVAILABLE:
                     text = f"tool (timeout {int(et_val)}s): {tool_name} {args_text}"
                 else:
                     text = f"tool: {tool_name} {args_text}"
+                if tool_name == "finish":
+                    self._write_lifecycle_separator()
                 start, end = self._write_tool_block(text)
                 self._active_tool_block = (tool_name, start, end, text)
             elif et == "tool_approval_rejected":
