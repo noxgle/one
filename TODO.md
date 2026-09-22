@@ -3350,6 +3350,184 @@ both slash commands and ordinary user prompts.
 | Multiline text changes widget height or cursor state | Restore via the existing `TextArea.text` setter and add pilot tests for exact text/cursor behavior |
 | Prompts may contain sensitive content | Keep the existing local-only history behavior and 50-entry cap; do not add new persistence unless explicitly requested |
 
+## Follow-up: unified TUI and interactive details rendering
+
+### Goal
+
+Unify reasoning labels, tool/MCP timeout reporting, and detailed tool-output
+visibility in both the Textual TUI and interactive mode without changing the
+underlying session event contract or persisted configuration compatibility.
+
+### Scope
+
+#### In Scope
+
+- Render completed reasoning blocks as `Thought:` with italic reasoning content.
+- Rename `tool start` display to `tool` and show the actual effective timeout.
+- Apply timeout precedence consistently to built-in and MCP tools:
+  `args.timeout` → `tools.timeoutSec` → MCP compatibility fallback `120s`.
+- Rename `/bash-show` to `/details-show` and `Bash:` to `Details:` in TUI and
+  interactive mode.
+- Use one persisted details-output setting to show/hide ordinary tool, MCP tool,
+  and Bash result bodies in both modes; preserve the existing `bash.showOutput`
+  storage key or provide a migration for existing settings.
+- Keep tool/MCP status lines visible when details are hidden; hide only detailed
+  result/output payloads unless the implementation review confirms an explicit
+  requirement to hide errors too.
+
+#### Non-Goals
+
+- No changes to provider reasoning generation or session event names.
+- No removal of the existing `bash.showOutput` persisted key without migration.
+- No change to MCP server protocol or tool argument schemas beyond timeout
+  propagation.
+
+### Architecture Decisions
+
+#### ADR-001: Preserve the existing details setting storage key
+
+**Decision:** Keep `bash.showOutput` as the persisted compatibility key while
+exposing it as the broader `details` output setting in both user interfaces.
+
+**Rationale:** Existing user settings must continue to work; the behavior is
+expanding from Bash-only output to all tool and MCP result bodies.
+
+**Trade-offs:** The internal/storage name remains legacy and differs from the
+new UI terminology.
+
+#### ADR-002: Centralize effective timeout precedence
+
+**Decision:** Compute one effective timeout per tool call using
+`args.timeout`, then `settings.tools.timeoutSec`, then `120` seconds only for
+MCP compatibility when no configured default is available. Pass that same
+value to MCP execution, outer enforcement, and emitted `tool_call_start` data.
+
+**Rationale:** The displayed timeout must match the actual timeout and must not
+depend on whether the tool is built-in or MCP.
+
+**Trade-offs:** Existing MCP calls without an explicit timeout may change from
+the current hardcoded 120 seconds to the configured `tools.timeoutSec` default
+(30 seconds by default), intentionally following the confirmed precedence.
+
+### Phases
+
+#### Phase 1: Reasoning and shared details rendering
+
+**Objective:** Make completed thinking readable as italic `Thought:` blocks and
+establish shared output-visibility semantics.
+
+**Prerequisites:** None.
+
+**Expected outcome:** TUI and interactive output use the new terminology while
+preserving reasoning/answer ordering and stored settings.
+
+**Estimated effort:** 1–2 engineering hours.
+
+**Confidence:** High.
+
+- [x] **Task:** Render completed thinking as italic `Thought:` content.
+  - **Description:** Track the current thinking-label line so active reasoning
+    can be finalized from `Thinking:` to `Thought:`; render the complete
+    reasoning text and label using the existing Rich markup path with italics.
+    Preserve separate thinking blocks around tool calls and reset state safely
+    on retries, aborts, stream failures, and session reloads.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_streaming.py`, relevant
+    TUI snapshot files if rendered fixtures change.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Completed reasoning displays `Thought:` and italic
+    content; active reasoning remains distinguishable; ordinary assistant text
+    is not italicized; multiple thinking/tool segments remain correctly ordered.
+  - **Verification:** TUI streaming tests for one block, multiple blocks,
+    retry/abort, reload, and Rich markup; targeted snapshots.
+
+- [x] **Task:** Rename details controls in TUI and interactive mode.
+  - **Description:** Replace `/bash-show` with `/details-show`, update help,
+    command palette, shortcut descriptions, sidebar `Bash:` to `Details:`, and
+    interactive help/command handling. Preserve `bash.showOutput` persistence
+    compatibility through aliases or migration.
+  - **Files:** `one/modes/tui_mode.py`, `one/modes/interactive_mode.py`,
+    `one/core/settings_manager.py` only if aliases are needed,
+    `tests/test_tui_commands.py`, `tests/test_interactive_mode.py`, settings
+    tests, TUI snapshots.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** `/details-show on|off` works in both modes;
+    old persisted settings retain their value; user-visible help contains only
+    the new command/name; Ctrl+O says `toggle details output`.
+  - **Verification:** TUI pilot tests, interactive command tests, persistence
+    round-trip tests, and snapshot review.
+
+#### Phase 2: Effective timeout and output-body filtering
+
+**Objective:** Show truthful timeouts and apply details visibility to all tool
+and MCP result bodies.
+
+**Prerequisites:** Phase 1 terminology/settings contract.
+
+**Expected outcome:** Built-in tools, Bash, and MCP tools share consistent
+timeout and details-output behavior in both interfaces.
+
+**Estimated effort:** 2–4 engineering hours.
+
+**Confidence:** Medium; MCP outer-timeout behavior must be verified carefully.
+
+- [x] **Task:** Implement and propagate effective timeout precedence.
+  - **Description:** Centralize `args.timeout` → `tools.timeoutSec` → `120s`
+    fallback for MCP; use the value for MCP client calls, outer timeout
+    enforcement, and `tool_call_start.effectiveTimeout`. Update TUI and
+    interactive rendering from `tool start (timeout Ns):` to
+    `tool (timeout Ns):`; show the true value for MCP and ordinary tools.
+    Represent genuinely unlimited operations explicitly rather than fabricating
+    a timeout.
+  - **Files:** `one/core/agent_session.py`, `one/mcp/client.py` only if client
+    plumbing needs a normalized timeout, `one/modes/tui_mode.py`,
+    `one/modes/interactive_mode.py`, timeout/provider/MCP tests.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Per-call timeout wins; configured `tools.timeoutSec`
+    is used when no per-call value exists; MCP uses 120 seconds only when no
+    configured default exists; displayed and enforced values match.
+  - **Verification:** Unit tests for all precedence branches, MCP default and
+    override, built-in tools, Bash grace behavior, emitted events, and TUI/
+    interactive text.
+
+- [x] **Task:** Filter detailed outputs for all tools and MCP results.
+  - **Description:** Reuse the details-output setting when handling
+    `tool_call_end`: keep the compact status (`tool ok/err`) visible, but show
+    or suppress result bodies for ordinary tools, MCP tools, and Bash according
+    to on/off state. Define and test the error-body policy explicitly; default
+    to preserving status visibility even when details are hidden.
+  - **Files:** `one/modes/tui_mode.py`, `one/modes/interactive_mode.py`,
+    settings accessors if needed, tool/MCP rendering tests and snapshots.
+  - **Dependencies:** Details setting from Phase 1; effective timeout event
+    contract from the preceding task.
+  - **Acceptance Criteria:** On mode shows all result bodies; off hides Bash,
+    ordinary tool, and MCP result bodies while retaining status lines; toggling
+    does not affect execution, persistence, evidence sidecars, or provider
+    context.
+  - **Verification:** Fake-event tests for successful/error Bash, ordinary tool,
+    and MCP results in both TUI and interactive mode; regression tests confirm
+    the model still receives tool results and evidence while display is hidden.
+
+### Risks & Mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| Thinking label/index state becomes stale after stream trim or retry | Track the label index with existing trim rebasing and test retries, aborts, and multiple blocks |
+| MCP displayed timeout differs from enforced timeout | Compute one effective value and pass it through execution, events, and renderers |
+| Existing `bash.showOutput` settings break | Preserve the key and test load/save round trips |
+| Hidden output accidentally hides status/errors or changes model context | Filter only UI rendering; keep events, tool results, and evidence unchanged |
+| Interactive and TUI command behavior diverges | Add parallel command/rendering tests for both modes |
+
+### Project Acceptance Criteria
+
+- [x] TUI and interactive mode use `Thought:`, italic reasoning, `Details:`,
+  `/details-show`, and `tool (timeout Ns):` consistently.
+- [x] Timeout precedence is enforced and displayed truthfully for built-in and
+  MCP tools.
+- [x] Details off hides tool/MCP/Bash result bodies without changing execution
+  or persisted/provider context.
+- [x] Existing settings remain compatible.
+- [x] Full pytest suite, Ruff, diff check, and reviewed TUI snapshots pass.
+
 ## Follow-up: TUI compact result rendering
 
 - [x] **Format `/compact` output in the TUI instead of displaying raw JSON.**

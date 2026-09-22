@@ -376,7 +376,9 @@ class InteractiveMode:
                 err = (event.get("error") or "Unknown error").strip()
                 print(f"[Error] {err}", flush=True)
             if et == "tool_call_start":
-                print(f"[Tool] {event.get('tool')} {json.dumps(event.get('args', {}), ensure_ascii=False)}", flush=True)
+                timeout = event.get("effectiveTimeout")
+                suffix = f" (timeout {int(timeout)}s)" if isinstance(timeout, (int, float)) and timeout > 0 else ""
+                print(f"[Tool{suffix}] {event.get('tool')} {json.dumps(event.get('args', {}), ensure_ascii=False)}", flush=True)
             if et == "tool_approval_rejected":
                 print(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", flush=True)
             if et == "tool_call_end":
@@ -527,7 +529,7 @@ class InteractiveMode:
                     "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>\n"
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
-                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
+                    "/cooperation [on|off] | /subagents [on|off] | /details-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
                     "/inspect-timeout | /reload | /skill:<name> [args] (list with /skill: alone)\n"
                     "Ctrl+A toggles cooperation mode (bash/write/edit ask first)"
                 )
@@ -1018,18 +1020,21 @@ class InteractiveMode:
                 session.settings_manager.set_subagents_enabled(mode == "on")
                 print(f"Subagents set to {mode}.")
                 continue
-            if line.strip() == "/bash-show":
+            # /bash-show remains an undocumented compatibility alias for the
+            # legacy bash.showOutput persisted setting.
+            if line.strip() in {"/details-show", "/bash-show"}:
                 state = session.settings_manager.get_bash_show_output()
-                print(f"Bash output: {'on' if state else 'off'}")
-                print("Usage: /bash-show <on|off>")
+                print(f"Details output: {'on' if state else 'off'}")
+                print("Usage: /details-show <on|off>")
                 continue
-            if line.startswith("/bash-show "):
-                mode = line[len("/bash-show ") :].strip().lower()
+            if line.startswith("/details-show ") or line.startswith("/bash-show "):
+                prefix = "/details-show " if line.startswith("/details-show ") else "/bash-show "
+                mode = line[len(prefix) :].strip().lower()
                 if mode not in {"on", "off"}:
-                    print("Usage: /bash-show <on|off>")
+                    print("Usage: /details-show <on|off>")
                     continue
                 session.settings_manager.set_bash_show_output(mode == "on")
-                print(f"Bash output set to {mode}.")
+                print(f"Details output set to {mode}.")
                 continue
             if line.strip() == "/mcp":
                 manager = getattr(session, "_mcp_manager", None)

@@ -382,8 +382,8 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
         "/bash echo hi",
         "/subagents off",
         "/subagents",
-        "/bash-show off",
-        "/bash-show",
+        "/details-show off",
+        "/details-show",
         "/abort",
         "/new",
         "/ns",
@@ -408,7 +408,7 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert "Updated tools.maxSteps." in out
     assert "ran:echo hi" in out
     assert "Subagents set to off." in out
-    assert "Bash output set to off." in out
+    assert "Details output set to off." in out
     assert session.settings_manager.get_subagents_enabled() is False
     assert session.settings_manager.get_bash_show_output() is False
     assert "Abort requested." in out

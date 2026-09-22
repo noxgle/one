@@ -151,7 +151,7 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+Q", "quit"),
     ("Ctrl+Z", "toggle cooperation"),
     ("Ctrl+S", "toggle subagents"),
-    ("Ctrl+O", "toggle bash output"),
+    ("Ctrl+O", "toggle details output"),
     ("Ctrl+V", "paste text from the host/system clipboard"),
     ("Ctrl+Shift+V", "paste terminal text (SSH-safe)"),
     ("Ctrl+Alt+V", "paste image from the system clipboard"),
@@ -390,7 +390,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/extui",
     "/cooperation",
     "/subagents",
-    "/bash-show",
+    "/details-show",
     "/mcp",
     "/history",
     "/bash",
@@ -801,7 +801,7 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+q", "quit", "Quit"),
             Binding("ctrl+z", "toggle_cooperation", "Toggle approval", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
-            Binding("ctrl+o", "toggle_bash_show", "Toggle bash output", priority=True),
+            Binding("ctrl+o", "toggle_bash_show", "Toggle details output", priority=True),
             Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
             # Ctrl+Shift+V is intentionally unbound: terminals turn it into a
             # bracketed events.Paste event, which _CommandTextArea consumes.
@@ -857,6 +857,7 @@ if TEXTUAL_AVAILABLE:
             self._thinking_label_shown = False
             self._thinking_buffer: str = ""
             self._thinking_line_idx: int | None = None
+            self._thinking_label_idx: int | None = None
             self._command_history: list[str] = []
             self._approval_queue: asyncio.Queue | None = None
             self._approval_pending: dict[str, Any] | None = None
@@ -889,7 +890,7 @@ if TEXTUAL_AVAILABLE:
                 ("Clear conversation stream", "Clear the visible conversation stream", self.action_clear_stream, True),
                 ("Toggle cooperation", "Require approval for mutating tools", self.action_toggle_cooperation, True),
                 ("Toggle subagents", "Enable or disable subagent tools", self.action_toggle_subagents, True),
-                ("Toggle bash output", "Show or hide bash output", self.action_toggle_bash_show, True),
+                ("Toggle details output", "Show or hide detailed tool output", self.action_toggle_bash_show, True),
                 ("Quit one", "Quit the application", self.exit, True),
             ]
             for theme_name in sorted(BUILTIN_TUI_THEMES):
@@ -1119,6 +1120,8 @@ if TEXTUAL_AVAILABLE:
                 elif line.startswith(_THINKING_TEXT_MARK):
                     # Thinking text with intentional markup (theme colour).
                     text.append_text(Text.from_markup(line[len(_THINKING_TEXT_MARK) :]))
+                elif line in {"Thinking:", "Thought:"}:
+                    text.append(line + "\n", style="italic")
                 else:
                     # Literal text — never parsed by Textual's markup parser.
                     text.append(line + "\n")
@@ -1216,13 +1219,14 @@ if TEXTUAL_AVAILABLE:
                 return False
             started_segment = not self._thinking_label_shown
             if started_segment:
-                self._write("Thinking:", render=False)
+                self._stream_lines.append("Thinking:")
+                self._thinking_label_idx = len(self._stream_lines) - 1
                 self._thinking_label_shown = True
                 self._thinking_buffer = ""
                 self._thinking_line_idx = None
             self._thinking_buffer += sanitize_display_text(delta)
             escaped = rich_escape(self._thinking_buffer)
-            line_text = f"{_THINKING_TEXT_MARK}[{self._theme.info}]{escaped}[/]"
+            line_text = f"{_THINKING_TEXT_MARK}[i {self._theme.info}]{escaped}[/]"
             if (
                 self._thinking_line_idx is not None
                 and 0 <= self._thinking_line_idx < len(self._stream_lines)
@@ -1274,9 +1278,32 @@ if TEXTUAL_AVAILABLE:
             remain visible as part of the turn transcript. The animated
             spinner is handled by _remove_thinking_line / _tick_waiting.
             """
+            if self._thinking_label_shown:
+                # The waiting spinner is inserted before a live reasoning
+                # block and removed asynchronously.  Its removal can shift
+                # the label before this lifecycle barrier runs, so the cached
+                # absolute index is only an optimization, never the source of
+                # truth.  Finalize the latest active label in the transcript.
+                label_idx = self._thinking_label_idx
+                if not (
+                    label_idx is not None
+                    and 0 <= label_idx < len(self._stream_lines)
+                    and self._stream_lines[label_idx] == "Thinking:"
+                ):
+                    label_idx = next(
+                        (
+                            index
+                            for index in range(len(self._stream_lines) - 1, -1, -1)
+                            if self._stream_lines[index] == "Thinking:"
+                        ),
+                        None,
+                    )
+                if label_idx is not None:
+                    self._stream_lines[label_idx] = "Thought:"
             self._thinking_label_shown = False
             self._thinking_buffer = ""
             self._thinking_line_idx = None
+            self._thinking_label_idx = None
 
         def _tick_waiting(self) -> None:
             """Animate the in-stream spinner while the model is working."""
@@ -1387,6 +1414,9 @@ if TEXTUAL_AVAILABLE:
                 if self._thinking_line_idx is not None:
                     new_idx = self._thinking_line_idx - dropped
                     self._thinking_line_idx = new_idx if new_idx >= 0 else None
+                if self._thinking_label_idx is not None:
+                    new_idx = self._thinking_label_idx - dropped
+                    self._thinking_label_idx = new_idx if new_idx >= 0 else None
                 active = self._active_tool_block
                 if active is not None:
                     _name, start, end, _text = active
@@ -1698,7 +1728,7 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Delivery: {sanitize_display_text(s['deliveryMode'])}\n")
             info_block.append(f"Coop: {sanitize_display_text(s['coop'])}\n")
             info_block.append(f"Subagents: {'on' if s['subagents'] else 'off'}\n")
-            info_block.append(f"Bash: {'on' if s['bashOutput'] else 'off'}\n")
+            info_block.append(f"Details: {'on' if s['bashOutput'] else 'off'}\n")
             info_block.append(f"CWD: {sanitize_display_text(s['cwd'])}\n")
             info_block.append(f"Session: {sanitize_display_text(s['sessionId'])}\n")
 
@@ -1837,7 +1867,7 @@ if TEXTUAL_AVAILABLE:
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
                 )
                 self._write(
-                    "/cooperation [on|off] | /subagents [on|off] | /bash-show [on|off] | /history [n] (last 50 inputs; Ctrl+Up/Down) | /mcp [list|enable|disable] | /bash <command> | /paste-image",
+                    "/cooperation [on|off] | /subagents [on|off] | /details-show [on|off] | /history [n] (last 50 inputs; Ctrl+Up/Down) | /mcp [list|enable|disable] | /bash <command> | /paste-image",
                     "info",
                 )
                 self._write("/inspect-timeout", "info")
@@ -2402,18 +2432,21 @@ if TEXTUAL_AVAILABLE:
                 self._write(f"Subagents set to {mode}.", "info")
                 self._refresh_sidebar()
                 return
-            if cmd == "/bash-show":
+            # Keep /bash-show as an undocumented compatibility alias; settings
+            # continue to use the legacy bash.showOutput storage key.
+            if cmd in {"/details-show", "/bash-show"}:
                 state = getattr(session.settings_manager, "get_bash_show_output", lambda: True)()
-                self._write(f"Bash output: {'on' if state else 'off'}", "info")
-                self._write("Usage: /bash-show <on|off>", "info")
+                self._write(f"Details output: {'on' if state else 'off'}", "info")
+                self._write("Usage: /details-show <on|off>", "info")
                 return
-            if cmd.startswith("/bash-show "):
-                mode = cmd[len("/bash-show ") :].strip().lower()
+            if cmd.startswith("/details-show ") or cmd.startswith("/bash-show "):
+                prefix = "/details-show " if cmd.startswith("/details-show ") else "/bash-show "
+                mode = cmd[len(prefix) :].strip().lower()
                 if mode not in {"on", "off"}:
-                    self._write("Usage: /bash-show <on|off>", "error")
+                    self._write("Usage: /details-show <on|off>", "error")
                     return
                 session.settings_manager.set_bash_show_output(mode == "on")
-                self._write(f"Bash output set to {mode}.", "info")
+                self._write(f"Details output set to {mode}.", "info")
                 self._refresh_sidebar()
                 return
             if cmd == "/mcp":
@@ -3222,7 +3255,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list|name [args]] /config /extui /cooperation /subagents /bash-show /history /mcp /bash /paste-image /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list|name [args]] /config /extui /cooperation /subagents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 
@@ -3353,9 +3386,9 @@ if TEXTUAL_AVAILABLE:
                 # number; omit the suffix for non-time-limited tools.
                 et_val = event.get("effectiveTimeout")
                 if isinstance(et_val, (int, float)) and et_val > 0:
-                    text = f"tool start (timeout {int(et_val)}s): {tool_name} {args_text}"
+                    text = f"tool (timeout {int(et_val)}s): {tool_name} {args_text}"
                 else:
-                    text = f"tool start: {tool_name} {args_text}"
+                    text = f"tool: {tool_name} {args_text}"
                 start, end = self._write_tool_block(text)
                 self._active_tool_block = (tool_name, start, end, text)
             elif et == "tool_approval_rejected":

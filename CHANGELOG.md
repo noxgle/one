@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Unified TUI and interactive details rendering** — completed reasoning is
+  styled as italic `Thought:` content, tool and MCP status lines report their
+  actual effective timeout, and `/details-show` consistently controls detailed
+  result bodies while preserving visible status lines.
 - **README mode documentation** — reorganized onboarding and added an accurate
   mode/automation reference distinguishing TUI, one-shot text/JSON, JSON-RPC,
   and `one run`.

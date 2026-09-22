@@ -792,7 +792,7 @@ class AgentSession:
         }
 
     async def _execute_tool_by_name(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
-        effective_timeout: int | float | None = None
+        effective_timeout = self._effective_tool_timeout(tool_name, args, timeout_sec)
         if tool_name not in self._active_tools:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
         if tool_name == "finish" and self._plan_just_created:
@@ -803,7 +803,7 @@ class AgentSession:
         tool = all_tools.get(tool_name)
         if not tool:
             if self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
-                return await self._mcp_manager.call_tool(tool_name, args, timeout=args.get("timeout"))
+                return await self._mcp_manager.call_tool(tool_name, args, timeout=effective_timeout)
             raise RuntimeError(f"Unknown tool: {tool_name}")
 
         if tool_name == "evidence_read":
@@ -891,7 +891,6 @@ class AgentSession:
         elif tool_name == "ls":
             result = fn(cwd, args.get("path", "."))
         elif tool_name == "bash":
-            effective_timeout = args.get("timeout") or timeout_sec or self.settings_manager.get_tool_timeout_sec()
             result = fn(cwd, args.get("command", ""), effective_timeout, self.settings_manager.get_shell_command_prefix())
         elif tool_name == "finish":
             result = fn(args.get("summary", ""), bool(args.get("goal_success", True)))
@@ -904,13 +903,11 @@ class AgentSession:
             # Compute the effective timeout for spawn_subagent (per-call >
             # timeout_sec param > subagents setting) — passed to _spawn_subagent
             # so the inner wait_for uses the same deadline as the outer one.
-            _spawn_timeout = args.get("timeout") or timeout_sec
-            if _spawn_timeout is None:
-                _spawn_timeout = self.settings_manager.get_subagents_timeout_sec()
+            _spawn_timeout = effective_timeout
             effective_timeout = _spawn_timeout
             # Return the coroutine (not awaited here) so the outer timeout
             # wrapping (lines 683-698) can enforce the tool timeout.
-            result = self._spawn_subagent(args, timeout_sec=_spawn_timeout)
+            result = self._spawn_subagent(args, timeout_sec=int(_spawn_timeout) if _spawn_timeout is not None else None)
         elif tool_name == "ask_user":
             # ask_user has its own askUser.timeoutSec semantics; return the
             # coroutine but skip timeout wrapping below.
@@ -938,8 +935,7 @@ class AgentSession:
                     # sub.prompt() internally so the two timeouts are identical.
                     outer_timeout = effective_timeout
                 elif self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
-                    model_timeout = args.get("timeout")
-                    outer_timeout = (model_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC if model_timeout else None
+                    outer_timeout = (effective_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC if effective_timeout else None
                 # ask_user is invoked with timeout_sec=None (line 1671), so
                 # outer_timeout stays None → no asyncio.wait_for wrapping.
                 if outer_timeout and outer_timeout > 0:
@@ -987,6 +983,36 @@ class AgentSession:
         # The session-local monotonic counter is stable for diagnostics and is
         # unique for sequential dispatches; it deliberately contains no input.
         return f"runtime-{self._active_turn_id or 'turn-0'}-{self._tool_call_sequence}"
+
+    def _effective_tool_timeout(
+        self, tool_name: str, args: dict[str, Any], timeout_sec: int | float | None
+    ) -> int | float | None:
+        """Return the single timeout used for execution and presentation.
+
+        ``ask_user`` deliberately remains unlimited here because it owns its
+        separate ``askUser.timeoutSec`` behavior. MCP uses the configured
+        ``tools.timeoutSec`` when available; its historic 120-second timeout
+        is only the compatibility fallback when that setting is missing or
+        cannot be read.
+        """
+        if tool_name == "ask_user":
+            return None
+        if tool_name == "spawn_subagent":
+            default: int | float | None = timeout_sec
+            if default is None:
+                default = self.settings_manager.get_subagents_timeout_sec()
+        else:
+            default = timeout_sec
+            if default is None:
+                try:
+                    default = self.settings_manager.get_tool_timeout_sec()
+                except (AttributeError, TypeError, ValueError):
+                    default = None
+        value = args.get("timeout") if args.get("timeout") is not None else default
+        mcp_manager = getattr(self, "_mcp_manager", None)
+        if value is None and mcp_manager is not None and mcp_manager.has_tool(tool_name):
+            return 120
+        return value
 
     async def _run_tool_call(
         self,
@@ -1085,20 +1111,9 @@ class AgentSession:
                 val = emit_args.get(key)
                 if isinstance(val, str):
                     emit_args[key] = str(Path(val).name) or "image"
-        # Compute the effective timeout for the tool-call-start event so the
-        # TUI / RPC renderers can show it (per-call override > passed timeout
-        # > global default).  spawn_subagent uses the subagents timeout; all
-        # other tools use tools.timeoutSec.  ask_user is invoked with
-        # timeout_sec=None and relies on askUser.timeoutSec semantics inside;
-        # the TUI would otherwise show a misleading "(timeout 30s)".
-        if tool_name == "spawn_subagent":
-            effective_timeout = args.get("timeout") or timeout_sec
-            if effective_timeout is None:
-                effective_timeout = self.settings_manager.get_subagents_timeout_sec()
-        else:
-            effective_timeout = args.get("timeout") or timeout_sec
-            if effective_timeout is None and timeout_sec is not None:
-                effective_timeout = self.settings_manager.get_tool_timeout_sec()
+        # This value is also passed into execution below. Keep the event
+        # additive, while making its timeout truthful for every tool class.
+        effective_timeout = self._effective_tool_timeout(tool_name, args, timeout_sec)
         self._emit({"type": "tool_call_start", "tool": tool_name, "toolCallId": tool_call_id, "args": emit_args, "effectiveTimeout": effective_timeout})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)

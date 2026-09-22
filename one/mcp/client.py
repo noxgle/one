@@ -386,7 +386,9 @@ class McpManager:
         client = next((c for c in self._clients if c.config.name == tool.server), None)
         if client is None:
             raise RuntimeError(f"MCP server '{tool.server}' is not running")
-        result = await client.call_tool(name, arguments, timeout=timeout or 120.0)
+        # AgentSession supplies the normalized timeout. Retain the compatibility
+        # fallback for direct manager callers.
+        result = await client.call_tool(name, arguments, timeout=120.0 if timeout is None else timeout)
         # Normalize MCP result into the session tool-result contract.
         content = result.get("content") or []
         texts = [str(c.get("text", "")) for c in content if isinstance(c, dict) and c.get("type") == "text"]

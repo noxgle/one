@@ -149,7 +149,7 @@ async def test_tui_renders_codex_reasoning_summary_sse_separately(
 
         stream = "\n".join(app._stream_lines)
         rendered = str(app.query_one("#stream", Static).content)
-        assert "Thinking:" in stream
+        assert "Thought:" in stream
         assert summary in stream
         assert summary in rendered
         assert "The visible answer" in stream
@@ -621,8 +621,8 @@ async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
         await pilot.pause()
 
         # Count Thinking: labels
-        thinking_labels = [l for l in app._stream_lines if l == "Thinking:"]
-        assert len(thinking_labels) == 2, f"Expected 2 Thinking: labels, got {len(thinking_labels)}"
+        thinking_labels = [l for l in app._stream_lines if l == "Thought:"]
+        assert len(thinking_labels) == 2, f"Expected 2 Thought: labels, got {len(thinking_labels)}"
 
         # Count _THINKING_TEXT_MARK lines
         thinking_text_lines = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
@@ -633,7 +633,7 @@ async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
 
         # Strict indices on full _stream_lines
         a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A" in l)
-        tool_start_idx = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "read" in l)
+        tool_start_idx = next(i for i, l in enumerate(app._stream_lines) if "tool:" in l and "read" in l)
         tool_end_idx = next(i for i, l in enumerate(app._stream_lines) if "result1" in l)
         b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B" in l)
         answer_idx = next(i for i, l in enumerate(app._stream_lines) if "answer" in l)
@@ -712,8 +712,8 @@ async def test_tui_leading_empty_whitespace_no_label_then_block(tmp_path: Path):
         await pilot.pause()
 
         # Exactly one Thinking: label
-        thinking_labels = [l for l in app._stream_lines if l == "Thinking:"]
-        assert len(thinking_labels) == 1, f"Expected 1 Thinking: label, got {len(thinking_labels)}"
+        thinking_labels = [l for l in app._stream_lines if l == "Thought:"]
+        assert len(thinking_labels) == 1, f"Expected 1 Thought: label, got {len(thinking_labels)}"
 
         # Inspect rendered Static content and assert literal "A B"
         widget = app.query_one("#stream", Static)
@@ -725,6 +725,33 @@ async def test_tui_leading_empty_whitespace_no_label_then_block(tmp_path: Path):
         assert len(thinking_text_lines) == 1
         assert "A" in thinking_text_lines[0]
         assert "B" in thinking_text_lines[0]
+
+
+@pytest.mark.asyncio
+async def test_tui_thinking_label_finalizes_after_waiting_spinner_removal(tmp_path: Path):
+    """Spinner removal before a lifecycle barrier must not leave ``Thinking:`` behind."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        session._emit({"type": "turn_start"})
+        await pilot.pause()
+        app._last_delta_ts = 0.0
+        app._tick_waiting()
+        session._emit({"type": "thinking_delta", "delta": "reasoning"})
+        await pilot.pause()
+
+        # This is the ordered lifecycle path that previously shifted the
+        # cached label index before the next boundary finalized it.
+        app._remove_thinking_line()
+        session._emit({"type": "tool_call_start", "tool": "read", "args": {"path": "a.txt"}})
+        await pilot.pause()
+
+        assert app._stream_lines.count("Thought:") == 1
+        assert app._stream_lines.count("Thinking:") == 0
 
 
 @pytest.mark.asyncio
@@ -899,9 +926,9 @@ async def test_tui_thinking_cleanup_on_tool_call(tmp_path: Path):
                 break
         stream = "\n".join(app._stream_lines)
         # Must contain the tool block but NOT a stale thinking line.
-        assert "tool start" in stream
+        assert "tool (timeout" in stream
         thinking_stale = any(
-            line == "Thinking:" and "tool start" not in line
+            line == "Thought:" and "tool:" not in line
             for line in app._stream_lines
         )
         # Thinking label should not remain after the turn completes.
@@ -978,12 +1005,12 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
 
         stream = "\n".join(app._stream_lines)
         # The tool block must be present.
-        assert "tool start" in stream and "bash" in stream
+        assert "tool:" in stream and "bash" in stream
         # The streamed JSON must NOT appear as a standalone assistant chat block.
         # Find the tool block line and verify there's no assistant delta block
         # before it (only logo lines and user text).
         tool_line_idx = next(
-            (i for i, l in enumerate(app._stream_lines) if "tool start" in l and "bash" in l),
+            (i for i, l in enumerate(app._stream_lines) if "tool:" in l and "bash" in l),
             None,
         )
         assert tool_line_idx is not None
@@ -991,12 +1018,12 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
         for line in app._stream_lines:
             if line.startswith(" ") or line.startswith("\u2588"):
                 continue  # logo lines
-            if "tool start" in line and "bash" in line:
+            if "tool:" in line and "bash" in line:
                 continue  # the tool block itself
             # No assistant delta lines should contain the full JSON structure.
             # Check by looking for the JSON's key structural elements on the
             # same line (they may be wrapped, but the tool block line is safe).
-            assert 'tool_start' not in line or ('tool start ' in line and 'bash' in line)
+            assert 'tool_start' not in line or ('tool: ' in line and 'bash' in line)
 
         # 4. message_end must NOT create a duplicate block (state already reset)
         session._emit({"type": "message_end", "message": {"role": "assistant", "content": ""}})
@@ -1004,7 +1031,7 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
         assert app._assistant_has_live_delta is False
         stream_after_end = "\n".join(app._stream_lines)
         # Only one tool block, no extra assistant block.
-        assert sum(1 for l in stream_after_end.split("\n") if "tool start" in l and "bash" in l) == 1
+        assert sum(1 for l in stream_after_end.split("\n") if "tool:" in l and "bash" in l) == 1
 
 
 @pytest.mark.asyncio
@@ -1025,7 +1052,7 @@ async def test_tui_tool_call_start_noop_without_live_block(tmp_path: Path):
         await pilot.pause()
 
         stream = "\n".join(app._stream_lines)
-        assert "tool start" in stream and "read" in stream
+        assert "tool:" in stream and "read" in stream
         assert app._assistant_has_live_delta is False
 
 
@@ -1122,7 +1149,7 @@ async def test_tui_tool_block_after_500_lines_yields_one_status(tmp_path: Path):
         # Count how many lines contain the tool start marker (status block).
         # _finish_tool_block replaces the multiline block with a single-line
         # status:  "<original> [ok]" or "<original> [err]".
-        search_sub = "tool start (timeout"
+        search_sub = "tool (timeout"
         status_lines = [l for l in app._stream_lines if search_sub in l]
         assert len(status_lines) == 1, f"expected exactly 1 status block, found {status_lines}"
 
@@ -1466,7 +1493,7 @@ async def test_tui_trim_rebases_live_block_and_discard_survives(tmp_path: Path):
         await pilot.pause()
 
         stream = "\n".join(app._stream_lines)
-        assert "tool start" in stream and "bash" in stream
+        assert "tool:" in stream and "bash" in stream
         # line-349 was at the end of the pre-fill and should survive the trim
         # (it was at index 349, which is within the last-500 window).
         assert "line-349" in stream, "Near-end pre-fill line should survive"

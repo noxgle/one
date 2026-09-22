@@ -155,3 +155,68 @@ async def test_bash_no_timeout_uses_settings_default(tmp_path: Path):
     content = tool_results[0]["content"].lower()
     assert "timed out" in content
     assert "(cancelled)" not in content
+
+
+@pytest.mark.asyncio
+async def test_mcp_timeout_precedence_is_emitted_and_propagated(tmp_path: Path):
+    """MCP uses the same per-call/default timeout in its event and client call."""
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    class _Mcp:
+        def __init__(self) -> None:
+            self.timeouts: list[int | float | None] = []
+
+        def tools(self) -> list[object]:
+            return [type("Tool", (), {"name": "remote"})()]
+
+        def has_tool(self, name: str) -> bool:
+            return name == "remote"
+
+        async def call_tool(self, name: str, args: dict[str, Any], timeout: int | float | None) -> dict[str, Any]:
+            self.timeouts.append(timeout)
+            return {"ok": True, "output": "remote result"}
+
+    mcp = _Mcp()
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"tools": {"timeoutSec": 7}}),
+        registry,
+        _Loader(),
+        model,
+        "medium",
+        tools=[],
+        mcp_manager=mcp,  # type: ignore[arg-type]
+    )
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent._run_tool_call("remote", {}, timeout_sec=None)
+    await agent._run_tool_call("remote", {"timeout": 11}, timeout_sec=None)
+
+    starts = [event for event in events if event["type"] == "tool_call_start"]
+    assert [event["effectiveTimeout"] for event in starts] == [7, 11]
+    assert mcp.timeouts == [7, 11]
+
+
+def test_mcp_timeout_compatibility_fallback_when_tools_default_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    class _Mcp:
+        def tools(self) -> list[object]:
+            return []
+
+        def has_tool(self, name: str) -> bool:
+            return name == "remote"
+
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=[], mcp_manager=_Mcp()  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(agent.settings_manager, "get_tool_timeout_sec", lambda: (_ for _ in ()).throw(ValueError()))
+    assert agent._effective_tool_timeout("remote", {}, None) == 120

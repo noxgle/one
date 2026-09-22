@@ -798,10 +798,10 @@ async def test_tui_three_segments_two_tools_strict_chronology(tmp_path: Path):
 
         # Strict chronological order: A < tool1_start < tool1_end < B < tool2_start < tool2_end < C < final
         a_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "A-seg" in l)
-        tool1_start = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "read" in l)
+        tool1_start = next(i for i, l in enumerate(app._stream_lines) if "tool:" in l and "read" in l)
         tool1_end = next(i for i, l in enumerate(app._stream_lines) if "out1" in l)
         b_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "B-seg" in l)
-        tool2_start = next(i for i, l in enumerate(app._stream_lines) if "tool start" in l and "grep" in l)
+        tool2_start = next(i for i, l in enumerate(app._stream_lines) if "tool:" in l and "grep" in l)
         tool2_end = next(i for i, l in enumerate(app._stream_lines) if "out2" in l)
         c_idx = next(i for i, l in enumerate(app._stream_lines) if l.startswith(_THINKING_TEXT_MARK) and "C-seg" in l)
         final_idx = next(i for i, l in enumerate(app._stream_lines) if "FINAL" in l)
@@ -911,7 +911,7 @@ async def test_tui_message_end_after_tool_call_no_duplicate(tmp_path: Path):
 
         stream = "\n".join(app._stream_lines)
         # The tool block must be present exactly once.
-        assert sum(1 for l in stream.split("\n") if "tool start" in l and "ls" in l) == 1
+        assert sum(1 for l in stream.split("\n") if "tool:" in l and "ls" in l) == 1
         # No assistant delta block should remain (JSON was removed by tool_call_start).
         assert app._assistant_has_live_delta is False
         assert app._assistant_live_start_idx == -1
@@ -959,7 +959,7 @@ async def test_tui_tool_call_start_with_effective_timeout(tmp_path: Path):
 
         stream = "\n".join(app._stream_lines)
         # The timeout and tool name must both appear in the stream.
-        assert "tool start (timeout 30s):" in stream
+        assert "tool (timeout 30s):" in stream
         assert '"command": "echo hi"' in stream
 
 
@@ -985,7 +985,7 @@ async def test_tui_tool_call_start_per_call_override_shows_override(tmp_path: Pa
         await pilot.pause()
 
         stream = "\n".join(app._stream_lines)
-        assert "tool start (timeout 5s):" in stream
+        assert "tool (timeout 5s):" in stream
         assert '"command": "sleep 10"' in stream
 
 
@@ -1011,9 +1011,9 @@ async def test_tui_tool_call_start_without_effective_timeout_plain_format(tmp_pa
         await pilot.pause()
 
         stream = "\n".join(app._stream_lines)
-        # Must use the plain "tool start: read" format — no "(timeout ..." suffix.
-        assert "tool start:" in stream
-        assert "tool start (timeout" not in stream
+        # Must use the plain "tool: read" format — no "(timeout ..." suffix.
+        assert "tool:" in stream
+        assert "tool (timeout" not in stream
         assert "a.txt" in stream
 
 
@@ -1043,7 +1043,7 @@ async def test_tui_tool_call_start_subagent_timeout(tmp_path: Path):
         await pilot.pause()
 
         stream = "\n".join(app._stream_lines)
-        assert "tool start (timeout 1800s):" in stream
+        assert "tool (timeout 1800s):" in stream
 
 
 @pytest.mark.asyncio
@@ -1080,7 +1080,7 @@ async def test_tui_separate_tool_output_appears_once(tmp_path: Path):
         stream = "\n".join(app._stream_lines)
         # Status block appears once (with [ok] suffix).
         # Note: _format_chat_panel wraps long lines, so search for the unique prefix.
-        assert stream.count("tool start (timeout 5s)") == 1
+        assert stream.count("tool (timeout 5s)") == 1
         # Output block appears exactly once.
         assert stream.count("hello output") == 1
 
