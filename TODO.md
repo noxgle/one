@@ -3549,3 +3549,199 @@ timeout and details-output behavior in both interfaces.
   - **Details:** Added `_write_compaction_result()` for readable completion,
     skipped, busy, and aborted messages; interactive-mode JSON output remains
     unchanged. Targeted TUI tests and Ruff pass.
+
+## Follow-up: TUI tool emphasis and lifecycle separators
+
+### Goal
+
+Improve TUI readability by styling tool status lines as structured output and
+visually separating context compaction and terminal `finish` actions from the
+preceding transcript.
+
+### Scope
+
+#### In Scope
+
+- Render the tool heading (`tool (timeout 30s): read`) in bold.
+- Keep the JSON argument payload beginning with `{` unbolded.
+- Render the terminal status suffix (`[ok]` or `[err]`) in bold.
+- Add a horizontal separator before compaction begins.
+- Add a horizontal separator before the `finish` tool block.
+- Add focused TUI tests and update affected snapshots.
+
+#### Non-Goals
+
+- Do not change tool execution, event payloads, timeout semantics, or provider
+  context.
+- Do not change the interactive-mode output unless ANSI styling is explicitly
+  requested later.
+- Do not add separators after compaction or after `finish`; the requested
+  placement is before each lifecycle boundary.
+
+### Assumptions
+
+- “Tool as bold text” refers to the Textual TUI stream, whose current tool
+  rendering is implemented in `one/modes/tui_mode.py`.
+- A separator is a single full-width Unicode horizontal rule (for example,
+  repeated `─`) rendered as a normal transcript line, with width derived from
+  the current stream/panel width and a safe fallback for tests/headless mode.
+- Tool lines remain stored as ordinary transcript strings; styling is applied
+  during TUI rendering so active tool-block replacement and stream trimming do
+  not require a second transcript representation.
+
+### Open Questions
+
+- If bold tool formatting is also required in interactive terminal mode, add a
+  follow-up ANSI-formatting task; this plan intentionally limits the change to
+  the TUI.
+
+### Architecture
+
+Keep `_stream_lines` as the plain-text source of truth. Extend the TUI render
+adapter to recognize tool status lines and compose Rich `Text` segments rather
+than parsing tool JSON as markup:
+
+1. Bold the tool prefix through the tool name and colon.
+2. Detect the first JSON-object delimiter `{`; render the argument suffix
+   literally and without bold styling.
+3. Detect a terminal ` [ok]`/` [err]` suffix and render that suffix bold,
+   independent of the argument payload.
+4. Preserve literal escaping so JSON containing Rich markup characters cannot
+   affect formatting.
+
+Add a small separator helper beside `_write_tool_block()`/`_write()` and call it
+from the ordered session-event handler on `compaction_start`, and immediately
+before writing a `finish` `tool_call_start` block. The helper must use the same
+trim/rebase/render path as other transcript lines and must not emit a session
+event or alter persisted history.
+
+### Architecture Decisions
+
+#### ADR-001: Apply tool emphasis at render time
+
+**Decision:** Keep transcript lines plain and construct styled Rich `Text`
+segments in `_render_stream()` for recognized tool lines.
+
+**Alternatives:** Store markup in transcript strings; introduce a parallel list
+of styled line objects; use global widget styling.
+
+**Rationale:** Render-time segmentation avoids corrupting JSON, preserves the
+existing active-block index/replacement logic, and limits the visual change to
+the TUI.
+
+**Trade-offs:** The renderer must maintain a precise parser for the tool-line
+format, and tests must inspect styles as well as visible text.
+
+#### ADR-002: Use a transcript horizontal-rule line
+
+**Decision:** Insert one width-aware Unicode rule into `_stream_lines` before
+`compaction_start` and before `finish` tool rendering.
+
+**Alternatives:** Textual widget border/CSS; a Rich `Rule` renderable outside
+the transcript; separators only in snapshots.
+
+**Rationale:** A transcript line follows scrolling, trimming, session reload,
+and existing event ordering, while CSS/widget borders would not mark the
+actual lifecycle position in the transcript.
+
+**Trade-offs:** The rule is a display-only line and must be regenerated with a
+safe width when the viewport changes; it should not be persisted as a message.
+
+### Phases
+
+#### Phase 1: Styled tool status lines
+
+**Objective:** Make the tool heading and terminal status bold while leaving
+JSON arguments plain and safely literal.
+
+**Prerequisites:** Current `tool` line format from the unified-details work.
+
+**Expected outcome:** A line such as `tool (timeout 30s): read {"path":"x"}
+[ok]` displays the heading and `[ok]` in bold, with the JSON unbolded.
+
+**Estimated effort:** 1–2 hours.
+
+**Confidence:** High.
+
+- [ ] **Task:** Add segmented Rich rendering for tool lines.
+  - **Description:** Update the TUI stream renderer to identify tool status
+    lines, split the heading, JSON argument suffix, and terminal status suffix,
+    and append each segment with the required style. Keep non-tool lines and
+    malformed/unknown tool output literal and unchanged.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_rendering.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** The heading is bold; text from the first `{` is
+    not bold; a terminal `[ok]`/`[err]` is bold; JSON containing brackets or
+    markup-like characters is displayed literally; existing visible text and
+    tool-block replacement remain unchanged.
+  - **Verification:** Add a TUI pilot test that inspects the rendered Rich
+    `Text` spans/styles and asserts the three regions; run the focused TUI
+    rendering tests.
+
+#### Phase 2: Lifecycle separators
+
+**Objective:** Make compaction and terminal completion visually distinct from
+the preceding transcript.
+
+**Prerequisites:** Phase 1 renderer and the existing ordered session-event
+handler.
+
+**Expected outcome:** Exactly one horizontal rule appears immediately before
+each `compaction_start` rendering and immediately before the `finish` tool
+status block, with normal scrolling/trimming behavior.
+
+**Estimated effort:** 1–2 hours.
+
+**Confidence:** Medium; automatic preflight compaction and direct `/compact`
+events must be checked for ordering and duplicate delivery.
+
+- [ ] **Task:** Add the width-aware transcript separator helper.
+  - **Description:** Implement a display-only helper that inserts a single
+    horizontal rule through the normal stream trim/render path. Use the current
+    panel width with a deterministic fallback and avoid adding blank duplicate
+    rules when the same lifecycle event is delivered through supported UI test
+    paths.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_rendering.py`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** The rule is visible before compaction and before
+    `finish`; it is not persisted, does not change tool/session events, and
+    remains safe when the viewport is narrow or the stream is trimmed.
+  - **Verification:** Fake `compaction_start` and `finish` event tests assert
+    ordering and exactly one rule; test automatic/preflight and `/compact`
+    paths where practical; inspect updated TUI snapshots.
+
+- [ ] **Task:** Update snapshot and regression coverage.
+  - **Description:** Update only snapshots affected by the new bold rendering
+    and separator lines, and add assertions that ordinary tool output,
+    compaction summaries, and terminal finish status remain present.
+  - **Files:** `tests/snapshots/tui/base.txt`,
+    `tests/snapshots/tui/overlay.txt`,
+    `tests/snapshots/tui/widget_panel.txt`,
+    `tests/test_tui_rendering.py`, `tests/test_tui_commands.py` if command
+    ordering coverage is needed.
+  - **Dependencies:** Tasks in Phases 1–2.
+  - **Acceptance Criteria:** Snapshots show the separator at the requested
+    boundaries; no unrelated snapshot drift; full existing TUI behavior stays
+    intact.
+  - **Verification:** `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q
+    tests/test_tui_snapshots.py` followed by focused TUI tests, full pytest,
+    `.venv/bin/ruff check .`, and `git diff --check`.
+
+### Risks & Mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| JSON is accidentally parsed as Rich markup or styled bold | Compose literal `Text` segments; never feed tool arguments to markup parsing |
+| Active tool replacement loses styles or status suffix | Keep plain source lines and style only during render; test start/end replacement |
+| Automatic compaction receives duplicate lifecycle delivery | Test ordered event handling and make separator insertion event-scoped |
+| Width-aware rule behaves poorly in narrow/headless tests | Use a minimum width and deterministic fallback; add narrow-width coverage |
+| Snapshot updates hide unrelated changes | Regenerate only the TUI snapshot suite and review the diff |
+
+### Project Acceptance Criteria
+
+- [ ] Tool heading and terminal `[ok]`/`[err]` are bold in the TUI.
+- [ ] Tool JSON arguments beginning with `{` remain unbolded and literal.
+- [ ] A horizontal rule appears before compaction and before `finish`.
+- [ ] No execution, persistence, provider-context, or event-contract behavior
+  changes.
+- [ ] Focused tests, full pytest, Ruff, diff check, and snapshot review pass.
