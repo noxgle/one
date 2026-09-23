@@ -53,7 +53,11 @@ def detect(events: list[dict[str, Any]], diagnostics: dict[str, Any] | None = No
             output.append(finding("malformed-rpc", "medium", "protocol", "Non-JSON or non-object RPC output was collected.", [evidence], "The child process may have written diagnostics to stdout.", "high"))
         if event.get("type") == "tool_call_end" and not event.get("toolCallId"):
             output.append(finding("malformed-tool-lifecycle", "medium", "lifecycle", "A tool completion has no tool-call identifier.", [f"events[{index}]"], "The event producer may not have supplied correlation metadata."))
-        if event.get("type") in {"error", "provider_error", "tool_error"} or event.get("success") is False:
+        if (
+            event.get("type") in {"error", "provider_error", "tool_error"}
+            or event.get("success") is False
+            or (event.get("type") == "tool_call_end" and event.get("ok") is False)
+        ):
             output.append(finding("runtime-failure", "medium", "provider" if "provider" in str(event.get("type")) else "tool", "A provider, tool, or RPC request reported failure.", [f"events[{index}]"], "The recorded failure needs inspection; no root cause is inferred.", "high"))
         # Event type, message, and error fields are the evidence-bearing locations
         # used by the RPC adapters for context-window failures.

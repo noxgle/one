@@ -410,6 +410,10 @@ diagnostic data; artifacts are removed after a successful report unless
 `--keep-artifacts` is used. See `--help` for workload, network, endpoint, and
 telemetry options.
 
+`--duration` is the scenario-admission window. The final admitted scenario gets
+up to 60 seconds to drain after that deadline; reports distinguish a truncated
+final scenario, clean shutdown, and runtime failure.
+
 ## Development
 
 ```bash

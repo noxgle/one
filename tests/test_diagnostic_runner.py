@@ -179,11 +179,11 @@ def test_build_failure_and_timeout_cleanup(monkeypatch, tmp_path: Path) -> None:
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
     monkeypatch.setattr(runner.subprocess, "run", timeout)
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: TimeoutProcess())
-    ticks = iter((0.0, 62.0, 62.0))
+    ticks = iter((0.0, 77.0, 77.0))
     monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
     timed_out = runner.build_and_run(args, tmp_path)
     assert timed_out["timedOut"]
-    assert timed_out["elapsedSec"] == 62.0
+    assert timed_out["elapsedSec"] == 77.0
     assert any(call[:2] == ["docker", "kill"] for call in calls)
     assert any(call[:3] == ["docker", "rm", "--force"] for call in calls)
 
@@ -217,13 +217,13 @@ def test_timeout_terminates_docker_workload_process_group(monkeypatch, tmp_path:
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(runner.os, "killpg", lambda pid, sig: groups.append((pid, sig)))
-    ticks = iter((0.0, 62.0, 62.0))
+    ticks = iter((0.0, 77.0, 77.0))
     monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
 
     result = runner.build_and_run(args, tmp_path)
 
     assert result["timedOut"]
-    assert result["elapsedSec"] == 62.0
+    assert result["elapsedSec"] == 77.0
     assert popen_kwargs["start_new_session"] is True
     assert groups == [
         (12345, signal.SIGTERM), (12345, signal.SIGKILL),

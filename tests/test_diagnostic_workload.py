@@ -42,6 +42,9 @@ def test_special_prompts_explicitly_request_safe_valid_tool_calls() -> None:
     subagent = scenario_prompt("spawn_subagent")
     assert "spawn_subagent" in subagent and "tools [\"read\"]" in subagent and "host state" in subagent
     assert subagent.count("finish") == 1
+    patch = scenario_prompt("apply_patch")
+    assert "*** Begin Patch" in patch and "*** Update File: patch-target.txt" in patch
+    assert "NOT ---/+++ unified diff" in patch
 
 
 def test_available_tools_extracts_names_from_dicts_and_strings() -> None:
@@ -119,6 +122,9 @@ def test_persistent_rpc_driver_answers_ask_user_and_collects_events(monkeypatch,
         driver.close()
     assert response and response["success"] is True
     assert any(command["type"] == "answer_question" for command in fake.commands)
+    answer = next(command for command in fake.commands if command["type"] == "answer_question")
+    assert answer["id"] != answer["questionId"]
+    assert answer["questionId"] == "question-1"
     assert any(event["type"] == "ask_user" for event in driver.events)
     assert emitted
 
@@ -322,6 +328,8 @@ def test_advertised_tool_dispatch_failure_remains_a_runtime_failure(monkeypatch,
     result = workload.run_workload(tmp_path / "fixture", 1, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
     assert result["toolPreflight"]["apply_patch"] == "advertised"
     assert result["coverage"]["apply_patch"]["observed"] is True
+    assert result["coverage"]["apply_patch"]["success"] is False
+    assert result["coverage"]["apply_patch"]["category"] == "tool_execution_failed"
     assert result["completed"] is False
     assert workload._runtime_failure(result["events"], 0, False) is True
 
@@ -358,6 +366,65 @@ def test_workload_schedules_scenarios_until_full_duration(monkeypatch, tmp_path:
     assert len(result["scenarios"]) <= workload.MAX_SCENARIO_RECORDS
 
 
+def test_apply_patch_fixture_is_reset_before_each_scenario_cycle(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+    inputs: list[str] = []
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            if body["type"] == "prompt":
+                target = tmp_path / "fixture" / "patch-target.txt"
+                inputs.append(target.read_text(encoding="utf-8"))
+                target.write_text("after\n", encoding="utf-8")
+            if body["type"] == "wait_for_idle":
+                clock["value"] += 1
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("apply_patch",))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    workload.run_workload(tmp_path / "fixture", 2, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert len(inputs) == 2
+    assert inputs == ["before\n", "before\n"]
+
+
+def test_final_deadline_drain_is_classified_separately_from_rpc_failure(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+    commands: list[str] = []
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            commands.append(body["type"])
+            if body["type"] == "wait_for_idle":
+                clock["value"] = 1.0
+                return None
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("read",))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    result = workload.run_workload(tmp_path / "fixture", 1, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert result["incompleteAtDeadline"]["finalScenarioTruncated"] is True
+    assert result["drain"]["attempted"] is True
+    assert "abort" in commands
+    assert result["drain"]["cleanShutdown"] is False
+    assert result["runtimeFailure"] is False
+
+
 def test_workload_continues_after_a_prompt_timeout(monkeypatch, tmp_path: Path) -> None:
     clock = {"value": 0.0}
     prompts: list[str] = []
@@ -386,3 +453,5 @@ def test_workload_continues_after_a_prompt_timeout(monkeypatch, tmp_path: Path) 
     assert result["completed"] is False
     assert len(prompts) > 1
     assert any(record["id"] == "read_image" for record in result["scenarios"])
+    assert result["incompleteAtDeadline"]["finalScenarioTruncated"] is False
+    assert result["drain"]["attempted"] is False

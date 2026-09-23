@@ -15,6 +15,11 @@ def test_lifecycle_and_malformed_detectors_are_evidence_based() -> None:
     assert all("probableCause" in item and "confidence" in item for item in findings)
 
 
+def test_failed_tool_call_end_is_a_runtime_failure_finding() -> None:
+    findings = detect([{"type": "tool_call_end", "tool": "apply_patch", "toolCallId": "x", "ok": False}])
+    assert "runtime-failure" in {item["id"] for item in findings}
+
+
 def test_agent_end_is_grouped_by_turn_but_same_turn_duplicates_remain_findings() -> None:
     valid = detect([{"type": "agent_end", "turnId": "turn-1"}, {"type": "agent_end", "turnId": "turn-2"}])
     duplicate = detect([{"type": "agent_end", "turnId": "turn-1"}, {"type": "agent_end", "turnId": "turn-1"}])

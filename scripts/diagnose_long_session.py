@@ -360,12 +360,14 @@ def build_and_run(args: argparse.Namespace, artifacts: Path) -> dict[str, Any]:
         command = ["docker", "run", "--name", container, "--network", args.docker_network, "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128", "--memory", "512m", "--cpus", "1", "--user", f"{os.getuid()}:{os.getgid()}", "--mount", f"type=bind,src={workspace.resolve()},dst=/tmp/diagnostic", image, "--workspace", "/tmp/diagnostic", "--duration", str(args.duration), "--workload", args.workload, "--model", args.model.split("/", 1)[-1], "--llama-cpp-url", args.llama_cpp_url]
         workload_started = time.monotonic()
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **_workload_popen_kwargs())
-        deadline = workload_started + args.duration + 60
+        # The workload uses duration only as an admission window, then grants
+        # its final admitted scenario a 60-second drain plus cleanup margin.
+        deadline = workload_started + args.duration + 75
         sample()
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise subprocess.TimeoutExpired(command, args.duration + 60)
+                raise subprocess.TimeoutExpired(command, args.duration + 75)
             try:
                 stdout, stderr = process.communicate(timeout=min(args.telemetry_interval, remaining))
                 return_code = process.returncode if process.returncode is not None else 0
@@ -404,6 +406,8 @@ def build_and_run(args: argparse.Namespace, artifacts: Path) -> dict[str, Any]:
             "incompleteAtDeadline": workload.get("incompleteAtDeadline", {}),
             "completed": workload.get("completed", False),
             "waitForIdle": workload.get("waitForIdle", {}),
+            "drain": workload.get("drain", {}),
+            "cleanShutdown": workload.get("cleanShutdown", False),
             "scenarios": workload.get("scenarios", []),
             "fixture": workload.get("fixture", {}),
             "elapsedSec": round(time.monotonic() - workload_started, 3),

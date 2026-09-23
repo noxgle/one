@@ -225,7 +225,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "plan": "{plan}  # the execution plan for the current task; visible to you on every step",
     "spawn_subagent": "{task, tasks?, model?, tools?}  # delegate a subtask to an isolated subagent (returns summary)",
     "ask_user": "{question, timeoutSec?}  # ask the human a question and wait for their answer",
-    "apply_patch": "{patchText}  # unified diff patch (*** Begin Patch / *** End Patch envelope; Add/Update/Delete/Move; Add/Move targets must be absent; conflicts and symlinks rejected; staged backup/rollback-protected)",
+    "apply_patch": "{patchText}  # non-empty string in OpenCode patch format, NOT ---/+++ unified diff. Exact Update example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch. Supports Add/Update/Delete/Move; Add/Move targets must be absent; conflicts and symlinks rejected; staged backup/rollback-protected",
     "read_image": "{path}  # read an image file and return its content as a base64-encoded blob with metadata",
 }
 

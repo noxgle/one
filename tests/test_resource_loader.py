@@ -41,6 +41,15 @@ def test_prompt_includes_plan_schema():
     assert "Use the plan tool to store the plan." in prompt
 
 
+def test_prompt_describes_opencode_apply_patch_format() -> None:
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+    prompt = loader.get_system_prompt(selected_tools=["apply_patch"])
+
+    assert "OpenCode patch format" in prompt
+    assert "NOT ---/+++ unified diff" in prompt
+    assert "*** Update File: file.txt" in prompt
+
+
 def test_prompt_includes_plan_completion_and_reporting_integrity_rules():
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
     prompt = loader.get_system_prompt(selected_tools=["read", "plan", "finish"])

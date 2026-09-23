@@ -406,7 +406,7 @@ def _create_parents(dir_path: Path, cwd_path: Path, created_dirs: list[Path]) ->
 
 
 def apply_patch_tool(cwd: str, patchText: str) -> dict[str, Any]:
-    """Apply a unified-diff patch envelope to files.
+    """Apply an OpenCode patch-format envelope to files.
 
     **Guarantees:**
     - Validates and stages all operations before any mutation.
@@ -422,6 +422,8 @@ def apply_patch_tool(cwd: str, patchText: str) -> dict[str, Any]:
       Cross-filesystem Move uses copy+delete (not inode-preserving).
     """
     # - Parse -
+    if not isinstance(patchText, str) or not patchText:
+        raise ValueError("apply_patch requires args.patchText to be a non-empty string")
 
     text = patchText.replace("\r\n", "\n").replace("\r", "\n").strip()
 

@@ -51,6 +51,7 @@ MAX_MALFORMED = 100
 MAX_AUTO_ANSWERS = 100
 MAX_SCENARIO_RECORDS = 200
 MAX_COVERAGE_WARNINGS = 50
+SCENARIO_DRAIN_GRACE_SEC = 60.0
 
 
 def create_fixture(workspace: Path) -> dict[str, str]:
@@ -79,7 +80,7 @@ def scenario_prompt(name: str) -> str:
         "bash": "Call bash with `pwd` only, then finish.",
         "write": "Call write to create generated.txt with exactly `diagnostic`, then finish.",
         "edit": "Call edit to replace `diagnostic` with `edited` in generated.txt, then finish.",
-        "apply_patch": "Call apply_patch to replace `before` with `after` in patch-target.txt, then finish.",
+        "apply_patch": "Call apply_patch with patchText exactly in this valid OpenCode format (NOT ---/+++ unified diff): `*** Begin Patch\n*** Update File: patch-target.txt\n@@\n-before\n+after\n*** End Patch`. Then finish.",
         "grep": "Call grep for `alpha` in notes.txt, then finish.",
         "find": "Call find for *.txt, then finish.",
         "ls": "Call ls on ., then finish.",
@@ -138,6 +139,8 @@ def classify_coverage(
     attempted: set[str], observed: set[str], available_tools: set[str] | None,
     idle: dict[str, int], final_idle_deadline_truncated: bool,
     capabilities: dict[str, bool] | None = None,
+    successful_tools: set[str] | None = None,
+    failed_tools: set[str] | None = None,
 ) -> tuple[dict[str, dict[str, object]], list[str], list[dict[str, str]]]:
     """Classify coverage without conflating disabled tools or deadline cleanup with misses."""
     coverage: dict[str, dict[str, object]] = {}
@@ -147,7 +150,11 @@ def classify_coverage(
         expected = name in attempted
         state: dict[str, object] = {"expected": expected, "observed": name in observed}
         required_tool = SCENARIO_REQUIRED_TOOLS[name]
-        if expected and not state["observed"]:
+        if required_tool is not None:
+            state["success"] = name in (successful_tools or set())
+        if expected and state["observed"] and name in (failed_tools or set()) and name not in (successful_tools or set()):
+            state["category"] = "tool_execution_failed"
+        elif expected and not state["observed"]:
             if detail := _scenario_unavailable(name, available_tools, capabilities):
                 state["category"] = "capability_unavailable"
                 warnings.append({"scenario": name, "category": "capability_unavailable", "detail": detail})
@@ -236,7 +243,7 @@ class RpcDriver:
                 if question_id not in self._answered_questions and len(self._answered_questions) < MAX_AUTO_ANSWERS:
                     self._answered_questions.add(question_id)
                     assert self.process.stdin is not None
-                    self.process.stdin.write(json.dumps({"type": "answer_question", "id": f"answer-{question_id}", "answer": "yes, continue diagnostic"}) + "\n")
+                    self.process.stdin.write(json.dumps({"type": "answer_question", "id": f"answer-{question_id}", "questionId": question_id, "answer": "yes, continue diagnostic"}) + "\n")
                     self.process.stdin.flush()
             if event and event.get("type") == "response":
                 if event.get("id") == request_id:
@@ -278,6 +285,9 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
     available_tools: set[str] | None = None
     capabilities: dict[str, bool] | None = None
     final_idle_deadline_truncated = False
+    final_scenario_truncated = False
+    clean_shutdown = False
+    drain: dict[str, object] = {"graceSec": SCENARIO_DRAIN_GRACE_SEC, "attempted": False, "aborted": False, "cleanShutdown": False}
     execution_failed = False
     result: dict[str, Any]
     try:
@@ -300,8 +310,11 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
         while monotonic() < deadline:
             name = SCENARIOS[index % len(SCENARIOS)]
             scenario_started = monotonic()
+            # This is intentionally per-iteration. An earlier RPC timeout must
+            # not make a later, successful scenario look deadline-truncated.
+            scenario_truncated = False
             attempted.add(name)
-            record: dict[str, Any] = {"id": name, "startSec": round(scenario_started - started, 3), "waitForIdle": {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}}
+            record: dict[str, Any] = {"id": name, "startSec": round(scenario_started - started, 3), "scenarioTimeoutSec": min(10.0, duration), "waitForIdle": {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}}
             if detail := _scenario_unavailable(name, available_tools, capabilities):
                 record.update(status="capability_unavailable", detail=detail, endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
                 if len(scenarios) < MAX_SCENARIO_RECORDS:
@@ -311,13 +324,23 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 if remaining > 0:
                     sleep(min(0.2, remaining))
                 continue
-            response = driver.command({"type": "prompt", "message": scenario_prompt(name), "streamingBehavior": "queue"}, deadline)
+            # The patch scenario mutates its fixture.  Restore its exact input
+            # before each cycle so a long run remains idempotent.
+            if name == "apply_patch":
+                (workspace / "patch-target.txt").write_text("before\n", encoding="utf-8")
+            scenario_deadline = min(scenario_started + min(10.0, duration), deadline + SCENARIO_DRAIN_GRACE_SEC)
+            response = driver.command({"type": "prompt", "message": scenario_prompt(name), "streamingBehavior": "queue"}, scenario_deadline)
             if response is None:
-                execution_failed = True
-                record.update(status="prompt_timeout", endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
+                scenario_truncated = monotonic() >= deadline
+                if not scenario_truncated:
+                    execution_failed = True
+                record.update(status="incomplete_at_deadline" if scenario_truncated else "prompt_timeout", endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
                 if len(scenarios) < MAX_SCENARIO_RECORDS:
                     scenarios.append(record)
                 index += 1
+                if scenario_truncated:
+                    final_scenario_truncated = True
+                    break
                 # A closed RPC stream can return immediately. Yield before the
                 # next scheduled attempt so it cannot spin until the deadline.
                 remaining = deadline - monotonic()
@@ -328,18 +351,19 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 execution_failed = True
             idle["requested"] += 1
             record["waitForIdle"]["requested"] = 1
-            idle_response = driver.command({"type": "wait_for_idle"}, deadline)
+            idle_response = driver.command({"type": "wait_for_idle"}, scenario_deadline)
             if idle_response is None:
                 idle["timedOut"] += 1
                 record["waitForIdle"]["timedOut"] = 1
                 all_planned_attempted = set(SCENARIOS) <= attempted
-                final_idle_deadline_truncated = (
-                    monotonic() >= deadline and all_planned_attempted
-                    and idle["failed"] == 0 and idle["timedOut"] == 1
-                )
+                final_idle_deadline_truncated = monotonic() >= deadline and all_planned_attempted and idle["failed"] == 0 and idle["timedOut"] == 1
+                scenario_truncated = monotonic() >= deadline
                 if not final_idle_deadline_truncated:
-                    execution_failed = True
-                record["status"] = "incomplete_at_deadline" if final_idle_deadline_truncated else "idle_timeout"
+                    # Deadline truncation is reported separately from an RPC
+                    # failure; a bounded drain below will abort and clean up.
+                    if not scenario_truncated:
+                        execution_failed = True
+                record["status"] = "incomplete_at_deadline" if scenario_truncated else "idle_timeout"
             elif idle_response.get("success") is True:
                 idle["completed"] += 1
                 record["waitForIdle"]["completed"] = 1
@@ -356,7 +380,24 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
             if len(scenarios) < MAX_SCENARIO_RECORDS:
                 scenarios.append(record)
             index += 1
+            if scenario_truncated:
+                final_scenario_truncated = True
+                break
+        if final_scenario_truncated:
+            # No scenario is admitted after the duration window.  Give the
+            # one already admitted a bounded cleanup path instead of treating
+            # the outer deadline as an ordinary failed RPC command.
+            drain["attempted"] = True
+            drain_deadline = deadline + SCENARIO_DRAIN_GRACE_SEC
+            abort_response = driver.command({"type": "abort"}, drain_deadline)
+            drain["aborted"] = bool(abort_response and abort_response.get("success") is True)
+            if drain["aborted"]:
+                shutdown_response = driver.command({"type": "wait_for_idle"}, drain_deadline)
+                clean_shutdown = bool(shutdown_response and shutdown_response.get("success") is True)
+            drain["cleanShutdown"] = clean_shutdown
         observed = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_start"}
+        successful_tools = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_end" and e.get("ok") is True}
+        failed_tools = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_end" and e.get("ok") is False}
         # A tool advertised by get_tools but ending unsuccessfully is a real
         # dispatch/runtime failure, not a disabled capability.  Optional
         # scenarios are skipped above, so they cannot be mistaken for this.
@@ -366,13 +407,15 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
         observed.update(control_observed)
         coverage, missing_coverage, coverage_warnings = classify_coverage(
             attempted, observed, available_tools, idle, final_idle_deadline_truncated, capabilities,
+            successful_tools, failed_tools,
         )
         incomplete_at_deadline = {
             "finalWaitForIdle": final_idle_deadline_truncated,
+            "finalScenarioTruncated": final_scenario_truncated,
             "allPlannedScenariosAttempted": set(SCENARIOS) <= attempted,
         }
         tool_preflight = {name: _tool_preflight_status(name, available_tools, capabilities) for name in SCENARIOS if SCENARIO_REQUIRED_TOOLS[name] is not None}
-        result = {"type": "diagnostic_workload", "fixture": fixture, "elapsedSec": round(monotonic() - started, 3), "events": driver.events, "malformed": driver.malformed, "coverage": coverage, "missingCoverage": missing_coverage, "coverageWarnings": coverage_warnings, "toolPreflight": tool_preflight, "incompleteAtDeadline": incomplete_at_deadline, "completed": incomplete_at_deadline["allPlannedScenariosAttempted"] and not execution_failed, "waitForIdle": idle, "scenarios": scenarios, "scenarioRecordsDropped": max(0, index - len(scenarios))}
+        result = {"type": "diagnostic_workload", "fixture": fixture, "elapsedSec": round(monotonic() - started, 3), "events": driver.events, "malformed": driver.malformed, "coverage": coverage, "missingCoverage": missing_coverage, "coverageWarnings": coverage_warnings, "toolPreflight": tool_preflight, "incompleteAtDeadline": incomplete_at_deadline, "completed": incomplete_at_deadline["allPlannedScenariosAttempted"] and not execution_failed, "waitForIdle": idle, "drain": drain, "cleanShutdown": clean_shutdown, "runtimeFailure": execution_failed, "scenarios": scenarios, "scenarioRecordsDropped": max(0, index - len(scenarios))}
     finally:
         driver.close()
     result["processReturnCode"] = driver.process.poll()
@@ -405,7 +448,7 @@ def main() -> int:
         parser.error("--duration must be greater than zero")
     workload_plan(args.duration, args.workload)
     result = run_workload(Path(args.workspace), args.duration, args.provider, args.model, args.llama_cpp_url)
-    result["runtimeFailure"] = _runtime_failure(
+    result["runtimeFailure"] = bool(result.get("runtimeFailure")) or _runtime_failure(
         result["events"], result["processReturnCode"], result["processTerminatedByDriver"],
     )
     print(json.dumps(result, sort_keys=True))

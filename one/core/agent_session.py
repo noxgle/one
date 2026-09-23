@@ -633,7 +633,8 @@ class AgentSession:
         return True
 
     def _should_repair_tool_response(self, tool_results: list[dict[str, Any]]) -> bool:
-        """Step-0 prose uses nudge; repair is post-tool malformed output, once per turn."""
+        # The step-0 nudge handles an initial prose response; this bounded
+        # repair is only for malformed output after a tool result.
         return bool(self._active_tools and tool_results)
 
     @staticmethod
@@ -810,6 +811,12 @@ class AgentSession:
         }
 
     async def _execute_tool_by_name(self, tool_name: str, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
+        # Reject malformed OpenCode patch calls before capability checks,
+        # approval hooks, timeout calculation, or tool execution.
+        if tool_name == "apply_patch":
+            patch_text = args.get("patchText")
+            if not isinstance(patch_text, str) or not patch_text:
+                raise ValueError("apply_patch requires args.patchText to be a non-empty string")
         effective_timeout = self._effective_tool_timeout(tool_name, args, timeout_sec)
         if tool_name not in self._active_tools:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
@@ -901,7 +908,9 @@ class AgentSession:
         elif tool_name == "edit":
             result = fn(cwd, path_arg or "", args.get("edits", []))
         elif tool_name == "apply_patch":
-            result = fn(cwd, args.get("patchText", ""))
+            patch_text = args.get("patchText")
+            assert isinstance(patch_text, str)
+            result = fn(cwd, patch_text)
         elif tool_name == "grep":
             result = fn(cwd, args.get("pattern", ""), args.get("path", "."))
         elif tool_name == "find":

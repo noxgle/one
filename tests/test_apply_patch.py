@@ -26,6 +26,22 @@ async def test_registered_apply_patch_dispatches_from_agent_session(tmp_path: Pa
     assert (tmp_path / "dispatched.txt").read_text(encoding="utf-8") == "ok\n"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("patch_text", [None, ""])
+async def test_agent_session_rejects_malformed_apply_patch_before_execution(tmp_path: Path, patch_text: object) -> None:
+    session = object.__new__(AgentSession)
+    session._active_tools = ["apply_patch"]
+    session.session_manager = type("SessionManager", (), {"cwd": str(tmp_path)})()
+
+    with pytest.raises(ValueError, match="args.patchText to be a non-empty string"):
+        await session._execute_tool_by_name("apply_patch", {"patchText": patch_text})
+
+
+def test_apply_patch_tool_rejects_non_string_patch_text() -> None:
+    with pytest.raises(ValueError, match="args.patchText to be a non-empty string"):
+        apply_patch_tool("/tmp", None)  # type: ignore[arg-type]
+
+
 # ── Add File ──────────────────────────────────────────────────────────────────
 
 

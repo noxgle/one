@@ -39,9 +39,51 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
         session.subscribe(on_event)
 
     await rebind()
+    prompt_tasks: set[asyncio.Task[None]] = set()
+    wait_tasks: set[asyncio.Task[None]] = set()
+
+    async def run_prompt(request_id: str | None, message: str, options: dict[str, Any], images: list[dict[str, Any]] | None) -> None:
+        """Run an accepted prompt and consume failures from its detached task."""
+        try:
+            await session.prompt(message, options, images=images)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - surface the asynchronous RPC failure
+            output({"type": "prompt_error", "requestId": request_id, "error": str(exc) or exc.__class__.__name__})
+
+    async def wait_until_idle(request_id: str | None) -> None:
+        # Snapshot tasks that were accepted before this waiter.  A prompt task
+        # is registered before its acceptance response is emitted, closing the
+        # prompt/wait race while keeping stdin command intake responsive.
+        pending = tuple(prompt_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            await session.wait_for_idle()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - report detached waiter failures to the RPC client
+            output(error(request_id, "wait_for_idle", str(exc) or exc.__class__.__name__))
+            return
+        output(success(request_id, "wait_for_idle"))
+
+    async def finish_wait_tasks() -> None:
+        """Deliver accepted wait responses at EOF without hiding task failures."""
+        results = await asyncio.gather(*tuple(wait_tasks), return_exceptions=True)
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                continue
+            if isinstance(result, BaseException):
+                output(error(None, "wait_for_idle", str(result) or result.__class__.__name__))
 
     while True:
-        line = await asyncio.to_thread(input)
+        try:
+            line = await asyncio.to_thread(input)
+        except EOFError:
+            # Test and pipe EOF must not drop already accepted wait responses.
+            if wait_tasks:
+                await finish_wait_tasks()
+            raise
         if not line:
             continue
 
@@ -119,11 +161,13 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                                 pass
                         output(error(cid, ctype, f"Attachment error: {e}"))
                         continue
-                asyncio.create_task(session.prompt(cmd.get("message", ""), {
+                task = asyncio.create_task(run_prompt(cid, cmd.get("message", ""), {
                     "streamingBehavior": cmd.get("streamingBehavior"),
                     # The command id is an optional, additive correlation key.
                     "requestId": cid,
-                }, images=image_refs))
+                }, image_refs))
+                prompt_tasks.add(task)
+                task.add_done_callback(prompt_tasks.discard)
                 output(success(cid, ctype))
             elif ctype == "steer":
                 steer_images = cmd.get("images")
@@ -273,8 +317,9 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
             elif ctype == "get_context_usage":
                 output(success(cid, ctype, {"contextUsage": session.get_context_usage()}))
             elif ctype == "wait_for_idle":
-                await session.wait_for_idle()
-                output(success(cid, ctype))
+                task = asyncio.create_task(wait_until_idle(cid))
+                wait_tasks.add(task)
+                task.add_done_callback(wait_tasks.discard)
             elif ctype == "reload_resources":
                 info = await session.reload()
                 output(success(cid, ctype, info))
@@ -346,7 +391,7 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                 )
             elif ctype == "answer_question":
                 try:
-                    session.answer_question(cmd.get("id", ""), cmd.get("answer", ""))
+                    session.answer_question(cmd.get("questionId", cmd.get("id", "")), cmd.get("answer", ""))
                 except ValueError as e:
                     output(error(cid, ctype, str(e)))
                 else:

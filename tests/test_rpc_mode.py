@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
 import json
 from pathlib import Path
@@ -366,6 +367,127 @@ async def test_rpc_answer_question_unknown_id(tmp_path: Path, monkeypatch: pytes
     r = _resp(responses, "answer_question", "1")
     assert r["success"] is False
     assert "No pending question" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_answer_question_prefers_question_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+    answered: list[tuple[str, str]] = []
+    session.answer_question = lambda question_id, answer: answered.append((question_id, answer))  # type: ignore[method-assign]
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "answer_question", "id": "request-1", "questionId": "question-1", "answer": "yes"})],
+    )
+
+    assert _resp(responses, "answer_question", "request-1")["success"] is True
+    assert answered == [("question-1", "yes")]
+
+
+@pytest.mark.asyncio
+async def test_rpc_answer_question_accepts_legacy_id_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+    answered: list[tuple[str, str]] = []
+    session.answer_question = lambda question_id, answer: answered.append((question_id, answer))  # type: ignore[method-assign]
+
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "answer_question", "id": "question-1", "answer": "yes"})],
+    )
+
+    assert _resp(responses, "answer_question", "question-1")["success"] is True
+    assert answered == [("question-1", "yes")]
+
+
+@pytest.mark.asyncio
+async def test_rpc_wait_for_idle_tracks_accepted_prompt_and_keeps_commands_responsive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+    started = False
+    gate = asyncio.Event()
+
+    async def prompt(*_args, **_kwargs) -> None:
+        nonlocal started
+        started = True
+        await gate.wait()
+
+    async def wait_for_idle() -> None:
+        assert started
+
+    session.prompt = prompt  # type: ignore[method-assign]
+    session.wait_for_idle = wait_for_idle  # type: ignore[method-assign]
+
+    # answer_question is processed while the waiter is pending and releases the prompt.
+    def answer_question(question_id: str, answer: str) -> None:
+        assert question_id == "question-1" and answer == "yes"
+        gate.set()
+
+    session.answer_question = answer_question  # type: ignore[method-assign]
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [
+            json.dumps({"type": "prompt", "id": "prompt-1", "message": "run"}),
+            json.dumps({"type": "wait_for_idle", "id": "wait-1"}),
+            json.dumps({"type": "answer_question", "id": "answer-request", "questionId": "question-1", "answer": "yes"}),
+        ],
+    )
+    assert _resp(responses, "prompt", "prompt-1")["success"] is True
+    assert _resp(responses, "answer_question", "answer-request")["success"] is True
+    assert _resp(responses, "wait_for_idle", "wait-1")["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_rpc_prompt_task_exception_is_consumed_and_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+
+    async def failing_prompt(*_args, **_kwargs) -> None:
+        raise RuntimeError("prompt boom")
+
+    session.prompt = failing_prompt  # type: ignore[method-assign]
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "prompt", "id": "p1", "message": "run"}), json.dumps({"type": "wait_for_idle", "id": "w1"})],
+    )
+    assert _resp(responses, "wait_for_idle", "w1")["success"] is True
+    assert {"type": "prompt_error", "requestId": "p1", "error": "prompt boom"} in responses
+
+
+@pytest.mark.asyncio
+async def test_rpc_wait_for_idle_failure_is_reported_during_eof_shutdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+
+    async def failing_wait_for_idle() -> None:
+        raise RuntimeError("idle boom")
+
+    session.wait_for_idle = failing_wait_for_idle  # type: ignore[method-assign]
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [json.dumps({"type": "wait_for_idle", "id": "w1"})],
+    )
+
+    response = _resp(responses, "wait_for_idle", "w1")
+    assert response == {"id": "w1", "type": "response", "command": "wait_for_idle", "success": False, "error": "idle boom"}
+
+
+@pytest.mark.asyncio
+async def test_rpc_multiple_waiters_preserve_request_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+
+    async def prompt(*_args, **_kwargs) -> None:
+        return None
+
+    session.prompt = prompt  # type: ignore[method-assign]
+    responses = await _run_rpc(
+        monkeypatch, capsys, session,
+        [
+            json.dumps({"type": "prompt", "id": "p1", "message": "run"}),
+            json.dumps({"type": "wait_for_idle", "id": "w1"}),
+            json.dumps({"type": "get_queue", "id": "q1"}),
+            json.dumps({"type": "wait_for_idle", "id": "w2"}),
+        ],
+    )
+    assert _resp(responses, "get_queue", "q1")["success"] is True
+    assert _resp(responses, "wait_for_idle", "w1")["success"] is True
+    assert _resp(responses, "wait_for_idle", "w2")["success"] is True
 
 
 @pytest.mark.asyncio
