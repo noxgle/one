@@ -11,6 +11,10 @@ class ChatResult:
     raw: dict[str, Any]
     usage: dict[str, Any]
     stop_reason: str | None = None
+    # Additive response classification. Reasoning remains separate from text.
+    had_thinking: bool = False
+    # Classification only; native calls remain unsupported until Phase 4.
+    had_native_tool_call: bool = False
 
 
 class ProviderAdapter:

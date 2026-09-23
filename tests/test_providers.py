@@ -317,6 +317,7 @@ async def test_non_streaming_includes_reasoning_content(adapter: OpenAICompatibl
 
     thinking = "I will solve this step by step."
     content = "The answer is 42."
+    thinking_deltas: list[str] = []
 
     post_resp = _PostResp(
         {
@@ -334,7 +335,6 @@ async def test_non_streaming_includes_reasoning_content(adapter: OpenAICompatibl
         }
     )
 
-    thinking_deltas: list[str] = []
     with patch.object(httpx, "AsyncClient") as MockClient:
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -352,6 +352,7 @@ async def test_non_streaming_includes_reasoning_content(adapter: OpenAICompatibl
 
     assert thinking_deltas == [thinking]
     assert result.text == content
+    assert result.had_thinking is True
 
 
 @pytest.mark.asyncio
@@ -388,6 +389,7 @@ async def test_streaming_content_only_no_reasoning(adapter: OpenAICompatibleAdap
 
     assert content_text in result.text
     assert "".join(captured_deltas) == content_text
+    assert result.had_thinking is False
 
 
 @pytest.mark.asyncio
@@ -426,6 +428,7 @@ async def test_non_streaming_no_reasoning_content(adapter: OpenAICompatibleAdapt
         )
 
     assert result.text == content
+    assert result.had_thinking is False
 
 
 @pytest.mark.asyncio
@@ -471,6 +474,7 @@ async def test_non_streaming_only_reasoning_no_content(adapter: OpenAICompatible
     """Edge case: only reasoning_content, empty content field."""
 
     thinking = "I thought about it."
+    thinking_deltas: list[str] = []
 
     post_resp = _PostResp(
         {
@@ -478,7 +482,7 @@ async def test_non_streaming_only_reasoning_no_content(adapter: OpenAICompatible
                 {
                     "message": {
                         "role": "assistant",
-                        "content": "",
+                        "content": None,
                         "reasoning_content": thinking,
                     },
                     "finish_reason": "stop",
@@ -500,9 +504,62 @@ async def test_non_streaming_only_reasoning_no_content(adapter: OpenAICompatible
             model="qwen-test",
             messages=[{"role": "user", "content": "test"}],
             thinking_level="high",
+            on_thinking_delta=thinking_deltas.append,
         )
 
     assert result.text == ""
+    assert thinking_deltas == [thinking]
+    assert result.had_thinking is True
+
+
+@pytest.mark.asyncio
+async def test_streaming_fragmented_reasoning_with_empty_content_is_classified(
+    adapter: OpenAICompatibleAdapter,
+):
+    """llama.cpp-style fragmented reasoning remains display-only with empty text."""
+
+    result, visible, thinking = await _stream_with(adapter, _sse(
+        {"choices": [{"delta": {"role": "assistant", "reasoning_content": "I will "}}]},
+        {"choices": [{"delta": {"reasoning_content": "use a tool", "content": ""}}]},
+        {"choices": [{"delta": {"content": None}, "finish_reason": "stop"}]},
+    ))
+
+    assert result.text == ""
+    assert result.had_thinking is True
+    assert visible == []
+    assert thinking == ["I will ", "use a tool"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_json_content_is_not_reasoning(adapter: OpenAICompatibleAdapter):
+    """Normal content, including a JSON-in-text tool call, keeps its prior path."""
+
+    tool_json = '{"tool":"read","args":{"path":"a.txt"}}'
+    result, visible, thinking = await _stream_with(adapter, _sse(
+        {"choices": [{"delta": {"role": "assistant", "content": tool_json[:17]}}]},
+        {"choices": [{"delta": {"content": tool_json[17:]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ))
+
+    assert result.text == tool_json
+    assert result.had_thinking is False
+    assert result.had_native_tool_call is False
+    assert visible == [tool_json[:17], tool_json[17:]]
+    assert thinking == []
+
+
+@pytest.mark.asyncio
+async def test_streaming_native_tool_calls_are_classified(adapter: OpenAICompatibleAdapter):
+    result, _, _ = await _stream_with(adapter, _sse(
+        {"choices": [{"delta": {"role": "assistant", "tool_calls": [
+            {"index": 0, "id": "call_1", "type": "function", "function": {"name": "read", "arguments": ""}},
+        ]}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"path":"a.txt"}'}},
+        ]}, "finish_reason": "tool_calls"}]},
+    ))
+
+    assert result.had_native_tool_call is True
 
 
 # ── Phase 24: on_thinking_delta ──────────────────────────────────────────────
@@ -641,6 +698,7 @@ async def test_raw_reasoning_chunks_exact_callbacks(adapter: OpenAICompatibleAda
     # Joined value is exact
     assert "".join(captured) == "reason, can't **bold** [x]"
     assert result.text == ""
+    assert result.had_thinking is True
 
 
 @pytest.mark.asyncio

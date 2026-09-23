@@ -17,6 +17,110 @@ from one.tools.index import all_tools
 from tests.support.agents import _FakeProvider, _Loader
 
 
+class _ThinkingFakeProvider:
+    """Fake provider that keeps display-only thinking separate from text."""
+
+    def __init__(self, responses: list[tuple[str, str]]) -> None:
+        self.responses = responses
+        self.calls = 0
+        self.requests: list[list[dict[str, Any]]] = []
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        on_delta: Any = None,
+        on_thinking_delta: Any = None,
+    ) -> ChatResult:
+        self.requests.append(messages)
+        text, thinking = self.responses[self.calls]
+        self.calls += 1
+        if thinking and on_thinking_delta:
+            on_thinking_delta(thinking)
+        return ChatResult(text=text, raw={}, usage={}, stop_reason="stop", had_thinking=bool(thinking.strip()))
+
+
+def _reasoning_agent(tmp_path: Path) -> AgentSession:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    return AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}}),
+        registry,
+        _Loader(),
+        model,
+        "medium",
+        tools=["write", "finish"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_first_response_nudges_to_tool_and_finish(tmp_path: Path):
+    agent = _reasoning_agent(tmp_path)
+    provider = _ThinkingFakeProvider([
+        ("", "I will write a program that prints prime numbers."),
+        (
+            '{"tool":"write","args":{"path":"primes.py","content":"n = 5\\nprimes = []\\ncandidate = 2\\nwhile len(primes) < n:\\n    if all(candidate % p for p in primes):\\n        primes.append(candidate)\\n    candidate += 1\\nprint(*primes)\\n"}}',
+            "",
+        ),
+        ('{"tool":"finish","args":{"summary":"Created primes.py","goal_success":true}}', ""),
+    ])
+    agent.providers = {"openai": provider}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Create a program in tmp which prints n prime numbers.")
+
+    assert provider.calls == 3
+    assert "while len(primes) < n:" in (tmp_path / "primes.py").read_text(encoding="utf-8")
+    assert agent.get_last_assistant_text() == "Created primes.py"
+    assert [e["tool"] for e in events if e["type"] == "tool_call_start"] == ["write", "finish"]
+    assert len([e for e in events if e["type"] == "tool_call_nudge_start"]) == 1
+    assert [e["used"] for e in events if e["type"] == "tool_call_nudge_end"] == [True]
+    stats = agent.get_session_stats()
+    assert stats["nudge"]["fires"] == 1
+    assert stats["nudge"]["conversions"] == {"true": 1, "false": 0}
+    assert all("_hadThinking" not in message for message in agent.messages)
+    assert all("_hadThinking" not in message for message in agent.session_manager.build_session_context()["messages"])
+    assert all("_hadThinking" not in message for request in provider.requests for message in request)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_nudge_failure_stops_without_third_call(tmp_path: Path):
+    agent = _reasoning_agent(tmp_path)
+    provider = _ThinkingFakeProvider([("", "I should use a tool."), ("", "Still considering it.")])
+    agent.providers = {"openai": provider}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Write a file.")
+
+    assert provider.calls == 2
+    assert not [e for e in events if e["type"] == "tool_call_start"]
+    assert len([e for e in events if e["type"] == "tool_call_nudge_start"]) == 1
+    assert [e["used"] for e in events if e["type"] == "tool_call_nudge_end"] == [False]
+
+
+@pytest.mark.asyncio
+async def test_genuinely_empty_first_response_does_not_nudge(tmp_path: Path):
+    agent = _reasoning_agent(tmp_path)
+    provider = _ThinkingFakeProvider([("", "")])
+    agent.providers = {"openai": provider}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Write a file.")
+
+    assert provider.calls == 1
+    assert not [e for e in events if e["type"] == "tool_call_nudge_start"]
+
+
 @pytest.mark.asyncio
 async def test_tool_calling_multistep_cycle(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
@@ -216,7 +320,7 @@ async def test_malformed_bash_repair_does_not_execute_or_repeat_bash_events(tmp_
 
 
 @pytest.mark.asyncio
-async def test_repaired_nonterminal_tool_does_not_restore_repair_budget(tmp_path: Path):
+async def test_repaired_nonterminal_tool_restores_post_tool_repair_budget(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
@@ -225,14 +329,15 @@ async def test_repaired_nonterminal_tool_does_not_restore_repair_budget(tmp_path
     assert model is not None
     agent = AgentSession(
         SessionManager.in_memory(str(tmp_path)),
-        SettingsManager.in_memory({"tools": {"maxSteps": 5, "timeoutSec": 5}}),
-        registry, _Loader(), model, "medium", tools=["read"],
+        SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}}),
+        registry, _Loader(), model, "medium", tools=["read", "finish"],
     )
     provider = _FakeProvider([
         '{"tool":"read","args":{"path":"a.txt"}}',
         "not a tool call",
         '{"tool":"read","args":{"path":"a.txt"}}',
-        "still not a tool call",
+        "Thought: the reads are complete.",
+        '{"tool":"finish","args":{"summary":"both reads completed","goal_success":true}}',
     ])
     agent.providers = {"openai": provider}
     events: list[dict[str, Any]] = []
@@ -240,10 +345,44 @@ async def test_repaired_nonterminal_tool_does_not_restore_repair_budget(tmp_path
 
     await agent.prompt("Read the file twice.")
 
-    assert provider.calls == 4
-    assert agent.get_last_assistant_text() == "still not a tool call"
+    assert provider.calls == 5
+    assert agent.get_last_assistant_text() == "both reads completed"
+    assert len([event for event in events if event["type"] == "tool_response_repair_start"]) == 2
+    assert [event["used"] for event in events if event["type"] == "tool_response_repair_end"] == [True, True]
+    assert [event["tool"] for event in events if event["type"] == "tool_call_start"] == ["read", "read", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_restored_repair_budget_respects_positive_max_steps(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"tools": {"maxSteps": 2, "timeoutSec": 5}}),
+        registry, _Loader(), model, "medium", tools=["read", "finish"],
+    )
+    provider = _FakeProvider([
+        '{"tool":"read","args":{"path":"a.txt"}}',
+        "not a tool call",
+        '{"tool":"read","args":{"path":"a.txt"}}',
+        "Thought: this must not be repaired because the step limit is reached.",
+        '{"tool":"finish","args":{"summary":"must not run","goal_success":true}}',
+    ])
+    agent.providers = {"openai": provider}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Read the file twice.")
+
+    assert provider.calls == 3
     assert len([event for event in events if event["type"] == "tool_response_repair_start"]) == 1
     assert [event["tool"] for event in events if event["type"] == "tool_call_start"] == ["read", "read"]
+    final = [message for message in agent.messages if message.get("role") == "assistant"][-1]
+    assert final["stopReason"] == "tool_step_limit"
 
 
 def test_provider_view_marks_tool_results_as_untrusted_data(tmp_path: Path):
@@ -365,7 +504,7 @@ def test_tool_nudge_prompt_uses_strict_json_finish_contract(tmp_path: Path):
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
     agent = AgentSession(
-        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=["read"]
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=["read", "finish"]
     )
     # Exercise the prompt source used by the nudge rather than accepting the
     # legacy FINAL_ANSWER marker in its bounded non-tool fallback.
@@ -374,6 +513,19 @@ def test_tool_nudge_prompt_uses_strict_json_finish_contract(tmp_path: Path):
     assert "FINAL_ANSWER:" not in nudge_prompt
     assert '{"tool":"finish","args":{"summary":"<answer>","goal_success":true}}' in nudge_prompt
     assert agent._should_tool_nudge("I will inspect that.", step=0, tool_results=[])
+
+
+def test_repair_and_nudge_prompts_do_not_advertise_disabled_finish(tmp_path: Path):
+    registry = ModelRegistry.create(AuthStorage.in_memory())
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=["read"]
+    )
+
+    for prompt in (agent._tool_response_repair_prompt(), agent._tool_nudge_prompt()):
+        assert '"tool":"finish"' not in prompt
+        assert "finish is not available" in prompt
 
 
 @pytest.mark.asyncio

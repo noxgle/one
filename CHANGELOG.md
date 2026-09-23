@@ -23,6 +23,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Reasoning-only first responses** — tool-enabled turns now make one bounded
+  strict JSON-tool-call recovery request when a provider emits display-only
+  reasoning with empty assistant content, without treating reasoning as actions.
+- **Post-tool format repair** — each completed non-terminal tool now restores
+  one bounded JSON-repair opportunity, allowing a later malformed response to
+  recover into `finish` without bypassing tool-step, abort, or budget limits.
 - **Malformed tool-output recovery** — strict JSON repair after tool outputs
   preserves untrusted provider-view boundaries, while OpenAI-compatible
   reasoning remains separate from parseable content.

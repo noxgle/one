@@ -276,12 +276,21 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             text = content
             usage = data.get("usage") or {}
             stop = choice.get("finish_reason")
-            return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop)
+            return ChatResult(
+                text=text,
+                raw=data,
+                usage=usage,
+                stop_reason=stop,
+                had_thinking=bool(str(thinking).strip()),
+                had_native_tool_call=bool(msg.get("tool_calls") or msg.get("toolCalls") or msg.get("function_call")),
+            )
 
         text_parts: list[str] = []
         usage: dict[str, Any] = {}
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
+        had_thinking = False
+        had_native_tool_call = False
 
         async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
             async with client.stream("POST", f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers) as resp:
@@ -318,6 +327,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         usage = chunk["usage"]
                     choice = (chunk.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
+                    had_native_tool_call = had_native_tool_call or bool(
+                        delta.get("tool_calls") or delta.get("toolCalls") or delta.get("function_call")
+                    )
                     piece = delta.get("content")
                     if piece:
                         text_parts.append(str(piece))
@@ -338,6 +350,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         piece_reasoning = delta.get("reasoning_content")
                     if piece_reasoning:
                         reasoning_str = str(piece_reasoning)
+                        had_thinking = had_thinking or bool(reasoning_str.strip())
                         # Forward raw reasoning_content exactly as-is (no synthetic spacing).
                         try:
                             if on_thinking_delta:
@@ -351,4 +364,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         break
 
         full_text = "".join(text_parts)
-        return ChatResult(text=full_text, raw=raw_last, usage=usage, stop_reason=stop_reason)
+        return ChatResult(
+            text=full_text,
+            raw=raw_last,
+            usage=usage,
+            stop_reason=stop_reason,
+            had_thinking=had_thinking,
+            had_native_tool_call=had_native_tool_call,
+        )
