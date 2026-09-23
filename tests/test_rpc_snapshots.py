@@ -233,10 +233,10 @@ async def test_rpc_conversation_snapshot_success(
 
     # Provider script mirrors test_event_snapshots success:
     #   response 1 → tool call (read succeeds),
-    #   response 2 → plain text "DONE" (terminal).
+    #   response 2 → valid finish tool call (terminal).
     session.providers = {"openai": _Provider([
         '{"tool":"read","args":{"path":"a.txt"}}',
-        "DONE",
+        '{"tool":"finish","args":{"summary":"read completed","goal_success":true}}',
     ])}
 
     responses, raw = await _run_rpc(

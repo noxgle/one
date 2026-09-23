@@ -62,6 +62,43 @@ def test_tool_parser_preserves_native_and_function_metadata_ids(tmp_path: Path):
     assert nested and nested["toolCallId"] == "call-function"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"tool":"bash"}',
+        '{"tool":"bash","args":{}}',
+        '{"function":{"name":"bash","arguments":"{}"}}',
+        '{"tool":"bash","args":{"command":""}}',
+        '{"tool":"bash","args":{"command":"  \t\n"}}',
+        '{"tool":"bash","args":{"command":42}}',
+    ],
+)
+def test_tool_parser_rejects_bash_without_a_nonempty_command(tmp_path: Path, text: str):
+    registry = ModelRegistry.create(AuthStorage.in_memory())
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium"
+    )
+
+    assert agent._try_parse_tool_call(text) is None
+
+
+def test_tool_parser_preserves_valid_bash_command(tmp_path: Path):
+    registry = ModelRegistry.create(AuthStorage.in_memory())
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium"
+    )
+
+    assert agent._try_parse_tool_call('{"tool":"bash","args":{"command":" echo ok "}}') == {
+        "tool": "bash",
+        "args": {"command": " echo ok "},
+        "toolCallId": None,
+    }
+
+
 @pytest.mark.asyncio
 async def test_openai_raw_tool_call_id_is_propagated_to_tool_events(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")

@@ -268,7 +268,7 @@ def adapter() -> OpenAICompatibleAdapter:
 
 @pytest.mark.asyncio
 async def test_streaming_includes_reasoning_content(adapter: OpenAICompatibleAdapter):
-    """on_delta must fire for reasoning_content chunks and final text includes it."""
+    """Reasoning is routed to thinking callbacks, not parseable result text."""
 
     reasoning_text = "Let me think about this carefully."
     content_text = "Here is the answer."
@@ -281,6 +281,7 @@ async def test_streaming_includes_reasoning_content(adapter: OpenAICompatibleAda
     )
 
     captured_deltas: list[str] = []
+    thinking_deltas: list[str] = []
 
     def on_delta(piece: str) -> None:
         captured_deltas.append(piece)
@@ -300,20 +301,19 @@ async def test_streaming_includes_reasoning_content(adapter: OpenAICompatibleAda
             messages=[{"role": "user", "content": "hello"}],
             thinking_level="high",
             on_delta=on_delta,
+            on_thinking_delta=thinking_deltas.append,
         )
 
-    # on_delta should have been called with reasoning_content
-    assert reasoning_text in captured_deltas
+    assert thinking_deltas == [reasoning_text]
+    assert reasoning_text not in captured_deltas
     assert content_text in captured_deltas
 
-    # Final text must contain both reasoning and content
-    assert reasoning_text in result.text
-    assert content_text in result.text
+    assert result.text == content_text
 
 
 @pytest.mark.asyncio
 async def test_non_streaming_includes_reasoning_content(adapter: OpenAICompatibleAdapter):
-    """Non-streaming chat must concatenate reasoning_content + content."""
+    """Non-streaming reasoning is emitted separately and cannot corrupt parsing."""
 
     thinking = "I will solve this step by step."
     content = "The answer is 42."
@@ -334,6 +334,7 @@ async def test_non_streaming_includes_reasoning_content(adapter: OpenAICompatibl
         }
     )
 
+    thinking_deltas: list[str] = []
     with patch.object(httpx, "AsyncClient") as MockClient:
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -346,12 +347,11 @@ async def test_non_streaming_includes_reasoning_content(adapter: OpenAICompatibl
             model="qwen-test",
             messages=[{"role": "user", "content": "what is 6*7?"}],
             thinking_level="high",
+            on_thinking_delta=thinking_deltas.append,
         )
 
-    assert thinking in result.text
-    assert content in result.text
-    # Expect thinking + "\n\n" + content
-    assert result.text.startswith(thinking)
+    assert thinking_deltas == [thinking]
+    assert result.text == content
 
 
 @pytest.mark.asyncio
@@ -463,12 +463,7 @@ async def test_streaming_reasoning_then_content_order(adapter: OpenAICompatibleA
             on_delta=on_delta,
         )
 
-    # Both reasoning and content parts appear in the final text
-    assert "thinking" in result.text
-    assert "Part " in result.text
-    assert "A" in result.text
-    assert " more thought" in result.text
-    assert "B" in result.text
+    assert result.text == "Part A B"
 
 
 @pytest.mark.asyncio
@@ -507,9 +502,7 @@ async def test_non_streaming_only_reasoning_no_content(adapter: OpenAICompatible
             thinking_level="high",
         )
 
-    assert thinking in result.text
-    # Should be thinking + "\n\n" + ""
-    assert result.text == thinking + "\n\n"
+    assert result.text == ""
 
 
 # ── Phase 24: on_thinking_delta ──────────────────────────────────────────────
@@ -603,8 +596,7 @@ async def test_on_thinking_delta_fallback_to_on_delta(adapter: OpenAICompatibleA
     # Both should appear in on_delta for backward compat
     assert reasoning_text in captured_deltas
     assert content_text in captured_deltas
-    assert reasoning_text in result.text
-    assert content_text in result.text
+    assert result.text == content_text
 
 
 # ── Phase 30.7: raw reasoning content streaming ──────────────────────────────
@@ -648,8 +640,7 @@ async def test_raw_reasoning_chunks_exact_callbacks(adapter: OpenAICompatibleAda
     assert captured == chunks
     # Joined value is exact
     assert "".join(captured) == "reason, can't **bold** [x]"
-    # ChatResult raw join unchanged
-    assert result.text == "reason, can't **bold** [x]"
+    assert result.text == ""
 
 
 @pytest.mark.asyncio
@@ -696,7 +687,7 @@ async def test_empty_vs_whitespace_reasoning_callbacks(adapter: OpenAICompatible
     assert captured == ["A", " ", "B"]
     # Join preserves whitespace
     assert "".join(captured) == "A B"
-    assert result.text == "A B"
+    assert result.text == ""
 
 
 @pytest.mark.asyncio
@@ -734,7 +725,7 @@ async def test_raw_reasoning_fallback_on_delta_only(adapter: OpenAICompatibleAda
         )
 
     assert captured == chunks
-    assert result.text == "think"
+    assert result.text == ""
 
 
 @pytest.mark.asyncio
@@ -775,6 +766,6 @@ async def test_raw_reasoning_callback_raises_still_finishes(adapter: OpenAICompa
         )
 
     # Provider finished despite exception on chunk 2
-    assert result.text == "ABC"
+    assert result.text == ""
     # All 3 chunks were attempted; chunk 2 raised but was swallowed
     assert call_count == 3

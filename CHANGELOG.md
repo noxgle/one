@@ -23,6 +23,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Malformed tool-output recovery** — strict JSON repair after tool outputs
+  preserves untrusted provider-view boundaries, while OpenAI-compatible
+  reasoning remains separate from parseable content.
 - **TUI compaction output** — `/compact` now displays a readable status,
   summary, and counters instead of exposing the raw JSON result object.
 - **llama.cpp thinking off** — `/thinking off` now passes llama.cpp's

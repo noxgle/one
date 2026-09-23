@@ -106,7 +106,9 @@ def test_default_provider_view_preserves_old_mcp_evidence_across_reload_and_pers
     assert "CPI was 3.2 percent on 2026-04-12" in request_text
     assert "copper inventory was 184,731 tonnes" in request_text
     assert "RECENT-TOOL-OUTPUT" in request_text
-    assert request_size == raw_size
+    # The provider view retains complete evidence and adds untrusted-data
+    # delimiters around each tool result; it must not prune the content.
+    assert request_size > raw_size
     assert agent.get_session_stats()["toolOutputPruning"] == {"count": 0, "tokensReclaimed": 0}
     assert open(path, encoding="utf-8").read() == original_jsonl
 

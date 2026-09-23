@@ -264,13 +264,16 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             choice = (data.get("choices") or [{}])[0]
             msg = choice.get("message", {})
             content = msg.get("content") or ""
-            # OpenRouter traces are not assistant output.  Generic compatible
-            # endpoints intentionally retain their legacy combined result.
-            if self.reasoning_mode == "openrouter":
-                text = content
-            else:
-                thinking = msg.get("reasoning_content") or ""
-                text = (thinking + "\n\n" + content) if thinking else content
+            # Reasoning is never parseable assistant content.  Non-streaming
+            # callers can still surface it through the thinking callback.
+            thinking = msg.get("reasoning_content") or ""
+            if thinking:
+                try:
+                    if on_thinking_delta:
+                        on_thinking_delta(str(thinking))
+                except Exception:
+                    pass
+            text = content
             usage = data.get("usage") or {}
             stop = choice.get("finish_reason")
             return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop)
@@ -335,8 +338,6 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         piece_reasoning = delta.get("reasoning_content")
                     if piece_reasoning:
                         reasoning_str = str(piece_reasoning)
-                        if self.reasoning_mode != "openrouter":
-                            text_parts.append(reasoning_str)
                         # Forward raw reasoning_content exactly as-is (no synthetic spacing).
                         try:
                             if on_thinking_delta:

@@ -166,6 +166,8 @@ async def test_event_snapshot_tool_success(tmp_path: Path):
         {"type": "turn_start", "attempt": 1},
         {"type": "tool_call_start", "tool": "read"},
         {"type": "tool_call_end", "ok": True, "tool": "read"},
+        {"type": "tool_response_repair_start"},
+        {"type": "tool_response_repair_end"},
         {"type": "message_start"},
         {"type": "message_update"},
         {"type": "message_end"},
@@ -222,6 +224,8 @@ async def test_event_snapshot_tool_error_lifecycle(tmp_path: Path):
         {"type": "tool_call_start", "tool": "read"},
         {"type": "tool_call_error", "tool": "read"},
         {"type": "tool_call_end", "ok": False, "tool": "read"},
+        {"type": "tool_response_repair_start"},
+        {"type": "tool_response_repair_end"},
         {"type": "message_start"},
         {"type": "message_update"},
         {"type": "message_end"},
@@ -501,6 +505,12 @@ async def test_multi_invocation_reasoning_tool_sequencing(tmp_path: Path):
         "thinking_delta",  # "THINK"
         "thinking_delta",  # " "
         "thinking_delta",  # "C"
+        "tool_response_repair_start",
+        # The bounded repair also emits the provider's thinking deltas.
+        "thinking_delta",  # "THINK"
+        "thinking_delta",  # " "
+        "thinking_delta",  # "C"
+        "tool_response_repair_end",
         # final answer
         "message_start",
         "message_update",
