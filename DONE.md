@@ -102,6 +102,14 @@ user-facing changes belong in [`CHANGELOG.md`](CHANGELOG.md).
 - Removed personal filesystem paths and private LAN examples from tracked
   documentation and test fixtures.
 
+## Reasoning-only tool recovery (0.1.37)
+
+- Commit d1d624d: classified provider responses with no tool call as reasoning-only
+  (not tool calls with zero args), added one bounded first-response nudge for
+  llama.cpp/Qwen to prevent infinite reasoning loops, and repaired streaming
+  non-streaming regressions in post-tool tool-result replay and reasoning-only
+  message handling. Verification: 1435 passed, 1 skipped; ruff clean.
+
 ## Historical verification at the release-preparation checkpoint
 
 - `794 passed` — full pytest suite.
