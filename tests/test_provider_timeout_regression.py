@@ -19,6 +19,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.providers.base import ChatResult
 
 
 class _Loader:
@@ -71,6 +72,141 @@ class _SlowProvider:
         self.chat_call_count += 1
         await asyncio.sleep(self.chat_delay)  # Never returns
         return None  # unreachable
+
+
+class _StreamingProvider:
+    """Controllable fake provider for AgentSession's token-idle supervisor."""
+
+    def __init__(self, pieces: list[tuple[float, str, bool]], finish_delay: float = 0) -> None:
+        self.pieces = pieces
+        self.finish_delay = finish_delay
+        self.cancelled = False
+
+    async def chat(self, messages: list[dict[str, Any]], *, on_delta: Any = None,
+                   on_thinking_delta: Any = None, **kwargs: Any) -> ChatResult:
+        try:
+            for delay, piece, thinking in self.pieces:
+                await asyncio.sleep(delay)
+                (on_thinking_delta if thinking else on_delta)(piece)
+            await asyncio.sleep(self.finish_delay)
+            return ChatResult(text="", raw={}, usage={}, stop_reason="stop")
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+def _short_idle(agent: AgentSession, seconds: float = 0.05) -> None:
+    agent.settings_manager.get_provider_timeout_sec = lambda: seconds  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_streaming_activity_extends_idle_window_and_cleans_up(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path)
+    _short_idle(agent)
+    provider = _StreamingProvider([(0.03, "a", False), (0.03, "b", False), (0.03, "c", False)], 0.03)
+    agent.providers = {"openai": provider}
+
+    await agent._invoke_provider([])
+
+    assert not agent._active_chat_tasks
+
+
+@pytest.mark.asyncio
+async def test_streaming_idle_ignores_whitespace_but_reasoning_resets_it(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path)
+    _short_idle(agent)
+    provider = _StreamingProvider([(0.03, "reasoning", True), (0.01, "   ", False)], 0.01)
+    agent.providers = {"openai": provider}
+
+    await agent._invoke_provider([])
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_stream_hits_meaningful_token_idle_timeout(tmp_path: Path) -> None:
+    """Whitespace from the first delta must not extend the central idle window."""
+    agent = _mk_agent(tmp_path)
+    _short_idle(agent)
+    stalled = _StreamingProvider([(0, "   ", False)], finish_delay=1)
+    agent.providers = {"openai": stalled}
+
+    with pytest.raises(RuntimeError, match=r"provider timed out after 0.05s"):
+        await agent._invoke_provider([])
+
+    assert stalled.cancelled
+    assert not agent._active_chat_tasks
+
+
+@pytest.mark.asyncio
+async def test_stream_activity_precedes_slow_event_callback(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path)
+    _short_idle(agent)
+    agent.subscribe(lambda event: __import__("time").sleep(0.08) if event["type"] == "message_update" else None)
+    agent.providers = {"openai": _StreamingProvider([(0, "meaningful streamed text", False)])}
+
+    await agent._invoke_provider([])
+
+
+@pytest.mark.asyncio
+async def test_streaming_abort_cancels_task_and_keeps_abort_signal(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path)
+    _short_idle(agent, 1)
+    provider = _StreamingProvider([], finish_delay=10)
+    agent.providers = {"openai": provider}
+    invocation = asyncio.create_task(agent._invoke_provider([]))
+    await asyncio.sleep(0.01)
+    await agent.abort()
+    with pytest.raises(Exception) as exc_info:
+        await invocation
+    assert exc_info.value.__class__.__name__ == "_AbortSignal"
+    assert provider.cancelled
+    assert not agent._active_chat_tasks
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_provider_keeps_absolute_deadline(tmp_path: Path) -> None:
+    class _NonStreaming:
+        async def chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> ChatResult:
+            await asyncio.sleep(1)
+            return ChatResult(text="", raw={}, usage={}, stop_reason="stop")
+
+    agent = _mk_agent(tmp_path)
+    _short_idle(agent)
+    agent.providers = {"openai": _NonStreaming()}
+    with pytest.raises(RuntimeError, match=r"provider timed out after 0.05s"):
+        await agent._invoke_provider([])
+    assert not agent._active_chat_tasks
+
+
+@pytest.mark.asyncio
+async def test_retry_after_stream_idle_gets_a_fresh_window(tmp_path: Path) -> None:
+    class _RetryProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages: list[dict[str, Any]], *, on_delta: Any = None,
+                       **kwargs: Any) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(1)
+            if on_delta is not None:
+                on_delta("successful retry output")
+            return ChatResult(text="successful retry output", raw={}, usage={}, stop_reason="stop")
+
+    agent = _mk_agent(
+        tmp_path,
+        settings_override={"retry": {"enabled": True, "maxRetries": 1, "baseDelayMs": 1, "maxDelayMs": 1}},
+    )
+    _short_idle(agent)
+    provider = _RetryProvider()
+    agent.providers = {"openai": provider}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("retry after idle")
+
+    assert provider.calls >= 2
+    assert any(event["type"] == "auto_retry_start" for event in events)
+    assert events[-1]["type"] == "agent_end"
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +564,29 @@ async def test_sse_idle_watchdog_codex() -> None:
                 await adapter.chat(
                     api_key="chatgpt-token",
                     model="codex",
+                    messages=[],
+                    thinking_level="medium",
+                    on_delta=lambda d: None,
+                )
+
+
+@pytest.mark.asyncio
+async def test_sse_idle_watchdog_ollama() -> None:
+    """Ollama's finite transport watchdog remains available as a fallback."""
+    from unittest.mock import patch
+
+    from one.providers.ollama import OllamaCloudAdapter
+
+    adapter = OllamaCloudAdapter("http://localhost:11434")
+    with patch(
+        "httpx.AsyncClient.stream",
+        return_value=_FakeStreamContext(_make_fake_sse_stream(['{"message":{"content":"hi"}}'])),
+    ):
+        with patch("one.providers.ollama._IDLE_SSE_TIMEOUT", 0.5):
+            with pytest.raises(RuntimeError, match="idle"):
+                await adapter.chat(
+                    api_key="",
+                    model="test",
                     messages=[],
                     thinking_level="medium",
                     on_delta=lambda d: None,

@@ -56,8 +56,9 @@ _BASE_INSTRUCTIONS = (
     "read and edit code, run commands, and explain your work concisely."
 )
 
-# Idle timeout for per-line SSE reads — aborts a stalled stream after 120 s
-# of no data. Must stay < the outer 300 s provider deadline.
+# 120 s is the direct-call/default finite transport watchdog. AgentSession
+# overrides it with a longer value for managed streams so its meaningful-token
+# idle timeout remains authoritative.
 _IDLE_SSE_TIMEOUT = 120
 
 
@@ -291,6 +292,7 @@ class CodexResponsesAdapter(ProviderAdapter):
         max_tokens: int | None = None,
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        stream_transport_timeout: float | None = None,
     ) -> ChatResult:
         url = f"{BASE_URL}/responses"
         use_stream = callable(on_delta)
@@ -300,6 +302,7 @@ class CodexResponsesAdapter(ProviderAdapter):
             images=images, storage_dir=storage_dir,
         )
         req_headers = self._headers(api_key, extra=headers)
+        transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
 
         if not use_stream:
             async with httpx.AsyncClient(timeout=120) as client:
@@ -327,7 +330,7 @@ class CodexResponsesAdapter(ProviderAdapter):
         raw_last: dict[str, Any] = {}
         summary_delta_keys: set[tuple[Any, ...]] = set()
 
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30)) as client:
             async with client.stream("POST", url, json=payload, headers=req_headers) as resp:
                 if resp.is_error:
                     raw_body = await resp.aread()
@@ -336,13 +339,13 @@ class CodexResponsesAdapter(ProviderAdapter):
                 while True:
                     try:
                         line = await asyncio.wait_for(
-                            aiter.__anext__(), timeout=_IDLE_SSE_TIMEOUT
+                            aiter.__anext__(), timeout=transport_timeout
                         )
                     except StopAsyncIteration:
                         break
                     except TimeoutError:
                         raise RuntimeError(
-                            f"SSE stream idle for {_IDLE_SSE_TIMEOUT:.0f}s — "
+                            f"SSE stream idle for {transport_timeout:.0f}s — "
                             "the request did not resolve within the idle timeout"
                         )
                     if not line or not line.startswith("data:"):

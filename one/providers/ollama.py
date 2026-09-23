@@ -17,6 +17,9 @@ import httpx
 
 from .base import ChatResult, ProviderAdapter
 
+# 120 s is the direct-call/default finite transport watchdog. AgentSession
+# overrides it with a longer value for managed streams so its meaningful-token
+# idle timeout remains authoritative.
 _IDLE_SSE_TIMEOUT = 120
 
 
@@ -60,11 +63,13 @@ class OllamaCloudAdapter(ProviderAdapter):
         on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None, images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        stream_transport_timeout: float | None = None,
     ) -> ChatResult:
         if images:
             raise RuntimeError("ollama-cloud image input is not supported by the native chat adapter")
         payload = self._build_payload(model, messages, thinking_level, max_tokens)
         use_stream = callable(on_delta)
+        transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
         payload["stream"] = use_stream
         req_headers = {"Content-Type": "application/json"}
         if api_key:
@@ -90,7 +95,7 @@ class OllamaCloudAdapter(ProviderAdapter):
 
         text_parts: list[str] = []
         raw_last: dict[str, Any] = {}
-        async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30), follow_redirects=True) as client:
             async with client.stream("POST", url, json=payload, headers=req_headers) as response:
                 if response.is_error:
                     body = (await response.aread()).decode("utf-8", errors="ignore")[:1000]
@@ -98,11 +103,11 @@ class OllamaCloudAdapter(ProviderAdapter):
                 lines = response.aiter_lines()
                 while True:
                     try:
-                        line = await asyncio.wait_for(lines.__anext__(), timeout=_IDLE_SSE_TIMEOUT)
+                        line = await asyncio.wait_for(lines.__anext__(), timeout=transport_timeout)
                     except StopAsyncIteration:
                         break
                     except TimeoutError:
-                        raise RuntimeError(f"Ollama stream idle for {_IDLE_SSE_TIMEOUT:.0f}s")
+                        raise RuntimeError(f"Ollama stream idle for {transport_timeout:.0f}s")
                     if not line:
                         continue
                     try:

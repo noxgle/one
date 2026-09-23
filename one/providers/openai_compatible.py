@@ -12,9 +12,9 @@ from one.core.attachments import AttachmentStorageError
 
 from .base import ChatResult, ProviderAdapter
 
-# Idle timeout for per-line SSE reads — aborts a stalled stream after 120 s
-# of no data. Must stay < the outer 300 s provider deadline
-# (get_provider_timeout_sec), otherwise the outer deadline fires first.
+# 120 s is the direct-call/default finite transport watchdog. AgentSession
+# overrides it with a longer value for managed streams so its meaningful-token
+# idle timeout remains authoritative.
 _IDLE_SSE_TIMEOUT = 120
 
 # Chat Completions reasoning effort supports minimal through high.  ``xhigh``
@@ -240,6 +240,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         max_tokens: int | None = None,
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        stream_transport_timeout: float | None = None,
     ) -> ChatResult:
         payload = self._build_payload(model, messages, thinking_level, images=images, storage_dir=storage_dir)
         if max_tokens is not None:
@@ -247,6 +248,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         use_stream = callable(on_delta)
         if use_stream:
             payload["stream"] = True
+        transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
         req_headers = self._build_headers(api_key, headers)
         if not use_stream:
             async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -292,7 +294,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         had_thinking = False
         had_native_tool_call = False
 
-        async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30), follow_redirects=True) as client:
             async with client.stream("POST", f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers) as resp:
                 if resp.is_error:
                     body = (await resp.aread()).decode("utf-8", errors="ignore")[:1000]
@@ -302,13 +304,13 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 while True:
                     try:
                         line = await asyncio.wait_for(
-                            aiter.__anext__(), timeout=_IDLE_SSE_TIMEOUT
+                            aiter.__anext__(), timeout=transport_timeout
                         )
                     except StopAsyncIteration:
                         break
                     except TimeoutError:
                         raise RuntimeError(
-                            f"SSE stream idle for {_IDLE_SSE_TIMEOUT:.0f}s — "
+                            f"SSE stream idle for {transport_timeout:.0f}s — "
                             "the request did not resolve within the idle timeout"
                         )
                     if not line:

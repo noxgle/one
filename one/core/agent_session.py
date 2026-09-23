@@ -1874,6 +1874,11 @@ class AgentSession:
         streamed_buffer = ""
         streamed_suppressed = False
         had_thinking = False
+        # A streaming provider has no wall-clock deadline: this generation is
+        # advanced by meaningful provider output before event subscribers run.
+        # In particular, a slow UI must not make a live provider look idle.
+        stream_activity = asyncio.Event()
+        stream_activity_generation = 0
         streamed_msg = {
             "role": "assistant",
             "content": [],
@@ -1883,9 +1888,12 @@ class AgentSession:
         }
 
         def _on_delta(delta: str) -> None:
-            nonlocal streamed_started, streamed_buffer, streamed_suppressed
+            nonlocal streamed_started, streamed_buffer, streamed_suppressed, stream_activity_generation
             if not delta:
                 return
+            if delta.strip():
+                stream_activity_generation += 1
+                stream_activity.set()
             streamed_buffer += delta
             if streamed_suppressed:
                 return
@@ -1921,9 +1929,12 @@ class AgentSession:
             )
 
         def _on_thinking_delta(delta: str) -> None:
-            nonlocal had_thinking
+            nonlocal had_thinking, stream_activity_generation
             if not delta:  # only skip None or exact empty ""; whitespace-only passes through
                 return
+            if delta.strip():
+                stream_activity_generation += 1
+                stream_activity.set()
             had_thinking = had_thinking or bool(delta.strip())
             # Emit exact original delta — no whitespace stripping.
             self._emit({"type": "thinking_delta", "delta": delta})
@@ -1950,16 +1961,61 @@ class AgentSession:
         # Pass storage_dir so providers can resolve blobs without leaking paths.
         if self._storage_dir and "storage_dir" in sig.parameters:
             chat_kwargs["storage_dir"] = self._storage_dir
-        if allow_live_stream and "on_delta" in sig.parameters:
+        is_streaming = allow_live_stream and "on_delta" in sig.parameters
+        if is_streaming:
             chat_kwargs["on_delta"] = _on_delta
         if "on_thinking_delta" in sig.parameters:
             chat_kwargs["on_thinking_delta"] = _on_thinking_delta
 
+        provider_timeout = self.settings_manager.get_provider_timeout_sec()
+        # The adapters retain a finite read/connect/write safeguard.  Keep it
+        # longer than this attempt's token-idle interval so AgentSession is the
+        # authoritative source of the user-visible streaming timeout.
+        if is_streaming and "stream_transport_timeout" in sig.parameters:
+            chat_kwargs["stream_transport_timeout"] = max(float(provider_timeout) * 2, 600.0)
+
         task = asyncio.create_task(provider.chat(**chat_kwargs))
         self._active_chat_tasks.add(task)
         try:
-            provider_timeout = self.settings_manager.get_provider_timeout_sec()
-            res = await asyncio.wait_for(task, timeout=provider_timeout)
+            if not is_streaming:
+                res = await asyncio.wait_for(task, timeout=provider_timeout)
+            else:
+                # Each retry enters this loop anew, therefore it receives a
+                # fresh idle window.  Metadata and whitespace intentionally do
+                # not signal activity; content and reasoning do.
+                while not task.done():
+                    seen_generation = stream_activity_generation
+                    stream_activity.clear()
+                    if stream_activity_generation != seen_generation:
+                        continue
+                    activity_wait = asyncio.create_task(stream_activity.wait())
+                    done, _ = await asyncio.wait(
+                        {task, activity_wait}, timeout=provider_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if activity_wait not in done:
+                        activity_wait.cancel()
+                        try:
+                            await activity_wait
+                        except asyncio.CancelledError:
+                            pass
+                    if task in done:
+                        break
+                    if activity_wait in done:
+                        continue
+                    # No meaningful provider activity and no completion in the
+                    # configured interval: this is the centralized idle expiry.
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                        raise RuntimeError(
+                            f"provider timed out after {provider_timeout}s — "
+                            "the request did not resolve within the configured deadline"
+                        ) from None
+                res = await task
         except TimeoutError:
             task.cancel()
             try:
@@ -1971,6 +2027,11 @@ class AgentSession:
                 "the request did not resolve within the configured deadline"
             ) from None
         except asyncio.CancelledError:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
             if self._abort_requested:
                 raise _AbortSignal() from None
             raise

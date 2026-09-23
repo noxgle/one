@@ -23,6 +23,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Streaming provider timeouts** — `providers.timeoutSec` now measures idle
+  time between meaningful content or reasoning tokens, allowing active streams
+  to continue past the configured interval while retaining finite transport
+  safeguards. Non-streaming requests retain their absolute deadline.
 - **Reasoning-only first responses** — tool-enabled turns now make one bounded
   strict JSON-tool-call recovery request when a provider emits display-only
   reasoning with empty assistant content, without treating reasoning as actions.
