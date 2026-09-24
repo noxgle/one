@@ -10,6 +10,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **MCP disable persistence** — `/mcp disable <name>` now saves `enabled: false`,
+  including unavailable servers with no live tools, until `/mcp enable <name>`.
 - **TUI MCP availability markers** — enabled MCP servers in the sidebar now
   display `[ok]` when running normally and `[!]` when unavailable or retrying.
 - **MCP recovery** — configured stdio servers can opt into delayed automatic

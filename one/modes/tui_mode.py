@@ -2603,12 +2603,17 @@ if TEXTUAL_AVAILABLE:
                         self._write("MCP not available (started with --no-mcp).", "error")
                         return
                     try:
+                        known = any(status["name"] == server_name for status in manager.server_status())
                         removed = await manager.disable_server(server_name)
-                        if removed:
-                            self._write(f"Server '{server_name}' disabled. Removed tools: {', '.join(removed)}", "info")
+                        if known:
+                            session.settings_manager.set_mcp_server_enabled(server_name, False)
                             session.sync_mcp_tools()
-                        else:
+                        if not known:
                             self._write(f"No running server named '{server_name}'.", "warn")
+                        elif removed:
+                            self._write(f"Server '{server_name}' disabled. Removed tools: {', '.join(removed)}", "info")
+                        else:
+                            self._write(f"Server '{server_name}' disabled.", "info")
                     except RuntimeError as e:
                         self._write(str(e), "error")
                 else:

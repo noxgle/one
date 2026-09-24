@@ -89,10 +89,12 @@ class _FakeMcpManager:
 
     async def disable_server(self, name: str) -> list[str]:
         for s in self._status:
-            if s["name"] == name and s["running"]:
+            if s["name"] == name:
+                removed = list(s["tools"]) if s["running"] else []
                 s["running"] = False
                 s["enabled"] = False
-                return list(s["tools"])
+                s["runtimeState"] = "disabled"
+                return removed
         return []
 
 
@@ -792,9 +794,42 @@ async def test_tui_command_mcp_disable(tmp_path: Path):
         await _submit(app, pilot, "/mcp disable demo")
         stream = "\n".join(app._stream_lines)
         assert "Server 'demo' disabled. Removed tools: demo_tool" in stream
-        # Disable applies only to this runtime; settings remain unchanged.
         servers = session.settings_manager.get_mcp_servers()
-        assert servers.get("demo", {}).get("enabled") is not False
+        assert servers["demo"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_tui_command_mcp_disable_failed_server_without_tools(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    fake = _FakeMcpManager()
+    fake._status[0].update({"running": False, "tools": [], "error": "connection failed", "runtimeState": "retrying"})
+    session._mcp_manager = fake
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/mcp disable demo")
+        stream = "\n".join(app._stream_lines)
+        assert "Server 'demo' disabled." in stream
+        assert "No running server named 'demo'." not in stream
+        assert "Removed tools:" not in stream
+        assert fake._status[0]["enabled"] is False
+        assert session.settings_manager.get_mcp_servers()["demo"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_tui_command_mcp_disable_unknown_server_does_not_persist(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._mcp_manager = _FakeMcpManager()
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/mcp disable ghost")
+        assert "No running server named 'ghost'." in "\n".join(app._stream_lines)
+        assert "ghost" not in session.settings_manager.get_mcp_servers()
 
 
 @pytest.mark.asyncio

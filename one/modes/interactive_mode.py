@@ -1131,12 +1131,17 @@ class InteractiveMode:
                         print("MCP not available (started with --no-mcp).")
                         continue
                     try:
+                        known = any(status["name"] == server_name for status in manager.server_status())
                         removed = await manager.disable_server(server_name)
-                        if removed:
-                            print(f"Server '{server_name}' disabled. Removed tools: {', '.join(removed)}")
+                        if known:
+                            session.settings_manager.set_mcp_server_enabled(server_name, False)
                             session.sync_mcp_tools()
-                        else:
+                        if not known:
                             print(f"No running server named '{server_name}'.")
+                        elif removed:
+                            print(f"Server '{server_name}' disabled. Removed tools: {', '.join(removed)}")
+                        else:
+                            print(f"Server '{server_name}' disabled.")
                     except RuntimeError as e:
                         print(str(e))
                 else:

@@ -1062,10 +1062,12 @@ class _FakeMcpManager:
 
     async def disable_server(self, name: str) -> list[str]:
         for s in self._status:
-            if s["name"] == name and s["running"]:
+            if s["name"] == name:
+                removed = list(s["tools"]) if s["running"] else []
                 s["running"] = False
                 s["enabled"] = False
-                return list(s["tools"])
+                s["runtimeState"] = "disabled"
+                return removed
         return []
 
 
@@ -1091,6 +1093,33 @@ async def test_interactive_mcp_disable(monkeypatch, capsys):
     await mode.run()
     out = capsys.readouterr().out
     assert "Server 'demo' disabled. Removed tools: demo_tool" in out
-    # Runtime disable must not persist enabled=false into settings.
     servers = session.settings_manager.get_mcp_servers()
-    assert servers.get("demo", {}).get("enabled") is not False
+    assert servers["demo"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_mcp_disable_failed_server_without_tools(monkeypatch, capsys):
+    session = _DummySession()
+    manager = _FakeMcpManager()
+    manager._status[0].update({"running": False, "tools": [], "error": "connection failed", "runtimeState": "failed"})
+    session._mcp_manager = manager
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/mcp disable demo", "/exit"]))
+    await mode.run()
+    out = capsys.readouterr().out
+    assert "Server 'demo' disabled." in out
+    assert "No running server named 'demo'." not in out
+    assert "Removed tools:" not in out
+    assert manager._status[0]["enabled"] is False
+    assert session.settings_manager.get_mcp_servers()["demo"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_mcp_disable_unknown_server_does_not_persist(monkeypatch, capsys):
+    session = _DummySession()
+    session._mcp_manager = _FakeMcpManager()
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/mcp disable ghost", "/exit"]))
+    await mode.run()
+    assert "No running server named 'ghost'." in capsys.readouterr().out
+    assert "ghost" not in session.settings_manager.get_mcp_servers()
