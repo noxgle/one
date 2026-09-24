@@ -792,9 +792,9 @@ async def test_tui_command_mcp_disable(tmp_path: Path):
         await _submit(app, pilot, "/mcp disable demo")
         stream = "\n".join(app._stream_lines)
         assert "Server 'demo' disabled. Removed tools: demo_tool" in stream
-        # Verify persistence: enabled flag stored in settings.
+        # Disable applies only to this runtime; settings remain unchanged.
         servers = session.settings_manager.get_mcp_servers()
-        assert servers.get("demo", {}).get("enabled") is False
+        assert servers.get("demo", {}).get("enabled") is not False
 
 
 @pytest.mark.asyncio

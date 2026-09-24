@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **MCP stdio recovery** — configured servers can opt into delayed automatic
+  restart after an unexpected exit or stdout EOF. Failed tools are removed from
+  the live agent catalog immediately; retries, exhaustion policy, and runtime
+  status are configurable without persisting a runtime disable.
 - **Unified TUI and interactive details rendering** — completed reasoning is
   styled as italic `Thought:` content, tool and MCP status lines report their
   actual effective timeout, and `/details-show` consistently controls detailed

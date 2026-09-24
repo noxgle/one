@@ -2593,7 +2593,6 @@ if TEXTUAL_AVAILABLE:
                         if removed:
                             self._write(f"Server '{server_name}' disabled. Removed tools: {', '.join(removed)}", "info")
                             session.sync_mcp_tools()
-                            session.settings_manager.set_mcp_server_enabled(server_name, False)
                         else:
                             self._write(f"No running server named '{server_name}'.", "warn")
                     except RuntimeError as e:

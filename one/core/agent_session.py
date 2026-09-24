@@ -149,6 +149,9 @@ class AgentSession:
         if mcp_manager is not None:
             mcp_names = [t.name for t in mcp_manager.tools()]
             self._active_tools = list(dict.fromkeys(self._active_tools + mcp_names))
+            set_callback = getattr(mcp_manager, "set_tools_changed_callback", None)
+            if callable(set_callback):
+                set_callback(self.sync_mcp_tools)
         self._abort_requested = False
         self._session_started_at = time.monotonic()
         # In-memory sessions have no session dir; use a transient temp dir

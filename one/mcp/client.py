@@ -18,6 +18,20 @@ def _ensure_url(config: McpServerConfig) -> str:
     return config.url
 
 
+def _nonnegative_float(value: Any, default: float) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _nonnegative_int(value: Any, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class McpServerConfig:
     name: str
@@ -26,6 +40,11 @@ class McpServerConfig:
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None
     enabled: bool = True
+    restart: bool = False
+    restart_delay_sec: float = 60.0
+    max_restart_attempts: int = 3
+    restart_exhaustion: str = "disable"
+    retry_interval_sec: float = 300.0
 
 
 @dataclass
@@ -186,6 +205,12 @@ class McpClient:
     def stderr_tail(self) -> list[str]:
         return list(self._stderr_tail)
 
+    async def wait_for_exit(self) -> int:
+        """Wait for the child process to exit without changing its lifecycle."""
+        if self._proc is None:
+            raise RuntimeError(f"MCP server '{self.config.name}' has no process to wait for")
+        return await self._proc.wait()
+
 
 class HttpMcpClient:
     """MCP server connection over HTTP streamable transport (JSON-RPC 2.0, buffered POST)."""
@@ -319,6 +344,14 @@ class McpManager:
         self._clients: list[McpClient | HttpMcpClient] = []
         self._tools: list[McpTool] = []
         self._errors: list[str] = []
+        self._runtime: dict[str, dict[str, Any]] = {
+            server.name: {"state": "disabled" if not server.enabled else "configured", "attempts": 0}
+            for server in servers
+        }
+        self._restart_tasks: dict[str, asyncio.Task[None]] = {}
+        self._monitor_tasks: dict[str, asyncio.Task[None]] = {}
+        self._closing = False
+        self._tools_changed_callback: Any = None
 
     @classmethod
     def create(cls, settings_manager: Any) -> McpManager:
@@ -340,35 +373,159 @@ class McpManager:
                     env={str(k): str(v) for k, v in (cfg.get("env") or {}).items()},
                     url=str(url) if url else None,
                     enabled=bool(cfg.get("enabled", True)),
+                    restart=bool(cfg.get("restart", False)),
+                    restart_delay_sec=_nonnegative_float(cfg.get("restartDelaySec", 60), 60.0),
+                    max_restart_attempts=_nonnegative_int(cfg.get("maxRestartAttempts", 3), 3),
+                    restart_exhaustion=(
+                        str(cfg.get("restartExhaustion", "disable"))
+                        if str(cfg.get("restartExhaustion", "disable")) in {"disable", "retry"}
+                        else "disable"
+                    ),
+                    retry_interval_sec=_nonnegative_float(cfg.get("retryIntervalSec", 300), 300.0),
                 )
             )
         return cls(servers)
+
+    def set_tools_changed_callback(self, callback: Any) -> None:
+        """Install the session hook used to refresh the agent's MCP tool catalog."""
+        self._tools_changed_callback = callback
+
+    def _notify_tools_changed(self) -> None:
+        if self._tools_changed_callback is not None:
+            try:
+                self._tools_changed_callback()
+            except Exception:
+                pass
+
+    def _clear_error(self, name: str) -> None:
+        self._errors = [error for error in self._errors if not error.startswith(f"MCP server '{name}':")]
+
+    def _add_tools(self, config: McpServerConfig, raw_tools: list[dict[str, Any]]) -> list[str]:
+        self._tools = [tool for tool in self._tools if tool.server != config.name]
+        added: list[str] = []
+        for tool in raw_tools:
+            mcp_tool = McpTool(
+                name=str(tool.get("name") or ""), description=str(tool.get("description") or ""),
+                input_schema=tool.get("inputSchema"), server=config.name,
+            )
+            self._tools.append(mcp_tool)
+            added.append(mcp_tool.name)
+        return added
+
+    async def _connect(self, config: McpServerConfig) -> list[str]:
+        client: McpClient | HttpMcpClient = HttpMcpClient(config) if config.url else McpClient(config)
+        try:
+            await client.start()
+            added = self._add_tools(config, await client.list_tools())
+            self._clients = [existing for existing in self._clients if existing.config.name != config.name]
+            self._clients.append(client)
+            self._clear_error(config.name)
+            self._runtime[config.name] = {"state": "running", "attempts": 0}
+            if isinstance(client, McpClient):
+                self._monitor_tasks[config.name] = asyncio.create_task(self._monitor_stdio(client))
+            self._notify_tools_changed()
+            return added
+        except Exception:
+            await client.close()
+            raise
+
+    async def _monitor_stdio(self, client: McpClient) -> None:
+        try:
+            exit_code = await client.wait_for_exit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if not self._closing:
+                await self._server_failed(client.config.name, client, error)
+        else:
+            if not self._closing and any(existing is client for existing in self._clients):
+                await self._server_failed(
+                    client.config.name,
+                    client,
+                    RuntimeError(f"exited with code {exit_code}"),
+                )
+        finally:
+            current = asyncio.current_task()
+            if current is not None and self._monitor_tasks.get(client.config.name) is current:
+                self._monitor_tasks.pop(client.config.name, None)
+
+    @staticmethod
+    def _failure_message(
+        name: str, client: McpClient | HttpMcpClient | None, error: Exception
+    ) -> str:
+        message = f"MCP server '{name}': {error}"
+        if client is not None:
+            try:
+                stderr_tail = client.stderr_tail()
+            except Exception:
+                stderr_tail = []
+            if stderr_tail:
+                message += f"; stderr: {' | '.join(stderr_tail)}"
+        return message
+
+    async def _server_failed(self, name: str, client: McpClient | HttpMcpClient | None, error: Exception) -> None:
+        """Remove a failed runtime connection; configuration remains intact."""
+        if self._closing:
+            return
+        if client is not None and not any(existing is client for existing in self._clients):
+            return
+        config = next((server for server in self._servers if server.name == name), None)
+        if config is None:
+            return
+        removed_tools = [tool for tool in self._tools if tool.server == name]
+        self._tools = [tool for tool in self._tools if tool.server != name]
+        failed_clients = [existing for existing in self._clients if existing.config.name == name]
+        self._clients = [existing for existing in self._clients if existing.config.name != name]
+        self._errors = [entry for entry in self._errors if not entry.startswith(f"MCP server '{name}':")]
+        self._errors.append(self._failure_message(name, client, error))
+        runtime = self._runtime.setdefault(name, {"attempts": 0})
+        runtime["state"] = "failed"
+        if removed_tools:
+            self._notify_tools_changed()
+        await asyncio.gather(*(failed.close() for failed in failed_clients), return_exceptions=True)
+        if config.restart and config.enabled and not config.url:
+            self._schedule_restart(config)
+
+    def _schedule_restart(self, config: McpServerConfig) -> None:
+        task = self._restart_tasks.get(config.name)
+        if task is None or task.done():
+            self._restart_tasks[config.name] = asyncio.create_task(self._restart_loop(config))
+
+    async def _restart_loop(self, config: McpServerConfig) -> None:
+        try:
+            while not self._closing and config.enabled:
+                runtime = self._runtime.setdefault(config.name, {"attempts": 0})
+                attempts = int(runtime.get("attempts", 0))
+                exhausted = attempts >= config.max_restart_attempts
+                if exhausted and config.restart_exhaustion == "disable":
+                    runtime["state"] = "disabled"
+                    return
+                delay = config.retry_interval_sec if exhausted else config.restart_delay_sec
+                runtime["state"] = "retrying"
+                await asyncio.sleep(delay)
+                if self._closing or not config.enabled:
+                    return
+                try:
+                    await self._connect(config)
+                    return
+                except Exception as error:
+                    runtime["attempts"] = attempts + 1
+                    runtime["state"] = "failed"
+                    self._errors = [entry for entry in self._errors if not entry.startswith(f"MCP server '{config.name}':")]
+                    self._errors.append(self._failure_message(config.name, None, error))
+        finally:
+            current = asyncio.current_task()
+            if current is not None and self._restart_tasks.get(config.name) is current:
+                self._restart_tasks.pop(config.name, None)
 
     async def start(self) -> None:
         for config in self._servers:
             if not config.enabled:
                 continue
-            client: McpClient | HttpMcpClient
-            if config.url:
-                client = HttpMcpClient(config)
-            else:
-                client = McpClient(config)
             try:
-                await client.start()
-                raw_tools = await client.list_tools()
-                for t in raw_tools:
-                    self._tools.append(
-                        McpTool(
-                            name=str(t.get("name") or ""),
-                            description=str(t.get("description") or ""),
-                            input_schema=t.get("inputSchema"),
-                            server=config.name,
-                        )
-                    )
-                self._clients.append(client)
+                await self._connect(config)
             except Exception as e:
-                self._errors.append(f"MCP server '{config.name}': {e}")
-                await client.close()
+                await self._server_failed(config.name, None, e)
 
     def tools(self) -> list[McpTool]:
         return list(self._tools)
@@ -388,7 +545,11 @@ class McpManager:
             raise RuntimeError(f"MCP server '{tool.server}' is not running")
         # AgentSession supplies the normalized timeout. Retain the compatibility
         # fallback for direct manager callers.
-        result = await client.call_tool(name, arguments, timeout=120.0 if timeout is None else timeout)
+        try:
+            result = await client.call_tool(name, arguments, timeout=120.0 if timeout is None else timeout)
+        except Exception as error:
+            await self._server_failed(tool.server, client, error)
+            raise
         # Normalize MCP result into the session tool-result contract.
         content = result.get("content") or []
         texts = [str(c.get("text", "")) for c in content if isinstance(c, dict) and c.get("type") == "text"]
@@ -405,6 +566,15 @@ class McpManager:
         }
 
     async def close(self) -> None:
+        self._closing = True
+        tasks = [*self._restart_tasks.values(), *self._monitor_tasks.values()]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._restart_tasks = {}
+        self._monitor_tasks = {}
         await asyncio.gather(*(c.close() for c in self._clients), return_exceptions=True)
         self._clients = []
 
@@ -420,45 +590,38 @@ class McpManager:
         # If a client for this name is already running, nothing to do.
         if any(c.config.name == name for c in self._clients):
             return []
-        config = McpServerConfig(
-            name=name,
-            command=command or "",
-            args=args or [],
-            env=env or {},
-            url=url,
-            enabled=True,
-        )
+        previous = next((server for server in self._servers if server.name == name), None)
+        config = McpServerConfig(name=name, command=command or "", args=args or [], env=env or {}, url=url, enabled=True,
+                                 restart=previous.restart if previous else False,
+                                 restart_delay_sec=previous.restart_delay_sec if previous else 60.0,
+                                 max_restart_attempts=previous.max_restart_attempts if previous else 3,
+                                 restart_exhaustion=previous.restart_exhaustion if previous else "disable",
+                                 retry_interval_sec=previous.retry_interval_sec if previous else 300.0)
         # Replace any existing config with the same name.
         self._servers = [s for s in self._servers if s.name != name]
         self._servers.append(config)
-        client: McpClient | HttpMcpClient
-        if config.url:
-            client = HttpMcpClient(config)
-        else:
-            client = McpClient(config)
+        task = self._restart_tasks.pop(name, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        monitor = self._monitor_tasks.pop(name, None)
+        if monitor is not None and not monitor.done():
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+        self._runtime[name] = {"state": "configured", "attempts": 0}
         try:
-            await client.start()
-            raw_tools = await client.list_tools()
-            added: list[str] = []
-            for t in raw_tools:
-                mc = McpTool(
-                    name=str(t.get("name") or ""),
-                    description=str(t.get("description") or ""),
-                    input_schema=t.get("inputSchema"),
-                    server=name,
-                )
-                self._tools.append(mc)
-                added.append(mc.name)
-            self._clients.append(client)
-            # Remove any stale error for this server.
-            self._errors = [e for e in self._errors if name not in e]
-            return added
+            return await self._connect(config)
         except Exception as e:
-            await client.close()
             raise RuntimeError(f"MCP server '{name}': {e}")
 
     async def disable_server(self, name: str) -> list[str]:
         """Stop an MCP server and return the names of removed tools."""
+        task = self._restart_tasks.pop(name, None)
+        monitor = self._monitor_tasks.pop(name, None)
+        for pending in (task, monitor):
+            if pending is not None and not pending.done():
+                pending.cancel()
+        await asyncio.gather(*(pending for pending in (task, monitor) if pending is not None), return_exceptions=True)
         # Remove tools for this server.
         removed = [t.name for t in self._tools if t.server == name]
         self._tools = [t for t in self._tools if t.server != name]
@@ -473,6 +636,9 @@ class McpManager:
             if config.name == name:
                 config.enabled = False
                 break
+        self._runtime[name] = {"state": "disabled", "attempts": 0}
+        self._clear_error(name)
+        self._notify_tools_changed()
         return removed
 
     def server_status(self) -> list[dict]:
@@ -483,6 +649,7 @@ class McpManager:
             tools = [t.name for t in self._tools if t.server == config.name]
             error = next((e for e in self._errors if config.name in e), None)
             transport = "http" if config.url else "stdio"
+            runtime = self._runtime.get(config.name, {})
             statuses.append(
                 {
                     "name": config.name,
@@ -492,6 +659,11 @@ class McpManager:
                     "tools": tools,
                     "error": error,
                     "transport": transport,
+                    "runtimeState": runtime.get("state", "configured"),
+                    "restartEnabled": config.restart,
+                    "restartAttempts": runtime.get("attempts", 0),
+                    "maxRestartAttempts": config.max_restart_attempts,
+                    "restartExhaustion": config.restart_exhaustion,
                 }
             )
         return statuses

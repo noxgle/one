@@ -1091,6 +1091,6 @@ async def test_interactive_mcp_disable(monkeypatch, capsys):
     await mode.run()
     out = capsys.readouterr().out
     assert "Server 'demo' disabled. Removed tools: demo_tool" in out
-    # Verify persistence.
+    # Runtime disable must not persist enabled=false into settings.
     servers = session.settings_manager.get_mcp_servers()
-    assert servers.get("demo", {}).get("enabled") is False
+    assert servers.get("demo", {}).get("enabled") is not False

@@ -381,6 +381,27 @@ MCP servers can be configured in global or project `settings.json` with
 their configured URL. Use `--no-mcp` to disable all of them for a run and
 `/mcp list|enable|disable` in the TUI. MCP tools are added to the agent prompt.
 
+Stdio servers can opt into runtime recovery after an unexpected process exit or
+stdout EOF. Recovery is off by default. The following optional fields belong
+under `mcpServers.<name>`:
+
+```json
+{
+  "restart": true,
+  "restartDelaySec": 60,
+  "maxRestartAttempts": 3,
+  "restartExhaustion": "disable",
+  "retryIntervalSec": 300
+}
+```
+
+After each failure, `one` removes that server's tools immediately and waits
+`restartDelaySec` before reconnecting. A successful reconnect restores the
+tools. At the attempt limit, `disable` stops recovery for this runtime only
+(the configured `enabled` value is not changed); `retry` continues at
+`retryIntervalSec`. `/mcp disable` cancels pending recovery, and `/mcp enable`
+resets recovery state. HTTP MCP servers retain their existing behavior.
+
 For web search, the [web-deepsearch MCP server](https://github.com/noxgle/mcp-web-deepsearch)
 uses DuckDuckGo and can run over stdio. It needs no API key, but its server is
 not sandboxed and may require outbound network access.

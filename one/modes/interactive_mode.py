@@ -1135,7 +1135,6 @@ class InteractiveMode:
                         if removed:
                             print(f"Server '{server_name}' disabled. Removed tools: {', '.join(removed)}")
                             session.sync_mcp_tools()
-                            session.settings_manager.set_mcp_server_enabled(server_name, False)
                         else:
                             print(f"No running server named '{server_name}'.")
                     except RuntimeError as e:

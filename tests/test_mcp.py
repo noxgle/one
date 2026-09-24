@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -13,7 +14,8 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
-from one.mcp import HttpMcpClient, McpManager, McpServerConfig, McpTool
+from one.mcp import HttpMcpClient, McpClient, McpManager, McpServerConfig, McpTool
+from one.mcp import client as mcp_client_module
 
 FAKE_SERVER_SRC = '''\
 import asyncio
@@ -629,3 +631,199 @@ async def test_mcp_manager_call_tool_forwards_timeout():
 
     await manager.call_tool("t1", {"a": 2})
     assert client.calls[1][2] == 120.0
+
+
+@pytest.mark.asyncio
+async def test_mcp_client_wait_for_exit_without_process_is_an_error():
+    client = McpClient(McpServerConfig("demo", "fake"))
+    with pytest.raises(RuntimeError, match="has no process to wait for"):
+        await client.wait_for_exit()
+
+
+class _FailingHttpCallClient:
+    def __init__(self, config: McpServerConfig) -> None:
+        self.config = config
+        self.closed = False
+
+    async def call_tool(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:
+        raise RuntimeError("network failed")
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def stderr_tail(self) -> list[str]:
+        return []
+
+
+@pytest.mark.asyncio
+async def test_http_call_failure_removes_stale_client_and_tools_without_restart():
+    config = McpServerConfig("web", "", url="http://x/mcp", restart=True)
+    manager = McpManager([config])
+    client = _FailingHttpCallClient(config)
+    manager._clients = [client]  # type: ignore[list-item]
+    manager._tools = [McpTool(name="web_tool", description="", input_schema=None, server="web")]
+
+    with pytest.raises(RuntimeError, match="network failed"):
+        await manager.call_tool("web_tool", {})
+
+    assert manager.tools() == []
+    assert manager._clients == []
+    assert client.closed is True
+    assert manager._restart_tasks == {}
+    assert manager.server_status()[0]["runtimeState"] == "failed"
+    await manager.close()
+
+
+# ---------------------------------------------------------------------------
+# Stdio recovery tests. These use fake subprocess clients: no processes or APIs.
+# ---------------------------------------------------------------------------
+
+
+class _RecoveringClient:
+    instances: list[_RecoveringClient] = []
+    outcomes: list[str] = []
+
+    def __init__(self, config: McpServerConfig) -> None:
+        self.config = config
+        self.exit = asyncio.Event()
+        self.closed = False
+        self.outcome = self.outcomes.pop(0) if self.outcomes else "ok"
+        self.instances.append(self)
+
+    async def start(self) -> None:
+        if self.outcome == "fail":
+            raise RuntimeError("connection failed")
+
+    async def list_tools(self) -> list[dict]:
+        return [{"name": "recovered_tool", "description": "", "inputSchema": {}}]
+
+    async def wait_for_exit(self) -> int:
+        await self.exit.wait()
+        return 1
+
+    async def call_tool(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def _wait_until(predicate, timeout: float = 0.5) -> None:
+    async def _wait() -> None:
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(_wait(), timeout=timeout)
+
+
+def test_mcp_restart_config_defaults_and_parsing():
+    defaults = McpServerConfig(name="demo", command="demo")
+    assert defaults.restart is False
+    assert defaults.restart_delay_sec == 60
+    assert defaults.max_restart_attempts == 3
+    assert defaults.restart_exhaustion == "disable"
+    assert defaults.retry_interval_sec == 300
+
+    settings = SettingsManager.in_memory(initial={"mcpServers": {"demo": {
+        "command": "demo", "restart": True, "restartDelaySec": 1.5,
+        "maxRestartAttempts": 7, "restartExhaustion": "retry", "retryIntervalSec": 4,
+    }}})
+    config = McpManager.create(settings)._servers[0]
+    assert (config.restart, config.restart_delay_sec, config.max_restart_attempts) == (True, 1.5, 7)
+    assert (config.restart_exhaustion, config.retry_interval_sec) == ("retry", 4)
+
+
+@pytest.mark.asyncio
+async def test_stdio_exit_removes_tools_and_delayed_recovery_restores_them(monkeypatch):
+    _RecoveringClient.instances = []
+    _RecoveringClient.outcomes = ["ok", "ok"]
+    monkeypatch.setattr(mcp_client_module, "McpClient", _RecoveringClient)
+    config = McpServerConfig("demo", "fake", restart=True, restart_delay_sec=0.01)
+    manager = McpManager([config])
+    await manager.start()
+    first = _RecoveringClient.instances[0]
+    first.exit.set()
+    await _wait_until(lambda: not manager.has_tool("recovered_tool"))
+    assert manager.server_status()[0]["runtimeState"] in {"failed", "retrying"}
+    await _wait_until(lambda: manager.has_tool("recovered_tool"))
+    status = manager.server_status()[0]
+    assert status["running"] is True
+    assert status["restartAttempts"] == 0
+    assert status["error"] is None
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_monitor_removes_its_task_after_exit(monkeypatch):
+    _RecoveringClient.instances = []
+    _RecoveringClient.outcomes = ["ok"]
+    monkeypatch.setattr(mcp_client_module, "McpClient", _RecoveringClient)
+    manager = McpManager([McpServerConfig("demo", "fake")])
+    await manager.start()
+    _RecoveringClient.instances[0].exit.set()
+
+    await _wait_until(lambda: not manager._clients)
+    await _wait_until(lambda: "demo" not in manager._monitor_tasks)
+    assert manager.tools() == []
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_exhaustion_disable_is_runtime_only(monkeypatch):
+    _RecoveringClient.instances = []
+    _RecoveringClient.outcomes = ["ok", "fail"]
+    monkeypatch.setattr(mcp_client_module, "McpClient", _RecoveringClient)
+    config = McpServerConfig("demo", "fake", restart=True, restart_delay_sec=0.01, max_restart_attempts=1)
+    manager = McpManager([config])
+    await manager.start()
+    _RecoveringClient.instances[0].exit.set()
+    await _wait_until(lambda: manager.server_status()[0]["runtimeState"] == "disabled")
+    status = manager.server_status()[0]
+    assert status["enabled"] is True
+    assert status["restartAttempts"] == 1
+    assert len(_RecoveringClient.instances) == 2
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_exhaustion_retry_uses_retry_interval(monkeypatch):
+    _RecoveringClient.instances = []
+    _RecoveringClient.outcomes = ["ok", "fail", "fail", "ok"]
+    monkeypatch.setattr(mcp_client_module, "McpClient", _RecoveringClient)
+    config = McpServerConfig(
+        "demo", "fake", restart=True, restart_delay_sec=0.01, max_restart_attempts=1,
+        restart_exhaustion="retry", retry_interval_sec=0.01,
+    )
+    manager = McpManager([config])
+    await manager.start()
+    _RecoveringClient.instances[0].exit.set()
+    await _wait_until(lambda: manager.has_tool("recovered_tool") and len(_RecoveringClient.instances) == 4)
+    assert manager.server_status()[0]["restartAttempts"] == 0
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_disable_and_close_cancel_pending_restart(monkeypatch):
+    _RecoveringClient.instances = []
+    _RecoveringClient.outcomes = ["ok"]
+    monkeypatch.setattr(mcp_client_module, "McpClient", _RecoveringClient)
+    config = McpServerConfig("demo", "fake", restart=True, restart_delay_sec=10)
+    manager = McpManager([config])
+    await manager.start()
+    _RecoveringClient.instances[0].exit.set()
+    await _wait_until(lambda: "demo" in manager._restart_tasks)
+    await manager.disable_server("demo")
+    assert manager._restart_tasks == {}
+    assert manager._monitor_tasks == {}
+    assert manager.server_status()[0]["enabled"] is False
+    await manager.close()
+
+    _RecoveringClient.instances = []
+    _RecoveringClient.outcomes = ["ok"]
+    closing_manager = McpManager([McpServerConfig("closing", "fake", restart=True, restart_delay_sec=10)])
+    await closing_manager.start()
+    _RecoveringClient.instances[0].exit.set()
+    await _wait_until(lambda: "closing" in closing_manager._restart_tasks)
+    await closing_manager.close()
+    assert closing_manager._restart_tasks == {}
+    assert closing_manager._monitor_tasks == {}
