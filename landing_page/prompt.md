@@ -1080,3 +1080,25 @@ Before completing, perform one final visual and technical pass and ask:
 * Does the production build succeed?
 
 If any answer is “no”, improve it before finishing.
+
+# Deployment
+
+After implementation is complete and all changes are verified:
+
+1. Run the deployment script from the `landing_page` directory:
+
+   ```bash
+   ./landing_page/deploy.sh
+   ```
+
+2. The script reads credentials from `landing_page/.env` and uploads all landing page files to the server.
+
+3. Verify the deployed page loads correctly at `https://one.noxgle.com/`:
+
+   ```bash
+   curl -sI https://one.noxgle.com/
+   ```
+
+4. Confirm the response returns `HTTP/1.1 200 OK` and the `Last-Modified` timestamp reflects the latest changes.
+
+5. Report whether the deployment was successful in the final task report.

@@ -694,16 +694,14 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
     <div class="fade-up">
       <div class="section-label">Install</div>
       <h2 class="section-title">Get started in seconds.</h2>
-      <p class="section-desc">Install from PyPI or build from source. Requires Python 3.12+.</p>
+      <p class="section-desc">Available from PyPI or build from source. Requires Python 3.12+.</p>
     </div>
     <div class="install-grid fade-up">
       <div class="install-card">
         <div class="ic-header">From PyPI</div>
         <div class="ic-body">
 <pre>pip install one-agent
-export OPENAI_API_KEY=sk-...
-one run "summarize README.md" \
-  --provider openai --model gpt-4o-mini</pre>
+one --help</pre>
           <button class="copy-btn-lg" onclick="copyBlock(this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copy</button>
         </div>
       </div>
@@ -712,8 +710,6 @@ one run "summarize README.md" \
         <div class="ic-body">
 <pre>git clone https://github.com/noxgle/one.git
 cd one
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -e '.[dev]'
 one --help</pre>
           <button class="copy-btn-lg" onclick="copyBlock(this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copy</button>
@@ -777,7 +773,7 @@ one --help</pre>
       <div class="built-by-label">Built by <strong>one</strong></div>
       <div class="built-by-meta">Autonomous terminal agent &middot; <span class="build-status">Task: landing page &middot; Status: completed</span></div>
       <div class="built-by-runtime">
-        <code>provider</code>: llama.cpp &middot; <code>model</code>: local
+        <code>provider</code>: llama.cpp &middot; <code>model</code>: qwen3.6-35ba3b-q5-k-m-mtp
       </div>
     </div>
   </div>
