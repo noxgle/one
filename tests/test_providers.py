@@ -181,31 +181,46 @@ async def test_codex_responses_stream_raises_on_incomplete_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_codex_responses_non_stream_emits_summary_but_not_result_text() -> None:
+async def test_codex_responses_without_visible_callback_uses_sse_and_accumulates() -> None:
     adapter = CodexResponsesAdapter()
-    post_resp = _PostResp({
-        "status": "completed",
-        "output": [
-            {"type": "reasoning", "summary": [
-                {"type": "summary_text", "text": "first"}, " second",
-            ]},
-            {"type": "function_call", "name": "read", "arguments": "{}"},
-            {"type": "message", "content": [{"type": "output_text", "text": "answer"}]},
-        ],
-    })
+    request: dict[str, Any] = {}
     thinking: list[str] = []
+
+    stream_ctx = _StreamContext(_sse(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "first",
+        },
+        {"type": "response.output_text.delta", "delta": "an"},
+        {"type": "response.output_text.delta", "delta": "swer"},
+        {
+            "type": "response.completed",
+            "response": {"status": "completed", "usage": {"output_tokens": 2}},
+        },
+    ))
     with patch.object(httpx, "AsyncClient") as mock_client_class:
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=post_resp)
+        def stream(*args: Any, **kwargs: Any) -> _StreamContext:
+            request.update({"args": args, "kwargs": kwargs})
+            return stream_ctx
+
+        mock_client.stream = stream
         mock_client_class.return_value = mock_client
         result = await adapter.chat(
             "key", "test-model", [{"role": "user", "content": "hello"}], "medium",
             on_thinking_delta=thinking.append,
         )
-    assert thinking == ["first", " second"]
+    assert request["args"][:2] == ("POST", "https://chatgpt.com/backend-api/codex/responses")
+    assert request["kwargs"]["json"]["stream"] is True
+    assert thinking == ["first"]
     assert result.text == "answer"
+    assert result.usage == {"output_tokens": 2}
+    assert result.had_thinking is True
 
 
 @pytest.mark.asyncio

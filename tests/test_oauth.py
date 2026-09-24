@@ -777,7 +777,7 @@ def test_codex_payload_instructions_fallback():
 
 
 @pytest.mark.asyncio
-async def test_codex_nonstream_chat_parses_output(monkeypatch):
+async def test_codex_nonlive_chat_parses_sse_output(monkeypatch):
     ad = CodexResponsesAdapter()
     captured: dict[str, Any] = {}
 
@@ -785,18 +785,19 @@ async def test_codex_nonstream_chat_parses_output(monkeypatch):
         status_code = 200
         is_error = False
 
-        def raise_for_status(self) -> None:
-            pass
+        async def __aenter__(self):
+            return self
 
-        def json(self) -> dict[str, Any]:
-            return {
-                "output": [
-                    {"type": "reasoning", "summary": []},
-                    {"type": "message", "content": [{"type": "output_text", "text": "hello "}, {"type": "output_text", "text": "world"}]},
-                ],
-                "usage": {"input_tokens": 5},
-                "status": "completed",
-            }
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.output_text.delta","delta":"hello "}'
+            yield 'data: {"type":"response.output_text.delta","delta":"world"}'
+            yield 'data: {"type":"response.completed","response":{"usage":{"input_tokens":5},"status":"completed"}}'
+
+        async def aread(self) -> bytes:
+            return b""
 
     def handler(method: str, url: str, kwargs: dict[str, Any]) -> _Resp:
         captured["url"] = url
@@ -817,6 +818,7 @@ async def test_codex_nonstream_chat_parses_output(monkeypatch):
     assert h["originator"] == "codex_cli_rs"
     assert h.get("session_id")
     assert captured["payload"]["store"] is False
+    assert captured["payload"]["stream"] is True
 
 
 class _StreamResp:

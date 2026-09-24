@@ -66,6 +66,30 @@ class _FailProvider:
         raise RuntimeError("summarizer down")
 
 
+class _CallbackProvider:
+    def __init__(self) -> None:
+        self.callbacks: tuple[bool, bool] | None = None
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+    ) -> Any:
+        from one.providers.base import ChatResult
+
+        self.callbacks = (on_delta is not None, on_thinking_delta is not None)
+        if on_delta:
+            on_delta("summary")
+        if on_thinking_delta:
+            on_thinking_delta("reasoning")
+        return ChatResult(text="MODEL SUMMARY", raw={}, usage={}, stop_reason="completed")
+
+
 def _mk_agent(
     tmp_path,
     settings_override: dict[str, Any] | None = None,
@@ -288,6 +312,25 @@ async def test_manual_compact_short_history_uses_model_summary(tmp_path):
     assert result["skipped"] is False
     assert result["summary"] == "MODEL SUMMARY"
     assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compaction_does_not_supply_live_callbacks_or_emit_live_events(tmp_path):
+    provider = _CallbackProvider()
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": True}},
+        provider=provider,
+    )
+    _seed(agent, count=2)
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    result = await agent.compact()
+
+    assert result["summary"] == "MODEL SUMMARY"
+    assert provider.callbacks == (False, False)
+    assert not any(event["type"] in {"message_start", "message_update", "thinking_delta"} for event in events)
 
 
 @pytest.mark.asyncio

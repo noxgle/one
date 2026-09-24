@@ -23,6 +23,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **ChatGPT/Codex compaction** — Responses API calls always use required SSE
+  streaming, including non-live summarization, without emitting live TUI deltas.
 - **Cooperation persistence** — TUI and interactive cooperation commands and
   shortcuts now save their approval setting for subsequent sessions.
 - **Streaming provider timeouts** — `providers.timeoutSec` now measures idle

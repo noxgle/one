@@ -1964,7 +1964,9 @@ class AgentSession:
         is_streaming = allow_live_stream and "on_delta" in sig.parameters
         if is_streaming:
             chat_kwargs["on_delta"] = _on_delta
-        if "on_thinking_delta" in sig.parameters:
+        # Non-live calls (notably compaction) must collect the adapter's final
+        # result without emitting assistant/thinking UI events.
+        if allow_live_stream and "on_thinking_delta" in sig.parameters:
             chat_kwargs["on_thinking_delta"] = _on_thinking_delta
 
         provider_timeout = self.settings_manager.get_provider_timeout_sec()

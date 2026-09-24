@@ -381,8 +381,8 @@ async def test_fake_adapter_without_images_param_raises_capability_error(
 
 
 @pytest.mark.asyncio
-async def test_codex_adapter_nonstream_payloads_images_as_input_image(tmp_path: Path, png_path: Path):
-    """Codex adapter serializes images as input_image parts in non-stream mode."""
+async def test_codex_adapter_nonlive_sse_payloads_images_as_input_image(tmp_path: Path, png_path: Path):
+    """Codex adapter serializes images as input_image parts without a callback."""
     import httpx
 
     from one.providers.codex_responses import (
@@ -395,12 +395,19 @@ async def test_codex_adapter_nonstream_payloads_images_as_input_image(tmp_path: 
         status_code = 200
         is_error = False
 
-        def json(self):
-            return {
-                "status": "completed",
-                "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
-                "usage": {},
-            }
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.output_text.delta","delta":"ok"}'
+            yield 'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}'
+
+        async def aread(self):
+            return b""
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _Resp()
+
+        async def __aexit__(self, *exc):
+            return False
 
     class _Client:
         def __init__(self, *args, **kwargs):
@@ -412,12 +419,9 @@ async def test_codex_adapter_nonstream_payloads_images_as_input_image(tmp_path: 
         async def __aexit__(self, *args):
             pass
 
-        async def post(self, url: str, json: dict | None, **kw):
-            captured["payload"] = json
-            return _Resp()
-
-        async def stream(self, *a, **kw):
-            raise RuntimeError("should not reach HTTP in non-stream test")
+        def stream(self, *a, **kw):
+            captured["payload"] = kw["json"]
+            return _Ctx()
 
     original_client = httpx.AsyncClient
     httpx.AsyncClient = _Client
@@ -448,6 +452,7 @@ async def test_codex_adapter_nonstream_payloads_images_as_input_image(tmp_path: 
         assert image_parts[0]["image_url"].startswith("data:image/png;base64,")
         # store:false and reasoning must still be present.
         assert payload["store"] is False
+        assert payload["stream"] is True
         assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
     finally:
         httpx.AsyncClient = original_client

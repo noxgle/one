@@ -295,36 +295,19 @@ class CodexResponsesAdapter(ProviderAdapter):
         stream_transport_timeout: float | None = None,
     ) -> ChatResult:
         url = f"{BASE_URL}/responses"
-        use_stream = callable(on_delta)
         payload = self._build_payload(
             model, messages, thinking_level,
-            stream=use_stream, max_tokens=max_tokens,
+            # ChatGPT's Responses endpoint requires SSE, including calls made
+            # for compaction where AgentSession intentionally supplies no live
+            # callback.
+            stream=True, max_tokens=max_tokens,
             images=images, storage_dir=storage_dir,
         )
         req_headers = self._headers(api_key, extra=headers)
         transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
 
-        if not use_stream:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(url, json=payload, headers=req_headers)
-                if resp.is_error:
-                    raise _error_with_body(resp.status_code, resp.text)
-                data = resp.json()
-            text, usage, status = self._extract_output(data)
-            if status == "failed":
-                raise RuntimeError(f"chatgpt responses failed: {data.get('error')}")
-            if status == "incomplete":
-                raise self._incomplete_error(data)
-            if on_thinking_delta:
-                for summary in self._extract_reasoning_summaries(data):
-                    try:
-                        on_thinking_delta(summary)
-                    except Exception:
-                        pass
-            return ChatResult(text=text, raw=data, usage=usage, stop_reason=status)
-
-        payload["stream"] = True
         text_parts: list[str] = []
+        had_thinking = False
         usage: dict[str, Any] = {}
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
@@ -366,16 +349,18 @@ class CodexResponsesAdapter(ProviderAdapter):
                         if delta:
                             delta_s = str(delta)
                             text_parts.append(delta_s)
-                            try:
-                                on_delta(delta_s)
-                            except Exception:
-                                pass
+                            if on_delta:
+                                try:
+                                    on_delta(delta_s)
+                                except Exception:
+                                    pass
                     elif ctype in {
                         "response.reasoning_summary_text.delta",
                         "response.reasoning_text.delta",
                     }:
                         reasoning_delta = self._summary_text(chunk.get("delta"))
                         if reasoning_delta:
+                            had_thinking = True
                             summary_delta_keys.add(self._summary_key(chunk))
                         if reasoning_delta and on_thinking_delta:
                             try:
@@ -387,6 +372,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                         # events. Emit it only when it was not streamed.
                         key = self._summary_key(chunk)
                         summary_text = self._summary_text(chunk.get("text"))
+                        had_thinking = had_thinking or bool(summary_text)
                         if summary_text and key not in summary_delta_keys and on_thinking_delta:
                             try:
                                 on_thinking_delta(summary_text)
@@ -397,6 +383,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                         # `part`, with the same no-duplicate fallback.
                         key = self._summary_key(chunk)
                         summary_text = self._summary_text(chunk.get("part"))
+                        had_thinking = had_thinking or bool(summary_text)
                         if summary_text and key not in summary_delta_keys and on_thinking_delta:
                             try:
                                 on_thinking_delta(summary_text)
@@ -412,6 +399,8 @@ class CodexResponsesAdapter(ProviderAdapter):
                         status = response_obj.get("status")
                         stop_reason = status if isinstance(status, str) else None
                         raw_last = response_obj or chunk
+                        if stop_reason == "failed":
+                            raise RuntimeError(f"chatgpt responses failed: {response_obj.get('error')}")
                         if stop_reason == "incomplete":
                             raise self._incomplete_error(response_obj)
                         break
@@ -424,7 +413,10 @@ class CodexResponsesAdapter(ProviderAdapter):
                     elif ctype == "response.incomplete":
                         raise self._incomplete_error(chunk.get("response") or chunk)
 
-        return ChatResult(text="".join(text_parts), raw=raw_last, usage=usage, stop_reason=stop_reason)
+        return ChatResult(
+            text="".join(text_parts), raw=raw_last, usage=usage,
+            stop_reason=stop_reason, had_thinking=had_thinking,
+        )
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
         detailed = await self.list_models_detailed(api_key, headers)

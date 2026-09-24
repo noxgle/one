@@ -506,10 +506,7 @@ async def test_multi_invocation_reasoning_tool_sequencing(tmp_path: Path):
         "thinking_delta",  # " "
         "thinking_delta",  # "C"
         "tool_response_repair_start",
-        # The bounded repair also emits the provider's thinking deltas.
-        "thinking_delta",  # "THINK"
-        "thinking_delta",  # " "
-        "thinking_delta",  # "C"
+        # Non-live repair calls retain their result but do not emit UI deltas.
         "tool_response_repair_end",
         # final answer
         "message_start",
