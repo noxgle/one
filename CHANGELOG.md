@@ -23,6 +23,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI session switching** — queued output from a replaced session is discarded
+  before the loaded transcript is rendered.
 - **ChatGPT/Codex compaction** — Responses API calls always use required SSE
   streaming, including non-live summarization, without emitting live TUI deltas.
 - **Cooperation persistence** — TUI and interactive cooperation commands and

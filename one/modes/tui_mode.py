@@ -946,29 +946,26 @@ if TEXTUAL_AVAILABLE:
             Used on mount and after /fork, which swaps the underlying session
             for a fresh one — the old listener must be detached first.
             """
-            # Invalidate before detaching. A callback already in flight from
-            # the old session must not append after its final drain.
+            # Invalidate before detaching and discard the old transcript's
+            # accepted events. A callback already in flight from the old
+            # session must not append after this boundary.
             with self._pending_ui_events_lock:
                 self._session_listener_generation += 1
                 listener_generation = self._session_listener_generation
+                self._pending_ui_events = []
+                self._pending_assistant_deltas = ""
+                self._ui_flush_wakeup_pending = False
+                self._last_delta_ts = 0.0
             if callable(self._off_listener):
                 try:
                     self._off_listener()
                 except Exception:
                     pass
                 self._off_listener = None
-            # A session switch is a transcript boundary: drain accepted old
-            # events. Only an explicit user clear is allowed to discard them.
-            self._flush_pending_ui_events()
-
             def _listener(event: dict[str, Any]) -> None:
                 # Preserve the session's event order, including the ordering
                 # between thinking and ordinary output. Lifecycle events are
                 # processed as barriers by _flush_pending_ui_events.
-                is_delta = event.get("type") == "thinking_delta" or (
-                    event.get("type") == "message_update"
-                    and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
-                )
                 wake_ui = False
                 with self._pending_ui_events_lock:
                     if listener_generation != self._session_listener_generation:
@@ -979,11 +976,11 @@ if TEXTUAL_AVAILABLE:
                         and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
                     ):
                         self._pending_assistant_deltas += str(event.get("assistantMessageEvent", {}).get("delta", ""))
+                    if event.get("type") in ("message_update", "thinking_delta"):
+                        self._last_delta_ts = time.monotonic()
                     if self.is_running and not self._ui_flush_wakeup_pending:
                         self._ui_flush_wakeup_pending = True
                         wake_ui = True
-                if event.get("type") in ("message_update", "thinking_delta"):
-                    self._last_delta_ts = time.monotonic()
                 if wake_ui:
                     # A coalesced private UI wakeup; session payloads stay in
                     # the ordered accumulator and no token adds a message.

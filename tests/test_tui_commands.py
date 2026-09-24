@@ -1132,6 +1132,58 @@ async def test_tui_sessions_load_exact_name_and_ignore_old_listener(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_tui_session_switch_discards_queued_old_transcript_events(tmp_path: Path):
+    from one.core.agent_session import AgentSession
+    from one.core.session_manager import SessionManager
+    from one.modes.tui_mode import _OneTextualApp
+
+    first = _persistent_tui_session(tmp_path, "First session", "first transcript")
+    second = _persistent_tui_session(tmp_path, "Second session", "selected transcript")
+
+    class Host:
+        def __init__(self):
+            self.session = first
+
+        async def switch_session(self, path: str):
+            manager = SessionManager.open(path, self.session.session_manager.session_dir)
+            self.session = AgentSession(
+                manager,
+                first.settings_manager,
+                first.model_registry,
+                first.resource_loader,
+                first.model,
+                "medium",
+            )
+
+    host = Host()
+    app = _OneTextualApp(first, runtime_host=host)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first._emit({"type": "message_start", "message": {"role": "assistant"}})
+        first._emit(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."},
+            }
+        )
+        first._emit({"type": "message_end", "message": {"role": "assistant", "content": "Request aborted."}})
+        assert app._pending_ui_events
+
+        target = next(info for info in app._session_infos() if info.id == second.session_id)
+        await app._switch_to_session(target)
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        assert "Request aborted." not in stream
+        assert "selected transcript" in stream
+        assert "Loaded session: Second session." in stream
+
+        first._emit({"type": "message_end", "message": {"role": "assistant", "content": "stale old event"}})
+        await pilot.pause()
+        assert "stale old event" not in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
 async def test_tui_sessions_target_names_precede_indexes_and_rename_is_unambiguous(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
