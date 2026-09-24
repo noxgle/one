@@ -278,6 +278,22 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
 .footer-left strong{color:var(--text-secondary)}
 .footer-links{display:flex;gap:24px;list-style:none}
 .footer-links a{font-size:.8125rem;color:var(--text-muted);transition:color .15s}
+.built-by-one{
+  margin-top:24px;padding-top:20px;border-top:1px solid var(--border);
+  width:100%;text-align:center;
+}
+.built-by-label{
+  font-family:var(--mono);font-size:.8125rem;color:var(--text-muted);margin-bottom:4px;
+}
+.built-by-label strong{color:var(--accent)}
+.built-by-meta{
+  font-family:var(--mono);font-size:.6875rem;color:var(--text-muted);margin-bottom:6px;
+}
+.build-status{color:var(--green)}
+.built-by-runtime{
+  font-family:var(--mono);font-size:.625rem;color:var(--text-muted);
+}
+.built-by-runtime code{color:var(--text-secondary)}
 .footer-links a:hover{color:var(--text-primary)}
 .fade-up{opacity:0;transform:translateY(24px);transition:opacity .5s ease,transform .5s ease}
 .fade-up.visible{opacity:1;transform:translateY(0)}
@@ -755,6 +771,15 @@ one --help</pre>
       <li><a href="https://github.com/noxgle/one/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
       <li><a href="https://github.com/noxgle/one/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
     </ul>
+  </div>
+  <div class="container">
+    <div class="built-by-one">
+      <div class="built-by-label">Built by <strong>one</strong></div>
+      <div class="built-by-meta">Autonomous terminal agent &middot; <span class="build-status">Task: landing page &middot; Status: completed</span></div>
+      <div class="built-by-runtime">
+        <code>provider</code>: llama.cpp &middot; <code>model</code>: local
+      </div>
+    </div>
   </div>
 </footer>
 

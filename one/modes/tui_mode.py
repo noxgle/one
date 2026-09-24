@@ -874,6 +874,9 @@ if TEXTUAL_AVAILABLE:
             self._ask_user_pending: dict[str, Any] | None = None
             self._pending_clipboard_image_bytes: bytes | None = None
             self._session_delete_pending: SessionInfo | None = None
+            # Numbered /sessions targets must keep referring to the list the
+            # user saw, rather than to a newly mtime-sorted filesystem scan.
+            self._session_list_snapshot: list[SessionInfo] | None = None
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
@@ -1024,8 +1027,20 @@ if TEXTUAL_AVAILABLE:
                 content = message.get("content", "")
                 if isinstance(content, list):
                     content = "".join(str(part.get("text", "")) for part in content if part.get("type") == "text")
+                historical_abort = (
+                    role == "assistant"
+                    and message.get("stopReason") == "abort"
+                    and content == "Request aborted."
+                )
+                # An abort is persisted so the provider history remains
+                # complete.  On reload it is not a live abort, though: render
+                # it as historical status rather than replaying the live
+                # assistant wording that prompted the session switch.
+                if historical_abort:
+                    self._write("Previous request was aborted.", "info")
                 if role in {"user", "assistant"}:
-                    self._write_chat_block(role, str(content))
+                    if not historical_abort:
+                        self._write_chat_block(role, str(content))
                 elif role == "toolResult":
                     self._write_tool_block(str(content))
                 elif role == "custom":
@@ -1035,6 +1050,9 @@ if TEXTUAL_AVAILABLE:
         def _session_infos(self) -> list[SessionInfo]:
             manager = self.session.session_manager
             return SessionManager.list(manager.cwd, manager.session_dir)
+
+        def _invalidate_session_list_snapshot(self) -> None:
+            self._session_list_snapshot = None
 
         def _resolve_session_target(self, target: str) -> tuple[SessionInfo | None, str | None]:
             infos = self._session_infos()
@@ -1046,9 +1064,16 @@ if TEXTUAL_AVAILABLE:
                 return matches[0], None
             if target.isdigit():
                 index = int(target)
-                if not 1 <= index <= len(infos):
-                    return None, f"Session number out of range (1..{len(infos)})"
-                return infos[index - 1], None
+                numbered_infos = self._session_list_snapshot if self._session_list_snapshot is not None else infos
+                if not 1 <= index <= len(numbered_infos):
+                    return None, f"Session number out of range (1..{len(numbered_infos)})"
+                selected = numbered_infos[index - 1]
+                # Do not open a replacement that happens to have acquired the
+                # cached path. A stale numbered target must be explicit.
+                live = next((info for info in infos if info.path == selected.path and info.id == selected.id), None)
+                if live is None:
+                    return None, "Session from the last /sessions list is no longer available. Run /sessions again."
+                return live, None
             return None, "No session has that exact name. Use /sessions to list sessions."
 
         def _parse_session_rename_target(self, rename_rest: str) -> tuple[str | None, str | None, str | None]:
@@ -1069,6 +1094,7 @@ if TEXTUAL_AVAILABLE:
 
         def _list_sessions(self) -> None:
             infos = self._session_infos()
+            self._session_list_snapshot = list(infos)
             if not infos:
                 self._write("No persisted sessions in this project.", "info")
                 return
@@ -1093,6 +1119,7 @@ if TEXTUAL_AVAILABLE:
             await self.runtime_host.switch_session(info.path)
             self.session = self.runtime_host.session
             self._bind_session()
+            self._invalidate_session_list_snapshot()
             self._clear_extension_ui_state()
             self._rebuild_session_transcript()
             self._write(f"Loaded session: {info.name or '(unnamed)'}.", "info")
@@ -2019,6 +2046,7 @@ if TEXTUAL_AVAILABLE:
                         self._write(str(exc), "error")
                         return
                     self._write(f"Renamed session to: {manager.get_session_name()}.", "info")
+                    self._invalidate_session_list_snapshot()
                     self._refresh_sidebar()
                     return
                 target, error = self._resolve_session_target(rest)
@@ -2325,6 +2353,7 @@ if TEXTUAL_AVAILABLE:
                     result = await self.runtime_host.fork(entry_id)
                     self.session = self.runtime_host.session
                     self._bind_session()
+                    self._invalidate_session_list_snapshot()
                     self._clear_extension_ui_state()
                     self._write(json.dumps(result, ensure_ascii=False), "info")
                 except ValueError as e:
@@ -2338,6 +2367,7 @@ if TEXTUAL_AVAILABLE:
                 result = await self.runtime_host.new_session({})
                 self.session = self.runtime_host.session
                 self._bind_session()
+                self._invalidate_session_list_snapshot()
                 # Fresh session: drop stale stream content from the old one.
                 stream_widget = self.query_one("#stream")
                 stream_widget.update("")
@@ -2796,6 +2826,7 @@ if TEXTUAL_AVAILABLE:
                         await self.runtime_host.new_session({})
                         self.session = self.runtime_host.session
                         self._bind_session()
+                        self._invalidate_session_list_snapshot()
                         self._rebuild_session_transcript()
                         self._clear_extension_ui_state()
                     SessionManager.delete(target.path, self.session.session_manager.session_dir)
@@ -2803,6 +2834,7 @@ if TEXTUAL_AVAILABLE:
                     self._write(f"Session deletion failed: {exc}", "error")
                     return
                 self._write(f"Deleted session: {target.name or '(unnamed)'}.", "info")
+                self._invalidate_session_list_snapshot()
                 if active:
                     self._write("New session started.", "info")
                 self._refresh_sidebar()

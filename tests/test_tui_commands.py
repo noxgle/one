@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -1167,6 +1169,69 @@ async def test_tui_sessions_load_exact_name_and_ignore_old_listener(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_tui_sessions_number_uses_displayed_snapshot_after_reorder(tmp_path: Path):
+    from one.core.agent_session import AgentSession
+    from one.core.session_manager import SessionManager
+    from one.modes.tui_mode import _OneTextualApp
+
+    first = _persistent_tui_session(tmp_path, "First session", "first transcript")
+    second = _persistent_tui_session(tmp_path, "Second session", "second transcript")
+
+    class Host:
+        def __init__(self):
+            self.session = first
+
+        async def switch_session(self, path: str):
+            manager = SessionManager.open(path, self.session.session_manager.session_dir)
+            self.session = AgentSession(
+                manager,
+                first.settings_manager,
+                first.model_registry,
+                first.resource_loader,
+                first.model,
+                "medium",
+            )
+
+    app = _OneTextualApp(first, runtime_host=Host())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/sessions")
+        snapshot = app._session_list_snapshot
+        assert snapshot is not None
+        target = snapshot[0]
+        assert target.id == second.session_id
+
+        assert first.session_file is not None
+        os.utime(first.session_file, (time.time() + 10, time.time() + 10))
+        assert app._session_infos()[0].id == first.session_id
+
+        await _submit(app, pilot, "/sessions 1")
+        assert app.session.session_id == target.id
+        assert "second transcript" in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
+async def test_tui_sessions_number_reports_stale_snapshot_target(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _persistent_tui_session(tmp_path, "First session", "first transcript")
+    _persistent_tui_session(tmp_path, "Second session", "second transcript")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/sessions")
+        snapshot = app._session_list_snapshot
+        assert snapshot is not None
+        target = snapshot[0]
+        Path(target.path).unlink()
+
+        await _submit(app, pilot, "/sessions 1")
+        assert "Session from the last /sessions list is no longer available. Run /sessions again." in "\n".join(
+            app._stream_lines
+        )
+
+
+@pytest.mark.asyncio
 async def test_tui_session_switch_discards_queued_old_transcript_events(tmp_path: Path):
     from one.core.agent_session import AgentSession
     from one.core.session_manager import SessionManager
@@ -1212,10 +1277,68 @@ async def test_tui_session_switch_discards_queued_old_transcript_events(tmp_path
         assert "Request aborted." not in stream
         assert "selected transcript" in stream
         assert "Loaded session: Second session." in stream
+        rendered = app.query_one("#stream").content.plain
+        assert "Request aborted." not in rendered
+        assert "selected transcript" in rendered
+        assert "Loaded session: Second session." in rendered
 
         first._emit({"type": "message_end", "message": {"role": "assistant", "content": "stale old event"}})
         await pilot.pause()
         assert "stale old event" not in "\n".join(app._stream_lines)
+        assert "stale old event" not in app.query_one("#stream").content.plain
+
+
+@pytest.mark.asyncio
+async def test_tui_session_load_marks_persisted_abort_as_historical(tmp_path: Path):
+    from one.core.agent_session import AgentSession
+    from one.core.session_manager import SessionManager
+    from one.modes.tui_mode import _OneTextualApp
+
+    first = _persistent_tui_session(tmp_path, "First session", "first transcript")
+    restored = _persistent_tui_session(tmp_path, "Restored session", "before abort")
+    abort_message = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Request aborted."}],
+        "stopReason": "abort",
+    }
+    restored.session_manager.append_message(abort_message)
+
+    class Host:
+        def __init__(self):
+            self.session = first
+
+        async def switch_session(self, path: str):
+            manager = SessionManager.open(path, self.session.session_manager.session_dir)
+            self.session = AgentSession(
+                manager,
+                first.settings_manager,
+                first.model_registry,
+                first.resource_loader,
+                first.model,
+                "medium",
+            )
+
+    app = _OneTextualApp(first, runtime_host=Host())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        restored_number = next(
+            str(index)
+            for index, info in enumerate(app._session_infos(), 1)
+            if info.id == restored.session_id
+        )
+        await _submit(app, pilot, f"/sessions {restored_number}")
+        await pilot.pause()
+
+        stream = "\n".join(app._stream_lines)
+        rendered = app.query_one("#stream").content.plain
+        assert "before abort" in stream and "before abort" in rendered
+        assert "Previous request was aborted." in stream
+        assert "Previous request was aborted." in rendered
+        assert "Request aborted." not in stream
+        assert "Request aborted." not in rendered
+        # The historical status is presentation-only; the durable/model
+        # history remains unchanged after loading.
+        assert app.session.messages[-1] == abort_message
 
 
 @pytest.mark.asyncio

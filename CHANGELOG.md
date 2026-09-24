@@ -33,6 +33,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI session selection** — numbered `/sessions <n>` selections now resolve
+  against the most recently displayed list, rather than a newly mtime-sorted
+  scan; stale listed sessions direct users to rerun `/sessions`.
+- **TUI session loading** — persisted aborted requests are now labeled as
+  historical status after `/sessions` reload, while their durable session
+  history is retained.
 - **TUI session switching** — queued output from a replaced session is discarded
   before the loaded transcript is rendered.
 - **ChatGPT/Codex compaction** — Responses API calls always use required SSE
