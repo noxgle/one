@@ -461,6 +461,7 @@ future target, while Windows 10 support is deferred.
 - [CHANGELOG.md](CHANGELOG.md) — release notes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development guide
 - [SECURITY.md](SECURITY.md) — security policy and reporting
+- [docs/architecture.md](docs/architecture.md) — internal architecture
 - [docs/EXTENSIONS.md](docs/EXTENSIONS.md) — extension contract
 - [docs/SKILLS.md](docs/SKILLS.md) — skills contract
 - [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) — release verification
