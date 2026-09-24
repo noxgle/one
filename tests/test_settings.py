@@ -236,6 +236,39 @@ def test_default_tools_approval_false() -> None:
     assert settings.get_tool_approval() is False
 
 
+def test_tool_approval_persists_and_preserves_approval_tools(tmp_path) -> None:
+    agent_dir = tmp_path / "agent"
+    project_dir = tmp_path / "project"
+    agent_dir.mkdir()
+    project_dir.mkdir()
+    settings = SettingsManager(str(project_dir), str(agent_dir))
+
+    settings.set_tool_approval(True)
+    assert settings.get_tool_approval() is True
+    assert settings.get_tool_approval_tools() == ["bash", "write", "edit", "plan", "apply_patch"]
+
+    reloaded = SettingsManager(str(project_dir), str(agent_dir))
+    assert reloaded.get_tool_approval() is True
+    assert reloaded.get_tool_approval_tools() == ["bash", "write", "edit", "plan", "apply_patch"]
+
+    reloaded.set_tool_approval(False)
+    assert SettingsManager(str(project_dir), str(agent_dir)).get_tool_approval() is False
+
+
+def test_set_tool_approval_refuses_malformed_global_settings(tmp_path) -> None:
+    agent_dir = tmp_path / "agent"
+    project_dir = tmp_path / "project"
+    agent_dir.mkdir()
+    project_dir.mkdir()
+    settings_path = agent_dir / "settings.json"
+    settings_path.write_text("{not json", encoding="utf-8")
+    settings = SettingsManager(str(project_dir), str(agent_dir))
+
+    with pytest.raises(RuntimeError, match="malformed"):
+        settings.set_tool_approval(True)
+    assert settings_path.read_text(encoding="utf-8") == "{not json"
+
+
 def test_default_bash_show_output_is_false() -> None:
     """bash.showOutput defaults to False."""
     from one.core.settings_manager import DEFAULT_SETTINGS

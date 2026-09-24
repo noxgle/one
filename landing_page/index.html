@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>one — autonomous terminal agent</title>
+<meta name="description" content="one is an autonomous Python terminal agent. Give it a goal. It plans, uses tools, executes work, verifies results, and reports back.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0b;
+  --bg-elevated:#111113;
+  --bg-surface:#18181b;
+  --bg-hover:#1e1e22;
+  --border:#27272a;
+  --border-hover:#3f3f46;
+  --text-primary:#fafafa;
+  --text-secondary:#a1a1aa;
+  --text-muted:#71717a;
+  --accent:#3b82f6;
+  --accent-dim:rgba(59,130,246,.12);
+  --accent-glow:rgba(59,130,246,.25);
+  --green:#22c55e;
+  --green-dim:rgba(34,197,94,.12);
+  --yellow:#eab308;
+  --radius:8px;
+  --radius-lg:12px;
+  --mono:'IBM Plex Mono',monospace;
+  --sans:'Inter',system-ui,-apple-system,sans-serif;
+  --max-w:1120px;
+  --nav-h:64px;
+}
+html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body{
+  font-family:var(--sans);
+  background:var(--bg);
+  color:var(--text-primary);
+  line-height:1.6;
+  overflow-x:hidden;
+}
+a{color:var(--accent);text-decoration:none;transition:color .15s}
+a:hover{color:#60a5fa}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:.018;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:256px 256px;
+}
+.grid-bg{
+  background-image:
+    linear-gradient(rgba(59,130,246,.03) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(59,130,246,.03) 1px,transparent 1px);
+  background-size:64px 64px;
+}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 24px}
+.nav{
+  position:fixed;top:0;left:0;right:0;height:var(--nav-h);z-index:100;
+  background:rgba(10,10,11,.82);backdrop-filter:blur(16px) saturate(1.4);
+  border-bottom:1px solid var(--border);
+  transition:background .2s;
+}
+.nav .container{display:flex;align-items:center;justify-content:space-between;height:100%}
+.nav-logo{
+  font-family:var(--mono);font-size:1.125rem;font-weight:600;color:var(--text-primary);
+  display:flex;align-items:center;gap:8px;
+}
+.nav-logo .dot{color:var(--accent)}
+.nav-links{display:flex;align-items:center;gap:32px;list-style:none}
+.nav-links a{color:var(--text-secondary);font-size:.875rem;font-weight:500;transition:color .15s}
+.nav-links a:hover{color:var(--text-primary)}
+.nav-cta{
+  background:var(--accent);color:#fff;padding:8px 18px;border-radius:var(--radius);
+  font-size:.8125rem;font-weight:600;transition:background .15s,transform .1s;
+}
+.nav-cta:hover{background:#2563eb;color:#fff;transform:translateY(-1px)}
+.nav-toggle{display:none;background:none;border:none;color:var(--text-primary);cursor:pointer;padding:8px}
+.nav-toggle svg{width:24px;height:24px}
+.hero{
+  padding:calc(var(--nav-h) + 80px) 0 80px;
+  position:relative;
+}
+.hero .container{display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:start}
+.hero-badge{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:4px 14px 4px 8px;border-radius:100px;
+  background:var(--accent-dim);border:1px solid rgba(59,130,246,.2);
+  font-family:var(--mono);font-size:.75rem;color:var(--accent);margin-bottom:20px;
+}
+.hero-badge .pulse{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:pulse 2s ease infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.hero h1{
+  font-size:clamp(2.25rem,5vw,3.5rem);font-weight:700;line-height:1.1;
+  letter-spacing:-.03em;margin-bottom:20px;
+}
+.hero h1 .accent{color:var(--accent)}
+.hero-sub{font-size:1.0625rem;color:var(--text-secondary);max-width:480px;margin-bottom:32px;line-height:1.65}
+.hero-actions{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:40px}
+.btn-primary{
+  background:var(--accent);color:#fff;padding:12px 28px;border-radius:var(--radius);
+  font-size:.875rem;font-weight:600;border:none;cursor:pointer;transition:background .15s,transform .1s;
+  display:inline-flex;align-items:center;gap:8px;
+}
+.btn-primary:hover{background:#2563eb;color:#fff;transform:translateY(-1px)}
+.btn-secondary{
+  background:transparent;color:var(--text-secondary);padding:12px 28px;border-radius:var(--radius);
+  font-size:.875rem;font-weight:500;border:1px solid var(--border);cursor:pointer;transition:all .15s;
+  display:inline-flex;align-items:center;gap:8px;
+}
+.btn-secondary:hover{color:var(--text-primary);border-color:var(--border-hover);background:var(--bg-hover)}
+.install-hint{
+  font-family:var(--mono);font-size:.8125rem;color:var(--text-muted);display:flex;align-items:center;gap:8px;
+}
+.install-hint code{
+  background:var(--bg-surface);padding:2px 8px;border-radius:4px;color:var(--text-secondary);
+}
+.terminal-wrap{position:relative}
+.terminal{
+  background:#0d0d0f;border:1px solid var(--border);border-radius:var(--radius-lg);
+  overflow:hidden;position:relative;
+  box-shadow:0 0 60px rgba(59,130,246,.06),0 4px 24px rgba(0,0,0,.4);
+}
+.terminal-header{
+  display:flex;align-items:center;gap:8px;padding:12px 16px;
+  background:var(--bg-surface);border-bottom:1px solid var(--border);
+}
+.terminal-dot{width:10px;height:10px;border-radius:50%}
+.terminal-dot.r{background:#ff5f57}.terminal-dot.y{background:#febc2e}.terminal-dot.g{background:#28c840}
+.terminal-title{font-family:var(--mono);font-size:.6875rem;color:var(--text-muted);margin-left:8px}
+.terminal-body{padding:20px;font-family:var(--mono);font-size:.8125rem;line-height:1.7;min-height:320px}
+.terminal-body .prompt{color:var(--accent);font-weight:500}
+.terminal-body .user-msg{color:var(--text-primary);margin-bottom:4px}
+.terminal-body .agent-line{color:var(--text-secondary)}
+.terminal-body .agent-line .icon{margin-right:6px}
+.terminal-body .agent-line.done{color:var(--green)}
+.terminal-body .agent-line .check{color:var(--green)}
+.terminal-body .agent-line .arrow{color:var(--text-muted)}
+section{padding:96px 0}
+.section-label{
+  font-family:var(--mono);font-size:.6875rem;text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);margin-bottom:12px;font-weight:500;
+}
+.section-title{font-size:clamp(1.5rem,3vw,2.125rem);font-weight:700;letter-spacing:-.02em;margin-bottom:16px}
+.section-desc{color:var(--text-secondary);font-size:1rem;max-width:560px;line-height:1.65}
+.pipeline{margin-top:56px;display:flex;gap:0}
+.pipeline-step{flex:1;text-align:center;padding:28px 16px;position:relative}
+.pipeline-step:not(:last-child)::after{
+  content:"\2192";position:absolute;right:-8px;top:50%;transform:translateY(-50%);
+  color:var(--text-muted);font-size:1.25rem;font-family:var(--mono);
+}
+.pipeline-icon{
+  width:40px;height:40px;border-radius:var(--radius);margin:0 auto 12px;
+  background:var(--accent-dim);border:1px solid rgba(59,130,246,.15);
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:.875rem;color:var(--accent);font-weight:600;
+}
+.pipeline-step h3{font-size:.875rem;font-weight:600;margin-bottom:4px}
+.pipeline-step p{font-size:.8125rem;color:var(--text-muted);line-height:1.5}
+.feature-block{display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:center;padding:48px 0}
+.feature-block + .feature-block{border-top:1px solid var(--border)}
+.feature-block.reverse .feature-text{order:2}
+.feature-block.reverse .feature-visual{order:1}
+.feature-text .section-label{margin-bottom:10px}
+.feature-text h2{font-size:1.5rem;font-weight:700;letter-spacing:-.015em;margin-bottom:12px}
+.feature-text p{color:var(--text-secondary);font-size:.9375rem;line-height:1.65;margin-bottom:20px}
+.feature-code{
+  background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+  padding:20px 24px;font-family:var(--mono);font-size:.8125rem;line-height:1.7;
+  overflow-x:auto;position:relative;
+}
+.feature-code .copy-btn{
+  position:absolute;top:10px;right:10px;background:var(--bg-hover);border:1px solid var(--border);
+  color:var(--text-muted);font-size:.6875rem;padding:4px 10px;border-radius:4px;cursor:pointer;
+  font-family:var(--sans);transition:all .15s;opacity:0;
+}
+.feature-code:hover .copy-btn{opacity:1}
+.feature-code .copy-btn:hover{color:var(--text-primary);border-color:var(--border-hover)}
+.feature-code .comment{color:var(--text-muted)}
+.feature-code .cmd{color:var(--green)}
+.feature-code .flag{color:var(--accent)}
+.feature-code .string{color:#f59e0b}
+.feature-code .json-key{color:#60a5fa}
+.feature-code .json-str{color:#f59e0b}
+.feature-code .json-bool{color:var(--green)}
+.terminal-mini{
+  background:#0d0d0f;border:1px solid var(--border);border-radius:var(--radius-lg);
+  overflow:hidden;font-family:var(--mono);font-size:.75rem;line-height:1.7;
+}
+.terminal-mini .t-header{padding:10px 14px;background:var(--bg-surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px}
+.terminal-mini .t-header .dots{display:flex;gap:5px}
+.terminal-mini .t-header .d{width:8px;height:8px;border-radius:50%}
+.terminal-mini .t-body{padding:14px 16px;color:var(--text-secondary)}
+.terminal-mini .t-body .line{margin-bottom:2px}
+.terminal-mini .t-body .t-green{color:var(--green)}
+.terminal-mini .t-body .t-blue{color:var(--accent)}
+.terminal-mini .t-body .t-muted{color:var(--text-muted)}
+.modes-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--border);border-radius:var(--radius-lg);overflow:hidden;border:1px solid var(--border)}
+.mode-card{background:var(--bg-elevated);padding:28px 24px;transition:background .15s}
+.mode-card:hover{background:var(--bg-hover)}
+.mode-card .mode-name{font-family:var(--mono);font-size:.875rem;font-weight:600;margin-bottom:8px;color:var(--accent)}
+.mode-card .mode-desc{font-size:.8125rem;color:var(--text-secondary);line-height:1.55}
+.mode-card .mode-tag{display:inline-block;font-family:var(--mono);font-size:.625rem;color:var(--text-muted);background:var(--bg-surface);padding:2px 8px;border-radius:4px;margin-top:12px;border:1px solid var(--border)}
+.showcase-section{padding:96px 0}
+.showcase-box{
+  background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);
+  overflow:hidden;position:relative;
+}
+.showcase-box .t-header{padding:12px 16px;background:var(--bg-surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.showcase-box .t-header .dots{display:flex;gap:5px}
+.showcase-box .t-header .d{width:10px;height:10px;border-radius:50%}
+.showcase-box .t-body{padding:28px 32px;font-family:var(--mono);font-size:.8125rem;line-height:1.8}
+.showcase-box .t-body .cmd-line{color:var(--text-primary);margin-bottom:20px}
+.showcase-box .t-body .cmd-line .prompt{color:var(--accent);font-weight:600}
+.showcase-tree{color:var(--text-secondary)}
+.showcase-tree .tree-ok{color:var(--green)}
+.showcase-tree .tree-branch{color:var(--text-muted)}
+.showcase-tree .tree-node{margin-left:20px}
+.showcase-tree .tree-leaf{margin-left:40px}
+.showcase-tree .tree-done{color:var(--green);font-weight:500}
+.control-section{background:var(--bg-elevated);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.control-grid{display:grid;grid-template-columns:1fr 1fr;gap:48px;margin-top:48px}
+.control-item{padding:24px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-lg)}
+.control-item h3{font-size:1rem;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.control-item h3 .c-icon{color:var(--accent);font-family:var(--mono);font-size:.875rem}
+.control-item p{font-size:.875rem;color:var(--text-secondary);line-height:1.6}
+.warning-box{
+  margin-top:32px;padding:20px 24px;background:rgba(234,179,8,.06);border:1px solid rgba(234,179,8,.15);
+  border-radius:var(--radius);font-size:.8125rem;color:var(--text-secondary);line-height:1.6;
+}
+.warning-box strong{color:var(--yellow)}
+.eco-diagram{margin-top:56px;display:flex;justify-content:center;align-items:center;flex-wrap:wrap;gap:0}
+.eco-center{font-family:var(--mono);font-size:1.5rem;font-weight:700;color:var(--text-primary);padding:24px 32px;background:var(--bg-elevated);border:2px solid var(--accent);border-radius:var(--radius-lg);position:relative;z-index:2;min-width:100px;text-align:center}
+.eco-links{display:flex;flex-wrap:wrap;justify-content:center;gap:0;margin-top:24px}
+.eco-node{display:flex;align-items:center;gap:8px;padding:12px 20px;font-family:var(--mono);font-size:.8125rem;color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-elevated);transition:all .15s}
+.eco-node:hover{color:var(--text-primary);border-color:var(--border-hover);background:var(--bg-hover)}
+.eco-node .node-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0}
+.install-section .install-grid{display:grid;grid-template-columns:1fr 1fr;gap:32px;margin-top:48px}
+.install-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden}
+.install-card .ic-header{padding:14px 20px;background:var(--bg-surface);border-bottom:1px solid var(--border);font-size:.875rem;font-weight:600}
+.install-card .ic-body{padding:20px}
+.install-card pre{
+  font-family:var(--mono);font-size:.8125rem;line-height:1.7;color:var(--text-secondary);
+  overflow-x:auto;padding:0;white-space:pre-wrap;
+}
+.copy-btn-lg{
+  display:inline-flex;align-items:center;gap:6px;margin-top:12px;
+  background:var(--bg-hover);border:1px solid var(--border);color:var(--text-secondary);
+  padding:8px 16px;border-radius:var(--radius);font-size:.75rem;font-family:var(--mono);cursor:pointer;
+  transition:all .15s;
+}
+.copy-btn-lg:hover{color:var(--text-primary);border-color:var(--border-hover)}
+.copy-btn-lg.copied{color:var(--green);border-color:rgba(34,197,94,.3)}
+.oss-section{border-top:1px solid var(--border)}
+.oss-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-top:48px}
+.oss-item{text-align:center;padding:28px 20px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg)}
+.oss-item .oss-icon{font-family:var(--mono);font-size:1.25rem;margin-bottom:10px;display:block}
+.oss-item h3{font-size:.9375rem;font-weight:600;margin-bottom:4px}
+.oss-item p{font-size:.8125rem;color:var(--text-muted)}
+.oss-badge{margin-top:32px;text-align:center}
+.oss-badge span{
+  display:inline-block;padding:6px 16px;border-radius:100px;font-family:var(--mono);font-size:.75rem;
+  background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.15);color:var(--yellow);
+}
+.cta-section{text-align:center;padding:120px 0}
+.cta-section h2{font-size:clamp(1.75rem,4vw,2.5rem);font-weight:700;letter-spacing:-.02em;margin-bottom:12px}
+.cta-section p{color:var(--text-secondary);font-size:1rem;margin-bottom:32px}
+.cta-section .install-big{
+  font-family:var(--mono);font-size:1rem;background:var(--bg-surface);padding:14px 28px;
+  border-radius:var(--radius);border:1px solid var(--border);display:inline-block;
+  margin-bottom:32px;color:var(--text-primary);letter-spacing:.02em;
+}
+.cta-actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+footer{border-top:1px solid var(--border);padding:48px 0 40px}
+footer .container{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px}
+.footer-left{font-size:.8125rem;color:var(--text-muted)}
+.footer-left strong{color:var(--text-secondary)}
+.footer-links{display:flex;gap:24px;list-style:none}
+.footer-links a{font-size:.8125rem;color:var(--text-muted);transition:color .15s}
+.footer-links a:hover{color:var(--text-primary)}
+.fade-up{opacity:0;transform:translateY(24px);transition:opacity .5s ease,transform .5s ease}
+.fade-up.visible{opacity:1;transform:translateY(0)}
+@media(max-width:900px){
+  .hero .container{grid-template-columns:1fr;gap:48px}
+  .feature-block{grid-template-columns:1fr;gap:32px}
+  .feature-block.reverse .feature-text{order:1}
+  .feature-block.reverse .feature-visual{order:2}
+  .modes-grid{grid-template-columns:1fr 1fr}
+  .control-grid{grid-template-columns:1fr}
+  .install-section .install-grid{grid-template-columns:1fr}
+  .oss-grid{grid-template-columns:1fr 1fr}
+  .pipeline{flex-direction:column;gap:0}
+  .pipeline-step:not(:last-child)::after{content:"\2193";right:50%;top:auto;bottom:-4px;transform:translateX(50%)}
+}
+@media(max-width:640px){
+  .nav-links{display:none}
+  .nav-toggle{display:block}
+  .nav-links.open{display:flex;flex-direction:column;position:absolute;top:var(--nav-h);left:0;right:0;background:rgba(10,10,11,.96);backdrop-filter:blur(16px);padding:24px;gap:20px;border-bottom:1px solid var(--border)}
+  .modes-grid{grid-template-columns:1fr}
+  .oss-grid{grid-template-columns:1fr}
+  .hero{padding-top:calc(var(--nav-h) + 48px);padding-bottom:48px}
+  section{padding:64px 0}
+  footer .container{flex-direction:column;align-items:flex-start}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+  .fade-up{opacity:1;transform:none}
+  html{scroll-behavior:auto}
+}
+</style>
+</head>
+<body>
+
+<nav class="nav" role="navigation" aria-label="Main navigation">
+  <div class="container">
+    <a href="#" class="nav-logo" aria-label="one home"><span class="dot">&#9679;</span> one</a>
+    <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false" onclick="toggleMenu()">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+    <ul class="nav-links" id="navLinks">
+      <li><a href="#features">Features</a></li>
+      <li><a href="#how-it-works">How it works</a></li>
+      <li><a href="#modes">Modes</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="https://github.com/noxgle/one" target="_blank" rel="noopener">Docs</a></li>
+      <li><a href="https://github.com/noxgle/one" target="_blank" rel="noopener" class="nav-cta">View on GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="hero grid-bg" id="hero">
+  <div class="container">
+    <div class="hero-text">
+      <div class="hero-badge"><span class="pulse"></span> Open source &middot; MIT licensed &middot; Alpha</div>
+      <h1>One agent.<br>Your terminal.<br><span class="accent">Real work.</span></h1>
+      <p class="hero-sub">Give <code style="font-family:var(--mono);color:var(--text-primary);background:var(--bg-surface);padding:2px 6px;border-radius:4px;font-size:.875em">one</code> a goal. It plans, uses tools, executes work, verifies results, and reports back &mdash; entirely in your terminal.</p>
+      <div class="hero-actions">
+        <a href="#install" class="btn-primary">Get started
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </a>
+        <a href="https://github.com/noxgle/one" target="_blank" rel="noopener" class="btn-secondary">
+          <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          View on GitHub
+        </a>
+      </div>
+      <div class="install-hint">
+        <span>Install:</span> <code>pip install one-agent</code>
+      </div>
+    </div>
+    <div class="terminal-wrap">
+      <div class="terminal">
+        <div class="terminal-header">
+          <span class="terminal-dot r"></span>
+          <span class="terminal-dot y"></span>
+          <span class="terminal-dot g"></span>
+          <span class="terminal-title">one &mdash; autonomous agent</span>
+        </div>
+        <div class="terminal-body" id="heroTerminal">
+          <div><span class="prompt">$</span> <span class="user-msg">one run "fix the failing tests and summarize the changes"</span></div>
+          <br>
+          <div class="agent-line"><span class="icon arrow">&#8594;</span> inspecting repository</div>
+          <div class="agent-line"><span class="icon arrow">&#8594;</span> reading failing tests</div>
+          <div class="agent-line"><span class="icon arrow">&#8594;</span> planning changes</div>
+          <div class="agent-line"><span class="icon arrow">&#8594;</span> editing <code style="color:var(--text-muted)">src/auth.py</code></div>
+          <div class="agent-line"><span class="icon arrow">&#8594;</span> editing <code style="color:var(--text-muted)">src/middleware.py</code></div>
+          <div class="agent-line"><span class="icon arrow">&#8594;</span> running <code style="color:var(--text-muted)">pytest</code></div>
+          <div class="agent-line done"><span class="icon check">&#10003;</span> <span style="color:var(--green)">128 tests passed</span></div>
+          <div class="agent-line done"><span class="icon check">&#10003;</span> goal completed</div>
+          <div><br><span class="agent-line" style="color:var(--text-muted)">Fixed auth session handling and middleware error propagation.</span></div>
+          <div><span class="agent-line" style="color:var(--text-muted)">128 tests passed. 2 files modified.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how-it-works">
+  <div class="container">
+    <div class="fade-up" style="text-align:center">
+      <div class="section-label">How it works</div>
+      <h2 class="section-title">Give it the outcome.<br><code style="font-family:var(--mono);color:var(--accent)">one</code> handles the loop.</h2>
+      <p class="section-desc" style="margin:0 auto">The agent takes your goal, breaks it into a plan, uses tools to execute, verifies the result, and reports back. Repeat until done.</p>
+    </div>
+    <div class="pipeline fade-up">
+      <div class="pipeline-step">
+        <div class="pipeline-icon">G</div>
+        <h3>Goal</h3>
+        <p>You describe the desired outcome in plain terms.</p>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-icon">P</div>
+        <h3>Plan</h3>
+        <p>For complex tasks, the agent generates a step-by-step plan.</p>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-icon">T</div>
+        <h3>Tools</h3>
+        <p>Reads files, edits code, runs shell commands, searches the web.</p>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-icon">E</div>
+        <h3>Execute</h3>
+        <p>Applies changes and runs validation &mdash; iteratively.</p>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-icon">V</div>
+        <h3>Verify</h3>
+        <p>Tests pass, diffs reviewed, result confirmed.</p>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-icon">R</div>
+        <h3>Report</h3>
+        <p>Final summary returned to you &mdash; or to CI.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="container">
+
+    <div class="feature-block fade-up">
+      <div class="feature-text">
+        <div class="section-label">Autonomous execution</div>
+        <h2>Run tasks without a live terminal.</h2>
+        <p><code style="font-family:var(--mono);color:var(--text-primary)">one run</code> executes headless tasks end-to-end. Give it a goal, get back a summary &mdash; or structured JSON output for integration with CI pipelines and scripts.</p>
+      </div>
+      <div class="feature-visual">
+        <div class="feature-code">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <div><span class="comment"># Autonomous headless task</span></div>
+          <div><span class="cmd">one</span> <span class="flag">run</span> <span class="string">"fix the failing tests"</span></div>
+          <div><span class="comment"># Structured JSON output</span></div>
+          <div><span class="cmd">one</span> <span class="flag">run</span> <span class="string">"refactor auth module"</span> <span class="flag">--json</span></div>
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+            <div>{<span class="json-key">"summary"</span>: <span class="json-str">"Fixed auth session"</span>,</div>
+            <div>&nbsp;&nbsp;<span class="json-key">"goalSuccess"</span>: <span class="json-bool">true</span>,</div>
+            <div>&nbsp;&nbsp;<span class="json-key">"finished"</span>: <span class="json-bool">true</span>}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature-block reverse fade-up">
+      <div class="feature-text">
+        <div class="section-label">Interactive terminal UI</div>
+        <h2>A rich TUI built on Textual.</h2>
+        <p>Stream responses in real-time, inspect tool lifecycle as it happens, steer the agent mid-task, continue sessions, and control everything with keyboard shortcuts. Slash commands for /help, /steer, /follow, /abort, and more.</p>
+      </div>
+      <div class="feature-visual">
+        <div class="terminal-mini">
+          <div class="t-header">
+            <div class="dots"><div class="d" style="background:#ff5f57"></div><div class="d" style="background:#febc2e"></div><div class="d" style="background:#28c840"></div></div>
+          </div>
+          <div class="t-body">
+            <div class="line"><span class="t-blue">one</span> <span class="t-muted">v0.1.x &mdash; session: parser fix</span></div>
+            <div class="line" style="margin-top:8px"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> read_file(</div>
+            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;parser/tokenize.py</div>
+            <div class="line"><span class="t-muted">thought:</span> Checking the regression&hellip;</div>
+            <div class="line"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> edit_file(</div>
+            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;parser/tokenize.py:23</div>
+            <div class="line"><span class="t-muted">thought:</span> Applying fix and retesting.</div>
+            <div class="line" style="margin-top:8px"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> bash(python -m pytest -q)</div>
+            <div class="line"><span class="t-muted">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-green">84 passed</span></div>
+            <div class="line" style="margin-top:8px"><span class="t-blue">&#8594;</span> <span class="t-muted">/details-show</span> <span class="t-muted">[Ctrl+D]</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature-block fade-up">
+      <div class="feature-text">
+        <div class="section-label">Stay in control</div>
+        <h2>Autonomy without surrendering control.</h2>
+        <p>Enable cooperation mode to require human approval before any mutating tool executes &mdash; bash, write, edit, plan, or apply_patch. In the TUI toggle it with Ctrl+Z, or steer, follow-up, and abort at any time. Autonomous does not mean uncontrolled.</p>
+      </div>
+      <div class="feature-visual">
+        <div class="feature-code">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <div><span class="comment"># Headless with cooperation gate</span></div>
+          <div><span class="cmd">one</span> <span class="flag">run</span> <span class="string">"refactor auth"</span> <span class="flag">--cooperation</span></div>
+          <div><span class="comment"># Write answers to a file for polling</span></div>
+          <div><span class="cmd">one</span> <span class="flag">run</span> <span class="string">"fix tests"</span> <span class="flag">--answer-file</span> /tmp/answer.txt <span class="flag">--steer-file</span> /tmp/steer.txt</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature-block reverse fade-up">
+      <div class="feature-text">
+        <div class="section-label">Bring your own model</div>
+        <h2>OpenAI, Anthropic, Gemini, Ollama, llama.cpp, and more.</h2>
+        <p>Connect to any OpenAI-compatible API, or run fully local with Ollama and llama.cpp. Credentials are resolved from runtime input, stored auth, or environment variables. No vendor lock-in.</p>
+      </div>
+      <div class="feature-visual">
+        <div class="feature-code">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <div><span class="comment"># Hosted providers</span></div>
+          <div><span class="cmd">one</span> <span class="flag">--provider</span> <span class="string">openai</span> <span class="flag">--model</span> <span class="string">gpt-4o-mini</span></div>
+          <div><span class="cmd">one</span> <span class="flag">--provider</span> <span class="string">anthropic</span> <span class="flag">--model</span> <span class="string">claude-sonnet-4-20250514</span></div>
+          <div><span class="cmd">one</span> <span class="flag">--provider</span> <span class="string">gemini</span></div>
+          <div><span class="comment"># Local models</span></div>
+          <div><span class="cmd">one</span> <span class="flag">--provider</span> <span class="string">ollama</span> <span class="flag">--model</span> <span class="string">llama3.2</span></div>
+          <div><span class="cmd">one</span> <span class="flag">--provider</span> <span class="string">llama.cpp</span> <span class="flag">--model</span> <span class="string">local</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature-block fade-up">
+      <div class="feature-text">
+        <div class="section-label">Extend it</div>
+        <h2>MCP servers, extensions, and skills.</h2>
+        <p>Add capabilities via MCP servers (stdio or streamable HTTP), custom extensions with hooks and commands, or skills &mdash; metadata-driven prompt profiles loaded on demand. Everything is discovered from configurable paths.</p>
+      </div>
+      <div class="feature-visual">
+        <div class="terminal-mini">
+          <div class="t-header">
+            <div class="dots"><div class="d" style="background:#ff5f57"></div><div class="d" style="background:#febc2e"></div><div class="d" style="background:#28c840"></div></div>
+          </div>
+          <div class="t-body">
+            <div class="line"><span class="t-blue">/mcp list</span></div>
+            <div class="line"><span class="t-muted">  web-search   [active]  (stdio)</span></div>
+            <div class="line"><span class="t-muted">  filesystem   [active]  (streamable-http)</span></div>
+            <div class="line" style="margin-top:8px"><span class="t-blue">/skill:code-review</span></div>
+            <div class="line"><span class="t-muted">  Loaded skill: code-review</span></div>
+            <div class="line"><span class="t-muted">  Profile: strict, 3-pass review</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature-block reverse fade-up">
+      <div class="feature-text">
+        <div class="section-label">Built for automation</div>
+        <h2>Not just a terminal tool &mdash; a programmable agent.</h2>
+        <p>RPC mode for long-lived orchestrator integration, JSON output for machine consumption, task files with parameter substitution, and answer/steer files for human-in-the-loop workflows outside an interactive shell.</p>
+      </div>
+      <div class="feature-visual">
+        <div class="feature-code">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <div><span class="comment"># RPC &mdash; long-lived integration</span></div>
+          <div><span class="cmd">echo</span> <span class="string">'{"id":"p1","type":"prompt","message":"test suite"}'</span></div>
+          <div><span class="cmd">| one --mode rpc</span></div>
+          <div><span class="comment"># Task file with parameters</span></div>
+          <div><span class="cmd">one</span> <span class="flag">run</span> <span class="string">@task.txt</span> <span class="flag">--param</span> <span class="string">component=auth</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section id="modes" style="background:var(--bg-elevated);border-top:1px solid var(--border);border-bottom:1px solid var(--border)">
+  <div class="container">
+    <div class="fade-up">
+      <div class="section-label">Modes &amp; interfaces</div>
+      <h2 class="section-title">Five ways to use <code style="font-family:var(--mono);color:var(--accent)">one</code>.</h2>
+      <p class="section-desc">Choose the right interface for the job &mdash; from interactive work to machine orchestration.</p>
+    </div>
+    <div class="modes-grid fade-up">
+      <div class="mode-card">
+        <div class="mode-name">TUI</div>
+        <div class="mode-desc">Human-driven interactive work with streamed responses, slash commands, and session management.</div>
+        <div class="mode-tag">one --mode tui</div>
+      </div>
+      <div class="mode-card">
+        <div class="mode-name">Text</div>
+        <div class="mode-desc">One-shot output. Send a message, get the final assistant text.</div>
+        <div class="mode-tag">one --mode text</div>
+      </div>
+      <div class="mode-card">
+        <div class="mode-name">JSON</div>
+        <div class="mode-desc">Machine-readable session messages. Structured output for scripts and integrations.</div>
+        <div class="mode-tag">one --mode json</div>
+      </div>
+      <div class="mode-card">
+        <div class="mode-name">RPC</div>
+        <div class="mode-desc">Long-lived JSON-lines protocol. Full control channel access for orchestrators.</div>
+        <div class="mode-tag">one --mode rpc</div>
+      </div>
+      <div class="mode-card">
+        <div class="mode-name">one run</div>
+        <div class="mode-desc">Autonomous headless tasks and CI workflows. Goal &rarr; plan &rarr; execute &rarr; report.</div>
+        <div class="mode-tag">one run &lt;task&gt;</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="showcase-section">
+  <div class="container">
+    <div class="fade-up">
+      <div class="section-label">In action</div>
+      <h2 class="section-title">Watch <code style="font-family:var(--mono);color:var(--accent)">one</code> work.</h2>
+    </div>
+    <div class="showcase-box fade-up" style="margin-top:32px">
+      <div class="t-header">
+        <div class="dots"><div class="d" style="background:#ff5f57"></div><div class="d" style="background:#febc2e"></div><div class="d" style="background:#28c840"></div></div>
+        <span style="font-family:var(--mono);font-size:.6875rem;color:var(--text-muted);margin-left:8px">bash &mdash; one</span>
+      </div>
+      <div class="t-body" id="showcaseTerminal">
+        <div class="cmd-line"><span class="prompt">$ </span>one run "find the bug causing the failing parser tests and fix it"</div>
+        <div class="showcase-tree" id="showcaseTree">
+          <div class="tree-branch">one</div>
+          <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Inspecting repository</div>
+          <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Running targeted tests</div>
+          <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Found regression in parser/tokenize.py</div>
+          <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Applying patch</div>
+          <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Running tests</div>
+          <div class="tree-node tree-leaf tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&#9492;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&ndash; <span class="tree-ok">84 passed</span></div>
+          <div class="tree-node tree-branch">&#9492;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&ndash; Verifying diff</div>
+          <div style="margin-top:8px" class="tree-done">&#10003; Goal completed</div>
+          <div style="margin-top:4px" class="tree-node"><span class="t-muted">Fixed parser handling for escaped delimiters.</span></div>
+          <div class="tree-node"><span class="t-muted">84 tests passed.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="control-section">
+  <div class="container">
+    <div class="fade-up">
+      <div class="section-label">Trust &amp; safety</div>
+      <h2 class="section-title">Autonomy with a human in the loop.</h2>
+      <p class="section-desc">Cooperation mode is an approval gate &mdash; not a sandbox. You stay in control.</p>
+    </div>
+    <div class="control-grid fade-up">
+      <div class="control-item">
+        <h3><span class="c-icon">&#9830;</span> Approval gates</h3>
+        <p>Require human approval before bash, write, edit, plan, and apply_patch tools execute. Toggle with Ctrl+Z in the TUI or use --cooperation in headless mode.</p>
+      </div>
+      <div class="control-item">
+        <h3><span class="c-icon">&#8599;</span> Steering &amp; follow-ups</h3>
+        <p>Guide the agent mid-task with /steer or /follow. Submit follow-up instructions without restarting the session.</p>
+      </div>
+      <div class="control-item">
+        <h3><span class="c-icon">&#9619;</span> Abort controls</h3>
+        <p>Abort any turn with Ctrl+C, reject pending approvals, or use RPC abort channels for programmatic control.</p>
+      </div>
+      <div class="control-item">
+        <h3><span class="c-icon">&#9673;</span> Full visibility</h3>
+        <p>Every tool call, MCP request, and plan step is visible in real-time. Inspect tool results with /details-show. No hidden actions.</p>
+      </div>
+    </div>
+    <div class="warning-box fade-up">
+      <strong>&#9888; Workspace trust:</strong> Extensions and MCP servers are not sandboxed &mdash; they run with your permissions. Start <code style="font-family:var(--mono)">one --no-extensions --no-mcp</code> in untrusted repositories. Cooperation mode is an approval gate, not a security boundary.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <div class="fade-up" style="text-align:center">
+      <div class="section-label">Ecosystem</div>
+      <h2 class="section-title">Bring your own models.<br>Connect your own tools.</h2>
+    </div>
+    <div class="eco-diagram fade-up">
+      <div style="text-align:center">
+        <div class="eco-center">one</div>
+        <div class="eco-links" style="margin-top:24px">
+          <div class="eco-node"><span class="node-dot"></span> OpenAI / OpenAI-compatible</div>
+          <div class="eco-node"><span class="node-dot"></span> Anthropic</div>
+          <div class="eco-node"><span class="node-dot"></span> Gemini</div>
+          <div class="eco-node"><span class="node-dot"></span> ChatGPT / Codex</div>
+          <div class="eco-node"><span class="node-dot"></span> Ollama</div>
+          <div class="eco-node"><span class="node-dot"></span> llama.cpp</div>
+          <div class="eco-node"><span class="node-dot"></span> MCP servers</div>
+          <div class="eco-node"><span class="node-dot"></span> Skills &amp; Extensions</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="install-section" style="background:var(--bg-elevated);border-top:1px solid var(--border);border-bottom:1px solid var(--border)">
+  <div class="container">
+    <div class="fade-up">
+      <div class="section-label">Install</div>
+      <h2 class="section-title">Get started in seconds.</h2>
+      <p class="section-desc">Install from PyPI or build from source. Requires Python 3.12+.</p>
+    </div>
+    <div class="install-grid fade-up">
+      <div class="install-card">
+        <div class="ic-header">From PyPI</div>
+        <div class="ic-body">
+<pre>pip install one-agent
+export OPENAI_API_KEY=sk-...
+one run "summarize README.md" \
+  --provider openai --model gpt-4o-mini</pre>
+          <button class="copy-btn-lg" onclick="copyBlock(this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copy</button>
+        </div>
+      </div>
+      <div class="install-card">
+        <div class="ic-header">From source</div>
+        <div class="ic-body">
+<pre>git clone https://github.com/noxgle/one.git
+cd one
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+one --help</pre>
+          <button class="copy-btn-lg" onclick="copyBlock(this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="oss-section">
+  <div class="container">
+    <div class="fade-up" style="text-align:center">
+      <div class="section-label">Open source</div>
+      <h2 class="section-title">Built in the open.<br>Built for developers.</h2>
+      <p class="section-desc" style="margin:0 auto">MIT licensed. Written in Python. GitHub-native development. Community contributions welcome.</p>
+    </div>
+    <div class="oss-grid fade-up">
+      <div class="oss-item"><span class="oss-icon">&#9830;</span><h3>MIT License</h3><p>Free to use, modify, and distribute.</p></div>
+      <div class="oss-item"><span class="oss-icon">&#9670;</span><h3>Python 3.12+</h3><p>Clean, typed, well-tested code.</p></div>
+      <div class="oss-item"><span class="oss-icon">&#8984;</span><h3>GitHub-native</h3><p>Issues, PRs, CI, and CHANGELOG all on GitHub.</p></div>
+      <div class="oss-item"><span class="oss-icon">&#9666;</span><h3>Community-driven</h3><p>Contributions, extensions, and skills welcome.</p></div>
+    </div>
+    <div class="oss-badge fade-up">
+      <span>&#9889; Currently in Alpha (0.1.x) &mdash; APIs and tool contracts may evolve</span>
+    </div>
+  </div>
+</section>
+
+<section class="cta-section">
+  <div class="container fade-up">
+    <h2>Your next task starts with <span style="color:var(--accent)">one</span> command.</h2>
+    <p>Give your terminal a goal. It'll handle the rest.</p>
+    <div class="install-big">pip install one-agent</div>
+    <div class="cta-actions">
+      <a href="#install" class="btn-primary">Get started
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      </a>
+      <a href="https://github.com/noxgle/one" target="_blank" rel="noopener" class="btn-secondary">
+        <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <div class="footer-left">
+      <strong>one</strong> &mdash; autonomous terminal agent &middot; <a href="https://github.com/noxgle/one/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+    </div>
+    <ul class="footer-links">
+      <li><a href="https://github.com/noxgle/one" target="_blank" rel="noopener">GitHub</a></li>
+      <li><a href="https://github.com/noxgle/one#readme" target="_blank" rel="noopener">Docs</a></li>
+      <li><a href="https://github.com/noxgle/one/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
+      <li><a href="https://github.com/noxgle/one/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
+      <li><a href="https://github.com/noxgle/one/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
+    </ul>
+  </div>
+</footer>
+
+<script>
+function toggleMenu(){
+  const links=document.getElementById('navLinks');
+  const btn=document.querySelector('.nav-toggle');
+  const isOpen=links.classList.toggle('open');
+  btn.setAttribute('aria-expanded',isOpen);
+}
+document.querySelectorAll('.nav-links a').forEach(a=>a.addEventListener('click',()=>{
+  document.getElementById('navLinks').classList.remove('open');
+  document.querySelector('.nav-toggle').setAttribute('aria-expanded','false');
+}));
+const observer=new IntersectionObserver((entries)=>{
+  entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');observer.unobserve(e.target)}});
+},{threshold:0.12,rootMargin:'0px 0px -40px 0px'});
+document.querySelectorAll('.fade-up').forEach(el=>observer.observe(el));
+function copyCode(btn){
+  const code=btn.parentElement;
+  let text='';
+  code.childNodes.forEach(node=>{
+    if(node.nodeType===3) text+=node.textContent;
+  });
+  navigator.clipboard.writeText(text.trim()).then(()=>showCopied(btn));
+}
+function copyBlock(btn){
+  const pre=btn.previousElementSibling;
+  const text=pre.textContent;
+  navigator.clipboard.writeText(text).then(()=>showCopied(btn));
+}
+function showCopied(btn){
+  const orig=btn.innerHTML;
+  btn.innerHTML='✓ Copied';btn.classList.add('copied');
+  setTimeout(()=>{btn.innerHTML=orig;btn.classList.remove('copied')},2000);
+}
+(function(){
+  const tree=document.getElementById('showcaseTree');
+  if(!tree)return;
+  const nodes=tree.querySelectorAll('.tree-branch,.tree-leaf,.tree-done,.tree-node');
+  const nodesArr=[...nodes];
+  nodesArr.forEach(n=>{n.style.opacity='0';n.style.transform='translateX(-8px)';n.style.transition='opacity .35s ease,transform .35s ease'});
+  const obs=new IntersectionObserver((entries)=>{
+    if(entries[0].isIntersecting){
+      nodesArr.forEach((n,idx)=>{
+        setTimeout(()=>{
+          n.style.opacity='1';n.style.transform='translateX(0)';
+        },idx*280);
+      });
+      obs.unobserve(entries[0].target);
+    }
+  },{threshold:0.3});
+  obs.observe(tree);
+})();
+document.querySelectorAll('a[href^="#"]').forEach(a=>{
+  a.addEventListener('click',e=>{
+    const id=a.getAttribute('href');
+    if(id==='#')return;
+    const target=document.querySelector(id);
+    if(target){e.preventDefault();target.scrollIntoView({behavior:'smooth',block:'start'})}
+  });
+});
+</script>
+</body>
+</html>

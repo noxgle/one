@@ -94,6 +94,12 @@ class _DummySettings:
     def get_bash_show_output(self) -> bool:
         return bool(self._global.get("bash", {}).get("showOutput", True))
 
+    def get_tool_approval(self) -> bool:
+        return bool(self._global.get("tools", {}).get("approval", False))
+
+    def set_tool_approval(self, enabled: bool, persist: bool = True) -> None:  # noqa: ARG002
+        self._global.setdefault("tools", {})["approval"] = bool(enabled)
+
     def set_bash_show_output(self, enabled: bool) -> None:
         self._global.setdefault("bash", {})["showOutput"] = bool(enabled)
 
@@ -848,6 +854,19 @@ async def test_interactive_ctrl_a_toggles_cooperation(monkeypatch, capsys):
     assert session.prompt_calls == []
     # Final state: enabled.
     assert session.approval_callback is not None
+    assert session.settings_manager.get_tool_approval() is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_cooperation_commands_persist_setting(monkeypatch, capsys):
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/cooperation on", "/cooperation off", "/exit"]))
+    await mode.run()
+
+    assert "[Cooperation] enabled" in capsys.readouterr().out
+    assert session.approval_callback is None
+    assert session.settings_manager.get_tool_approval() is False
 
 
 class _EventSession(_DummySession):

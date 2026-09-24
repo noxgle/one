@@ -543,11 +543,13 @@ async def test_tui_command_logout_and_cooperation(tmp_path: Path):
         assert '"enabled": false' in stream
         await _submit(app, pilot, "/cooperation on")
         assert session.approval_callback is not None
+        assert session.settings_manager.get_tool_approval() is True
         await _submit(app, pilot, "/cooperation")
         stream = "\n".join(app._stream_lines)
         assert '"enabled": true' in stream
         await _submit(app, pilot, "/cooperation off")
         assert session.approval_callback is None
+        assert session.settings_manager.get_tool_approval() is False
 
 
 @pytest.mark.asyncio

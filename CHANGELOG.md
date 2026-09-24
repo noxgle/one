@@ -23,6 +23,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Cooperation persistence** — TUI and interactive cooperation commands and
+  shortcuts now save their approval setting for subsequent sessions.
 - **Streaming provider timeouts** — `providers.timeoutSec` now measures idle
   time between meaningful content or reasoning tokens, allowing active streams
   to continue past the configured interval while retaining finite transport

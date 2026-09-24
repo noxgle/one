@@ -301,6 +301,24 @@ class SettingsManager:
     def get_tool_approval_tools(self) -> list[str]:
         return list(self.get_tool_settings().get("approvalTools", ["bash", "write", "edit", "plan", "apply_patch"]))
 
+    def set_tool_approval(self, enabled: bool, persist: bool = True) -> None:
+        """Set global tools.approval without changing the approved-tool list."""
+        if persist:
+            self._require_writable_global()
+        previous = self._global.get("tools")
+        tools = dict(previous) if isinstance(previous, dict) else {}
+        tools["approval"] = bool(enabled)
+        self._global["tools"] = tools
+        if persist:
+            try:
+                self._save_global()
+            except Exception:
+                if previous is None:
+                    self._global.pop("tools", None)
+                else:
+                    self._global["tools"] = previous
+                raise
+
     def get_subagents_max_concurrent(self) -> int:
         return int(self.merged().get("subagents", {}).get("maxConcurrent", 2))
 

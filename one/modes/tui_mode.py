@@ -2696,14 +2696,23 @@ if TEXTUAL_AVAILABLE:
             if cmd.startswith("/cooperation "):
                 mode = cmd[len("/cooperation ") :].strip().lower()
                 if mode in {"on", "enable", "yes", "1", "true"}:
-                    session.approval_callback = self._approval_prompt
-                    self._write("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", "info")
+                    enabled = True
                 elif mode in {"off", "disable", "no", "0", "false"}:
-                    session.approval_callback = None
-                    self._write("[Cooperation] disabled: all tools run freely", "info")
+                    enabled = False
                 else:
                     self._write("Usage: /cooperation [on|off]", "error")
                     return
+                try:
+                    session.settings_manager.set_tool_approval(enabled)
+                except Exception as e:
+                    self._write(f"Unable to persist cooperation setting: {e}", "error")
+                    return
+                if enabled:
+                    session.approval_callback = self._approval_prompt
+                    self._write("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", "info")
+                else:
+                    session.approval_callback = None
+                    self._write("[Cooperation] disabled: all tools run freely", "info")
                 self._refresh_sidebar()
                 return
             if cmd.startswith("/bash "):
@@ -3223,7 +3232,13 @@ if TEXTUAL_AVAILABLE:
             Affects future tool calls only; a pending approval prompt keeps
             waiting for its answer.
             """
-            if self.session.approval_callback is None:
+            enabled = self.session.approval_callback is None
+            try:
+                self.session.settings_manager.set_tool_approval(enabled)
+            except Exception as e:
+                self._write(f"Unable to persist cooperation setting: {e}", "error")
+                return
+            if enabled:
                 self.session.approval_callback = self._approval_prompt
                 self._write("[Cooperation] enabled: mutating tools (bash/write/edit/plan/apply_patch) ask first", "info")
             else:

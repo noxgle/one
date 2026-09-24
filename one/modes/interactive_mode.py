@@ -330,7 +330,13 @@ class InteractiveMode:
 
         def _toggle_cooperation() -> None:
             nonlocal cooperation_state
-            if session.approval_callback is None:
+            enabled = session.approval_callback is None
+            try:
+                session.settings_manager.set_tool_approval(enabled)
+            except Exception as e:
+                print(f"[Error] Unable to persist cooperation setting: {e}", flush=True)
+                return
+            if enabled:
                 session.approval_callback = self._prompt_approval
                 cooperation_state = "on"
                 print("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", flush=True)
@@ -1301,15 +1307,25 @@ class InteractiveMode:
             if line.startswith("/cooperation "):
                 mode = line[len("/cooperation ") :].strip().lower()
                 if mode in {"on", "enable", "yes", "1", "true"}:
+                    enabled = True
+                elif mode in {"off", "disable", "no", "0", "false"}:
+                    enabled = False
+                else:
+                    print("Usage: /cooperation [on|off]")
+                    continue
+                try:
+                    session.settings_manager.set_tool_approval(enabled)
+                except Exception as e:
+                    print(f"[Error] Unable to persist cooperation setting: {e}", flush=True)
+                    continue
+                if enabled:
                     session.approval_callback = self._prompt_approval
                     cooperation_state = "on"
                     print("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", flush=True)
-                elif mode in {"off", "disable", "no", "0", "false"}:
+                else:
                     session.approval_callback = None
                     cooperation_state = "off"
                     print("[Cooperation] disabled: all tools run freely", flush=True)
-                else:
-                    print("Usage: /cooperation [on|off]")
                 continue
             if line.startswith("/"):
                 print(f"Unknown command: {line.strip()}. Use /help.")

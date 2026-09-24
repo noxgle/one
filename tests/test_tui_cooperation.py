@@ -21,8 +21,10 @@ async def test_tui_ctrl_z_toggles_cooperation(tmp_path: Path):
         assert input_widget.has_focus
         await pilot.press("ctrl+z")
         assert session.approval_callback is not None
+        assert session.settings_manager.get_tool_approval() is True
         await pilot.press("ctrl+z")
         assert session.approval_callback is None
+        assert session.settings_manager.get_tool_approval() is False
 
 
 @pytest.mark.asyncio
