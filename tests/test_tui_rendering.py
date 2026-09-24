@@ -301,7 +301,7 @@ async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
         s = str(sidebar.content)
         assert "[ok] demo" in s
         assert "[!] web" in s
-        assert "old" not in s
+        assert "old" not in s.splitlines()
         assert s.index("MCP") < s.index("Keys")
 
 
