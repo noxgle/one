@@ -198,7 +198,9 @@ def test_build_sidebar_snapshot_lists_enabled_mcp_servers() -> None:
     assert [s["name"] for s in snapshot["mcpServers"]] == ["demo", "web"]
     assert snapshot["mcpServers"][0]["toolCount"] == 3
     assert snapshot["mcpServers"][0]["transport"] == "stdio"
+    assert snapshot["mcpServers"][0]["available"] is True
     assert snapshot["mcpServers"][1]["error"] == "boom"
+    assert snapshot["mcpServers"][1]["available"] is False
     assert snapshot["retry"] == "off"
 
 
@@ -213,6 +215,29 @@ def test_build_sidebar_snapshot_mcp_manager_raises_is_safe() -> None:
 
     assert snapshot["mcpEnabled"] is True
     assert snapshot["mcpServers"] == []
+
+
+def test_build_sidebar_snapshot_marks_problematic_mcp_runtime_states_unavailable() -> None:
+    class _FakeMcpManager:
+        def server_status(self) -> list[dict]:
+            return [
+                {
+                    "name": state,
+                    "enabled": True,
+                    "running": True,
+                    "tools": [],
+                    "error": None,
+                    "runtimeState": state,
+                }
+                for state in ("running", "failed", "retrying", "disabled")
+            ]
+
+    session = _DummySession()
+    session._mcp_manager = _FakeMcpManager()
+
+    snapshot = build_sidebar_snapshot(session)
+
+    assert [server["available"] for server in snapshot["mcpServers"]] == [True, False, False, False]
 
 
 @pytest.mark.asyncio
@@ -238,7 +263,7 @@ async def test_tui_sidebar_renders_mcp_off_without_manager(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
-    """Verify enabled MCP clients are listed as bullets; disabled excluded."""
+    """Verify MCP availability markers and disabled-server filtering."""
     from textual.widgets import Static
 
     from one.modes.tui_mode import _OneTextualApp
@@ -274,9 +299,9 @@ async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
         await pilot.pause()
         sidebar = app.query_one("#sidebar", Static)
         s = str(sidebar.content)
-        assert "- demo" in s
-        assert "- web" in s
-        assert "- old" not in s
+        assert "[ok] demo" in s
+        assert "[!] web" in s
+        assert "old" not in s
         assert s.index("MCP") < s.index("Keys")
 
 

@@ -10,6 +10,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **TUI MCP availability markers** — enabled MCP servers in the sidebar now
+  display `[ok]` when running normally and `[!]` when unavailable or retrying.
 - **MCP stdio recovery** — configured servers can opt into delayed automatic
   restart after an unexpected exit or stdout EOF. Failed tools are removed from
   the live agent catalog immediately; retries, exhaustion policy, and runtime

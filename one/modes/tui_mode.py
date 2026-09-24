@@ -68,6 +68,12 @@ def build_sidebar_snapshot(
         for s in statuses:
             if not s.get("enabled"):
                 continue
+            runtime_state = str(s.get("runtimeState") or "").lower()
+            available = (
+                bool(s.get("running"))
+                and not s.get("error")
+                and runtime_state not in {"failed", "retrying", "disabled"}
+            )
             mcp_servers.append(
                 {
                     "name": str(s.get("name") or ""),
@@ -75,6 +81,7 @@ def build_sidebar_snapshot(
                     "toolCount": len(s.get("tools") or []),
                     "running": bool(s.get("running")),
                     "error": s.get("error"),
+                    "available": available,
                 }
             )
 
@@ -1752,7 +1759,7 @@ if TEXTUAL_AVAILABLE:
             elif not s["mcpServers"]:
                 mcp_lines = ["none"]
             else:
-                mcp_lines = [f"- {sanitize_display_text(sv['name'])}" for sv in s["mcpServers"]]
+                mcp_lines = []
             plan_text = getattr(self.session, "_plan", None)
 
             info_block = Text()
@@ -1783,7 +1790,14 @@ if TEXTUAL_AVAILABLE:
             mcp_block = Text()
             mcp_block.append_text(Text.from_markup(f"[b {self._theme.info}]MCP[/]"))
             mcp_block.append("\n")
-            mcp_block.append("\n".join(mcp_lines) + "\n")
+            if s["mcpEnabled"] and s["mcpServers"]:
+                for server in s["mcpServers"]:
+                    marker = "[ok]" if server["available"] else "[!]"
+                    marker_style = self._theme.user if server["available"] else self._theme.error
+                    mcp_block.append(marker, style=marker_style)
+                    mcp_block.append(f" {sanitize_display_text(server['name'])}\n")
+            else:
+                mcp_block.append("\n".join(mcp_lines) + "\n")
 
             keys_block = Text()
             keys_block.append_text(Text.from_markup(f"[b {self._theme.info}]Keys[/]"))
