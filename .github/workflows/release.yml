@@ -6,13 +6,11 @@ on:
       - "v*"
 
 # Do not allow publishing from arbitrary PRs — only triggered by tag pushes.
-# Publishing is disabled by default. Enable trusted publishing when ready.
+# Publishing uses PyPI Trusted Publishing (GitHub Actions OIDC).
 #
-# NOTE: To enable publishing, the tagged commit must have passed CI (test gate).
-#   1. Uncomment the environment line below.
-#   2. Add a "needs: [lint, test, build]" on the publish job.
-#   3. Configure PyPI trusted publishing via GitHub environment `publish`.
-#   4. Ensure the release tag equals the VERSION in one/config.py (see "Tag == version" step).
+# NOTE: Configure a protected GitHub environment named `pypi` and register this
+# workflow as a trusted publisher for the `noxgle/one` project on PyPI.
+# The release tag must equal VERSION in one/config.py.
 
 permissions:
   contents: read
@@ -20,8 +18,12 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # Uncomment the environment line below when ready for protected publishing:
-    # environment: publish
+    environment:
+      name: pypi
+      url: https://pypi.org/p/one-agent
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -66,16 +68,5 @@ jobs:
           name: dist
           path: dist/*
 
-      # Publishing is intentionally disabled until the first GitHub release is validated.
-      # To enable, uncomment the following and configure trusted publishing
-      # via PyPI's trusted publishers (OIDC). The release tag must be semver (v0.1.0)
-      # and the GitHub environment `publish` must be protected.
-      #
-      # - name: Publish to PyPI
-      #   needs: [lint, test, build]   # test-gate: only publish if tagged commit passed CI
-      #   env:
-      #     TWINE_USERNAME: __token__
-      #     TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      #   run: |
-      #     . .venv/bin/activate
-      #     twine upload dist/*
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
