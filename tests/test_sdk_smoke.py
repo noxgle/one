@@ -10,6 +10,8 @@ from one.core.sdk import create_agent_session
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 
+pytestmark = pytest.mark.smoke
+
 
 @pytest.mark.asyncio
 async def test_create_agent_session_smoke(tmp_path: Path):

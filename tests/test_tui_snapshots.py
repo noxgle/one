@@ -26,6 +26,8 @@ import pytest
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "tui"
 
+pytestmark = pytest.mark.snapshot
+
 # ---------------------------------------------------------------------------
 # Self-contained deterministic fake session / model helpers, including the
 # attributes read by ``_OneTextualApp._refresh_sidebar_`` and

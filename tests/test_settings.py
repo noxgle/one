@@ -4,6 +4,8 @@ import pytest
 
 from one.core.settings_manager import SettingsManager
 
+pytestmark = pytest.mark.smoke
+
 
 def test_default_subagents_has_timeout_sec_1800() -> None:
     """DEFAULT_SETTINGS subagents dict includes timeoutSec=1800."""

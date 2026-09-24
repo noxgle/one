@@ -82,6 +82,11 @@ version = {attr = "one.config.VERSION"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "smoke: fast, local baseline tests",
+    "slow: tests with intentionally longer runtime",
+    "snapshot: golden-file rendering regression tests",
+]
 filterwarnings = [
     "error::DeprecationWarning:one.*",
     "ignore:unclosed:ResourceWarning",

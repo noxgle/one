@@ -11,7 +11,10 @@ cd one
 python3 -m venv .venv
 .venv/bin/pip install -e .[dev]
 
-# Run the full test suite (~1230 tests, ~3 minutes)
+# Run a focused local suite while editing
+scripts/test.sh tools
+
+# Run the full test suite (the CI command)
 .venv/bin/python -m pytest -q
 
 # Lint (ruff)
@@ -40,6 +43,21 @@ ruff check .
 
 - `pytest` is the primary gate (`testpaths = ["tests"]`, no conftest); `ruff` is
   an additional CI lint gate (`pyproject.toml` `[tool.ruff]`).
+- Use `scripts/test.sh <suite>` for focused local feedback. It uses
+  `.venv/bin/python` when available and otherwise falls back to `python`.
+  Available suites are `quick`, `mcp`, `tui`, `providers`, `tools`, `auth`,
+  `extensions`, `cli`, `rpc`, `core`, `sessions`, `failed`/`last`, and
+  `full`/`all`; pass extra pytest arguments after the suite. For example, run
+  `scripts/test.sh tools -x` for tool work or `scripts/test.sh tui -k paste`
+  for a TUI change. `scripts/test.sh --help` lists every suite.
+- `failed` and its `last` alias run pytest with `--lf`. When pytest has no
+  last-failure cache, they may run the complete test suite.
+- `quick` is a fast smoke baseline, not a replacement for the full suite. Run
+  `.venv/bin/python -m pytest -q` before committing or merging; this remains
+  the unchanged full CI command. `scripts/test.sh full` is equivalent.
+- Pytest markers identify smoke (`smoke`) and golden-rendering (`snapshot`)
+  tests. `slow` is reserved for deliberately long-running tests; do not apply
+  it merely because a test is in a broad suite.
 - Tests live in `tests/` with `testpaths = ["tests"]` (no conftest).
 - Async tests need `@pytest.mark.asyncio` (no `asyncio_mode = auto` in pyproject).
 - Tests must **never** hit real API servers — inject fake providers via
@@ -113,6 +131,8 @@ The agent event contract (`tool_call_start/end`, `turn_*`, snapshots in
 1. Create a feature branch from `main`.
 2. Write tests for new behavior.
 3. Run the full suite: `.venv/bin/python -m pytest -q` and `ruff check .`.
+   Focused `scripts/test.sh` suites are encouraged during local edits but do
+   not replace the full command before commit or merge.
 4. Ensure no private data (IPs, paths, keys) in commits.
 5. Open a pull request with a clear description.
 
