@@ -40,11 +40,18 @@ class McpServerConfig:
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None
     enabled: bool = True
-    restart: bool = False
+    restart: bool | None = None
     restart_delay_sec: float = 60.0
     max_restart_attempts: int = 3
     restart_exhaustion: str = "disable"
     retry_interval_sec: float = 300.0
+
+    def __post_init__(self) -> None:
+        # HTTP servers have no child-process monitor, so recover their failed
+        # connections unless recovery was explicitly configured off. Preserve
+        # stdio's historical opt-in behavior.
+        if self.restart is None:
+            self.restart = bool(self.url)
 
 
 @dataclass
@@ -373,7 +380,7 @@ class McpManager:
                     env={str(k): str(v) for k, v in (cfg.get("env") or {}).items()},
                     url=str(url) if url else None,
                     enabled=bool(cfg.get("enabled", True)),
-                    restart=bool(cfg.get("restart", False)),
+                    restart=bool(cfg.get("restart", bool(url))),
                     restart_delay_sec=_nonnegative_float(cfg.get("restartDelaySec", 60), 60.0),
                     max_restart_attempts=_nonnegative_int(cfg.get("maxRestartAttempts", 3), 3),
                     restart_exhaustion=(
@@ -483,7 +490,7 @@ class McpManager:
         if removed_tools:
             self._notify_tools_changed()
         await asyncio.gather(*(failed.close() for failed in failed_clients), return_exceptions=True)
-        if config.restart and config.enabled and not config.url:
+        if config.restart and config.enabled:
             self._schedule_restart(config)
 
     def _schedule_restart(self, config: McpServerConfig) -> None:
@@ -592,7 +599,7 @@ class McpManager:
             return []
         previous = next((server for server in self._servers if server.name == name), None)
         config = McpServerConfig(name=name, command=command or "", args=args or [], env=env or {}, url=url, enabled=True,
-                                 restart=previous.restart if previous else False,
+                                  restart=previous.restart if previous else bool(url),
                                  restart_delay_sec=previous.restart_delay_sec if previous else 60.0,
                                  max_restart_attempts=previous.max_restart_attempts if previous else 3,
                                  restart_exhaustion=previous.restart_exhaustion if previous else "disable",

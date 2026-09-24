@@ -568,6 +568,15 @@ async def test_mcp_manager_create_http_config():
     assert len(statuses) == 1
     assert statuses[0]["transport"] == "http"
     assert statuses[0]["enabled"] is True
+    assert manager._servers[0].restart is True
+
+
+def test_mcp_manager_create_http_restart_can_be_disabled_explicitly():
+    settings = SettingsManager.in_memory(
+        initial={"mcpServers": {"ws": {"url": "http://127.0.0.1:8000/mcp", "restart": False}}}
+    )
+    config = McpManager.create(settings)._servers[0]
+    assert config.restart is False
 
 
 @pytest.mark.asyncio
@@ -656,7 +665,7 @@ class _FailingHttpCallClient:
 
 
 @pytest.mark.asyncio
-async def test_http_call_failure_removes_stale_client_and_tools_without_restart():
+async def test_http_call_failure_removes_stale_client_tools_and_schedules_recovery():
     config = McpServerConfig("web", "", url="http://x/mcp", restart=True)
     manager = McpManager([config])
     client = _FailingHttpCallClient(config)
@@ -669,8 +678,115 @@ async def test_http_call_failure_removes_stale_client_and_tools_without_restart(
     assert manager.tools() == []
     assert manager._clients == []
     assert client.closed is True
-    assert manager._restart_tasks == {}
+    assert "web" in manager._restart_tasks
     assert manager.server_status()[0]["runtimeState"] == "failed"
+    await manager.close()
+
+
+class _RecoveringHttpClient:
+    instances: list[_RecoveringHttpClient] = []
+    outcomes: list[str] = []
+
+    def __init__(self, config: McpServerConfig) -> None:
+        self.config = config
+        self.closed = False
+        self.calls: list[tuple[str, dict]] = []
+        self.outcome = self.outcomes.pop(0) if self.outcomes else "ok"
+        self.instances.append(self)
+
+    async def start(self) -> None:
+        if self.outcome == "connect-fail":
+            raise RuntimeError("connection failed")
+
+    async def list_tools(self) -> list[dict]:
+        return [{"name": "http_recovered_tool", "description": "", "inputSchema": {}}]
+
+    async def call_tool(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:
+        self.calls.append((name, arguments))
+        if self.outcome == "call-fail":
+            raise RuntimeError("transport failed")
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def stderr_tail(self) -> list[str]:
+        return []
+
+
+@pytest.mark.asyncio
+async def test_http_call_failure_recovers_tools_without_replaying_call(monkeypatch):
+    _RecoveringHttpClient.instances = []
+    _RecoveringHttpClient.outcomes = ["call-fail", "ok"]
+    monkeypatch.setattr(mcp_client_module, "HttpMcpClient", _RecoveringHttpClient)
+    manager = McpManager([McpServerConfig("web", "", url="http://x/mcp", restart_delay_sec=0.01)])
+    await manager.start()
+
+    with pytest.raises(RuntimeError, match="transport failed"):
+        await manager.call_tool("http_recovered_tool", {"value": 1})
+
+    assert not manager.has_tool("http_recovered_tool")
+    await _wait_until(lambda: manager.has_tool("http_recovered_tool"))
+    status = manager.server_status()[0]
+    assert status["running"] is True
+    assert status["error"] is None
+    assert status["restartAttempts"] == 0
+    assert _RecoveringHttpClient.instances[0].calls == [("http_recovered_tool", {"value": 1})]
+    assert _RecoveringHttpClient.instances[1].calls == []
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_http_disable_and_close_cancel_pending_recovery(monkeypatch):
+    _RecoveringHttpClient.instances = []
+    _RecoveringHttpClient.outcomes = ["call-fail"]
+    monkeypatch.setattr(mcp_client_module, "HttpMcpClient", _RecoveringHttpClient)
+    manager = McpManager([McpServerConfig("web", "", url="http://x/mcp", restart_delay_sec=10)])
+    await manager.start()
+    with pytest.raises(RuntimeError):
+        await manager.call_tool("http_recovered_tool", {})
+    await _wait_until(lambda: "web" in manager._restart_tasks)
+    await manager.disable_server("web")
+    assert manager._restart_tasks == {}
+    assert manager.server_status()[0]["enabled"] is False
+
+    _RecoveringHttpClient.instances = []
+    _RecoveringHttpClient.outcomes = ["call-fail", "ok"]
+    enabling_manager = McpManager([McpServerConfig("manual", "", url="http://x/mcp", restart_delay_sec=10)])
+    await enabling_manager.start()
+    with pytest.raises(RuntimeError):
+        await enabling_manager.call_tool("http_recovered_tool", {})
+    await _wait_until(lambda: "manual" in enabling_manager._restart_tasks)
+    assert await enabling_manager.enable_server("manual", "", url="http://x/mcp") == ["http_recovered_tool"]
+    assert enabling_manager._restart_tasks == {}
+    await enabling_manager.close()
+
+    _RecoveringHttpClient.instances = []
+    _RecoveringHttpClient.outcomes = ["call-fail"]
+    closing_manager = McpManager([McpServerConfig("closing", "", url="http://x/mcp", restart_delay_sec=10)])
+    await closing_manager.start()
+    with pytest.raises(RuntimeError):
+        await closing_manager.call_tool("http_recovered_tool", {})
+    await _wait_until(lambda: "closing" in closing_manager._restart_tasks)
+    await closing_manager.close()
+    assert closing_manager._restart_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_http_restart_exhaustion_disable_is_runtime_only(monkeypatch):
+    _RecoveringHttpClient.instances = []
+    _RecoveringHttpClient.outcomes = ["call-fail", "connect-fail"]
+    monkeypatch.setattr(mcp_client_module, "HttpMcpClient", _RecoveringHttpClient)
+    manager = McpManager(
+        [McpServerConfig("web", "", url="http://x/mcp", restart_delay_sec=0.01, max_restart_attempts=1)]
+    )
+    await manager.start()
+    with pytest.raises(RuntimeError):
+        await manager.call_tool("http_recovered_tool", {})
+    await _wait_until(lambda: manager.server_status()[0]["runtimeState"] == "disabled")
+    status = manager.server_status()[0]
+    assert status["enabled"] is True
+    assert status["restartAttempts"] == 1
     await manager.close()
 
 

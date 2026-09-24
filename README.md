@@ -382,8 +382,10 @@ their configured URL. Use `--no-mcp` to disable all of them for a run and
 `/mcp list|enable|disable` in the TUI. MCP tools are added to the agent prompt.
 
 Stdio servers can opt into runtime recovery after an unexpected process exit or
-stdout EOF. Recovery is off by default. The following optional fields belong
-under `mcpServers.<name>`:
+stdout EOF; recovery remains off by default for stdio. Streamable HTTP servers
+recover failed connections by default because they have no child-process monitor.
+Set `"restart": false` on an HTTP server to opt out. The following optional
+fields belong under `mcpServers.<name>`:
 
 ```json
 {
@@ -400,7 +402,7 @@ After each failure, `one` removes that server's tools immediately and waits
 tools. At the attempt limit, `disable` stops recovery for this runtime only
 (the configured `enabled` value is not changed); `retry` continues at
 `retryIntervalSec`. `/mcp disable` cancels pending recovery, and `/mcp enable`
-resets recovery state. HTTP MCP servers retain their existing behavior.
+resets recovery state. Recovery never replays the interrupted tool call.
 
 For web search, the [web-deepsearch MCP server](https://github.com/noxgle/mcp-web-deepsearch)
 uses DuckDuckGo and can run over stdio. It needs no API key, but its server is
