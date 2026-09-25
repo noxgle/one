@@ -47,7 +47,7 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ),
     ModelInfo(
         "ollama",
-        "llama3.1",
+        "local",
         reasoning=False,
         context_window=32_768,
         # No hardcoded base URL: default to the provider registry, which reads

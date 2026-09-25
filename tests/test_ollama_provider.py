@@ -35,11 +35,11 @@ def test_model_registry_ollama_available_without_auth(tmp_path: Path) -> None:
     auth = AuthStorage.in_memory()
     # Isolate from the real ~/.config/one/models.json (builtins only).
     registry = ModelRegistry.create(auth, str(tmp_path / "no" / "models.json"))
-    model = registry.find("ollama", "llama3.1")
+    model = registry.find("ollama", "local")
     assert model is not None
     assert model.base_url is None
     available = registry.get_available()
-    assert any(m.provider == "ollama" and m.id == "llama3.1" for m in available)
+    assert any(m.provider == "ollama" and m.id == "local" for m in available)
     auth_data = registry.get_api_key_and_headers(model)
     assert auth_data["ok"] is True
     assert auth_data["apiKey"] == ""
@@ -70,4 +70,4 @@ def test_cli_accepts_ollama_url_flag(tmp_path: Path):
         check=False,
     )
     assert res.returncode == 0
-    assert "ollama/llama3.1" in res.stdout
+    assert "ollama/local" in res.stdout
