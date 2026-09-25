@@ -32,6 +32,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
     "theme": "hacker",
+    "tui": {"infoPanel": "top"},
     "defaultMode": "tui",
     "quietStartup": False,
     "steeringMode": "interrupt",
@@ -175,6 +176,12 @@ class SettingsManager:
     def get_theme(self) -> str:
         theme = self.merged().get("theme", "hacker")
         return theme if isinstance(theme, str) else "hacker"
+
+    def get_tui_info_panel(self) -> str:
+        """Return the validated startup information-panel layout."""
+        tui = self.merged().get("tui", {})
+        value = tui.get("infoPanel", "top") if isinstance(tui, dict) else "top"
+        return value if value in {"top", "sidebar"} else "top"
 
     def get_default_mode(self) -> str:
         mode = str(self.merged().get("defaultMode") or "tui").lower()

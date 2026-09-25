@@ -128,10 +128,30 @@ def test_resolve_tui_theme_includes_fallout() -> None:
     assert resolve_tui_theme("no-such-theme").name == "default"
 
 
+@pytest.mark.asyncio
+async def test_tui_theme_applies_sidebar_colors_to_header(tmp_path: Path) -> None:
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        theme = BUILTIN_TUI_THEMES["light"]
+        assert app._apply_theme(theme.name)
+
+        header = app.query_one("#header", Static)
+        assert header.styles.background.hex.lower() == theme.sidebar_bg
+        assert header.styles.color.hex.lower() == theme.screen_fg
+        assert all(border[1].hex.lower() == theme.panel_border for border in header.styles.border)
+        assert app.query_one("#logo", Static).styles.color.hex.lower() == theme.screen_fg
+
+
 def test_tui_shortcuts_are_single_source_of_truth() -> None:
     rendered = format_tui_shortcuts()
 
     assert ("Ctrl+P", "command palette") in TUI_SHORTCUTS
+    assert ("Ctrl+K", "provider/model picker") in TUI_SHORTCUTS
     assert "Ctrl+P command palette" in rendered
     assert "Ctrl+V paste text from the host/system clipboard" in rendered
     assert "Ctrl+Shift+V paste terminal text (SSH-safe)" in rendered
@@ -161,6 +181,33 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     assert snapshot["mcpEnabled"] is False
     assert snapshot["mcpServers"] == []
     assert snapshot["retry"] == "on"
+
+
+@pytest.mark.asyncio
+async def test_tui_info_panel_layouts_are_mutually_exclusive(tmp_path: Path) -> None:
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    top = _OneTextualApp(_mk_app_session(tmp_path))
+    async with top.run_test() as pilot:
+        await pilot.pause()
+        assert top.query_one("#sidebar", Static).styles.display == "none"
+        header = top.query_one("#header", Static)
+        assert header.styles.height.value == 3
+        assert "\n" not in str(header.content)
+        assert "██████╗" not in str(header.content)
+        assert len(list(top.query("#logo"))) == 1
+
+        await top._handle_command("/layout focus")
+        assert top.query_one("#header", Static).styles.display == "none"
+        assert len(list(top.query("#logo"))) == 1
+
+    sidebar = _OneTextualApp(_mk_app_session(tmp_path, settings_override={"tui": {"infoPanel": "sidebar"}}))
+    async with sidebar.run_test() as pilot:
+        await pilot.pause()
+        assert sidebar.query_one("#sidebar", Static).styles.display != "none"
+        assert len(list(sidebar.query("#logo"))) == 1
 
 
 def test_build_sidebar_snapshot_lists_enabled_mcp_servers() -> None:
@@ -754,17 +801,28 @@ async def test_tui_sidebar_info_markup_still_rendered(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_tui_welcome_includes_logo(tmp_path: Path):
-    """TUI mount must write ASCII logo lines containing '██╗' anchors."""
-    from one.modes.tui_mode import _OneTextualApp
+async def test_tui_welcome_logo_is_a_dedicated_non_transcript_widget(tmp_path: Path):
+    """Startup artwork is visual-only and separate from the status header."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _TUI_LOGO_LINES, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(120, 48)) as pilot:
         await pilot.pause()
-        stream = "\n".join(app._stream_lines)
-        assert "██╗" in stream
-        assert "one TUI v2 ready. /help" in stream
+        assert app._stream_lines == []
+        header = str(app.query_one("#header", Static).content)
+        logo = str(app.query_one("#logo", Static).content)
+        assert _TUI_LOGO_LINES[0] in logo
+        assert _TUI_LOGO_LINES[-1] in logo
+        assert _TUI_LOGO_LINES[0] not in header
+        assert "\n" not in header
+        assert "v" in header
+        assert "openai/" in header
+        assert "THINK:" in header
+        assert "COOP: OFF" in header
+        assert "ready" in header
 
 
 @pytest.mark.asyncio
@@ -1016,7 +1074,7 @@ async def test_tui_tool_status_uses_literal_segmented_bold_styles(tmp_path: Path
         status_line = next(line for line in app._stream_lines if line.endswith(" [ok]"))
         error_line = next(line for line in app._stream_lines if line.endswith("[err]"))
         heading_start = content.plain.index(heading)
-        args_start = content.plain.index(args_line)
+        args_start = content.plain.index('{"x": "[b]"}')
         status_start = content.plain.index(status_line) + status_line.rindex(" [ok]")
         error_start = content.plain.index(error_line) + error_line.rindex("[err]")
 

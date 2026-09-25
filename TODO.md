@@ -3765,3 +3765,229 @@ events must be checked for ordering and duplicate delivery.
 - [x] No execution, persistence, provider-context, or event-contract behavior
   changes.
 - [x] Focused tests, full pytest, Ruff, diff check, and snapshot review pass.
+
+---
+
+## TUI UX redesign: logo, information panel, conversation hierarchy, and input
+
+### Goal
+
+Improve TUI readability while preserving the existing event contracts, keyboard
+shortcuts, session behavior, cooperation safety semantics, and terminal-first
+visual style.
+
+### Scope
+
+#### In scope
+
+- Restore the textual/ASCII logo in a dedicated upper panel, never in the
+  conversation transcript.
+- Offer exactly one information layout at a time:
+  - `top`: logo plus minimal status information, without the detailed side panel;
+  - `sidebar`: logo/status header plus the detailed right sidebar.
+- Add persistent configuration under `tui.infoPanel`, defaulting to `top`.
+- Make `COOP: ON` / `COOP: OFF` consistent everywhere and refresh it immediately
+  when cooperation or approval state changes.
+- Give transcript blocks explicit `You`, `Thinking`, `Tool`, and `Assistant`
+  labels without heavy per-message borders.
+- Dim thinking output, add tool status badges, and shorten/collapse long tool
+  arguments and results while retaining full evidence/detail access.
+- Simplify the input area: one-line default, multiline expansion, subtle border,
+  and focus-only send/command hints.
+- Add `Ctrl+K` provider/model picker, `/layout compact|wide|focus`, and
+  `/sidebar hide|show`.
+- Add a context usage meter and shortened active-model display with a detailed
+  overlay/panel fallback.
+- Use shared status symbols (`●`, `✓`, `△`, `×`, `○`) with an ASCII-safe fallback.
+
+#### Non-goals
+
+- No changes to provider APIs, agent events, session persistence, or tool
+  execution semantics.
+- No removal of existing cooperation safeguards or keyboard behavior.
+- No mandatory version bump in this compatibility/UI refinement unless the
+  release policy is explicitly changed.
+
+### Assumptions and decisions
+
+- `tui.infoPanel` is the persisted setting; valid values are `top` and
+  `sidebar`. Invalid values fall back to `top`.
+- `/layout` changes presentation at runtime; the persisted setting remains the
+  startup default unless the command explicitly persists it.
+- `/sidebar hide|show` controls visibility at runtime without deleting sidebar
+  data or changing the configured default.
+- The existing logo artwork is restored in the upper panel and is excluded from
+  stream selection/copy coordinates.
+- `COOP` remains explicit text, not color-only state, for accessibility and
+  terminals without color support.
+
+### Open questions
+
+- Should `/layout` persist its selection, or should only `/config tui.infoPanel`
+  persist it?
+- Should the default logo use the previous full multi-line artwork or a shorter
+  one-line/three-line variant when the terminal height is small?
+- Should the model picker be available only through `Ctrl+K`, or also through a
+  slash command such as `/model`?
+
+### Architecture
+
+Keep the current `_OneTextualApp` and ordered event accumulator. Add a small
+presentation state layer for the selected information layout and runtime
+visibility. Separate fast header/status updates from detailed sidebar
+re-rendering. Keep transcript source lines/events independent from Rich/Textual
+presentation so labels, dimming, badges, and truncation cannot alter persisted
+messages or provider context.
+
+### Phases
+
+#### Phase 1: Logo and configurable information layout
+
+**Objective:** Restore the logo in the upper panel and render either the top
+minimal panel or the detailed sidebar, never both information panels.
+
+**Prerequisites:** Current compact-header implementation on
+`feat/tui-compact-header`.
+
+**Expected outcome:** Fresh TUI startup shows the logo above the conversation;
+`tui.infoPanel=top` hides the right sidebar and `tui.infoPanel=sidebar` shows it.
+
+**Estimated effort:** 3–5 hours.
+
+**Confidence:** High.
+
+- [x] **Task:** Add validated TUI information-panel configuration.
+  - **Description:** Add `tui.infoPanel` to defaults and a settings getter with
+    `top`/`sidebar` validation. Document `/config tui.infoPanel top|sidebar`.
+  - **Files:** `one/core/settings_manager.py`, `one/modes/tui_mode.py`,
+    `README.md`, relevant settings tests.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Missing/invalid values resolve to `top`; valid
+    values persist and are available to TUI startup.
+  - **Verification:** Settings unit tests and `/config tui.infoPanel` TUI tests.
+
+- [x] **Task:** Restore the logo in a dedicated upper panel.
+  - **Description:** Move the existing logo artwork into the header/top panel;
+    keep it out of `_stream_lines`, selection offsets, session content, and
+    copy behavior. Make height/overflow safe for short terminals.
+  - **Files:** `one/modes/tui_mode.py`, TUI snapshots and rendering tests.
+  - **Dependencies:** Configuration task.
+  - **Acceptance Criteria:** Logo is visible above the stream and does not add
+    transcript rows or alter copied conversation text.
+  - **Verification:** Startup rendering, selection/copy, narrow-height tests,
+    and reviewed snapshot updates.
+
+- [x] **Task:** Implement mutually exclusive top/sidebar layouts.
+  - **Description:** Hide/show `#sidebar` according to configuration; add
+    runtime `/layout compact|wide|focus` and `/sidebar hide|show` commands with
+    predictable precedence and no event-contract changes.
+  - **Files:** `one/modes/tui_mode.py`, command tests, snapshot tests.
+  - **Dependencies:** Configuration and logo tasks.
+  - **Acceptance Criteria:** Only the selected information panel is rendered;
+    runtime toggles update immediately and preserve MCP/session data.
+  - **Verification:** TUI command tests, all three layouts, narrow/wide viewport
+    snapshots, and existing shortcut tests.
+
+#### Phase 2: Transcript hierarchy and status presentation
+
+**Objective:** Make roles, thinking, tools, and assistant responses visually
+distinct without heavy borders or changing event ordering.
+
+**Prerequisites:** Phase 1 layout state.
+
+**Expected outcome:** A turn visibly follows `You → Thinking → Tool → Assistant`
+with dim thinking, status badges, and bounded long tool content.
+
+**Estimated effort:** 4–7 hours.
+
+**Confidence:** Medium.
+
+- [x] **Task:** Add role labels and lightweight tool status badges.
+  - **Description:** Update display-only stream formatting for `You`,
+    `Thinking`, `Tool`, and `Assistant`; use shared symbols and preserve tool
+    lifecycle ordering, retry/error states, and literal JSON rendering.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_rendering.py`,
+    `tests/test_tui_streaming.py`, TUI snapshots.
+  - **Dependencies:** Phase 1.
+  - **Acceptance Criteria:** Labels are visible, thinking is visually subdued,
+    tool status is unambiguous, and no persisted/provider-facing content changes.
+  - **Verification:** Lifecycle, retry, error, compaction, copy, and snapshot tests.
+
+- [x] **Task:** Bound long tool arguments and results in the display.
+  - **Description:** Show concise previews by default with an explicit expand or
+    existing detail/evidence path for complete sanitized content; never truncate
+    persisted evidence or provider context accidentally.
+  - **Files:** `one/modes/tui_mode.py`, relevant tool/evidence and TUI tests.
+  - **Dependencies:** Role-label renderer.
+  - **Acceptance Criteria:** Long output cannot monopolize the viewport; full
+    detail remains recoverable and JSON stays literal.
+  - **Verification:** Long-output, evidence retrieval, wrapping, and copy tests.
+
+- [x] **Task:** Add context meter and consistent status formatting.
+  - **Description:** Render context usage as text plus a bounded meter, shorten
+    the active model in compact views, and expose the full value via detail
+    overlay/panel. Centralize `COOP` casing and status-symbol mapping.
+  - **Files:** `one/modes/tui_mode.py`, sidebar/header tests, snapshots.
+  - **Dependencies:** Phase 1 layout and role renderer.
+  - **Acceptance Criteria:** Context values have safe unknown-limit fallbacks;
+    `COOP: ON/OFF` is identical in all views and status symbols have an ASCII
+    fallback.
+  - **Verification:** Context usage fixtures, cooperation/approval tests,
+    theme tests, and snapshots.
+
+#### Phase 3: Input and model navigation
+
+**Objective:** Reduce input chrome and make model/layout navigation fast without
+breaking paste, history, approval, or existing commands.
+
+**Prerequisites:** Phase 1 and Phase 2 renderers.
+
+**Expected outcome:** Input is one line by default, expands for multiline text,
+and `Ctrl+K` opens a usable provider/model picker.
+
+**Estimated effort:** 3–5 hours.
+
+**Confidence:** Medium.
+
+- [x] **Task:** Simplify and focus-adapt the input widget.
+  - **Description:** Use a subtle single-line default, expand only for
+    multiline, and show `Ctrl+Enter send · Ctrl+P commands` only while focused.
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_input.py`, snapshots.
+  - **Dependencies:** Phase 1 layout.
+  - **Acceptance Criteria:** Existing submit, paste, history, approval answer,
+    and multiline behavior remains intact.
+  - **Verification:** Keyboard/paste/input tests and narrow terminal snapshots.
+
+- [x] **Task:** Add the `Ctrl+K` provider/model picker.
+  - **Description:** Add a searchable picker using available registry models,
+    preserve provider/model selection and persistence semantics, and show full
+    model details in the picker or overlay.
+  - **Files:** `one/modes/tui_mode.py`, model-picker tests, snapshot tests.
+  - **Dependencies:** Phase 1 layout and settings behavior.
+  - **Acceptance Criteria:** Picker opens/closes reliably, selects a valid model,
+    handles no configured models, and does not bypass provider authentication.
+  - **Verification:** Provider/model selection tests, keyboard tests, and manual
+    TUI acceptance with configured and unconfigured providers.
+
+### Risks & mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| Logo/header consumes too much height on small terminals | Use bounded layout, short-logo fallback, and narrow-height snapshots |
+| Two information layouts drift in behavior | Share one status snapshot and test both layouts |
+| Display truncation hides safety/tool details | Keep full evidence/detail paths and explicit expand affordances |
+| Rich styling changes literal JSON or copy output | Style display segments only; test exact copied/source text |
+| Runtime layout commands desynchronize persisted settings | Separate runtime state from persisted default and test precedence |
+| Faster header refresh races with session events | Keep Textual-thread updates centralized and test approval/toggle transitions |
+
+### Project acceptance criteria
+
+- [x] Logo is visible in the dedicated upper panel and absent from transcript data.
+- [x] Exactly one information layout is active at a time (`top` or `sidebar`).
+- [x] `COOP: ON/OFF` is explicit, consistent, and immediately updated.
+- [x] Conversation roles and tool statuses are visually distinguishable.
+- [x] Long tool content is bounded without losing access to complete details.
+- [x] Input is compact by default and preserves existing keyboard/paste behavior.
+- [x] Layout commands, context meter, model picker, themes, snapshots, and tests
+  are complete.
+- [x] `scripts/test.sh tui`, full pytest, Ruff, and `git diff --check` pass.

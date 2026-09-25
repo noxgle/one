@@ -149,7 +149,7 @@ async def test_tui_renders_codex_reasoning_summary_sse_separately(
 
         stream = "\n".join(app._stream_lines)
         rendered = str(app.query_one("#stream", Static).content)
-        assert "Thought:" in stream
+        assert "Thinking:" in stream
         assert summary in stream
         assert summary in rendered
         assert "The visible answer" in stream
@@ -196,14 +196,20 @@ async def test_tui_copy_selected_stream_text(tmp_path: Path):
 
         app._copy_to_clipboard = fake_copy  # type: ignore[method-assign]
         stream_widget = app.query_one("#stream")
-        # Selection offsets are (x, y): the logo lines are written on mount,
-        # "one TUI v2 ready" is at y=20, and "hello world" is at y=21.
-        app.screen.selections = {stream_widget: Selection(Offset(0, 21), Offset(5, 21))}
+        # Selection offsets are (x, y) within the transcript. The visual-only
+        # logo has its own widget, so this is row zero.
+        app.screen.selections = {stream_widget: Selection(Offset(0, 0), Offset(5, 0))}
         app._try_auto_copy_selected_stream_text()
 
         assert received == ["hello"]
         assert app._last_auto_copied == "hello"
+        assert all("██████╗" not in line for line in app._stream_lines)
+        logo_widget = app.query_one("#logo")
+        app.screen.selections = {logo_widget: Selection(Offset(0, 0), Offset(3, 0))}
+        app._try_auto_copy_selected_stream_text()
+        assert received == ["hello"]
         # Dedup: the same selection must not copy twice.
+        app.screen.selections = {stream_widget: Selection(Offset(0, 0), Offset(5, 0))}
         app._try_auto_copy_selected_stream_text()
         assert received == ["hello"]
 
@@ -621,8 +627,8 @@ async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
         await pilot.pause()
 
         # Count Thinking: labels
-        thinking_labels = [l for l in app._stream_lines if l == "Thought:"]
-        assert len(thinking_labels) == 2, f"Expected 2 Thought: labels, got {len(thinking_labels)}"
+        thinking_labels = [l for l in app._stream_lines if l == "Thinking:"]
+        assert len(thinking_labels) == 2, f"Expected 2 Thinking: labels, got {len(thinking_labels)}"
 
         # Count _THINKING_TEXT_MARK lines
         thinking_text_lines = [l for l in app._stream_lines if l.startswith(_THINKING_TEXT_MARK)]
@@ -712,8 +718,8 @@ async def test_tui_leading_empty_whitespace_no_label_then_block(tmp_path: Path):
         await pilot.pause()
 
         # Exactly one Thinking: label
-        thinking_labels = [l for l in app._stream_lines if l == "Thought:"]
-        assert len(thinking_labels) == 1, f"Expected 1 Thought: label, got {len(thinking_labels)}"
+        thinking_labels = [l for l in app._stream_lines if l == "Thinking:"]
+        assert len(thinking_labels) == 1, f"Expected 1 Thinking: label, got {len(thinking_labels)}"
 
         # Inspect rendered Static content and assert literal "A B"
         widget = app.query_one("#stream", Static)
@@ -750,8 +756,7 @@ async def test_tui_thinking_label_finalizes_after_waiting_spinner_removal(tmp_pa
         session._emit({"type": "tool_call_start", "tool": "read", "args": {"path": "a.txt"}})
         await pilot.pause()
 
-        assert app._stream_lines.count("Thought:") == 1
-        assert app._stream_lines.count("Thinking:") == 0
+        assert app._stream_lines.count("Thinking:") == 1
 
 
 @pytest.mark.asyncio
@@ -1008,16 +1013,14 @@ async def test_tui_tool_call_start_removes_streamed_json_block(tmp_path: Path):
         assert "tool:" in stream and "bash" in stream
         # The streamed JSON must NOT appear as a standalone assistant chat block.
         # Find the tool block line and verify there's no assistant delta block
-        # before it (only logo lines and user text).
+        # before it (only user text).
         tool_line_idx = next(
             (i for i, l in enumerate(app._stream_lines) if "tool:" in l and "bash" in l),
             None,
         )
         assert tool_line_idx is not None
-        # The JSON text should not be in any non-logo lines.
+        # The JSON text should not be in any transcript lines.
         for line in app._stream_lines:
-            if line.startswith(" ") or line.startswith("\u2588"):
-                continue  # logo lines
             if "tool:" in line and "bash" in line:
                 continue  # the tool block itself
             # No assistant delta lines should contain the full JSON structure.
@@ -1310,6 +1313,9 @@ async def test_tui_clear_command_uses_full_stream_reset(tmp_path: Path):
         app._thinking_buffer = "reasoning"
         app._thinking_line_idx = 1
         app._last_auto_copied = "copied selection"
+        app.action_show_model_picker()
+        assert app._model_picker_models
+        assert app.query_one("#model_overlay", Static).has_class("visible")
         with app._pending_ui_events_lock:
             app._pending_ui_events = [
                 {
@@ -1341,6 +1347,8 @@ async def test_tui_clear_command_uses_full_stream_reset(tmp_path: Path):
         assert app._thinking_buffer == ""
         assert app._thinking_line_idx is None
         assert app._last_auto_copied == ""
+        assert app._model_picker_models == []
+        assert not app.query_one("#model_overlay", Static).has_class("visible")
 
 
 @pytest.mark.asyncio

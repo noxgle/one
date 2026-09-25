@@ -9,6 +9,8 @@ from tests.support.tui import _mk_app_session
 
 @pytest.mark.asyncio
 async def test_tui_ctrl_z_toggles_cooperation(tmp_path: Path):
+    from textual.widgets import Static
+
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -19,12 +21,16 @@ async def test_tui_ctrl_z_toggles_cooperation(tmp_path: Path):
         # ctrl+z toggles cooperation regardless of widget focus.
         input_widget = app.query_one("#input")
         assert input_widget.has_focus
+        header = app.query_one("#header", Static)
+        assert "COOP: OFF" in str(header.content)
         await pilot.press("ctrl+z")
         assert session.approval_callback is not None
         assert session.settings_manager.get_tool_approval() is True
+        assert "COOP: ON" in str(header.content)
         await pilot.press("ctrl+z")
         assert session.approval_callback is None
         assert session.settings_manager.get_tool_approval() is False
+        assert "COOP: OFF" in str(header.content)
 
 
 @pytest.mark.asyncio
@@ -99,6 +105,8 @@ async def test_tui_spinner_paused_shows_ask_user_wait(tmp_path: Path):
 async def test_tui_approval_prompt_toasts(tmp_path: Path):
     """_approval_prompt must call notify (toast) with a message containing 'Approve:'
     and timeout=8.0."""
+    from textual.widgets import Static
+
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -128,6 +136,9 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
         # The prompt should have called notify already.
         assert len(notified) >= 1
         assert any("Approve: bash" in n for n, _ in notified)
+        header = app.query_one("#header", Static)
+        assert "COOP: ON (PENDING)" in str(header.content)
+        assert "awaiting approval" in str(header.content)
         # Verify timeout=8.0 is passed.
         # Find the actual call with the "Approve:" message
         approve_call = [kwargs for msg, kwargs in notified if "Approve: bash" in msg]

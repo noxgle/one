@@ -132,13 +132,26 @@ one --mode tui --image screenshot.png
 The Textual TUI is the human-facing interface. It streams responses, displays
 tool lifecycle status, retains sessions, and accepts slash commands such as
 `/help`, `/steer`, `/follow`, `/abort`, `/login`, and `/mcp list`. It displays a
-startup banner and the version in its sidebar.
+startup banner and status information.
+
+Configure the startup information panel in `settings.json`:
+
+```json
+{"tui": {"infoPanel": "top"}}
+```
+
+`top` is the default minimal layout with no right sidebar; `sidebar` enables the
+detailed right sidebar. At runtime, use `/layout compact|wide|focus` or
+`/sidebar hide|show` to adjust the layout. The header explicitly shows
+`COOP: ON` or `COOP: OFF`; its logo is display-only and is not transcript
+content.
 
 Current application shortcuts are:
 
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+P` | Command palette |
+| `Ctrl+K` | Provider/model picker |
 | `Ctrl+C` | Abort turn; reject a pending approval |
 | `Ctrl+L` | Clear stream |
 | `Ctrl+Q` | Quit |

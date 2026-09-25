@@ -46,8 +46,14 @@ class _DummySessionManager:
 
 
 class _DummySettingsManager:
+    def __init__(self, info_panel: str = "top") -> None:
+        self.info_panel = info_panel
+
     def get_theme(self) -> str:
         return "default"
+
+    def get_tui_info_panel(self) -> str:
+        return self.info_panel
 
     def get_subagents_enabled(self) -> bool:
         return True
@@ -59,7 +65,7 @@ class _DummySettingsManager:
 class _DummySession:
     """Minimal deterministic session for snapshot tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, info_panel: str = "top") -> None:
         self.model = _DummyModel()
         self.thinking_level: str = "medium"
         self.session_manager = _DummySessionManager()
@@ -67,7 +73,7 @@ class _DummySession:
         self.is_streaming: bool = False
         self.is_compacting: bool = False
         self.approval_callback: Any = None
-        self.settings_manager = _DummySettingsManager()
+        self.settings_manager = _DummySettingsManager(info_panel)
         self._subscribers: list[Any] = []
         self._unsubscribe: Any = None
         self.auto_retry_enabled: bool = True
@@ -211,7 +217,7 @@ async def test_tui_snapshot_base() -> None:
     session = _DummySession()
     app = _OneTextualApp(session)
 
-    async with app.run_test(size=(100, 28)) as pilot:
+    async with app.run_test(size=(120, 48)) as pilot:
         await pilot.pause()
 
         # Deterministic assistant + tool stream content.
@@ -220,6 +226,10 @@ async def test_tui_snapshot_base() -> None:
         app._render_stream()
         app._refresh_sidebar()
         await pilot.pause()
+
+        # This snapshot covers the full visual-only logo rather than its
+        # short-screen fallback.
+        assert "██████╗" in str(app.query_one("#logo").content)
 
         # Capture SVG screenshot; fall back to text snapshot if needed.
         content = _capture_content(app)
@@ -231,7 +241,9 @@ async def test_tui_snapshot_widget_panel() -> None:
     """Base scenario plus an extension widget panel rendered."""
     from one.modes.tui_mode import _OneTextualApp
 
-    session = _DummySession()
+    # This fixture explicitly uses the sidebar layout: the widget-panel golden
+    # is intended to cover the sidebar and the extension widget together.
+    session = _DummySession(info_panel="sidebar")
     app = _OneTextualApp(session)
 
     async with app.run_test(size=(100, 28)) as pilot:
@@ -317,7 +329,7 @@ def _capture_content(app: Any) -> str:
 def _compose_text_snapshot(app: Any) -> str:
     """Compose a deterministic text snapshot from widget content and classes.
 
-    Captures: ``#stream``, ``#sidebar``, ``#input`` placeholder,
+    Captures: ``#header``, ``#logo``, ``#stream``, ``#sidebar``, ``#input`` placeholder,
     ``#ext_panel``, ``#ext_overlay`` — each separated by a horizontal rule.
     """
     from textual.widgets import Static, TextArea
@@ -339,6 +351,10 @@ def _compose_text_snapshot(app: Any) -> str:
         except Exception:
             return "[TextArea]\n[not found]\n"
 
+    parts.append("### HEADER")
+    parts.append(_widget_text("#header"))
+    parts.append("### LOGO")
+    parts.append(_widget_text("#logo"))
     parts.append("### STREAM")
     parts.append(_widget_text("#stream"))
     parts.append("### SIDEBAR")

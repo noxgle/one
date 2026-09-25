@@ -283,6 +283,59 @@ async def test_tui_command_model_cycle_and_thinking_cycle(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_layout_sidebar_and_model_picker_commands(tmp_path: Path):
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="dummy")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._handle_command("/layout compact")
+        assert app._layout_mode == "compact"
+        assert app.query_one("#header", Static).styles.display != "none"
+        assert app.query_one("#sidebar", Static).styles.display == "none"
+        await app._handle_command("/layout wide")
+        assert app._layout_mode == "wide"
+        assert app._sidebar_visible is True
+        assert app.query_one("#sidebar", Static).styles.display != "none"
+        await app._handle_command("/layout focus")
+        assert app._layout_mode == "focus"
+        assert app.query_one("#header", Static).styles.display == "none"
+        assert app.query_one("#sidebar", Static).styles.display == "none"
+        await app._handle_command("/sidebar hide")
+        assert app._sidebar_visible is False
+        assert app._stream_lines[-1] == "Sidebar hidden."
+        await app._handle_command("/sidebar show")
+        assert app._stream_lines[-1] == "Sidebar shown."
+        await app._handle_command("/layout invalid")
+        assert app._stream_lines[-1] == "Usage: /layout <compact|wide|focus>"
+        app.action_show_model_picker()
+        assert app._model_picker_models
+        await app._select_picker_model("1")
+        assert session.settings_manager.get_default_model() == session.model.id
+
+
+@pytest.mark.asyncio
+async def test_tui_slash_command_cancels_model_picker_and_runs_normally(tmp_path: Path):
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path, runtime_key="dummy"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_show_model_picker()
+        assert app._model_picker_models
+        assert app.query_one("#model_overlay", Static).has_class("visible")
+        await _submit(app, pilot, "/stats")
+        assert app._model_picker_models == []
+        assert not app.query_one("#model_overlay", Static).has_class("visible")
+        assert '"userMessages"' in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("level", "reasoning"),
     [

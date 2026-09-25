@@ -113,6 +113,7 @@ def build_sidebar_snapshot(
         "retry": retry_display,
         "coop": "on" if getattr(session, "approval_callback", None) is not None else "off",
         "contextPercent": float(usage.get("percent") or 0.0),
+        "contextKnown": isinstance(usage.get("percent"), (int, float)),
         "deliveryMode": delivery_mode,
         "queueSteer": steer_count,
         "queueFollow": follow_count,
@@ -138,12 +139,36 @@ _THINKING_FRAMES = "░▒▓█▓▒"
 _THINKING_MARK = "__MK__:"
 _THINKING_TEXT_MARK = "__MK_THINK__: "
 
+# Startup artwork is a dedicated visual widget, kept outside both the durable
+# conversation and the transcript presentation cache.
+_TUI_LOGO_LINES: tuple[str, ...] = (
+    r" ██████╗ ███╗   ██╗███████╗",
+    r"██╔═══██╗████╗  ██║██╔════╝",
+    r"██║   ██║██╔██╗ ██║█████╗  ",
+    r"██║   ██║██║╚██╗██║██╔══╝  ",
+    r"╚██████╔╝██║ ╚████║███████╗",
+    r" ╚═════╝ ╚═╝  ╚═══╝╚══════╝",
+    "",
+    r"███████╗ ██████╗ ██████╗ ",
+    r"██╔════╝██╔═══██╗██╔══██╗",
+    r"█████╗  ██║   ██║██████╔╝",
+    r"██╔══╝  ██║   ██║██╔══██╗",
+    r"██║     ╚██████╔╝██║  ██║",
+    r"╚═╝      ╚═════╝ ╚═╝  ╚═╝",
+    "",
+    r"███████╗██╗   ██╗███████╗██████╗ ██╗   ██╗ ██████╗ ███╗   ██╗███████╗",
+    r"██╔════╝██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔═══██╗████╗  ██║██╔════╝",
+    r"█████╗  ██║   ██║█████╗  ██████╔╝ ╚████╔╝ ██║   ██║██╔██╗ ██║█████╗  ",
+    r"██╔══╝  ╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  ██║   ██║██║╚██╗██║██╔══╝  ",
+    r"███████╗ ╚████╔╝ ███████╗██║  ██║   ██║   ╚██████╔╝██║ ╚████║███████╗",
+    r"╚══════╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚══════╝",
+)
+
 # The transcript is a presentation cache.  AgentSession and session JSONL keep
 # the complete conversation; this list is deliberately bounded so rebuilding
 # the Static widget remains predictable during long-running sessions.
 MAX_RENDERED_LINES = 500
 _TRUNCATED_ASSISTANT_MARKER = "[earlier assistant output truncated in viewport]"
-_TRUNCATED_TOOL_MARKER = "[earlier tool output truncated in viewport]"
 
 # Maximum characters for the plan section in the sidebar (truncated with …).
 _PLAN_SIDEBAR_MAX = 200
@@ -152,6 +177,7 @@ _PLAN_SIDEBAR_MAX = 200
 # provides many widget/editor bindings, but these are the application-level
 # actions users can rely on in the TUI.
 TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
+    ("Ctrl+K", "provider/model picker"),
     ("Ctrl+P", "command palette"),
     ("Ctrl+C", "abort"),
     ("Ctrl+L", "clear stream"),
@@ -404,6 +430,8 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/bash",
     "/inspect-timeout",
     "/paste-image",
+    "/layout",
+    "/sidebar",
 )
 
 
@@ -538,7 +566,7 @@ if TEXTUAL_AVAILABLE:
             # TextArea._on_key swallows Enter (inserts "\n") before widget
             # BINDINGS are ever consulted, so Enter-to-submit must be handled
             # here, ahead of the superclass. Shift+Enter stays a newline.
-            if event.key == "enter":
+            if event.key in {"enter", "ctrl+enter"}:
                 event.stop()
                 event.prevent_default()
                 self.post_message(InputSubmitted(self.text))
@@ -589,6 +617,14 @@ if TEXTUAL_AVAILABLE:
 
         async def action_submit(self) -> None:
             self.post_message(InputSubmitted(self.text))
+
+        def on_focus(self) -> None:
+            if self.placeholder == "Type a command or /help":
+                self.placeholder = "Ctrl+Enter send · Ctrl+P commands"
+
+        def on_blur(self) -> None:
+            if self.placeholder == "Ctrl+Enter send · Ctrl+P commands":
+                self.placeholder = "Type a command or /help"
 
         def action_newline(self) -> None:
             self.reset_history_navigation()
@@ -726,11 +762,28 @@ if TEXTUAL_AVAILABLE:
             padding: 0 1;
         }
 
+        #header {
+            height: 3;
+            border: round #2f466e;
+            background: #101a30;
+            color: #dbe7ff;
+            padding: 0 1;
+            text-wrap: nowrap;
+            text-overflow: ellipsis;
+        }
+
         #stream_container {
             height: 1fr;
+            margin: 1 0 0 0;
             border: round #2f466e;
             background: #0f1a2e;
             overflow-y: auto;
+        }
+
+        #logo {
+            height: auto;
+            padding: 1 2;
+            color: #8db7ff;
         }
 
         #stream {
@@ -798,7 +851,21 @@ if TEXTUAL_AVAILABLE:
             layer: above;
         }
 
-        #ext_panel.visible, #ext_overlay.visible, #shortcuts_overlay.visible {
+        #model_overlay {
+            display: none;
+            position: absolute;
+            offset: 15% 15%;
+            width: 70%;
+            height: auto;
+            max-height: 70%;
+            border: heavy #456ca8;
+            background: #0d1424;
+            color: #e7f0ff;
+            padding: 1 2;
+            layer: above;
+        }
+
+        #ext_panel.visible, #ext_overlay.visible, #shortcuts_overlay.visible, #model_overlay.visible {
             display: block;
         }
         """
@@ -811,6 +878,7 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle details output", priority=True),
             Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
+            Binding("ctrl+k", "show_model_picker", "Model picker", priority=True),
             # Ctrl+Shift+V is intentionally unbound: terminals turn it into a
             # bracketed events.Paste event, which _CommandTextArea consumes.
             Binding("ctrl+alt+v", "paste_image", "Paste image from clipboard", priority=True),
@@ -874,6 +942,10 @@ if TEXTUAL_AVAILABLE:
             self._ask_user_pending: dict[str, Any] | None = None
             self._pending_clipboard_image_bytes: bytes | None = None
             self._session_delete_pending: SessionInfo | None = None
+            self._info_layout = getattr(session.settings_manager, "get_tui_info_panel", lambda: "top")()
+            self._sidebar_visible = self._info_layout == "sidebar"
+            self._layout_mode = "wide" if self._sidebar_visible else "compact"
+            self._model_picker_models: list[ModelInfo] = []
             # Numbered /sessions targets must keep referring to the list the
             # user saw, rather than to a newly mtime-sorted filesystem scan.
             self._session_list_snapshot: list[SessionInfo] | None = None
@@ -881,11 +953,14 @@ if TEXTUAL_AVAILABLE:
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
                 with Vertical(id="main"):
+                    yield Static(id="header")
                     with VerticalScroll(id="stream_container"):
+                        yield Static("", id="logo")
                         yield Static("", id="stream")
                     yield Static("", id="ext_panel")
                     yield Static("", id="ext_overlay")
                     yield Static("", id="shortcuts_overlay")
+                    yield Static("", id="model_overlay")
                     yield _CommandTextArea(placeholder="Type a command or /help", id="input", soft_wrap=True)
                 yield Static(id="sidebar")
 
@@ -923,32 +998,9 @@ if TEXTUAL_AVAILABLE:
             self.set_interval(0.15, self._tick_waiting)
             self.set_interval(1 / 30, self._flush_pending_ui_events)
             self._bind_session()
-            _logo_lines = [
-                r" ██████╗ ███╗   ██╗███████╗",
-                r"██╔═══██╗████╗  ██║██╔════╝",
-                r"██║   ██║██╔██╗ ██║█████╗  ",
-                r"██║   ██║██║╚██╗██║██╔══╝  ",
-                r"╚██████╔╝██║ ╚████║███████╗",
-                r" ╚═════╝ ╚═╝  ╚═══╝╚══════╝",
-                "",
-                r"███████╗ ██████╗ ██████╗ ",
-                r"██╔════╝██╔═══██╗██╔══██╗",
-                r"█████╗  ██║   ██║██████╔╝",
-                r"██╔══╝  ██║   ██║██╔══██╗",
-                r"██║     ╚██████╔╝██║  ██║",
-                r"╚═╝      ╚═════╝ ╚═╝  ╚═╝",
-                "",
-                r"███████╗██╗   ██╗███████╗██████╗ ██╗   ██╗ ██████╗ ███╗   ██╗███████╗",
-                r"██╔════╝██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔═══██╗████╗  ██║██╔════╝",
-                r"█████╗  ██║   ██║█████╗  ██████╔╝ ╚████╔╝ ██║   ██║██╔██╗ ██║█████╗  ",
-                r"██╔══╝  ╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  ██║   ██║██║╚██╗██║██╔══╝  ",
-                r"███████╗ ╚████╔╝ ███████╗██║  ██║   ██║   ╚██████╔╝██║ ╚████║███████╗",
-                r"╚══════╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚══════╝",
-            ]
-            for _line in _logo_lines:
-                self._write(_line, "info")
-            self._write("one TUI v2 ready. /help", "info")
             self._refresh_sidebar()
+            self._apply_information_layout()
+            self._refresh_logo()
 
         def _bind_session(self) -> None:
             """(Re)subscribe to session events.
@@ -1168,6 +1220,16 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 pass
 
+        def _refresh_logo(self) -> None:
+            """Render startup artwork separately from the selectable transcript."""
+            available_width = self.size.width - (44 if self._sidebar_visible else 0)
+            show_full_logo = self.size.height >= 30 and available_width >= 90
+            logo = "\n".join(_TUI_LOGO_LINES) if show_full_logo else "one"
+            try:
+                self.query_one("#logo", Static).update(logo)
+            except Exception:
+                pass
+
         @staticmethod
         def _append_stream_line(text: Text, line: str, *, in_tool_block: bool = False) -> None:
             """Append a literal transcript line, styling recognized tool status."""
@@ -1361,7 +1423,7 @@ if TEXTUAL_AVAILABLE:
                         None,
                     )
                 if label_idx is not None:
-                    self._stream_lines[label_idx] = "Thought:"
+                    self._stream_lines[label_idx] = "Thinking:"
             self._thinking_label_shown = False
             self._thinking_buffer = ""
             self._thinking_line_idx = None
@@ -1566,6 +1628,7 @@ if TEXTUAL_AVAILABLE:
             self._remove_thinking_line()
             if not self._assistant_has_live_delta:
                 self._stream_lines.append("")
+                self._stream_lines.append("Assistant:")
                 self._assistant_live_start_idx = len(self._stream_lines)
                 self._assistant_live_buffer = ""
                 self._assistant_live_line_count = 0  # will be set below
@@ -1612,9 +1675,9 @@ if TEXTUAL_AVAILABLE:
         def _write_chat_block(self, role: str, text: str) -> None:
             self._remove_thinking_line()
             self._stream_lines.append("")
+            labels = {"user": "You", "assistant": "Assistant", "custom": "Assistant"}
+            self._stream_lines.append(f"{labels.get(role, 'Assistant')}:")
             rendered_text = text
-            if role == "user":
-                rendered_text = f"> {text}"
             self._stream_lines.extend(self._format_chat_panel(role, rendered_text))
             self._stream_lines.append("")
             self._trim_stream()
@@ -1622,6 +1685,7 @@ if TEXTUAL_AVAILABLE:
         def _write_tool_block(self, text: str) -> tuple[int, int]:
             self._remove_thinking_line()
             self._stream_lines.append("")
+            self._stream_lines.append("Tool: ○")
             start = len(self._stream_lines)
             panel_lines = self._bounded_tool_panel(text)
             self._stream_lines.extend(panel_lines)
@@ -1634,8 +1698,9 @@ if TEXTUAL_AVAILABLE:
 
         def _bounded_tool_panel(self, text: str) -> list[str]:
             panel_lines = self._format_chat_panel("tool", text, pad_y=0)
-            if len(panel_lines) > MAX_RENDERED_LINES - 2:
-                return [_TRUNCATED_TOOL_MARKER, *panel_lines[-(MAX_RENDERED_LINES - 3) :]]
+            display_limit = 40
+            if len(panel_lines) > display_limit:
+                return ["[tool output preview; full result remains in evidence]", *panel_lines[:display_limit]]
             return panel_lines
 
         def _finish_tool_block(self, tool_name: str, status: str) -> bool:
@@ -1647,6 +1712,9 @@ if TEXTUAL_AVAILABLE:
             if active_name != tool_name or not (0 <= start <= end <= len(self._stream_lines)):
                 return False
             self._stream_lines[start:end] = self._bounded_tool_panel(f"{text} [{status}]")
+            badge = "✓" if status in {"ok", "success"} else "△" if status in {"warning", "disabled"} else "×"
+            if start > 0 and self._stream_lines[start - 1].startswith("Tool:"):
+                self._stream_lines[start - 1] = f"Tool: {badge} {tool_name}"
             self._active_tool_block = None
             self._trim_stream(render=False)
             self._render_stream()
@@ -1681,6 +1749,18 @@ if TEXTUAL_AVAILABLE:
                 sidebar_widget.styles.background = theme.sidebar_bg
                 sidebar_widget.styles.border = ("round", theme.panel_border)
                 sidebar_widget.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
+                header_widget = self.query_one("#header", Static)
+                header_widget.styles.background = theme.sidebar_bg
+                header_widget.styles.border = ("round", theme.panel_border)
+                header_widget.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
+                logo_widget = self.query_one("#logo", Static)
+                logo_widget.styles.color = theme.screen_fg
             except Exception:
                 pass
             try:
@@ -1771,8 +1851,66 @@ if TEXTUAL_AVAILABLE:
                 pass
             return ("failed", "no clipboard backend")
 
+        def _runtime_status(self, snapshot: dict[str, Any]) -> str:
+            """Return the concise runtime state shared by the header and sidebar."""
+            if self._approval_pending is not None:
+                return "awaiting approval"
+            if self._ask_user_pending is not None:
+                return "waiting for input"
+            if snapshot["compacting"]:
+                return "compacting"
+            if self._retry_state != "idle":
+                return "retrying"
+            if snapshot["streaming"] or self._turn_active:
+                return "working"
+            return "ready"
+
+        def _refresh_header(self, snapshot: dict[str, Any]) -> None:
+            """Render the compact status panel without rebuilding details."""
+            model = sanitize_display_text(str(snapshot["model"]))
+            coop = "ON" if snapshot["coop"] == "on" or self._approval_pending is not None else "OFF"
+            if self._approval_pending is not None:
+                coop += " (PENDING)"
+            thinking = sanitize_display_text(str(snapshot["thinking"]))
+            runtime_status = self._runtime_status(snapshot)
+            suffix = f" | THINK: {thinking} | COOP: {coop} | {runtime_status}"
+            prefix = f"v{VERSION} | "
+            # Account for main padding, header borders, and header padding.
+            # Keep the variable provider/model segment within the available
+            # width first; CSS still clips safely at exceptionally narrow sizes.
+            available_width = max(1, self.size.width - (44 if self._sidebar_visible else 0) - 6)
+            max_model_length = max(1, available_width - len(prefix) - len(suffix))
+            if len(model) > max_model_length:
+                model = model[: max_model_length - 1] + "…" if max_model_length > 1 else "…"
+            header = Text(f"{prefix}{model}{suffix}")
+            try:
+                header_widget = self.query_one("#header", Static)
+                header_widget.styles.height = 3
+                header_widget.update(header)
+            except Exception:
+                pass
+            self._refresh_logo()
+
+        def _apply_information_layout(self) -> None:
+            try:
+                self.query_one("#sidebar", Static).styles.display = "block" if self._sidebar_visible else "none"
+            except Exception:
+                pass
+            try:
+                self.query_one("#header", Static).styles.display = "none" if self._layout_mode == "focus" else "block"
+            except Exception:
+                pass
+
+        @staticmethod
+        def _context_meter(percent: float) -> str:
+            if not 0 <= percent <= 100:
+                return "unknown"
+            filled = min(10, max(0, round(percent / 10)))
+            return f"{'#' * filled}{'-' * (10 - filled)} {percent:.1f}%"
+
         def _refresh_sidebar(self) -> None:
             s = build_sidebar_snapshot(self.session)
+            self._refresh_header(s)
             if s["compacting"]:
                 status = "compacting…"
             elif self._retry_state != "idle":
@@ -1796,11 +1934,12 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Model: {sanitize_display_text(s['model'])}\n")
             info_block.append(f"Theme: {sanitize_display_text(self._theme.name)}\n")
             info_block.append(f"Thinking: {sanitize_display_text(s['thinking'])}\n")
-            info_block.append(f"Ctx: {s['contextPercent']:.1f}%\n")
+            context = self._context_meter(s["contextPercent"]) if s["contextKnown"] else "unknown"
+            info_block.append(f"Context: {context}\n")
             info_block.append(f"Retry: {sanitize_display_text(s['retry'])}\n")
             info_block.append(f"Status: {sanitize_display_text(status)}\n")
             info_block.append(f"Delivery: {sanitize_display_text(s['deliveryMode'])}\n")
-            info_block.append(f"Coop: {sanitize_display_text(s['coop'])}\n")
+            info_block.append(f"COOP: {'ON' if s['coop'] == 'on' or self._approval_pending is not None else 'OFF'}\n")
             info_block.append(f"Subagents: {'on' if s['subagents'] else 'off'}\n")
             info_block.append(f"Details: {'on' if s['bashOutput'] else 'off'}\n")
             info_block.append(f"CWD: {sanitize_display_text(s['cwd'])}\n")
@@ -1843,6 +1982,7 @@ if TEXTUAL_AVAILABLE:
                 self.query_one("#sidebar", Static).update(sidebar)
             except Exception:
                 pass
+            self._apply_information_layout()
 
         def _copy_selected_stream_text(self, text: str) -> bool:
             """Copy an already-snapshotted selection exactly once."""
@@ -1862,6 +2002,9 @@ if TEXTUAL_AVAILABLE:
             # Textual 8 keeps arbitrary text selections in `screen.selections`
             # (not on the widget); `Static` has no `selected_text` attribute.
             try:
+                stream_widget = self.query_one("#stream", Static)
+                if stream_widget not in self.screen.selections:
+                    return
                 text = str(self.screen.get_selected_text() or "")
             except Exception:
                 return
@@ -1952,6 +2095,7 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write("/inspect-timeout", "info")
+                self._write("/layout <compact|wide|focus> | /sidebar <hide|show>", "info")
                 return
             if cmd == "/clear":
                 self.action_clear_stream()
@@ -1973,6 +2117,28 @@ if TEXTUAL_AVAILABLE:
             if cmd == "/status":
                 s = build_sidebar_snapshot(session)
                 self._write(json.dumps(s, ensure_ascii=False), "info")
+                return
+            if cmd.startswith("/layout"):
+                mode = cmd[len("/layout") :].strip().lower()
+                if mode not in {"compact", "wide", "focus"}:
+                    self._write("Usage: /layout <compact|wide|focus>", "error")
+                    return
+                # This is deliberately runtime-only: compact retains the
+                # logo/status panel, wide adds the detailed sidebar, and focus
+                # removes both information panels.
+                self._layout_mode = mode
+                self._sidebar_visible = mode == "wide"
+                self._refresh_sidebar()
+                self._write(f"Layout set to {mode}.", "info")
+                return
+            if cmd.startswith("/sidebar"):
+                mode = cmd[len("/sidebar") :].strip().lower()
+                if mode not in {"hide", "show"}:
+                    self._write("Usage: /sidebar <hide|show>", "error")
+                    return
+                self._sidebar_visible = mode == "show"
+                self._refresh_sidebar()
+                self._write("Sidebar shown." if mode == "show" else "Sidebar hidden.", "info")
                 return
             if cmd == "/stats":
                 self._write(json.dumps(session.get_session_stats(), ensure_ascii=False), "info")
@@ -2805,6 +2971,12 @@ if TEXTUAL_AVAILABLE:
             input_widget = self.query_one("#input", _CommandTextArea)
             input_widget.text = ""
             input_widget.reset_history_navigation()
+            if self._model_picker_models:
+                if text.startswith("/"):
+                    self._dismiss_model_picker()
+                else:
+                    await self._select_picker_model(text)
+                    return
             if self._approval_pending is not None:
                 await self._handle_approval_answer(text)
                 return
@@ -3293,6 +3465,44 @@ if TEXTUAL_AVAILABLE:
                 self._write("[Cooperation] disabled: all tools run freely", "info")
             self._refresh_sidebar()
 
+        def action_show_model_picker(self) -> None:
+            """Open a small, authenticated-model-only picker using existing selection semantics."""
+            overlay = self.query_one("#model_overlay", Static)
+            if self._model_picker_models:
+                self._dismiss_model_picker()
+                return
+            self._model_picker_models = list(self.session.model_registry.get_available())
+            if not self._model_picker_models:
+                self._write("No available authenticated models. Use /login first.", "warn")
+                return
+            current = f"{self.session.model.provider}/{self.session.model.id}" if self.session.model else "none"
+            lines = [f"Model picker — current: {current}", "Type a number and press Enter (Ctrl+K cancels):"]
+            lines.extend(f"{i}. {model.provider}/{model.id}" for i, model in enumerate(self._model_picker_models, 1))
+            overlay.update("\n".join(lines))
+            overlay.add_class("visible")
+            self.query_one("#input", TextArea).focus()
+
+        async def _select_picker_model(self, text: str) -> None:
+            models = self._model_picker_models
+            self._dismiss_model_picker()
+            if not text.isdigit() or not 1 <= int(text) <= len(models):
+                self._write("Model picker cancelled: enter a listed number.", "warn")
+                return
+            model = models[int(text) - 1]
+            await self.session.set_model(model)
+            self.session.settings_manager.set_default_provider(model.provider)
+            self.session.settings_manager.set_default_model(model.id)
+            self._write(f"Model set to {model.provider}/{model.id} (saved as default)", "info")
+            self._refresh_sidebar()
+
+        def _dismiss_model_picker(self) -> None:
+            """Close the picker without changing the current model."""
+            self._model_picker_models = []
+            try:
+                self.query_one("#model_overlay", Static).remove_class("visible")
+            except Exception:
+                pass
+
         def action_toggle_subagents(self) -> None:
             enabled = getattr(getattr(self.session, "settings_manager", None), "get_subagents_enabled", lambda: True)()
             self.session.settings_manager.set_subagents_enabled(not enabled)
@@ -3347,6 +3557,7 @@ if TEXTUAL_AVAILABLE:
             self._thinking_buffer = ""
             self._thinking_line_idx = None
             self._last_auto_copied = ""
+            self._dismiss_model_picker()
 
         def action_show_shortcuts(self) -> None:
             """Show one-owned shortcuts rather than Textual's merged key panel."""

@@ -134,7 +134,7 @@ async def test_tui_input_stays_responsive_during_rapid_streaming(tmp_path: Path)
         stream = "\n".join(app._stream_lines)
         assert "rapid-stream-output-" in stream
         assert stream.count("x") >= 4000
-        assert stream.index("rapid-stream-output-") < stream.index("> second prompt")
+        assert stream.index("rapid-stream-output-") < stream.index("You:\nsecond prompt")
 
 
 @pytest.mark.asyncio

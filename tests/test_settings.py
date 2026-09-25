@@ -148,6 +148,12 @@ def test_default_theme_is_hacker() -> None:
     assert settings.get_theme() == "hacker"
 
 
+@pytest.mark.parametrize(("value", "expected"), [("top", "top"), ("sidebar", "sidebar"), ("wide", "top"), (None, "top")])
+def test_tui_info_panel_is_validated(value: object, expected: str) -> None:
+    settings = SettingsManager.in_memory({"tui": {"infoPanel": value}})
+    assert settings.get_tui_info_panel() == expected
+
+
 def test_default_quiet_startup_is_false() -> None:
     """quietStartup defaults to False."""
     from one.core.settings_manager import DEFAULT_SETTINGS
