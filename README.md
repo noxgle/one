@@ -141,10 +141,18 @@ Configure the startup information panel in `settings.json`:
 ```
 
 `top` is the default minimal layout with no right sidebar; `sidebar` enables the
-detailed right sidebar. At runtime, use `/layout compact|wide|focus` or
-`/sidebar hide|show` to adjust the layout. The header explicitly shows
-`COOP: ON` or `COOP: OFF`; its logo is display-only and is not transcript
-content.
+detailed right sidebar. These startup settings retain their existing semantics.
+At runtime, the information layouts are mutually exclusive:
+
+- `/layout compact` shows the top status panel and hides the detailed sidebar.
+- `/layout wide` hides the top status panel and shows the detailed right sidebar.
+- `/layout focus` hides both information panels.
+
+Use `/sidebar hide` or `/sidebar show` to hide or show the detailed sidebar;
+showing it selects the `wide` layout, while hiding it from `wide` returns to
+`compact`. The separate visual logo in the conversation window remains visible
+in every layout and is not transcript content. The top status panel explicitly
+shows `COOP: ON` or `COOP: OFF`.
 
 Current application shortcuts are:
 

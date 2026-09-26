@@ -152,8 +152,26 @@ async def test_tui_command_help_lists_all_commands(tmp_path: Path):
             "/mcp [list|enable|disable]",
             "/bash <command>",
             "/paste-image",
+            "/layout <compact|wide|focus>",
+            "compact: header visible; sidebar hidden",
+            "wide: header hidden; sidebar visible",
+            "focus: header and sidebar hidden",
+            "/sidebar <hide|show>",
+            "hide: hide the sidebar; show: switch to wide",
         ]:
             assert token in stream, token
+        assert [
+            line
+            for line in app._stream_lines
+            if line.startswith(("/layout", "  compact:", "  wide:", "  focus:", "/sidebar", "  hide:"))
+        ] == [
+            "/layout <compact|wide|focus>",
+            "  compact: header visible; sidebar hidden",
+            "  wide: header hidden; sidebar visible",
+            "  focus: header and sidebar hidden",
+            "/sidebar <hide|show>",
+            "  hide: hide the sidebar; show: switch to wide",
+        ]
 
 
 @pytest.mark.asyncio
@@ -292,22 +310,29 @@ async def test_tui_layout_sidebar_and_model_picker_commands(tmp_path: Path):
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
+        assert not hasattr(app, "_sidebar_visible")
         await app._handle_command("/layout compact")
         assert app._layout_mode == "compact"
         assert app.query_one("#header", Static).styles.display != "none"
         assert app.query_one("#sidebar", Static).styles.display == "none"
+        assert len(list(app.query("#logo"))) == 1
         await app._handle_command("/layout wide")
         assert app._layout_mode == "wide"
-        assert app._sidebar_visible is True
+        assert app.query_one("#header", Static).styles.display == "none"
         assert app.query_one("#sidebar", Static).styles.display != "none"
+        assert len(list(app.query("#logo"))) == 1
         await app._handle_command("/layout focus")
         assert app._layout_mode == "focus"
         assert app.query_one("#header", Static).styles.display == "none"
         assert app.query_one("#sidebar", Static).styles.display == "none"
+        assert len(list(app.query("#logo"))) == 1
         await app._handle_command("/sidebar hide")
-        assert app._sidebar_visible is False
+        assert app._layout_mode == "focus"
         assert app._stream_lines[-1] == "Sidebar hidden."
         await app._handle_command("/sidebar show")
+        assert app._layout_mode == "wide"
+        assert app.query_one("#header", Static).styles.display == "none"
+        assert app.query_one("#sidebar", Static).styles.display != "none"
         assert app._stream_lines[-1] == "Sidebar shown."
         await app._handle_command("/layout invalid")
         assert app._stream_lines[-1] == "Usage: /layout <compact|wide|focus>"

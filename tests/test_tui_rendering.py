@@ -210,6 +210,81 @@ async def test_tui_info_panel_layouts_are_mutually_exclusive(tmp_path: Path) -> 
         assert len(list(sidebar.query("#logo"))) == 1
 
 
+@pytest.mark.asyncio
+async def test_tui_compact_to_wide_aligns_conversation_and_sidebar_frames(tmp_path: Path) -> None:
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static, TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test(size=(120, 48)) as pilot:
+        await pilot.pause()
+        main = app.query_one("#main")
+        header = app.query_one("#header", Static)
+        stream = app.query_one("#stream_container", VerticalScroll)
+        sidebar = app.query_one("#sidebar", Static)
+        input_widget = app.query_one("#input", TextArea)
+        logo = app.query_one("#logo", Static)
+
+        assert not main.has_class("layout-wide")
+        assert stream.styles.margin.top == 1
+        assert stream.region.y > header.region.bottom
+        assert "██████╗" in str(logo.content)
+
+        await app._handle_command("/layout wide")
+        await pilot.pause()
+
+        assert main.has_class("layout-wide")
+        assert header.styles.display == "none"
+        assert sidebar.styles.display != "none"
+        assert stream.styles.margin.top == 0
+        assert main.region.y == sidebar.region.y
+        assert main.region.height == sidebar.region.height
+        assert stream.region.y == sidebar.region.y
+        assert input_widget.region.bottom == main.region.bottom
+        assert str(logo.content) == "one"
+
+        await app._handle_command("/layout compact")
+        await pilot.pause()
+
+        assert not main.has_class("layout-wide")
+        assert stream.styles.margin.top == 1
+        assert stream.region.y > header.region.bottom
+        assert "██████╗" in str(logo.content)
+
+
+@pytest.mark.asyncio
+async def test_tui_narrow_compact_and_wide_frames_remain_aligned(tmp_path: Path) -> None:
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+        main = app.query_one("#main")
+        header = app.query_one("#header", Static)
+        stream = app.query_one("#stream_container", VerticalScroll)
+        sidebar = app.query_one("#sidebar", Static)
+
+        assert stream.region.y > header.region.bottom
+
+        await app._handle_command("/layout wide")
+        await pilot.pause()
+
+        assert main.region.y == sidebar.region.y
+        assert main.region.height == sidebar.region.height
+        assert stream.region.y == sidebar.region.y
+
+        await app._handle_command("/layout compact")
+        await pilot.pause()
+
+        assert sidebar.styles.display == "none"
+        assert stream.region.y > header.region.bottom
+
+
 def test_build_sidebar_snapshot_lists_enabled_mcp_servers() -> None:
     class _FakeMcpManager:
         def server_status(self) -> list[dict]:
@@ -817,12 +892,12 @@ async def test_tui_welcome_logo_is_a_dedicated_non_transcript_widget(tmp_path: P
         assert _TUI_LOGO_LINES[0] in logo
         assert _TUI_LOGO_LINES[-1] in logo
         assert _TUI_LOGO_LINES[0] not in header
-        assert "\n" not in header
+        assert header.splitlines() == [header]
         assert "v" in header
         assert "openai/" in header
         assert "THINK:" in header
         assert "COOP: OFF" in header
-        assert "ready" in header
+        assert "STATUS: ready" in header
 
 
 @pytest.mark.asyncio

@@ -780,6 +780,10 @@ if TEXTUAL_AVAILABLE:
             overflow-y: auto;
         }
 
+        #main.layout-wide #stream_container {
+            margin: 0;
+        }
+
         #logo {
             height: auto;
             padding: 1 2;
@@ -943,8 +947,9 @@ if TEXTUAL_AVAILABLE:
             self._pending_clipboard_image_bytes: bytes | None = None
             self._session_delete_pending: SessionInfo | None = None
             self._info_layout = getattr(session.settings_manager, "get_tui_info_panel", lambda: "top")()
-            self._sidebar_visible = self._info_layout == "sidebar"
-            self._layout_mode = "wide" if self._sidebar_visible else "compact"
+            # The layout mode owns information-panel visibility. The persisted
+            # setting only selects its initial mode.
+            self._layout_mode = "wide" if self._info_layout == "sidebar" else "compact"
             self._model_picker_models: list[ModelInfo] = []
             # Numbered /sessions targets must keep referring to the list the
             # user saw, rather than to a newly mtime-sorted filesystem scan.
@@ -1222,13 +1227,23 @@ if TEXTUAL_AVAILABLE:
 
         def _refresh_logo(self) -> None:
             """Render startup artwork separately from the selectable transcript."""
-            available_width = self.size.width - (44 if self._sidebar_visible else 0)
+            available_width = self._main_width()
             show_full_logo = self.size.height >= 30 and available_width >= 90
             logo = "\n".join(_TUI_LOGO_LINES) if show_full_logo else "one"
             try:
                 self.query_one("#logo", Static).update(logo)
             except Exception:
                 pass
+
+        def _main_width(self) -> int:
+            """Return the rendered conversation-column width when available."""
+            try:
+                width = self.query_one("#main").region.width
+                if width > 0:
+                    return width
+            except Exception:
+                pass
+            return self.size.width
 
         @staticmethod
         def _append_stream_line(text: Text, line: str, *, in_tool_block: bool = False) -> None:
@@ -1873,12 +1888,12 @@ if TEXTUAL_AVAILABLE:
                 coop += " (PENDING)"
             thinking = sanitize_display_text(str(snapshot["thinking"]))
             runtime_status = self._runtime_status(snapshot)
-            suffix = f" | THINK: {thinking} | COOP: {coop} | {runtime_status}"
+            suffix = f" | THINK: {thinking} | COOP: {coop} | STATUS: {runtime_status}"
             prefix = f"v{VERSION} | "
             # Account for main padding, header borders, and header padding.
             # Keep the variable provider/model segment within the available
             # width first; CSS still clips safely at exceptionally narrow sizes.
-            available_width = max(1, self.size.width - (44 if self._sidebar_visible else 0) - 6)
+            available_width = max(1, self._main_width() - 6)
             max_model_length = max(1, available_width - len(prefix) - len(suffix))
             if len(model) > max_model_length:
                 model = model[: max_model_length - 1] + "…" if max_model_length > 1 else "…"
@@ -1893,11 +1908,22 @@ if TEXTUAL_AVAILABLE:
 
         def _apply_information_layout(self) -> None:
             try:
-                self.query_one("#sidebar", Static).styles.display = "block" if self._sidebar_visible else "none"
+                main_widget = self.query_one("#main")
+                main_widget.set_class(self._layout_mode == "wide", "layout-wide")
             except Exception:
                 pass
             try:
-                self.query_one("#header", Static).styles.display = "none" if self._layout_mode == "focus" else "block"
+                self.query_one("#sidebar", Static).styles.display = "block" if self._layout_mode == "wide" else "none"
+            except Exception:
+                pass
+            try:
+                self.query_one("#header", Static).styles.display = "block" if self._layout_mode == "compact" else "none"
+            except Exception:
+                pass
+            # The layout pass updates #main's region. Refresh the independent
+            # logo afterward so its breakpoint uses that rendered width.
+            try:
+                self.call_after_refresh(self._refresh_logo)
             except Exception:
                 pass
 
@@ -2095,7 +2121,12 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write("/inspect-timeout", "info")
-                self._write("/layout <compact|wide|focus> | /sidebar <hide|show>", "info")
+                self._write("/layout <compact|wide|focus>", "info")
+                self._write("  compact: header visible; sidebar hidden", "info")
+                self._write("  wide: header hidden; sidebar visible", "info")
+                self._write("  focus: header and sidebar hidden", "info")
+                self._write("/sidebar <hide|show>", "info")
+                self._write("  hide: hide the sidebar; show: switch to wide", "info")
                 return
             if cmd == "/clear":
                 self.action_clear_stream()
@@ -2127,7 +2158,6 @@ if TEXTUAL_AVAILABLE:
                 # logo/status panel, wide adds the detailed sidebar, and focus
                 # removes both information panels.
                 self._layout_mode = mode
-                self._sidebar_visible = mode == "wide"
                 self._refresh_sidebar()
                 self._write(f"Layout set to {mode}.", "info")
                 return
@@ -2136,7 +2166,10 @@ if TEXTUAL_AVAILABLE:
                 if mode not in {"hide", "show"}:
                     self._write("Usage: /sidebar <hide|show>", "error")
                     return
-                self._sidebar_visible = mode == "show"
+                if mode == "show":
+                    self._layout_mode = "wide"
+                elif self._layout_mode == "wide":
+                    self._layout_mode = "compact"
                 self._refresh_sidebar()
                 self._write("Sidebar shown." if mode == "show" else "Sidebar hidden.", "info")
                 return
