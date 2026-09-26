@@ -13,6 +13,7 @@ dist/
 build/
 *.egg-info/
 diagnostic-reports/
+write-tool-reports/
 
 *.log
 *.tmp

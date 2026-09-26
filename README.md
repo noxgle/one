@@ -459,6 +459,18 @@ telemetry options.
 up to 60 seconds to drain after that deadline; reports distinguish a truncated
 final scenario, clean shutdown, and runtime failure.
 
+The offline write-tool regression harness uses a loopback fake OpenAI-compatible
+provider inside an isolated `--network none` container; it never uses provider
+credentials or outbound network access:
+
+```bash
+.venv/bin/python scripts/diagnose_write_tool.py --json
+```
+
+It writes only hashes and per-case assertions to `write-tool-reports/`; use
+`--keep-artifacts` only when inspecting its disposable workspace. The Docker
+smoke test is opt-in: `WRITE_TOOL_DOCKER_SMOKE=1 .venv/bin/python -m pytest -q tests/test_write_tool_diagnostic.py`.
+
 ## Development
 
 ```bash

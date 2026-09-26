@@ -82,6 +82,17 @@ async def test_write_content_is_omitted_from_context_but_retained_in_evidence(tm
     assert evidence["args"]["content"] == expected
 
 
+def test_parsed_write_call_source_is_omitted_before_next_provider_request(tmp_path: Path) -> None:
+    agent = _agent(SessionManager.create(str(tmp_path), str(tmp_path / "sessions")), tmp_path)
+    source = "<tool_call|> private &amp; 😀"
+    assistant = {"role": "assistant", "content": [{"type": "text", "text": source}]}
+    agent.messages.append(assistant)
+    agent._omit_write_call_from_assistant_context(assistant, {"tool": "write", "args": {"path": "x", "content": source}})
+    visible = agent._flatten_messages_for_provider()[-1]["content"]
+    assert source not in visible
+    assert "writeContentOmitted" in visible
+
+
 @pytest.mark.asyncio
 async def test_evidence_rejects_other_session_and_bad_ranges(tmp_path: Path) -> None:
     one = SessionManager.create(str(tmp_path), str(tmp_path / "one"))

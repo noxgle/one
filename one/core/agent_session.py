@@ -780,6 +780,20 @@ class AgentSession:
                 msg_payload["goalSuccess"] = payload["goalSuccess"]
         return msg_payload
 
+    def _omit_write_call_from_assistant_context(
+        self, assistant: dict[str, Any], tool_call: dict[str, Any]
+    ) -> None:
+        """Retain write source in evidence, not in the next provider request."""
+        if tool_call.get("tool") != "write" or not isinstance(tool_call.get("args"), dict):
+            return
+        args = dict(tool_call["args"])
+        if "content" not in args and "text" not in args:
+            return
+        args.pop("content", None)
+        args.pop("text", None)
+        args["writeContentOmitted"] = True
+        assistant["content"] = [{"type": "text", "text": json.dumps({"tool": "write", "args": args})}]
+
     @staticmethod
     def _evidence_normalize(value: Any, key: str = "") -> Any:
         """JSON-safe evidence value with conservative credential redaction."""
@@ -2478,6 +2492,7 @@ class AgentSession:
                                     )
 
                             if tool_call:
+                                self._omit_write_call_from_assistant_context(assistant, tool_call)
                                 sub_timeout = None if tool_call["tool"] == "ask_user" else tool_timeout_sec
                                 tool_payload = await self._run_tool_call(
                                     tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout,
