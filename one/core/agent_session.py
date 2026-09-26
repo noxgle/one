@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import inspect
 import itertools
@@ -392,6 +393,18 @@ class AgentSession:
                     in_string = True
             return json.loads("".join(repaired))
 
+        def json_loads_compatible(raw: str) -> Any:
+            """Parse a candidate without rewriting valid decoded string values.
+
+            Compatibility normalization is solely for malformed provider framing.
+            In particular, it must not turn marker-like text, smart quotes, or a
+            BOM that is *inside* a valid write payload into different file data.
+            """
+            try:
+                return json.loads(raw)
+            except Exception:
+                return json_loads_relaxed(normalize_jsonish(raw))
+
         def parse_write_pseudo_json(raw: str) -> dict[str, Any] | None:
             s = normalize_jsonish(raw)
             if '"tool":"write"' not in s and '"tool": "write"' not in s and '"name":"write"' not in s and '"name": "write"' not in s:
@@ -506,19 +519,23 @@ class AgentSession:
 
         def parse_json_candidates(raw_text: str) -> dict[str, Any] | None:
             candidates: list[str] = []
-            stripped = normalize_jsonish(raw_text)
+            stripped = raw_text.strip()
+            # A leading BOM is provider framing, whereas a BOM decoded from a
+            # JSON string is content and is deliberately never normalized.
+            if stripped.startswith("\ufeff"):
+                stripped = stripped[1:]
             if stripped.startswith("{") and stripped.endswith("}"):
                 candidates.append(stripped)
 
             for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw_text):
-                candidates.append(normalize_jsonish(m.group(1)))
+                candidates.append(m.group(1).strip())
 
             marker = "TOOL_CALL:"
             if marker in raw_text:
-                candidates.append(normalize_jsonish(raw_text.split(marker, 1)[1]))
+                candidates.append(raw_text.split(marker, 1)[1].strip())
 
             # Fallback: extract balanced JSON objects from arbitrary text.
-            candidates.extend(normalize_jsonish(x) for x in balanced_json_objects(raw_text))
+            candidates.extend(balanced_json_objects(raw_text))
 
             seen: set[str] = set()
             unique_candidates: list[str] = []
@@ -530,7 +547,7 @@ class AgentSession:
 
             for c in unique_candidates:
                 try:
-                    obj = json_loads_relaxed(c)
+                    obj = json_loads_compatible(c)
                 except Exception:
                     continue
                 if not isinstance(obj, dict):
@@ -557,9 +574,11 @@ class AgentSession:
                     return {"tool": tool_name, "args": normalized_args}
 
             # Try JSON-like objects first (often with name/arguments fields).
-            for c in [s, *balanced_json_objects(s)]:
+            # Parse raw JSON candidates before compatibility framing repair so
+            # valid write content is never normalized globally.
+            for c in [raw_text, *balanced_json_objects(raw_text)]:
                 try:
-                    obj = json_loads_relaxed(c)
+                    obj = json_loads_compatible(c)
                 except Exception:
                     continue
                 if not isinstance(obj, dict):
@@ -671,10 +690,21 @@ class AgentSession:
         )
 
     def _build_tool_result_message_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        args = payload.get("args", {})
+        if isinstance(args, dict):
+            args = dict(args)
+        if payload.get("tool") == "write" and isinstance(args, dict):
+            # Write data has already been executed and is available in durable
+            # evidence when persistence is enabled. Do not replay an entire
+            # source file into ordinary model context through toolResult args.
+            for key in ("content", "text"):
+                if key in args:
+                    args[key] = "[omitted from model context]"
+            args["writeContentOmitted"] = True
         msg_payload: dict[str, Any] = {
             "ok": bool(payload.get("ok", False)),
             "tool": payload.get("tool"),
-            "args": payload.get("args", {}),
+            "args": args,
         }
         if payload.get("evidenceId"):
             msg_payload["evidenceId"] = payload["evidenceId"]
@@ -1160,7 +1190,9 @@ class AgentSession:
         # This value is also passed into execution below. Keep the event
         # additive, while making its timeout truthful for every tool class.
         effective_timeout = self._effective_tool_timeout(tool_name, args, timeout_sec)
-        self._emit({"type": "tool_call_start", "tool": tool_name, "toolCallId": tool_call_id, "args": emit_args, "effectiveTimeout": effective_timeout})
+        # Listeners are observational. Give each start event an isolated args
+        # value so a UI/logger cannot mutate the arguments about to execute.
+        self._emit({"type": "tool_call_start", "tool": tool_name, "toolCallId": tool_call_id, "args": copy.deepcopy(emit_args), "effectiveTimeout": effective_timeout})
         try:
             result = await self._execute_tool_by_name(tool_name, args, timeout_sec=timeout_sec)
             if result.get("ok", True) is True:

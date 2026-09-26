@@ -296,6 +296,37 @@ def test_analysis_markers_strict_shape(monkeypatch, tmp_path: Path) -> None:
     assert runner.run_analysis(args, {}, tmp_path)["status"] == "completed"
 
 
+@pytest.mark.parametrize("stdout", [
+    '{"summary":"ok","findings":[],"recommendations":[]}',
+    '```json\n{"summary":"ok","findings":[],"recommendations":[]}\n```',
+])
+def test_analysis_accepts_only_single_valid_json_fallback(monkeypatch, tmp_path: Path, stdout: str) -> None:
+    args = runner.parse_args([])
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, stdout, ""))
+    result = runner.run_analysis(args, {}, tmp_path)
+    assert result["status"] == "completed"
+    assert result["detail"] == {"formatFallback": "single_json"}
+
+
+def test_analysis_rejects_prose_wrapped_json_without_envelope(monkeypatch, tmp_path: Path) -> None:
+    args = runner.parse_args([])
+    stdout = 'Here are findings: {"summary":"ok","findings":[]}'
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, stdout, ""))
+    assert runner.run_analysis(args, {}, tmp_path)["status"] == "malformed"
+
+
+def test_analysis_fallback_is_tried_after_invalid_envelope_state(monkeypatch, tmp_path: Path) -> None:
+    args = runner.parse_args([])
+    fallback = '{"summary":"ok","findings":[],"recommendations":[]}'
+    monkeypatch.setattr(runner, "_analysis_text_candidates", lambda _stdout: [fallback, "DIAGNOSTIC_JSON_BEGIN\n{bad}\nDIAGNOSTIC_JSON_END"])
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "ignored", ""))
+
+    result = runner.run_analysis(args, {}, tmp_path)
+
+    assert result["status"] == "completed"
+    assert result["detail"] == {"formatFallback": "single_json"}
+
+
 def test_analysis_unwraps_json_summary_despite_nonzero_exit(monkeypatch, tmp_path: Path) -> None:
     args = runner.parse_args([])
     envelope = "DIAGNOSTIC_JSON_BEGIN\n" + json.dumps({"summary": "ok", "findings": [], "recommendations": []}) + "\nDIAGNOSTIC_JSON_END"

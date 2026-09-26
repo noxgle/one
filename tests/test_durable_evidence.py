@@ -39,7 +39,7 @@ def _agent(manager: SessionManager, tmp_path: Path) -> AgentSession:
     registry = ModelRegistry.create(auth)
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
-    return AgentSession(manager, SettingsManager.in_memory(), registry, _Loader(), model, "off", tools=["read", "evidence_read"])
+    return AgentSession(manager, SettingsManager.in_memory(), registry, _Loader(), model, "off", tools=["read", "write", "evidence_read"])
 
 
 @pytest.mark.asyncio
@@ -64,6 +64,22 @@ async def test_large_unicode_evidence_survives_reload_and_is_chunked(tmp_path: P
     assert rest["ok"] is True
     # Retrieval reads durable data only; it did not invoke/read the source again.
     assert result["evidenceId"] == evidence_id
+
+
+@pytest.mark.asyncio
+async def test_write_content_is_omitted_from_context_but_retained_in_evidence(tmp_path: Path) -> None:
+    manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    agent = _agent(manager, tmp_path)
+    expected = '\ufeff<p>Żółć &amp; <tool_call|> TOOL_CALL: “quoted”</p>'
+
+    result = await agent._run_tool_call("write", {"path": "page.html", "content": expected})
+
+    message = json.loads(agent.messages[-1]["content"])
+    assert message["args"]["content"] == "[omitted from model context]"
+    assert expected not in agent._flatten_messages_for_provider()[-1]["content"]
+    evidence = manager.read_evidence(result["evidenceId"])
+    assert evidence is not None
+    assert evidence["args"]["content"] == expected
 
 
 @pytest.mark.asyncio

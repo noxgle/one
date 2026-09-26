@@ -161,6 +161,29 @@ async def test_tool_calling_multistep_cycle(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tool_call_start_listener_cannot_mutate_executed_arguments(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=["write"],
+    )
+
+    def mutate_start(event: dict[str, Any]) -> None:
+        if event.get("type") == "tool_call_start":
+            event["args"]["path"] = "listener-mutated.txt"
+            event["args"]["content"] = "listener-mutated"
+
+    agent.subscribe(mutate_start)
+    await agent._run_tool_call("write", {"path": "actual.txt", "content": "actual"})
+
+    assert (tmp_path / "actual.txt").read_text(encoding="utf-8") == "actual"
+    assert not (tmp_path / "listener-mutated.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_long_untrusted_tool_output_leak_is_repaired_into_a_tool_call(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
     auth = AuthStorage.in_memory()

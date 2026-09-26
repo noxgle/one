@@ -566,6 +566,28 @@ def _parse_diagnostic_envelope(text: str) -> tuple[dict[str, Any] | None, str]:
     return data, "valid"
 
 
+def _parse_bounded_diagnostic_json(text: str) -> tuple[dict[str, Any] | None, str]:
+    """Accept one complete JSON object (optionally in one JSON fence), never prose.
+
+    Local models occasionally omit the requested envelope.  This deliberately
+    narrow fallback accepts only a single syntactic JSON value covering the
+    entire candidate, so log chatter or instruction-like prose cannot become a
+    structured finding.
+    """
+    stripped = text.strip()
+    if stripped.startswith("```json") and stripped.endswith("```"):
+        stripped = stripped[len("```json"): -len("```")].strip()
+    elif stripped.startswith("```") and stripped.endswith("```"):
+        stripped = stripped[len("```"): -len("```")].strip()
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None, "missing"
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str) or not isinstance(data.get("findings"), list) or not isinstance(data.get("recommendations", []), list):
+        return None, "shape"
+    return data, "valid"
+
+
 def run_analysis(args: argparse.Namespace, artifact: dict[str, Any], workspace: Path) -> dict[str, Any]:
     """Use the supported CLI, never a provider adapter, in a disposable cwd."""
     artifact_paths = prepare_analysis_workspace(workspace, artifact)
@@ -583,6 +605,15 @@ def run_analysis(args: argparse.Namespace, artifact: dict[str, Any], workspace: 
         parsed_data, parse_state = _parse_diagnostic_envelope(text)
         if parsed_data is not None:
             break
+    if parsed_data is None and parse_state in {"missing", "invalid"}:
+        # One bounded fallback is enough for known local-model formatting drift.
+        for text in candidates:
+            parsed_data, fallback_state = _parse_bounded_diagnostic_json(text)
+            if parsed_data is not None:
+                parse_state = "fallback_valid"
+                break
+            if fallback_state == "shape":
+                parse_state = fallback_state
 
     if parsed_data is not None:
         response = {
@@ -593,6 +624,8 @@ def run_analysis(args: argparse.Namespace, artifact: dict[str, Any], workspace: 
         }
         if result.returncode:
             response["detail"] = {"returnCode": result.returncode}
+        elif parse_state == "fallback_valid":
+            response["detail"] = {"formatFallback": "single_json"}
         return response
 
     text = candidates[0]
@@ -603,13 +636,20 @@ def run_analysis(args: argparse.Namespace, artifact: dict[str, Any], workspace: 
     if parse_state == "invalid":
         return {"status": "malformed", "summary": "Model diagnostic JSON was invalid.", "findings": [], "detail": {"envelope": "present", "json": "invalid", "stdoutPreview": _analysis_preview(text), "stderrPreview": _analysis_preview(result.stderr)}}
     # recommendations remains optional under the established result contract.
-    try:
-        data = json.loads(text.split("DIAGNOSTIC_JSON_BEGIN", 1)[1].split("DIAGNOSTIC_JSON_END", 1)[0].strip())
-    except json.JSONDecodeError:  # Defensive: _parse_diagnostic_envelope already checked this.
-        data = None
+    # A shape failure can also come from the bounded fallback, where no envelope
+    # exists; do not attempt envelope splitting in that case.
+    data = None
+    envelope_present = text.count("DIAGNOSTIC_JSON_BEGIN") == 1 and text.count("DIAGNOSTIC_JSON_END") == 1
+    if envelope_present:
+        try:
+            data = json.loads(text.split("DIAGNOSTIC_JSON_BEGIN", 1)[1].split("DIAGNOSTIC_JSON_END", 1)[0].strip())
+        except json.JSONDecodeError:  # Defensive: _parse_diagnostic_envelope already checked this.
+            pass
+    else:
+        data, _fallback_state = _parse_bounded_diagnostic_json(text)
     missing = [key for key in ("summary", "findings") if isinstance(data, dict) and key not in data] if isinstance(data, dict) else ["object"]
     invalid = [key for key in ("summary", "findings", "recommendations") if isinstance(data, dict) and key in data and not isinstance(data[key], str if key == "summary" else list)]
-    return {"status": "malformed", "summary": "Model diagnostic JSON did not match the required shape.", "findings": [], "detail": {"envelope": "present", "json": "valid", "missingFields": missing, "invalidFields": invalid, "stdoutPreview": _analysis_preview(text), "stderrPreview": _analysis_preview(result.stderr)}}
+    return {"status": "malformed", "summary": "Model diagnostic JSON did not match the required shape.", "findings": [], "detail": {"envelope": "present" if envelope_present else "missing", "json": "valid", "missingFields": missing, "invalidFields": invalid, "stdoutPreview": _analysis_preview(text), "stderrPreview": _analysis_preview(result.stderr)}}
 
 
 def render_markdown(report: dict[str, Any]) -> str:

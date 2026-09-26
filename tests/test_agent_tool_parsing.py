@@ -99,6 +99,54 @@ def test_tool_parser_preserves_valid_bash_command(tmp_path: Path):
     }
 
 
+def test_valid_write_json_is_parsed_losslessly_before_compatibility_repair(tmp_path: Path):
+    registry = ModelRegistry.create(AuthStorage.in_memory())
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium"
+    )
+    expected = '\ufeff<!doctype html><p title="“smart”">Żółć &amp; \u003c literal</p> <tool_call|> TOOL_CALL: <|tool_response>'
+    wire = json.dumps({"tool": "write", "args": {"path": "page.html", "content": expected}}, ensure_ascii=False)
+    # JSON's escaped less-than sequence must decode, while all literal content
+    # remains byte-for-character unchanged after parsing.
+    wire = wire.replace("<", "\\u003c")
+
+    parsed = agent._try_parse_tool_call(wire)
+
+    assert parsed == {"tool": "write", "args": {"path": "page.html", "content": expected}, "toolCallId": None}
+
+
+@pytest.mark.asyncio
+async def test_write_e2e_preserves_html_unicode_entities_bom_and_marker_strings(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory({"tools": {"maxSteps": 2}}),
+        registry, _Loader(), model, "medium", tools=["write"],
+    )
+    expected = '\ufeff<!doctype html>\n<p title="“smart quotes”">Żółć &amp; &lt;tag&gt; <tag> <tool_call|> TOOL_CALL: <|tool_response></p>\n'
+    wire = json.dumps({"tool": "write", "args": {"path": "page.html", "content": expected}}, ensure_ascii=False)
+    agent.providers = {"openai": _FakeProvider([wire.replace("<tag>", "\\u003ctag>"), "DONE"])}
+
+    await agent.prompt("write the page")
+
+    assert (tmp_path / "page.html").read_text(encoding="utf-8") == expected
+    tool_message = json.loads(next(m for m in agent.messages if m.get("role") == "toolResult")["content"])
+    assert tool_message["args"]["content"] == "[omitted from model context]"
+    assert tool_message["args"]["writeContentOmitted"] is True
+    provider_tool_result = next(
+        message
+        for message in agent._flatten_messages_for_provider()
+        if message["content"].startswith("<untrusted-tool-output>")
+    )
+    assert "[omitted from model context]" in provider_tool_result["content"]
+    assert expected not in provider_tool_result["content"]
+
+
 @pytest.mark.asyncio
 async def test_openai_raw_tool_call_id_is_propagated_to_tool_events(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
@@ -181,7 +229,7 @@ async def test_tool_call_parses_llama_cpp_style_write_payload(tmp_path: Path):
     assert agent.get_last_assistant_text() == "DONE"
     out_file = tmp_path / "out.py"
     assert out_file.exists()
-    assert "def x():" in out_file.read_text(encoding="utf-8")
+    assert out_file.read_text(encoding="utf-8") == "def x():\n    return 1\n"
 
 
 @pytest.mark.asyncio
@@ -207,8 +255,11 @@ async def test_tool_call_parses_llama_cpp_write_payload_with_unescaped_quotes(tm
     out_file = tmp_path / "out2.py"
     assert out_file.exists()
     written = out_file.read_text(encoding="utf-8")
-    assert "def is_palindrome(s):" in written
-    assert 'processed_s = "".join' in written
+    assert written == (
+        "def is_palindrome(s):\n"
+        '    processed_s = "".join(filter(str.isalnum), s)).lower()\n'
+        "    return processed_s == processed_s[::-1]\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -261,7 +312,11 @@ async def test_tool_call_parses_llama_cpp_write_payload_with_missing_outer_brace
     out_file = tmp_path / "p1.py"
     assert out_file.exists()
     written = out_file.read_text(encoding="utf-8")
-    assert "def is_palindrome(s):" in written
+    assert written == (
+        "def is_palindrome(s):\n"
+        '    processed_s = "".join(ch for ch in s if ch.isalnum()).lower()\n'
+        "    return processed_s == processed_s[::-1]\n"
+    )
 
 
 @pytest.mark.asyncio

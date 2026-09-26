@@ -33,6 +33,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Write tool parsing** — write-content bodies now preserve exact text safely;
+  escaped bodies omitted from feedback no longer leak or corrupt parser state.
 - **TUI session selection** — numbered `/sessions <n>` selections now resolve
   against the most recently displayed list, rather than a newly mtime-sorted
   scan; stale listed sessions direct users to rerun `/sessions`.

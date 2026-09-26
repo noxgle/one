@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 SCENARIOS = (
-    "read", "read_image", "bash", "write", "edit", "apply_patch", "grep", "find", "ls",
+    "read", "read_image", "bash", "write", "write_html_preservation", "edit", "apply_patch", "grep", "find", "ls",
     "evidence_read", "plan", "finish", "ask_user", "spawn_subagent", "retry", "timeout",
     "steering", "follow_up", "compaction", "reload",
 )
@@ -28,6 +28,7 @@ SCENARIO_REQUIRED_TOOLS: dict[str, str | None] = {
     "read_image": "read_image",
     "bash": "bash",
     "write": "write",
+    "write_html_preservation": "write",
     "edit": "edit",
     "apply_patch": "apply_patch",
     "grep": "grep",
@@ -52,6 +53,15 @@ MAX_AUTO_ANSWERS = 100
 MAX_SCENARIO_RECORDS = 200
 MAX_COVERAGE_WARNINGS = 50
 SCENARIO_DRAIN_GRACE_SEC = 60.0
+SIMPLE_SCENARIO_TIMEOUT_SEC = 20.0
+COMPLEX_SCENARIO_TIMEOUT_SEC = 60.0
+COMPLEX_SCENARIOS = frozenset({"evidence_read", "plan", "ask_user", "spawn_subagent"})
+SCENARIO_TIMEOUTS = {
+    name: COMPLEX_SCENARIO_TIMEOUT_SEC if name in COMPLEX_SCENARIOS else SIMPLE_SCENARIO_TIMEOUT_SEC
+    for name in SCENARIOS
+}
+RECOVERY_TIMEOUT_SEC = 20.0
+HTML_PRESERVATION_CONTENT = "\ufeff<html data-marker=\"&lt;marker&gt;\">smart ‘quotes’ &amp; literal &lt;tag&gt; — Ω</html>\n<!-- *** Begin Patch marker-like text -->\n"
 
 
 def create_fixture(workspace: Path) -> dict[str, str]:
@@ -59,6 +69,7 @@ def create_fixture(workspace: Path) -> dict[str, str]:
     (workspace / "notes.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     (workspace / "large.txt").write_text("diagnostic-line\n" * 512, encoding="utf-8")
     (workspace / "patch-target.txt").write_text("before\n", encoding="utf-8")
+    (workspace / "html-preservation-source.txt").write_text(HTML_PRESERVATION_CONTENT, encoding="utf-8")
     (workspace / "fixture.png").write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL6xQAAAABJRU5ErkJggg=="))
     return {"workspace": str(workspace), "image": "fixture.png", "text": "notes.txt", "scenarios": ",".join(SCENARIOS)}
 
@@ -66,7 +77,7 @@ def create_fixture(workspace: Path) -> dict[str, str]:
 def workload_plan(duration: float, workload: str = "safe") -> list[dict[str, object]]:
     if workload not in {"safe", "stress", "custom"}:
         raise ValueError("workload must be safe, stress, or custom")
-    return [{"id": name, "expected": "bounded", "timeoutSec": min(10.0, duration)} for name in SCENARIOS]
+    return [{"id": name, "expected": "bounded", "timeoutSec": min(SCENARIO_TIMEOUTS[name], duration)} for name in SCENARIOS]
 
 
 def scenario_prompt(name: str) -> str:
@@ -79,6 +90,7 @@ def scenario_prompt(name: str) -> str:
         "read_image": "Call read_image on fixture.png, then finish.",
         "bash": "Call bash with `pwd` only, then finish.",
         "write": "Call write to create generated.txt with exactly `diagnostic`, then finish.",
+        "write_html_preservation": "Call read on html-preservation-source.txt, then call write to create html-preservation-output.txt with exactly the returned content, preserving its BOM, literal HTML, &lt;, &amp;, Unicode smart quotes, and marker-like text. Call read on html-preservation-output.txt to verify it exactly matches the source, then finish.",
         "edit": "Call edit to replace `diagnostic` with `edited` in generated.txt, then finish.",
         "apply_patch": "Call apply_patch with patchText exactly in this valid OpenCode format (NOT ---/+++ unified diff): `*** Begin Patch\n*** Update File: patch-target.txt\n@@\n-before\n+after\n*** End Patch`. Then finish.",
         "grep": "Call grep for `alpha` in notes.txt, then finish.",
@@ -88,7 +100,7 @@ def scenario_prompt(name: str) -> str:
         "plan": "This is a genuinely complex diagnostic with three dependent phases: inspect notes.txt, verify the fixture image, and patch patch-target.txt, followed by validation. Call plan with those 3+ phases, execute the fixture-only steps, verify them, then finish.",
         "finish": "Call finish with a concise completion summary.",
         "ask_user": "Call ask_user with the harmless diagnostic question `Should the fixture-only diagnostic continue?` and timeoutSec 30. Wait for the automatic answer, then call finish.",
-        "spawn_subagent": "Call spawn_subagent with task `In the fixture workspace only, read notes.txt and return its two lines; do not modify files or inspect host state.` and tools [\"read\"]. If the tool is unavailable, report that it is unavailable; otherwise report the child result. Then call finish exactly once.",
+        "spawn_subagent": "Call spawn_subagent with task `In the fixture workspace only, read notes.txt and return its two lines; do not modify files or inspect host state. Finish with the two-line result.`. Report the child result, then call finish exactly once.",
     }
     return f"Work only in this fixture workspace. {details.get(name, f'Call {tool}, then finish.')}"
 
@@ -135,6 +147,26 @@ def _tool_preflight_status(name: str, available_tools: set[str] | None, capabili
     return "advertised"
 
 
+def _online_tool_counts(driver: Any, event_start: int = 0) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """Return unbounded tool counters, falling back to retained test events."""
+    counter_names = ("tool_observed_counts", "successful_tool_counts", "failed_tool_counts")
+    if all(hasattr(driver, name) for name in counter_names):
+        return tuple(dict(getattr(driver, name)) for name in counter_names)  # type: ignore[return-value]
+    counts: list[dict[str, int]] = [{}, {}, {}]
+    for event in driver.events[event_start:]:
+        tool_name = event.get("toolName") or event.get("tool") or event.get("name")
+        if not isinstance(tool_name, str):
+            continue
+        index = 0 if event.get("type") == "tool_call_start" else 1 if event.get("type") == "tool_call_end" and event.get("ok") is True else 2 if event.get("type") == "tool_call_end" and event.get("ok") is False else None
+        if index is not None:
+            counts[index][tool_name] = counts[index].get(tool_name, 0) + 1
+    return counts[0], counts[1], counts[2]
+
+
+def _tool_count_delta(before: dict[str, int], after: dict[str, int]) -> set[str]:
+    return {name for name, count in after.items() if count > before.get(name, 0)}
+
+
 def classify_coverage(
     attempted: set[str], observed: set[str], available_tools: set[str] | None,
     idle: dict[str, int], final_idle_deadline_truncated: bool,
@@ -163,8 +195,8 @@ def classify_coverage(
                 missing.append(name)
         coverage[name] = state
     idle_expected = idle["requested"] > 0
-    idle_observed = idle_expected and not idle["failed"] and not idle["timedOut"]
-    idle_state: dict[str, object] = {"kind": "rpc", "expected": idle_expected, "observed": idle_observed}
+    idle_observed = idle["completed"] > 0
+    idle_state: dict[str, object] = {"kind": "rpc", "expected": idle_expected, "observed": idle_observed, "completed": idle["completed"], "failed": idle["failed"], "timedOut": idle["timedOut"], "partial": idle_observed and (idle["failed"] > 0 or idle["timedOut"] > 0)}
     if idle_expected and not idle_observed and final_idle_deadline_truncated:
         idle_state["category"] = "deadline_truncated"
         warnings.append({"scenario": "wait_for_idle", "category": "deadline_truncated", "detail": "The final wait_for_idle reached the outer workload deadline after all planned scenarios were attempted."})
@@ -188,6 +220,14 @@ class RpcDriver:
         self.terminated_by_driver = False
         self._stream_closed = False
         self._answered_questions: set[str] = set()
+        self._request_counter = 0
+        self._event_sequence = 0
+        self.tool_observed: set[str] = set()
+        self.successful_tools: set[str] = set()
+        self.failed_tools: set[str] = set()
+        self.tool_observed_counts: dict[str, int] = {}
+        self.successful_tool_counts: dict[str, int] = {}
+        self.failed_tool_counts: dict[str, int] = {}
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
 
@@ -211,6 +251,24 @@ class RpcDriver:
                 self.malformed.append({"type": "non_object_output"})
             self.emit(json.dumps({"type": "non_object_output"}))
             return None
+        # Assign IDs as events arrive, independently from bounded retention.
+        # The emitted stream and retained evidence therefore retain one stable,
+        # contiguous diagnostic sequence even after the event buffer fills.
+        self._event_sequence += 1
+        item = dict(item)
+        item["diagnosticEventId"] = self._event_sequence
+        # Track coverage before applying the retained-event bound.
+        tool_name = item.get("toolName") or item.get("tool") or item.get("name")
+        if item.get("type") == "tool_call_start" and isinstance(tool_name, str):
+            self.tool_observed.add(tool_name)
+            self.tool_observed_counts[tool_name] = self.tool_observed_counts.get(tool_name, 0) + 1
+        elif item.get("type") == "tool_call_end" and isinstance(tool_name, str):
+            if item.get("ok") is True:
+                self.successful_tools.add(tool_name)
+                self.successful_tool_counts[tool_name] = self.successful_tool_counts.get(tool_name, 0) + 1
+            elif item.get("ok") is False:
+                self.failed_tools.add(tool_name)
+                self.failed_tool_counts[tool_name] = self.failed_tool_counts.get(tool_name, 0) + 1
         if len(self.events) < MAX_EVENTS:
             self.events.append(item)
         self.emit(json.dumps(item, ensure_ascii=False, sort_keys=True))
@@ -220,7 +278,8 @@ class RpcDriver:
         assert self.process.stdin is not None
         if self._stream_closed:
             return None
-        request_id = body.setdefault("id", f"diagnostic-{len(self.events)}")
+        self._request_counter += 1
+        request_id = body.setdefault("id", f"diagnostic-{self._request_counter}")
         try:
             self.process.stdin.write(json.dumps(body) + "\n")
             self.process.stdin.flush()
@@ -254,16 +313,23 @@ class RpcDriver:
 
     def close(self) -> None:
         if self.process.poll() is None:
-            self.terminated_by_driver = True
             try:
-                os.killpg(self.process.pid, signal.SIGTERM)
+                if self.process.stdin is not None and not self.process.stdin.closed:
+                    self.process.stdin.close()
                 self.process.wait(timeout=3)
-            except (OSError, subprocess.TimeoutExpired):
+            except (AttributeError, OSError, ValueError, subprocess.TimeoutExpired):
+                self.terminated_by_driver = True
                 try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                    self.process.wait(timeout=3)
                 except OSError:
-                    pass
-                self.process.wait(timeout=3)
+                    return
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    self.process.wait(timeout=3)
         self._reader.join(timeout=1)
 
 
@@ -282,6 +348,13 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
     control_observed: set[str] = set()
     idle = {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}
     scenarios: list[dict[str, Any]] = []
+    # Keep per-scenario attribution separately from the unbounded global tool
+    # counters.  A tool name can appear in more than one scenario (notably
+    # ``write``), so session-wide tool presence is not coverage evidence.
+    scenario_tool_coverage: dict[str, dict[str, bool]] = {
+        name: {"observed": False, "successful": False, "failed": False}
+        for name in SCENARIOS
+    }
     available_tools: set[str] | None = None
     capabilities: dict[str, bool] | None = None
     final_idle_deadline_truncated = False
@@ -314,7 +387,34 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
             # not make a later, successful scenario look deadline-truncated.
             scenario_truncated = False
             attempted.add(name)
-            record: dict[str, Any] = {"id": name, "startSec": round(scenario_started - started, 3), "scenarioTimeoutSec": min(10.0, duration), "waitForIdle": {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}}
+            scenario_timeout = min(SCENARIO_TIMEOUTS[name], duration)
+            record: dict[str, Any] = {"id": name, "startSec": round(scenario_started - started, 3), "scenarioTimeoutSec": scenario_timeout, "waitForIdle": {"requested": 0, "completed": 0, "failed": 0, "timedOut": 0}}
+            event_start = len(driver.events)
+            tool_counts_before = _online_tool_counts(driver, event_start)
+
+            def capture_scenario_tools(scenario_name: str, scenario_record: dict[str, Any]) -> None:
+                observed_counts, successful_counts, failed_counts = _online_tool_counts(driver, event_start)
+                observed_tools = _tool_count_delta(tool_counts_before[0], observed_counts)
+                successful_tools = _tool_count_delta(tool_counts_before[1], successful_counts)
+                failed_tools = _tool_count_delta(tool_counts_before[2], failed_counts)
+                required_tool = SCENARIO_REQUIRED_TOOLS[scenario_name]
+                if required_tool is None:
+                    return
+                state = scenario_tool_coverage[scenario_name]
+                # HTML preservation is a scenario-level assertion, rather than
+                # generic write coverage. It requires this turn's successful
+                # write and controller-side byte-for-character verification.
+                if scenario_name == "write_html_preservation":
+                    verified = scenario_record.get("status") == "completed" and scenario_record.get("contentVerified") is True
+                    if required_tool in successful_tools and verified:
+                        state["observed"] = True
+                        state["successful"] = True
+                    elif required_tool in failed_tools:
+                        state["failed"] = True
+                    return
+                state["observed"] |= required_tool in observed_tools
+                state["successful"] |= required_tool in successful_tools
+                state["failed"] |= required_tool in failed_tools
             if detail := _scenario_unavailable(name, available_tools, capabilities):
                 record.update(status="capability_unavailable", detail=detail, endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
                 if len(scenarios) < MAX_SCENARIO_RECORDS:
@@ -328,19 +428,26 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
             # before each cycle so a long run remains idempotent.
             if name == "apply_patch":
                 (workspace / "patch-target.txt").write_text("before\n", encoding="utf-8")
-            scenario_deadline = min(scenario_started + min(10.0, duration), deadline + SCENARIO_DRAIN_GRACE_SEC)
+            scenario_deadline = min(scenario_started + scenario_timeout, deadline)
             response = driver.command({"type": "prompt", "message": scenario_prompt(name), "streamingBehavior": "queue"}, scenario_deadline)
             if response is None:
                 scenario_truncated = monotonic() >= deadline
                 if not scenario_truncated:
                     execution_failed = True
                 record.update(status="incomplete_at_deadline" if scenario_truncated else "prompt_timeout", endSec=round(monotonic() - started, 3), elapsedSec=round(monotonic() - scenario_started, 3))
+                capture_scenario_tools(name, record)
                 if len(scenarios) < MAX_SCENARIO_RECORDS:
                     scenarios.append(record)
                 index += 1
                 if scenario_truncated:
                     final_scenario_truncated = True
                     break
+                recovery_deadline = min(monotonic() + RECOVERY_TIMEOUT_SEC, deadline)
+                abort_response = driver.command({"type": "abort"}, recovery_deadline)
+                record["recovery"] = {"attempted": True, "aborted": bool(abort_response and abort_response.get("success") is True)}
+                if record["recovery"]["aborted"]:
+                    recovered = driver.command({"type": "wait_for_idle"}, recovery_deadline)
+                    record["recovery"]["idle"] = bool(recovered and recovered.get("success") is True)
                 # A closed RPC stream can return immediately. Yield before the
                 # next scheduled attempt so it cannot spin until the deadline.
                 remaining = deadline - monotonic()
@@ -351,7 +458,11 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 execution_failed = True
             idle["requested"] += 1
             record["waitForIdle"]["requested"] = 1
-            idle_response = driver.command({"type": "wait_for_idle"}, scenario_deadline)
+            # A prompt may consume most of its own bounded window while the
+            # queued turn is still making progress. Give idle detection a fresh
+            # bounded window, but never extend beyond the workload deadline.
+            idle_deadline = min(monotonic() + scenario_timeout, deadline)
+            idle_response = driver.command({"type": "wait_for_idle"}, idle_deadline)
             if idle_response is None:
                 idle["timedOut"] += 1
                 record["waitForIdle"]["timedOut"] = 1
@@ -368,6 +479,13 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 idle["completed"] += 1
                 record["waitForIdle"]["completed"] = 1
                 record["status"] = "completed"
+                if name == "write_html_preservation":
+                    output = workspace / "html-preservation-output.txt"
+                    if not output.is_file() or output.read_text(encoding="utf-8") != HTML_PRESERVATION_CONTENT:
+                        execution_failed = True
+                        record.update(status="content_verification_failed", contentVerified=False)
+                    else:
+                        record["contentVerified"] = True
                 if name not in requested:
                     requested.append(name)
             else:
@@ -375,8 +493,16 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 idle["failed"] += 1
                 record["waitForIdle"]["failed"] = 1
                 record["status"] = "idle_failed"
+            if record.get("status") in {"idle_timeout", "idle_failed"} and not scenario_truncated:
+                recovery_deadline = min(monotonic() + RECOVERY_TIMEOUT_SEC, deadline)
+                abort_response = driver.command({"type": "abort"}, recovery_deadline)
+                record["recovery"] = {"attempted": True, "aborted": bool(abort_response and abort_response.get("success") is True)}
+                if record["recovery"]["aborted"]:
+                    recovered = driver.command({"type": "wait_for_idle"}, recovery_deadline)
+                    record["recovery"]["idle"] = bool(recovered and recovered.get("success") is True)
             scenario_ended = monotonic()
             record.update(endSec=round(scenario_ended - started, 3), elapsedSec=round(scenario_ended - scenario_started, 3))
+            capture_scenario_tools(name, record)
             if len(scenarios) < MAX_SCENARIO_RECORDS:
                 scenarios.append(record)
             index += 1
@@ -395,13 +521,16 @@ def run_workload(workspace: Path, duration: float, provider: str, model: str, en
                 shutdown_response = driver.command({"type": "wait_for_idle"}, drain_deadline)
                 clean_shutdown = bool(shutdown_response and shutdown_response.get("success") is True)
             drain["cleanShutdown"] = clean_shutdown
-        observed = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_start"}
-        successful_tools = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_end" and e.get("ok") is True}
-        failed_tools = {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_end" and e.get("ok") is False}
+        # Test doubles from older focused tests expose only events; production
+        # drivers use the online counters, which remain correct after truncation.
+        online_failed = getattr(driver, "failed_tools", {str(e.get("toolName") or e.get("tool") or e.get("name")) for e in driver.events if e.get("type") == "tool_call_end" and e.get("ok") is False})
+        observed = {name for name, state in scenario_tool_coverage.items() if state["observed"]}
+        successful_tools = {name for name, state in scenario_tool_coverage.items() if state["successful"]}
+        failed_tools = {name for name, state in scenario_tool_coverage.items() if state["failed"]}
         # A tool advertised by get_tools but ending unsuccessfully is a real
         # dispatch/runtime failure, not a disabled capability.  Optional
         # scenarios are skipped above, so they cannot be mistaken for this.
-        if any(event.get("type") == "tool_call_end" and event.get("ok") is False for event in driver.events):
+        if online_failed:
             execution_failed = True
         attempted.update(requested)
         observed.update(control_observed)

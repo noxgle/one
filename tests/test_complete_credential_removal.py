@@ -443,8 +443,9 @@ async def test_rpc_logout_clears_all_and_schema(tmp_path: Path, monkeypatch, cap
     settings = SettingsManager.in_memory({"tools": {"maxSteps": 2, "timeoutSec": 5}})
     session_manager = SessionManager.in_memory(str(tmp_path))
 
-    # Import _FakeLoader from test_rpc_mode where it's already defined
-    import test_rpc_mode as _test_rpc
+    # Import the shared RPC test loader through the tests package. Pytest does
+    # not expose test modules as top-level imports with the current layout.
+    from tests import test_rpc_mode as _test_rpc
     session = AgentSession(
         session_manager, settings, registry,
         _test_rpc._FakeLoader(str(tmp_path)), model, "medium",

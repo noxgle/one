@@ -23,6 +23,7 @@ def test_fixture_is_deterministic_and_contains_image(tmp_path: Path) -> None:
     second = create_fixture(tmp_path / "fixture")
     assert first == second
     assert (tmp_path / "fixture" / "fixture.png").read_bytes().startswith(b"\x89PNG")
+    assert (tmp_path / "fixture" / "html-preservation-source.txt").read_text(encoding="utf-8") == workload.HTML_PRESERVATION_CONTENT
     assert "spawn_subagent" in SCENARIOS
 
 
@@ -40,8 +41,10 @@ def test_special_prompts_explicitly_request_safe_valid_tool_calls() -> None:
     evidence = scenario_prompt("evidence_read")
     assert "read on notes.txt" in evidence and "evidenceId" in evidence and "maxChars 256" in evidence
     subagent = scenario_prompt("spawn_subagent")
-    assert "spawn_subagent" in subagent and "tools [\"read\"]" in subagent and "host state" in subagent
+    assert "spawn_subagent" in subagent and "tools [\"read\"]" not in subagent and "host state" in subagent
     assert subagent.count("finish") == 1
+    preservation = scenario_prompt("write_html_preservation")
+    assert "BOM" in preservation and "&lt;" in preservation and "html-preservation-output.txt" in preservation
     patch = scenario_prompt("apply_patch")
     assert "*** Begin Patch" in patch and "*** Update File: patch-target.txt" in patch
     assert "NOT ---/+++ unified diff" in patch
@@ -111,6 +114,61 @@ def test_stdout_reader_marks_stream_closed_before_eof_sentinel() -> None:
     driver._read_stdout()
 
 
+def test_rpc_driver_uses_monotonic_request_ids_and_online_coverage_after_event_bound() -> None:
+    driver: Any = object.__new__(workload.RpcDriver)
+    driver.events = []
+    driver.malformed = []
+    driver.emit = lambda _line: None
+    driver.tool_observed = set()
+    driver.successful_tools = set()
+    driver.failed_tools = set()
+    driver.tool_observed_counts = {}
+    driver.successful_tool_counts = {}
+    driver.failed_tool_counts = {}
+    driver._event_sequence = 0
+    emitted: list[dict[str, object]] = []
+    driver.emit = lambda line: emitted.append(json.loads(line))
+    for _ in range(workload.MAX_EVENTS + 1):
+        driver._record('{"type":"tool_call_start","tool":"read"}')
+    driver._record('{"type":"tool_call_end","tool":"read","ok":true}')
+    assert len(driver.events) == workload.MAX_EVENTS
+    assert driver.events[0]["diagnosticEventId"] == 1
+    assert driver.events[-1]["diagnosticEventId"] == workload.MAX_EVENTS
+    assert [event["diagnosticEventId"] for event in emitted] == list(range(1, workload.MAX_EVENTS + 3))
+    assert driver.tool_observed == {"read"}
+    assert driver.successful_tools == {"read"}
+    assert driver.tool_observed_counts == {"read": workload.MAX_EVENTS + 1}
+    assert driver.successful_tool_counts == {"read": 1}
+
+
+def test_wait_for_idle_receives_fresh_bounded_deadline_after_prompt(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+    deadlines: dict[str, float] = {}
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, deadline):
+            if body["type"] == "prompt":
+                deadlines["prompt"] = deadline
+                clock["value"] = 10.0
+            elif body["type"] == "wait_for_idle":
+                deadlines["idle"] = deadline
+                clock["value"] = 100.0
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("read",))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    workload.run_workload(tmp_path / "fixture", 100, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert deadlines == {"prompt": 20.0, "idle": 30.0}
+
+
 def test_persistent_rpc_driver_answers_ask_user_and_collects_events(monkeypatch, tmp_path: Path) -> None:
     fake = _FakeProcess()
     monkeypatch.setattr(workload.subprocess, "Popen", lambda *a, **k: fake)
@@ -170,7 +228,7 @@ def test_workload_records_wait_for_idle_coverage(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(workload, "RpcDriver", Driver)
     result = workload.run_workload(tmp_path / "fixture", 0.01, "llama.cpp", "local", "http://example.test", emit=lambda _line: None)
     assert result["waitForIdle"]["failed"] > 0
-    assert result["coverage"]["wait_for_idle"] == {"kind": "rpc", "expected": True, "observed": False, "category": "missing_model_or_tool_coverage"}
+    assert result["coverage"]["wait_for_idle"] == {"kind": "rpc", "expected": True, "observed": False, "completed": 0, "failed": result["waitForIdle"]["failed"], "timedOut": 0, "partial": False, "category": "missing_model_or_tool_coverage"}
     assert "wait_for_idle" in result["missingCoverage"]
     assert result["completed"] is False
 
@@ -241,6 +299,23 @@ def test_coverage_excludes_final_idle_truncated_by_outer_deadline() -> None:
     assert coverage["wait_for_idle"]["category"] == "deadline_truncated"
     assert "wait_for_idle" not in missing
     assert warnings[-1]["scenario"] == "wait_for_idle"
+
+
+def test_coverage_marks_wait_for_idle_observed_after_any_successful_repetition() -> None:
+    coverage, missing, _warnings = classify_coverage(
+        set(), set(), None,
+        {"requested": 3, "completed": 1, "failed": 1, "timedOut": 1}, False,
+    )
+    assert coverage["wait_for_idle"]["observed"] is True
+    assert coverage["wait_for_idle"]["partial"] is True
+    assert "wait_for_idle" not in missing
+
+
+def test_workload_plan_uses_bounded_local_model_timeouts() -> None:
+    timeouts = {item["id"]: item["timeoutSec"] for item in workload_plan(120)}
+    assert timeouts["read"] == 20.0
+    assert timeouts["evidence_read"] == 60.0
+    assert timeouts["spawn_subagent"] == 60.0
 
 
 def test_workload_treats_final_idle_deadline_as_completed_warning(monkeypatch, tmp_path: Path) -> None:
@@ -395,6 +470,72 @@ def test_apply_patch_fixture_is_reset_before_each_scenario_cycle(monkeypatch, tm
     assert inputs == ["before\n", "before\n"]
 
 
+def test_html_preservation_scenario_verifies_exact_fixture_content(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events: list[dict[str, object]] = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            if body["type"] == "prompt":
+                root = tmp_path / "fixture"
+                (root / "html-preservation-output.txt").write_text(
+                    (root / "html-preservation-source.txt").read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                self.events.extend((
+                    {"type": "tool_call_start", "tool": "write"},
+                    {"type": "tool_call_end", "tool": "write", "ok": True},
+                ))
+            if body["type"] == "wait_for_idle":
+                clock["value"] = 1.0
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("write_html_preservation",))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    result = workload.run_workload(tmp_path / "fixture", 1, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert result["coverage"]["write_html_preservation"]["observed"] is True
+    assert result["coverage"]["write_html_preservation"]["success"] is True
+    assert result["scenarios"][0]["contentVerified"] is True
+
+
+def test_ordinary_write_event_does_not_satisfy_html_preservation_coverage(monkeypatch, tmp_path: Path) -> None:
+    clock = {"value": 0.0}
+
+    class Driver:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.events: list[dict[str, object]] = []
+            self.malformed = []
+            self.process = type("Process", (), {"poll": lambda self: 0})()
+
+        def command(self, body, _deadline):
+            if body["type"] == "prompt" and "generated.txt" in body["message"]:
+                self.events.extend((
+                    {"type": "tool_call_start", "tool": "write"},
+                    {"type": "tool_call_end", "tool": "write", "ok": True},
+                ))
+            if body["type"] == "wait_for_idle":
+                clock["value"] += 1.0
+            return {"success": True, "id": body.get("id")}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload, "SCENARIOS", ("write", "write_html_preservation"))
+    monkeypatch.setattr(workload, "RpcDriver", Driver)
+    result = workload.run_workload(tmp_path / "fixture", 2, "llama.cpp", "local", "http://example.test", emit=lambda _line: None, monotonic=lambda: clock["value"])
+    assert result["coverage"]["write"]["observed"] is True
+    assert result["coverage"]["write"]["success"] is True
+    assert result["coverage"]["write_html_preservation"]["expected"] is True
+    assert result["coverage"]["write_html_preservation"]["observed"] is False
+    assert result["coverage"]["write_html_preservation"]["success"] is False
+
+
 def test_final_deadline_drain_is_classified_separately_from_rpc_failure(monkeypatch, tmp_path: Path) -> None:
     clock = {"value": 0.0}
     commands: list[str] = []
@@ -428,6 +569,7 @@ def test_final_deadline_drain_is_classified_separately_from_rpc_failure(monkeypa
 def test_workload_continues_after_a_prompt_timeout(monkeypatch, tmp_path: Path) -> None:
     clock = {"value": 0.0}
     prompts: list[str] = []
+    commands: list[str] = []
 
     class Driver:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -436,6 +578,7 @@ def test_workload_continues_after_a_prompt_timeout(monkeypatch, tmp_path: Path) 
             self.process = type("Process", (), {"poll": lambda self: 0})()
 
         def command(self, body, _deadline):
+            commands.append(body["type"])
             clock["value"] += 1.0
             if body["type"] == "prompt":
                 prompts.append(body["message"])
@@ -452,6 +595,8 @@ def test_workload_continues_after_a_prompt_timeout(monkeypatch, tmp_path: Path) 
     assert result["scenarios"][0]["status"] == "prompt_timeout"
     assert result["completed"] is False
     assert len(prompts) > 1
+    assert "abort" in commands
+    assert commands.index("abort") < commands.index("prompt", commands.index("abort") + 1)
     assert any(record["id"] == "read_image" for record in result["scenarios"])
     assert result["incompleteAtDeadline"]["finalScenarioTruncated"] is False
     assert result["drain"]["attempted"] is False
