@@ -1,5 +1,16 @@
 # Extension Runtime Contract
 
+```
+ ██████╗ ███╗   ██╗███████╗
+██╔═══██╗████╗  ██║██╔════╝
+██║   ██║██╔██╗ ██║█████╗
+██║   ██║██║╚██╗██║██╔══╝
+╚██████╔╝██║ ╚████║███████╗
+ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+```
+
+[Full TUI logo artwork](https://github.com/noxgle/one/blob/main/one/assets/logo.txt)
+
 An extension is a plain Python file that exports a `register(ctx) -> hooks` function.
 The contract is inspired by [opencode](https://opencode.ai) plugins — hooks share the same
 names and similar inputs/outputs. Hooks may be **synchronous or async** functions.

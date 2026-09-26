@@ -75,6 +75,9 @@ include-package-data = true
 where = ["."]
 include = ["one*"]
 
+[tool.setuptools.package-data]
+one = ["assets/logo.txt"]
+
 # Dynamic version read from one/config.py at build time.
 [tool.setuptools.dynamic]
 version = {attr = "one.config.VERSION"}

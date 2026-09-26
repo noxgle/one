@@ -8,6 +8,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Added
+
+- **TUI logo asset** — startup artwork now loads from the packaged
+  `one/assets/logo.txt`, which is also linked from the main documentation.
+
 ### Changed
 
 - **MCP disable persistence** — `/mcp disable <name>` now saves `enabled: false`,

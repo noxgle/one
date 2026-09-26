@@ -1,5 +1,16 @@
 # one
 
+```
+ ██████╗ ███╗   ██╗███████╗
+██╔═══██╗████╗  ██║██╔════╝
+██║   ██║██╔██╗ ██║█████╗
+██║   ██║██║╚██╗██║██╔══╝
+╚██████╔╝██║ ╚████║███████╗
+ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+```
+
+[Full TUI logo artwork](https://github.com/noxgle/one/blob/main/one/assets/logo.txt)
+
 [![CI](https://github.com/noxgle/one/actions/workflows/ci.yml/badge.svg)](https://github.com/noxgle/one/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)

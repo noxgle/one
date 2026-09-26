@@ -1,5 +1,16 @@
 # Skills
 
+```
+ ██████╗ ███╗   ██╗███████╗
+██╔═══██╗████╗  ██║██╔════╝
+██║   ██║██╔██╗ ██║█████╗
+██║   ██║██║╚██╗██║██╔══╝
+╚██████╔╝██║ ╚████║███████╗
+ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+```
+
+[Full TUI logo artwork](https://github.com/noxgle/one/blob/main/one/assets/logo.txt)
+
 Skills are modular, discoverable instruction sets that extend the agent's capabilities on demand. They follow a YAML frontmatter + Markdown body format (`SKILL.md` files) and are loaded via the resource loader.
 
 ## Discovery

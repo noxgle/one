@@ -10,6 +10,8 @@ import textwrap
 import threading
 import time
 from dataclasses import dataclass
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 
@@ -139,30 +141,24 @@ _THINKING_FRAMES = "░▒▓█▓▒"
 _THINKING_MARK = "__MK__:"
 _THINKING_TEXT_MARK = "__MK_THINK__: "
 
+def _read_logo_lines(path: Traversable) -> tuple[str, ...]:
+    """Read logo lines, preserving blank separators; return empty only if entirely blank."""
+    lines = tuple(path.read_text(encoding="utf-8").splitlines())
+    return lines if any(line.strip() for line in lines) else ()
+
+
+def _load_tui_logo_lines() -> tuple[str, ...]:
+    """Read the packaged startup artwork."""
+    try:
+        logo_lines = _read_logo_lines(files("one").joinpath("assets").joinpath("logo.txt"))
+    except (FileNotFoundError, ModuleNotFoundError, OSError, UnicodeError):
+        return ()
+    return logo_lines
+
+
 # Startup artwork is a dedicated visual widget, kept outside both the durable
 # conversation and the transcript presentation cache.
-_TUI_LOGO_LINES: tuple[str, ...] = (
-    r" ██████╗ ███╗   ██╗███████╗",
-    r"██╔═══██╗████╗  ██║██╔════╝",
-    r"██║   ██║██╔██╗ ██║█████╗  ",
-    r"██║   ██║██║╚██╗██║██╔══╝  ",
-    r"╚██████╔╝██║ ╚████║███████╗",
-    r" ╚═════╝ ╚═╝  ╚═══╝╚══════╝",
-    "",
-    r"███████╗ ██████╗ ██████╗ ",
-    r"██╔════╝██╔═══██╗██╔══██╗",
-    r"█████╗  ██║   ██║██████╔╝",
-    r"██╔══╝  ██║   ██║██╔══██╗",
-    r"██║     ╚██████╔╝██║  ██║",
-    r"╚═╝      ╚═════╝ ╚═╝  ╚═╝",
-    "",
-    r"███████╗██╗   ██╗███████╗██████╗ ██╗   ██╗ ██████╗ ███╗   ██╗███████╗",
-    r"██╔════╝██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔═══██╗████╗  ██║██╔════╝",
-    r"█████╗  ██║   ██║█████╗  ██████╔╝ ╚████╔╝ ██║   ██║██╔██╗ ██║█████╗  ",
-    r"██╔══╝  ╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  ██║   ██║██║╚██╗██║██╔══╝  ",
-    r"███████╗ ╚████╔╝ ███████╗██║  ██║   ██║   ╚██████╔╝██║ ╚████║███████╗",
-    r"╚══════╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚══════╝",
-)
+_TUI_LOGO_LINES = _load_tui_logo_lines()
 
 # The transcript is a presentation cache.  AgentSession and session JSONL keep
 # the complete conversation; this list is deliberately bounded so rebuilding
@@ -1227,9 +1223,8 @@ if TEXTUAL_AVAILABLE:
 
         def _refresh_logo(self) -> None:
             """Render startup artwork separately from the selectable transcript."""
-            available_width = self._main_width()
-            show_full_logo = self.size.height >= 30 and available_width >= 90
-            logo = "\n".join(_TUI_LOGO_LINES) if show_full_logo else "one"
+            full_logo = "\n".join(_TUI_LOGO_LINES)
+            logo = full_logo if full_logo.strip() else "one"
             try:
                 self.query_one("#logo", Static).update(logo)
             except Exception:

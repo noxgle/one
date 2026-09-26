@@ -1,5 +1,16 @@
 # Architecture of `one`
 
+```
+ ██████╗ ███╗   ██╗███████╗
+██╔═══██╗████╗  ██║██╔════╝
+██║   ██║██╔██╗ ██║█████╗
+██║   ██║██║╚██╗██║██╔══╝
+╚██████╔╝██║ ╚████║███████╗
+ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+```
+
+[Full TUI logo artwork](https://github.com/noxgle/one/blob/main/one/assets/logo.txt)
+
 Internal architecture of the autonomous terminal agent `one` — components,
 data flows, contracts, and extension points.
 

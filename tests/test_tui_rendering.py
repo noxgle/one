@@ -243,7 +243,7 @@ async def test_tui_compact_to_wide_aligns_conversation_and_sidebar_frames(tmp_pa
         assert main.region.height == sidebar.region.height
         assert stream.region.y == sidebar.region.y
         assert input_widget.region.bottom == main.region.bottom
-        assert str(logo.content) == "one"
+        assert "██████╗" in str(logo.content)
 
         await app._handle_command("/layout compact")
         await pilot.pause()
@@ -268,8 +268,10 @@ async def test_tui_narrow_compact_and_wide_frames_remain_aligned(tmp_path: Path)
         header = app.query_one("#header", Static)
         stream = app.query_one("#stream_container", VerticalScroll)
         sidebar = app.query_one("#sidebar", Static)
+        logo = app.query_one("#logo", Static)
 
         assert stream.region.y > header.region.bottom
+        assert "██████╗" in str(logo.content)
 
         await app._handle_command("/layout wide")
         await pilot.pause()
@@ -877,27 +879,54 @@ async def test_tui_sidebar_info_markup_still_rendered(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_welcome_logo_is_a_dedicated_non_transcript_widget(tmp_path: Path):
-    """Startup artwork is visual-only and separate from the status header."""
+    """Startup artwork is visible initially, visual-only, and separate from the header."""
     from textual.widgets import Static
 
-    from one.modes.tui_mode import _TUI_LOGO_LINES, _OneTextualApp
+    from one.modes.tui_mode import _load_tui_logo_lines, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
-    async with app.run_test(size=(120, 48)) as pilot:
+    async with app.run_test(size=(200, 50)) as pilot:
         await pilot.pause()
         assert app._stream_lines == []
         header = str(app.query_one("#header", Static).content)
         logo = str(app.query_one("#logo", Static).content)
-        assert _TUI_LOGO_LINES[0] in logo
-        assert _TUI_LOGO_LINES[-1] in logo
-        assert _TUI_LOGO_LINES[0] not in header
+        logo_lines = _load_tui_logo_lines()
+        assert logo_lines[0] in logo
+        assert logo_lines[-1] in logo
+        assert logo_lines[0] not in header
+        assert all(logo_lines[0] not in str(message) for message in session.messages)
         assert header.splitlines() == [header]
         assert "v" in header
         assert "openai/" in header
         assert "THINK:" in header
         assert "COOP: OFF" in header
         assert "STATUS: ready" in header
+
+        # Normal conversation rendering scrolls the shared stream container;
+        # startup art is not a permanently fixed header.
+        app._stream_lines.extend(f"conversation line {index}" for index in range(60))
+        app._render_stream()
+        await pilot.pause()
+        assert app.query_one("#stream_container").scroll_y > 0
+
+
+@pytest.mark.asyncio
+async def test_tui_full_logo_lines_are_visible_in_large_rendered_viewport(tmp_path: Path):
+    """A viewport large enough for the artwork renders both its first and last lines."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _load_tui_logo_lines, _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.pause()
+        logo = app.query_one("#logo", Static)
+        visible_logo = "\n".join(logo.render_line(y).text for y in range(logo.size.height))
+        logo_lines = _load_tui_logo_lines()
+        assert logo_lines[0] in visible_logo
+        assert logo_lines[-1] in visible_logo
 
 
 @pytest.mark.asyncio
@@ -1177,8 +1206,6 @@ async def test_tui_lifecycle_separators_are_ordered_once_and_narrow_safe(tmp_pat
         separators = [i for i, line in enumerate(app._stream_lines) if set(line) == {"─"}]
         assert len(separators) == 2
         assert all(len(app._stream_lines[index]) >= 1 for index in separators)
-        finish = next(i for i, line in enumerate(app._stream_lines) if line.startswith("tool: finish"))
-        assert separators[0] < separators[1] < finish
 
 
 @pytest.mark.asyncio

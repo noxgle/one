@@ -1,5 +1,16 @@
 # Release Checklist
 
+```
+ ██████╗ ███╗   ██╗███████╗
+██╔═══██╗████╗  ██║██╔════╝
+██║   ██║██╔██╗ ██║█████╗
+██║   ██║██║╚██╗██║██╔══╝
+╚██████╔╝██║ ╚████║███████╗
+ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+```
+
+[Full TUI logo artwork](https://github.com/noxgle/one/blob/main/one/assets/logo.txt)
+
 Reproducible commands for verifying the `one-agent` package before publication.
 Run from the repository root.
 
