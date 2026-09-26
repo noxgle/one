@@ -3991,3 +3991,451 @@ and `Ctrl+K` opens a usable provider/model picker.
 - [x] Layout commands, context meter, model picker, themes, snapshots, and tests
   are complete.
 - [x] `scripts/test.sh tui`, full pytest, Ruff, and `git diff --check` pass.
+
+## Project: Preserve HTML through the `write` tool pipeline
+
+### Goal
+
+Guarantee that `write` stores the exact content requested by the model, including
+literal HTML, intended HTML entities, Unicode, and JSON escapes, while preventing
+provider-context safety escaping from contaminating later model-generated writes.
+
+### Context
+
+Read-only tracing confirmed that `one/tools/write.py` passes `content` directly to
+`Path.write_text(..., encoding="utf-8")`; it performs no HTML escaping or
+unescaping. The content can nevertheless be changed before execution:
+
+- `normalize_jsonish()` in `one/core/agent_session.py` currently performs global
+  replacements across the complete tool-call payload, including `args.content`.
+  It removes exact parser-marker strings such as `<tool_response>` and changes
+  BOM/smart-quote characters even when they are intentional file content.
+- Malformed-write recovery performs a limited best-effort unescape for `\"`,
+  `\n`, `\r`, and `\t`; it does not decode HTML entities.
+- After execution, the complete write arguments are copied into a `toolResult`.
+  The provider-only conversation view then applies `html.escape(...,
+  quote=False)`, so a later model call sees `<`, `>`, and `&` as entities. If the
+  model copies that representation into a subsequent `write`, the entities are
+  persisted literally.
+- Approval callbacks, `tool.execute.before` extensions, and synchronous
+  `tool_call_start` listeners receive mutable arguments before execution.
+  Extension mutation is intentional, but presentation/event listeners should not
+  be able to modify the executed write by shared reference.
+
+### Scope
+
+#### In Scope
+
+- Exact preservation tests from provider text through parser, dispatch, and disk.
+- Prefer lossless parsing for valid JSON before any repair or normalization.
+- Restrict provider-marker cleanup to framing syntax rather than file content.
+- Preserve the malformed llama.cpp/Qwen write fallback without treating it as a
+  general HTML decoder.
+- Remove full write bodies from ordinary model-facing tool-result previews while
+  keeping complete durable evidence.
+- Isolate execution arguments from event-listener mutation.
+- Release notes, version update, and required version-bearing TUI snapshots.
+
+#### Non-Goals
+
+- Do not apply `html.unescape()` to write content; `&lt;`, `&amp;`, numeric
+  entities, and other entity text may be intentional source data.
+- Do not rewrite provider adapters or introduce provider-native tool calling.
+- Do not remove the `<untrusted-tool-output>` boundary or weaken escaping of
+  untrusted tool output sent to providers.
+- Do not forbid documented argument changes by `tool.execute.before` extensions.
+- Do not infer that arbitrary malformed pseudo-JSON can always be recovered
+  without ambiguity.
+
+### Assumptions
+
+- The exact Python string passed to `write_tool()` is the authoritative write
+  contract.
+- Complete tool payloads remain available in sanitized evidence sidecars even
+  when ordinary provider-context previews omit large write bodies.
+- Valid JSON and JSON Unicode escapes such as `\u003c` must follow normal
+  `json.loads()` semantics; literal HTML entities must remain literal entities.
+- Existing llama.cpp malformed-output compatibility remains required.
+
+### Open Questions
+
+- Obtain and preserve a redacted real failing provider response, if available,
+  to classify the observed incident as first-write parser corruption or a later
+  model-mediated rewrite from escaped tool-result context.
+- Confirm whether any external RPC/event consumer intentionally mutates
+  `tool_call_start.args`; the documented event contract should be observational.
+
+### Tech Stack
+
+- **Python 3.12+:** parser, dispatch, persistence, and write implementation.
+- **pytest / pytest-asyncio:** direct parser and end-to-end fake-provider tests.
+- **Ruff:** lint gate.
+- **Textual snapshots:** regenerated only because a user-visible version bump is
+  displayed in the TUI sidebar.
+
+### Constraints
+
+- Preserve JSON-in-text tool calling and current parser ordering.
+- Preserve event ordering and additive compatibility of existing event payloads.
+- Tests must use fake providers and temporary workspaces; no real provider, MCP,
+  or user state access.
+- Work on a feature branch based on current `main`, recommended
+  `fix/write-html-preservation`; do not merge, push, tag, or publish without
+  explicit approval.
+
+### Architecture
+
+The write pipeline remains `provider text → lossless JSON candidate parsing →
+explicit repair fallback → tool dispatch → write_tool`. Valid tool-call JSON is
+parsed before any compatibility repair. Framing-token cleanup is limited to
+recognized outer wrappers, and never scans a decoded `content` value.
+
+Execution retains the parsed arguments as its private value. Approval and
+documented extension hooks run according to their contracts, after which event
+payloads receive copies. `write_tool()` remains a literal UTF-8 sink and does not
+gain HTML-specific logic.
+
+The complete execution payload is stored in the sanitized evidence sidecar.
+Ordinary persisted/model-facing `toolResult` context contains the write path and
+success metadata but not a replayable copy of the complete source body. The
+existing untrusted-output escaping remains unchanged for all retained preview
+text.
+
+### Architecture Decisions
+
+#### ADR-WRITE-001: Preserve content; never guess whether entities should decode
+
+**Decision:** Keep `write_tool()` content-agnostic and do not add
+`html.unescape()` anywhere in the write path.
+
+**Alternatives:** Decode every entity before writing; decode only files with HTML
+extensions; add a caller-controlled decode option.
+
+**Rationale:** Entities are valid and often intentional HTML/source content.
+Automatic decoding would silently change semantics and could turn displayed text
+into executable markup.
+
+**Trade-offs:** If a model itself emits `&lt;` when it intended `<`, the runtime
+will not guess the intended representation. Instead, the plan removes known
+sources that expose escaped copies back to the model.
+
+**Consequences:** Exact string preservation becomes testable independent of file
+extension, and HTML-specific behavior stays outside the generic filesystem tool.
+
+#### ADR-WRITE-002: Parse valid JSON before compatibility normalization
+
+**Decision:** Attempt raw valid-JSON candidates first. Apply narrowly scoped
+framing repair only after lossless parsing fails, and never globally replace
+tokens inside decoded arguments.
+
+**Alternatives:** Keep global `normalize_jsonish()`; remove all malformed-output
+support; implement a fully permissive custom JSON grammar.
+
+**Rationale:** Valid JSON needs no repair, while global string replacement can
+corrupt valid source content. Narrow fallback behavior retains local-model
+compatibility with a smaller corruption surface.
+
+**Trade-offs:** Parser code and tests become more explicit, and some previously
+accepted highly malformed payloads may need dedicated bounded repair rules.
+
+**Consequences:** Marker-like custom HTML elements, smart quotes, and BOMs can be
+written exactly when supplied through valid JSON.
+
+#### ADR-WRITE-003: Keep full write bodies in evidence, not provider previews
+
+**Decision:** Omit `content`/`text` bodies from ordinary write tool-result
+arguments returned to model context, while retaining path/result metadata and the
+complete sanitized payload in durable evidence.
+
+**Alternatives:** Keep the full body and HTML-escape it; stop escaping tool
+results; HTML-unescape only write arguments on replay.
+
+**Rationale:** The model already generated the content and needs confirmation,
+not an escaped duplicate. Removing the duplicate reduces context cost and
+prevents entity contamination without weakening prompt-injection boundaries.
+
+**Trade-offs:** Inspecting the complete historical body requires the evidence
+path instead of the ordinary preview. Evidence-unavailable behavior needs an
+explicit test.
+
+**Consequences:** Later model calls receive the write path and outcome but cannot
+copy an HTML-escaped version of the previous source from `toolResult.args`.
+
+#### ADR-WRITE-004: Event listeners observe copies
+
+**Decision:** Emit copied write/tool arguments for observational events so event
+listeners cannot mutate the dictionary subsequently passed to execution.
+
+**Alternatives:** Keep shared references; deep-freeze every event; remove args
+from events.
+
+**Rationale:** Event/UI consumers should not influence filesystem effects.
+Explicit extension hooks remain the supported mutation boundary.
+
+**Trade-offs:** Copying has a bounded memory cost for large writes; redacted or
+bounded presentation payloads should avoid duplicating the complete body where
+possible.
+
+**Consequences:** Extension changes remain effective, but synchronous display or
+telemetry callbacks cannot accidentally rewrite source content.
+
+### Phases
+
+#### Phase 1: Establish exact-content regression coverage
+
+**Objective:** Reproduce every transformation boundary and lock down the intended
+write contract before changing production behavior.
+
+**Prerequisites:** Feature branch based on current `main`.
+
+**Expected outcome:** Tests distinguish literal HTML, entities, JSON escapes,
+parser-marker strings, malformed fallback behavior, and multi-step provider
+feedback.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Add direct and end-to-end HTML preservation tests
+
+  - **Description:** Add a table-driven direct `write_tool()` test and
+    fake-provider agent tests covering `<html>`, `<script>`, `<`, `>`, `&`,
+    `&amp;`, `&lt;`, numeric entities, `\u003c`, quotes, backslashes, newlines,
+    Unicode, smart quotes, BOM, and literal `<tool_response>`/tool-marker text.
+    Cover valid JSON, relaxed raw-control JSON, malformed pseudo-JSON, and two
+    sequential writes where the second provider call observes the first result.
+
+  - **Files:** `tests/test_tools.py`, `tests/test_agent_tool_parsing.py`,
+    `tests/test_agent_tool_calls.py`.
+
+  - **Dependencies:** None.
+
+  - **Acceptance Criteria:** Tests prove `write_tool()` itself is byte-for-byte
+    content-preserving; expose current parser-marker corruption; distinguish
+    normal JSON `\u003c → <` from literal `&lt;`; and demonstrate whether escaped
+    result feedback is present before the fix.
+
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_tools.py
+    tests/test_agent_tool_parsing.py tests/test_agent_tool_calls.py`.
+
+#### Phase 2: Make parsing lossless before bounded repair
+
+**Objective:** Prevent parser compatibility cleanup from modifying valid write
+content.
+
+**Prerequisites:** Phase 1 regression fixtures.
+
+**Expected outcome:** Valid JSON content reaches dispatch exactly as decoded by
+`json.loads()`, including marker-like HTML and intentional Unicode characters;
+supported malformed local-model payloads continue to work.
+
+**Estimated effort:** 1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Separate lossless candidate parsing from framing repair
+
+  - **Description:** Refactor `_try_parse_tool_call()` so raw complete JSON,
+    fenced JSON payloads, marker suffixes, balanced objects, nested string
+    arguments, and raw-function-call forms first use lossless JSON decoding.
+    Restrict BOM/marker/smart-quote compatibility handling to recognized outer
+    syntax after lossless parsing fails. Ensure repair logic never globally
+    deletes or rewrites decoded `args.content`.
+
+  - **Files:** `one/core/agent_session.py`,
+    `tests/test_agent_tool_parsing.py`.
+
+  - **Dependencies:** Phase 1 exact-content tests.
+
+  - **Acceptance Criteria:** Valid write JSON preserves all tested content;
+    wrappers outside the JSON object are tolerated; marker strings inside
+    content survive; parser order and tool-call IDs remain unchanged; unrelated
+    tools continue to parse.
+
+  - **Verification:** `.venv/bin/python -m pytest -q
+    tests/test_agent_tool_parsing.py tests/test_agent_tool_calls.py
+    tests/test_event_snapshots.py`.
+
+- [ ] **Task:** Bound malformed-write recovery without HTML semantics
+
+  - **Description:** Retain the narrow llama.cpp/Qwen pseudo-JSON fallback for
+    raw controls, unescaped quotes, and a missing outer brace. Document and test
+    its supported repair set. Do not decode HTML entities or generic Unicode
+    escapes with ad hoc replacement logic, and fail clearly when content
+    boundaries are ambiguous rather than writing corrupted output.
+
+  - **Files:** `one/core/agent_session.py`,
+    `tests/test_agent_tool_parsing.py`.
+
+  - **Dependencies:** Lossless candidate parser task.
+
+  - **Acceptance Criteria:** Existing malformed-write fixtures pass; supported
+    escapes produce deterministic content; ambiguous payloads return no parsed
+    write call and enter the existing repair/nudge behavior; HTML entities remain
+    literal.
+
+  - **Verification:** `.venv/bin/python -m pytest -q
+    tests/test_agent_tool_parsing.py tests/test_agent_retry_abort.py`.
+
+#### Phase 3: Prevent escaped feedback and shared-reference mutation
+
+**Objective:** Keep successful write bodies out of escaped provider previews and
+make execution arguments independent of observational event consumers.
+
+**Prerequisites:** Phase 2 parser behavior.
+
+**Expected outcome:** A later provider call sees write path/outcome metadata but
+not an entity-encoded duplicate of the previous source; event listeners cannot
+alter the executed file content.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Redact write bodies from ordinary tool-result context
+
+  - **Description:** Build a non-mutating preview copy for `write` tool results
+    that retains path and success/error metadata but omits `content` and fallback
+    `text` bodies. Store the complete effective payload in evidence before
+    preview construction. Preserve existing `<untrusted-tool-output>` escaping
+    and behavior for other tools.
+
+  - **Files:** `one/core/agent_session.py`,
+    `tests/test_agent_tool_calls.py`, evidence/persistence tests identified by
+    the implementation.
+
+  - **Dependencies:** Phase 1 multi-step feedback test.
+
+  - **Acceptance Criteria:** Provider context and persisted ordinary
+    `toolResult` do not contain the complete write body; path and successful byte
+    count remain available; `evidence_read` can retrieve complete sanitized
+    details; the source payload is not mutated; other tools are unchanged.
+
+  - **Verification:** `.venv/bin/python -m pytest -q
+    tests/test_agent_tool_calls.py tests/test_persistence.py
+    tests/test_evidence_sidecar.py` (or the repository's current evidence test
+    modules).
+
+- [ ] **Task:** Isolate execution arguments from event listeners
+
+  - **Description:** Emit a defensive copy of arguments for
+    `tool_call_start` and other pre-execution observational events while keeping
+    approval and `tool.execute.before` extension contracts explicit. Include a
+    regression listener that mutates its received write content and prove that
+    the file still receives the post-extension execution value.
+
+  - **Files:** `one/core/agent_session.py`,
+    `tests/test_agent_tool_calls.py`, `tests/test_extension_runtime.py`,
+    `tests/test_event_snapshots.py` if event serialization changes.
+
+  - **Dependencies:** Write-result preview task only if a shared copy/redaction
+    helper is introduced.
+
+  - **Acceptance Criteria:** Event-listener mutation cannot affect execution;
+    documented extension mutation still can; event ordering and payload shape
+    remain compatible; large contents are not needlessly copied into additional
+    presentation layers.
+
+  - **Verification:** `.venv/bin/python -m pytest -q
+    tests/test_agent_tool_calls.py tests/test_extension_runtime.py
+    tests/test_event_snapshots.py`.
+
+#### Phase 4: Release and full verification
+
+**Objective:** Validate the complete fix and prepare the user-visible patch for a
+separately approved release.
+
+**Prerequisites:** Phases 1–3.
+
+**Expected outcome:** HTML/source content is exact across all supported parser
+paths, no regression appears in sessions/evidence/events, and release metadata
+accurately describes the correction.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Complete regression, changelog, and version validation
+
+  - **Description:** Run focused and full tests, update the `Unreleased`
+    changelog entry and patch version for the user-visible correction, regenerate
+    only version-bearing TUI snapshots, and review all snapshot/diff changes.
+
+  - **Files:** `one/config.py`, `CHANGELOG.md`,
+    `tests/snapshots/tui/*.txt`, parser/write/tool-result tests changed in prior
+    phases.
+
+  - **Dependencies:** All implementation tasks.
+
+  - **Acceptance Criteria:** Changelog states exact-content preservation and
+    removal of escaped write-body feedback; version source and visible snapshots
+    agree; no unrelated snapshots change; all supported Python/CI paths remain
+    green.
+
+  - **Verification:** `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check .`,
+    `git diff --check`; regenerate TUI snapshots with
+    `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q
+    tests/test_tui_snapshots.py` and review the resulting diff before rerunning
+    the full suite.
+
+### Rollout & Rollback
+
+Land the change as one reviewable parser/context-integrity patch after focused
+and full verification. A separately approved release may then use the normal
+tag/version workflow. Roll back the patch if supported local-model malformed
+calls regress or provider history loses required outcome metadata; do not respond
+by adding global HTML decoding. Keep the new exact-content tests during rollback
+to preserve the documented contract and isolate the incompatible subchange.
+
+### Observability
+
+- Existing `tool_call_start`, `tool_call_end`, evidence IDs, and session messages
+  remain the diagnostic surfaces.
+- Tests should compare hashes or exact fixture strings, not log complete
+  potentially sensitive write bodies.
+- If temporary debug instrumentation is needed during implementation, record
+  lengths/parser-path classifications only and remove it before completion.
+
+### Security Considerations
+
+- Preserve HTML escaping inside provider-added untrusted-output boundaries.
+- Never execute, render, or decode source HTML as part of the filesystem write.
+- Keep full content out of ordinary model-context previews to reduce both prompt
+  injection exposure and accidental source duplication.
+- Evidence retrieval remains session-scoped and sanitized under the existing
+  evidence contract.
+
+### Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Narrower repair rejects a local-model payload previously accepted | Medium | Medium | Preserve current malformed fixtures, add parser-path matrix, fail through existing repair flow rather than write guessed content |
+| Removing write bodies from previews hides useful diagnostics | Medium | Low | Retain path/result metadata and complete sanitized evidence with retrieval tests |
+| Copying event arguments increases memory use for large files | Medium | Medium | Redact/bound presentation copies and avoid duplicate full-body copies where the event contract does not require them |
+| Event consumers depend on mutating shared args | Medium | Low | Confirm contract, preserve explicit extension mutation, document observational event semantics |
+| Fix addresses multi-step feedback but not model-originated entities on the first write | Medium | Medium | Preserve a redacted real reproduction when available; never guess via global entity decoding |
+| Parser refactor changes unrelated tools | High | Low | Run cross-tool parser, event snapshot, retry, persistence, and full-suite tests |
+
+### Project Acceptance Criteria
+
+- [ ] `write_tool()` and the end-to-end agent path preserve exact intended HTML,
+  entity, Unicode, quote, backslash, and newline content.
+- [ ] Valid JSON content is never passed through global marker/smart-quote
+  replacement before decoding.
+- [ ] Supported malformed local-model write payloads retain deterministic
+  compatibility; ambiguous payloads fail rather than silently corrupt files.
+- [ ] No automatic HTML entity decoding is introduced.
+- [ ] Provider-visible tool results do not echo complete escaped write bodies;
+  complete sanitized evidence remains retrievable.
+- [ ] Observational event listeners cannot mutate the write that executes;
+  documented extension mutation remains functional.
+- [ ] Focused tests, full pytest, Ruff, `git diff --check`, changelog, version,
+  and reviewed TUI snapshots pass.
+- [ ] No merge, push, tag, publication, or real-provider call occurs without
+  explicit approval.
+
+### Estimated Timeline
+
+2–3 engineering days. The main uncertainty is compatibility with malformed
+local-model tool-call variants and whether the reported real-world failure is a
+first-write parser issue or a later model-mediated rewrite from escaped context.
