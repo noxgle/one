@@ -11,6 +11,7 @@ __pycache__/
 one.egg-info/
 dist/
 build/
+tests_prompts/
 *.egg-info/
 diagnostic-reports/
 write-tool-reports/
