@@ -9,11 +9,14 @@ change.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections.abc import Callable
 from typing import Any
 
 import httpx
+
+from one.core.attachments import AttachmentError, AttachmentStorageError
 
 from .base import ChatResult, ProviderAdapter
 
@@ -21,6 +24,10 @@ from .base import ChatResult, ProviderAdapter
 # overrides it with a longer value for managed streams so its meaningful-token
 # idle timeout remains authoritative.
 _IDLE_SSE_TIMEOUT = 120
+
+
+class MissingBlobError(AttachmentStorageError):
+    """Raised when a required image blob is missing or corrupt before HTTP."""
 
 
 class OllamaCloudAdapter(ProviderAdapter):
@@ -45,11 +52,62 @@ class OllamaCloudAdapter(ProviderAdapter):
 
     def _build_payload(
         self, model: str, messages: list[dict[str, Any]], thinking_level: str,
-        max_tokens: int | None = None,
+        max_tokens: int | None = None, images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
     ) -> dict[str, Any]:
+        """Build a native Ollama chat payload.
+
+        Native image input still requires the selected model to advertise
+        ``input_image=True``; AgentSession enforces that capability before this
+        adapter is called.
+        """
+        encoded_images: list[str] = []
+        if images:
+            # Validate and read every image before building a request so an
+            # invalid attachment can never result in a text-only HTTP call.
+            for image_ref in images:
+                blob_hash = image_ref.get("blobHash") or image_ref.get("blob_hash")
+                if not blob_hash:
+                    raise MissingBlobError(f"image reference missing blob_hash: {image_ref}")
+                if not storage_dir:
+                    raise MissingBlobError(
+                        f"image reference missing storage_dir: {image_ref}"
+                    )
+                try:
+                    from one.core.attachments import read_blob_bytes
+
+                    raw = read_blob_bytes(storage_dir, blob_hash)
+                except AttachmentError as exc:
+                    raise MissingBlobError(
+                        f"required image blob missing or corrupt before HTTP: {blob_hash}"
+                    ) from exc
+                if raw is None:
+                    raise MissingBlobError(
+                        f"required image blob missing or corrupt before HTTP: {blob_hash}"
+                    )
+                encoded_images.append(base64.b64encode(raw).decode("ascii"))
+
+            last_user_idx = next(
+                (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"),
+                None,
+            )
+            if last_user_idx is None:
+                raise MissingBlobError("image input requires a user message")
+
+            # Copy only the message dictionaries we send. This preserves every
+            # existing field and never mutates caller-owned history or refs.
+            payload_messages = [dict(message) for message in messages]
+            last_user = payload_messages[last_user_idx]
+            existing_images = last_user.get("images")
+            if existing_images is not None and not isinstance(existing_images, list):
+                raise AttachmentStorageError("last user message images field must be a list")
+            last_user["images"] = [*(existing_images or []), *encoded_images]
+        else:
+            payload_messages = messages
+
         payload: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": payload_messages,
             "think": self._think_value(thinking_level),
         }
         if max_tokens is not None:
@@ -65,9 +123,9 @@ class OllamaCloudAdapter(ProviderAdapter):
         storage_dir: str = "",
         stream_transport_timeout: float | None = None,
     ) -> ChatResult:
-        if images:
-            raise RuntimeError("ollama-cloud image input is not supported by the native chat adapter")
-        payload = self._build_payload(model, messages, thinking_level, max_tokens)
+        payload = self._build_payload(
+            model, messages, thinking_level, max_tokens, images, storage_dir
+        )
         use_stream = callable(on_delta)
         transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
         payload["stream"] = use_stream
@@ -79,7 +137,9 @@ class OllamaCloudAdapter(ProviderAdapter):
         url = f"{self.base_url}{self.endpoint}"
 
         if not use_stream:
-            async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            async with httpx.AsyncClient(
+                timeout=transport_timeout, follow_redirects=True
+            ) as client:
                 response = await client.post(url, json=payload, headers=req_headers)
                 if response.is_error:
                     raise RuntimeError(f"ollama-cloud API error {response.status_code}: {response.text[:1000]}")

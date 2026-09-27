@@ -12,6 +12,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 - **TUI logo asset** — startup artwork now loads from the packaged
   `one/assets/logo.txt`, which is also linked from the main documentation.
+- **Ollama Cloud image input** — `glm-5.3-flash:cloud` is registered as a
+  vision-capable model and sends native Ollama raw-Base64 image payloads.
 
 ### Changed
 
