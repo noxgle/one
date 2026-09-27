@@ -36,6 +36,13 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("openrouter", "openai/gpt-4.1", reasoning=True, context_window=1_000_000, input_image=True),
     ModelInfo("ollama-cloud", "glm-5:cloud", reasoning=True, context_window=128_000),
     ModelInfo(
+        "ollama-cloud",
+        "glm-5.3-flash:cloud",
+        reasoning=True,
+        context_window=1_000_000,
+        input_image=True,
+    ),
+    ModelInfo(
         "llama.cpp",
         "local",
         reasoning=False,

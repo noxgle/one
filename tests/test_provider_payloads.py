@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import copy
 import struct
 from typing import Any
 
@@ -164,6 +166,183 @@ def test_registry_keeps_llama_cpp_compatible_and_uses_native_cloud_adapter() -> 
     assert getattr(registry["ollama-cloud"], "endpoint") == "/api/chat"
     assert isinstance(registry["llama.cpp"], OpenAICompatibleAdapter)
     assert registry["llama.cpp"].reasoning_mode == "openai"
+
+
+class TestOllamaCloudNativeImages:
+    def test_payload_attaches_raw_base64_images_to_last_user_without_mutation(self, tmp_path) -> None:
+        from one.core.attachments import store_blob
+
+        first_raw = b"first image bytes"
+        second_raw = b"second image bytes"
+        first = store_blob(str(tmp_path), first_raw, "image/png")
+        second = store_blob(str(tmp_path), second_raw, "image/jpeg")
+        messages = [
+            {"role": "system", "content": "sys", "custom": {"keep": True}},
+            {"role": "user", "content": "earlier", "name": "old"},
+            {"role": "assistant", "content": "reply", "tool_calls": []},
+            {
+                "role": "user",
+                "content": "inspect",
+                "name": "current",
+                "images": ["already-encoded"],
+            },
+        ]
+        images = [
+            {"blobHash": first.blob_hash, "mime": "image/png"},
+            {"blob_hash": second.blob_hash, "mime": "image/jpeg"},
+        ]
+        original_messages = copy.deepcopy(messages)
+        original_images = copy.deepcopy(images)
+
+        payload = OllamaCloudAdapter("https://ollama.com")._build_payload(
+            "vision-model", messages, "medium", images=images, storage_dir=str(tmp_path)
+        )
+
+        assert payload == {
+            "model": "vision-model",
+            "messages": [
+                {"role": "system", "content": "sys", "custom": {"keep": True}},
+                {"role": "user", "content": "earlier", "name": "old"},
+                {"role": "assistant", "content": "reply", "tool_calls": []},
+                {
+                    "role": "user",
+                    "content": "inspect",
+                    "name": "current",
+                    "images": [
+                        "already-encoded",
+                        base64.b64encode(first_raw).decode("ascii"),
+                        base64.b64encode(second_raw).decode("ascii"),
+                    ],
+                },
+            ],
+            "think": "medium",
+        }
+        assert messages == original_messages
+        assert images == original_images
+
+    def test_text_only_payload_is_unchanged(self) -> None:
+        messages = [{"role": "user", "content": "hi", "name": "current"}]
+        original_messages = copy.deepcopy(messages)
+        payload = OllamaCloudAdapter("https://ollama.com")._build_payload(
+            "glm-5:cloud", messages, "high", max_tokens=12
+        )
+        assert payload == {
+            "model": "glm-5:cloud",
+            "messages": messages,
+            "think": "high",
+            "options": {"num_predict": 12},
+        }
+        assert messages == original_messages
+
+    def test_images_and_max_tokens_preserve_both_fields(self, tmp_path) -> None:
+        from one.core.attachments import store_blob
+
+        raw = b"image bytes"
+        image = store_blob(str(tmp_path), raw, "image/png")
+        payload = OllamaCloudAdapter("https://ollama.com")._build_payload(
+            "glm-5.3-flash:cloud",
+            [{"role": "user", "content": "inspect"}],
+            "off",
+            max_tokens=99,
+            images=[{"blobHash": image.blob_hash}],
+            storage_dir=str(tmp_path),
+        )
+
+        assert payload["options"] == {"num_predict": 99}
+        assert payload["messages"][0]["images"] == [base64.b64encode(raw).decode("ascii")]
+
+    @pytest.mark.asyncio
+    async def test_images_without_user_message_prevent_http(self, tmp_path, monkeypatch) -> None:
+        from one.core.attachments import store_blob
+        from one.providers import ollama as ollama_module
+
+        image = store_blob(str(tmp_path), b"image bytes", "image/png")
+
+        class UnexpectedClient:
+            def __init__(self, *args, **kwargs) -> None:
+                raise AssertionError("HTTP client must not be created without a user message")
+
+        monkeypatch.setattr(ollama_module.httpx, "AsyncClient", UnexpectedClient)
+        with pytest.raises(ollama_module.MissingBlobError, match="requires a user message"):
+            await ollama_module.OllamaCloudAdapter("https://ollama.com").chat(
+                "key",
+                "vision-model",
+                [{"role": "system", "content": "inspect"}],
+                "off",
+                images=[{"blobHash": image.blob_hash}],
+                storage_dir=str(tmp_path),
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stream_transport_timeout", "expected_timeout"),
+        [(None, 7), (3.5, 3.5)],
+    )
+    async def test_non_streaming_uses_stream_transport_timeout(
+        self, monkeypatch, stream_transport_timeout: float | None, expected_timeout: float
+    ) -> None:
+        from one.providers import ollama as ollama_module
+
+        captured: dict[str, Any] = {}
+
+        class Response:
+            is_error = False
+
+            def json(self) -> dict[str, Any]:
+                return {"message": {"content": "ok"}, "done": True}
+
+        class Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                captured["timeout"] = kwargs["timeout"]
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc: Any) -> bool:
+                return False
+
+            async def post(self, *args: Any, **kwargs: Any) -> Response:
+                return Response()
+
+        monkeypatch.setattr(ollama_module, "_IDLE_SSE_TIMEOUT", 7)
+        monkeypatch.setattr(ollama_module.httpx, "AsyncClient", Client)
+        result = await ollama_module.OllamaCloudAdapter("https://ollama.com").chat(
+            "key",
+            "glm-5:cloud",
+            [{"role": "user", "content": "hi"}],
+            "off",
+            stream_transport_timeout=stream_transport_timeout,
+        )
+
+        assert result.text == "ok"
+        assert captured["timeout"] == expected_timeout
+
+    @pytest.mark.parametrize(
+        ("images", "storage_dir", "match"),
+        [
+            ([{"mime": "image/png"}], "/tmp", "missing blob_hash"),
+            ([{"blobHash": "a" * 64, "mime": "image/png"}], "", "missing storage_dir"),
+            ([{"blobHash": "a" * 64, "mime": "image/png"}], "/tmp", "missing or corrupt before HTTP"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_image_prevents_http(
+        self, monkeypatch, images: list[dict[str, str]], storage_dir: str, match: str
+    ) -> None:
+        from one.core.attachments import AttachmentStorageError
+        from one.providers import ollama as ollama_module
+
+        class UnexpectedClient:
+            def __init__(self, *args, **kwargs) -> None:
+                raise AssertionError("HTTP client must not be created for invalid images")
+
+        monkeypatch.setattr(ollama_module.httpx, "AsyncClient", UnexpectedClient)
+        adapter = OllamaCloudAdapter("https://ollama.com")
+        with pytest.raises(AttachmentStorageError, match=match):
+            await adapter.chat(
+                "key", "vision-model", [{"role": "user", "content": "inspect"}], "off",
+                images=images, storage_dir=storage_dir,
+            )
 
 
 def test_openai_compatible_payload_without_images_works() -> None:

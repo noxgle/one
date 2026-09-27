@@ -47,6 +47,20 @@ def test_model_registry_ollama_available_without_auth(tmp_path: Path) -> None:
     assert status["requiresApiKey"] is False
 
 
+def test_model_registry_ollama_cloud_vision_capabilities(tmp_path: Path) -> None:
+    registry = ModelRegistry.create(AuthStorage.in_memory(), str(tmp_path / "models.json"))
+
+    text_model = registry.find("ollama-cloud", "glm-5:cloud")
+    vision_model = registry.find("ollama-cloud", "glm-5.3-flash:cloud")
+
+    assert text_model is not None
+    assert text_model.input_image is False
+    assert vision_model is not None
+    assert vision_model.reasoning is True
+    assert vision_model.context_window == 1_000_000
+    assert vision_model.input_image is True
+
+
 def test_cli_accepts_ollama_url_flag(tmp_path: Path):
     env = os.environ.copy()
     env["ONE_CODING_AGENT_DIR"] = str(tmp_path / ".one" / "agent")
