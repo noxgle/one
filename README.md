@@ -15,9 +15,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 
-`one` is an autonomous Python terminal agent. It can plan, use files and shell
-tools, verify work, and report a result. It also supports approval gates,
-steering, questions, sessions, MCP tools, extensions, skills, and image input.
+`one` is an autonomous Python terminal agent with **14 built-in tools**:
+`read`, `read_image`, `bash`, `edit`, `write`, `grep`, `find`, `ls`,
+`evidence_read`, `finish`, `plan`, `spawn_subagent`, `ask_user`, and
+`apply_patch`. It can plan, use files and shell tools, verify work, and report
+a result. It also supports approval gates, steering, questions, sessions, MCP
+tools, extensions, skills, and image input.
 
 > **Maturity:** Alpha (`0.1.x`). Public APIs, tool contracts, and storage
 > formats may change in `0.1` releases. See [CHANGELOG.md](CHANGELOG.md) and
@@ -122,7 +125,7 @@ The default settings select the TUI.
 
 | Interface | Interactive | Input | Output | Startup banner | Images | Best for |
 | --- | --- | --- | --- | --- | --- | --- |
-| `--mode tui` | Yes | Textual editor and slash commands | Rendered stream | Yes | `--image`, pasted/path images, `read_image` | Human-driven work |
+| `--mode tui` | Yes | Textual editor and slash commands | Rendered stream | Yes | `--image`, pasted/path images, `read_image` (runtime) | Human-driven work |
 | `--mode text` | No | Positional messages | Last assistant text | Yes, unless `quietStartup` is set | Startup `--image` | Simple one-shot text output |
 | `--mode json` | No | Positional messages | JSON object containing session `messages` | Yes, unless `quietStartup` is set | Startup `--image` | One-shot session data |
 | `--mode rpc` | Yes, protocol-driven | One JSON object per stdin line | JSON event/response object per stdout line | No | Startup `--image`; prompt `attachments` | Orchestrators and UI clients |
@@ -322,7 +325,9 @@ By default state is private under `~/.config/one` (override with
 `ONE_CODING_AGENT_DIR`): `auth.json`, `models.json`, `settings.json`, sessions,
 and reports. A project `.one/` directory supplies per-project MCP and extension
 configuration. Use `--no-session`, `--session`, `--continue`, `--resume`, or
-`--fork` to control session use.
+`--fork` to control session use. Use `--tools <list>` to restrict the agent to
+a specific set of tools and `--no-tools` to disable all built-in tools (useful
+for agent-only MCP/extension setups).
 
 Session JSONL, durable evidence, and provider context are separate. Provider
 context receives bounded tool/MCP previews; durable sessions can retain complete
@@ -500,6 +505,7 @@ future target, while Windows 10 support is deferred.
 
 ## References
 
+- [Website](https://one.noxgle.com/)
 - [TODO.md](TODO.md) — roadmap
 - [DONE.md](DONE.md) — delivered work
 - [CHANGELOG.md](CHANGELOG.md) — release notes

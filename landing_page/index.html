@@ -39,7 +39,6 @@ body{
   background:var(--bg);
   color:var(--text-primary);
   line-height:1.6;
-  overflow-x:hidden;
 }
 a{color:var(--accent);text-decoration:none;transition:color .15s}
 a:hover{color:#60a5fa}
@@ -82,7 +81,7 @@ body::before{
   padding:calc(var(--nav-h) + 80px) 0 80px;
   position:relative;
 }
-.hero .container{display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:start}
+.hero .container{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:64px;align-items:start}
 .hero-badge{
   display:inline-flex;align-items:center;gap:8px;
   padding:4px 14px 4px 8px;border-radius:100px;
@@ -91,6 +90,14 @@ body::before{
 }
 .hero-badge .pulse{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:pulse 2s ease infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.full-logo{
+  font-family:var(--mono);font-size:.75rem;line-height:1.35;color:var(--text-secondary);
+  white-space:pre;display:inline-block;text-align:left;
+}
+.full-logo .logo-line{opacity:.9}
+@media(min-width:640px){.full-logo{font-size:.95rem}}
+@media(min-width:1024px){.full-logo{font-size:1.15rem}}
+@media(min-width:1400px){.full-logo{font-size:1.35rem}}
 .hero h1{
   font-size:clamp(2.25rem,5vw,3.5rem);font-weight:700;line-height:1.1;
   letter-spacing:-.03em;margin-bottom:20px;
@@ -388,6 +395,31 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
         </div>
       </div>
     </div>
+  </div>
+</section>
+
+<section class="logo-section" style="padding:64px 0 32px">
+  <div class="container" style="text-align:center">
+    <pre class="full-logo" aria-label="one ASCII logo"> <span class="logo-line"> ██████╗ ███╗   ██╗███████╗</span>
+<span class="logo-line">██╔═══██╗████╗  ██║██╔════╝</span>
+<span class="logo-line">██║   ██║██╔██╗ ██║█████╗</span>
+<span class="logo-line">██║   ██║██║╚██╗██║██╔══╝</span>
+<span class="logo-line">╚██████╔╝██║ ╚████║███████╗</span>
+<span class="logo-line"> ╚═════╝ ╚═╝  ╚═══╝╚══════╝</span>
+
+<span class="logo-line">███████╗ ██████╗ ██████╗</span>
+<span class="logo-line">██╔════╝██╔═══██╗██╔══██╗</span>
+<span class="logo-line">█████╗  ██║   ██║██████╔╝</span>
+<span class="logo-line">██╔══╝  ██║   ██║██╔══██╗</span>
+<span class="logo-line">██║     ╚██████╔╝██║  ██║</span>
+<span class="logo-line">╚═╝      ╚═════╝ ╚═╝  ╚═╝</span>
+
+<span class="logo-line">███████╗██╗   ██╗███████╗██████╗ ██╗   ██╗ ██████╗ ███╗   ██╗███████╗</span>
+<span class="logo-line">██╔════╝██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔═══██╗████╗  ██║██╔════╝</span>
+<span class="logo-line">█████╗  ██║   ██║█████╗  ██████╔╝ ╚████╔╝ ██║   ██║██╔██╗ ██║█████╗</span>
+<span class="logo-line">██╔══╝  ╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  ██║   ██║██║╚██╗██║██╔══╝</span>
+<span class="logo-line">███████╗ ╚████╔╝ ███████╗██║  ██║   ██║   ╚██████╔╝██║ ╚████║███████╗</span>
+<span class="logo-line">╚══════╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚══════╝</span></pre>
   </div>
 </section>
 
