@@ -4439,3 +4439,257 @@ to preserve the documented contract and isolate the incompatible subchange.
 2–3 engineering days. The main uncertainty is compatibility with malformed
 local-model tool-call variants and whether the reported real-world failure is a
 first-write parser issue or a later model-mediated rewrite from escaped context.
+
+## Project: Structured plan tool (`feat/structured-plan-tool`)
+
+### Goal
+
+Replace the current free-form string payload of the `plan` tool with a validated
+structured list of steps, while preserving compatibility with existing sessions
+and keeping the current agent-loop contract intact.
+
+### Context
+
+`one/tools/plan.py` currently accepts only a non-empty string and stores it in
+`AgentSession._plan`. A caller that sends the natural structured shape
+`{"plan": [{"step": "...", "status": "pending"}]}` is incompatible with
+the current `plan.strip()` validation and can be reported by the TUI as a
+failed or timed-out `plan` call. The configured 30-second timeout is not needed
+for the synchronous in-process plan operation itself, but remains visible in
+the generic tool-call presentation.
+
+Work on branch `feat/structured-plan-tool`, based on `main`; do not merge or
+push without explicit approval.
+
+### Scope
+
+#### In Scope
+
+- Structured plan items with `step` and validated `status`.
+- Full-plan replacement on each `plan` call, with deterministic normalization.
+- Legacy string-plan read/restore compatibility.
+- Provider prompt rendering and TUI rendering of structured plans.
+- Persistence, event, parser, and regression-test coverage.
+
+#### Non-Goals
+
+- Introducing a general workflow/state-machine engine.
+- Automatic execution of plan steps or hidden tool calls.
+- Changing the existing one-tool-call-per-response agent loop.
+- Adding arbitrary model-controlled fields without a separate schema decision.
+
+### Assumptions
+
+- The model sends the complete current plan on every update rather than a
+  patch operation.
+- Valid statuses are `pending`, `in_progress`, `completed`, and `blocked`.
+- At most one item may be `in_progress`; zero is allowed for an empty/not-yet-
+  started plan.
+- Existing persisted string plans must remain readable after the change.
+
+### Open Questions
+
+- Should completed plans remain visible until `finish`, or should the TUI hide
+  them after a configurable limit?
+- Should a plan item gain stable `id` and optional `verification` fields in the
+  first version, or remain limited to `step` and `status`?
+- Should invalid status transitions be rejected strictly, or should the tool
+  only validate shape and leave transition policy to the model?
+
+### Architecture
+
+The canonical in-memory representation becomes a list of plan-item dictionaries
+with validated `step` and `status` fields. `plan_tool` validates and returns a
+normalized representation. `AgentSession` owns the active plan lifecycle,
+persists the canonical representation as the existing `customType="plan"`
+session message, and emits `plan_update` with the normalized plan. Provider
+context receives a compact deterministic text/JSON rendering, while the TUI
+renders a readable checklist. A legacy string loaded from JSONL is converted to
+a single compatible item or rendered through a legacy adapter without breaking
+old sessions.
+
+### Architecture Decisions
+
+#### ADR-001: Use a structured list, not a string containing JSON
+
+**Decision:** Make `plan` accept `list[object]` as the canonical payload, with
+`step: string` and `status: enum` required for every item.
+
+**Alternatives:** Keep free-form text; accept a JSON string; support both
+formats permanently without canonicalization.
+
+**Rationale:** Native structure enables validation, status-aware TUI display,
+future verification metadata, and avoids double-encoding/escaping failures.
+
+**Trade-offs:** The tool schema, persistence, prompt rendering, and tests must
+change; local models may need a clear repair message for malformed items.
+
+**Consequences:** Every update replaces the complete canonical list. Partial
+step mutation is not introduced in this branch.
+
+#### ADR-002: Preserve legacy persisted plans
+
+**Decision:** Accept old string values when restoring sessions and normalize them
+for display/context; write new plans in the structured canonical form.
+
+**Alternatives:** Invalidate old sessions; preserve strings forever as the only
+format; run a migration over all session files.
+
+**Rationale:** Session history must remain readable without a destructive
+migration or user-visible loss of active plans.
+
+**Trade-offs:** Restore logic temporarily handles two input representations.
+
+### Phases
+
+#### Phase 1: Contract and validation
+
+**Objective:** Define and enforce the structured plan payload without changing
+the surrounding execution loop.
+
+**Prerequisites:** None.
+
+**Expected outcome:** Valid lists are accepted and normalized; malformed lists,
+empty steps, unknown statuses, and multiple active steps return clear errors.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Implement the structured plan schema and normalization.
+
+  - **Description:** Update the plan tool contract to accept a list of item
+    objects, validate required fields and statuses, enforce the single
+    `in_progress` rule, and return a stable normalized result. Decide and
+    document whether legacy string input is accepted at dispatch time or only
+    during session restore.
+
+  - **Files:** `one/tools/plan.py`, `one/tools/index.py`,
+    `one/resources/resource_loader.py`, relevant tool-schema tests.
+
+  - **Dependencies:** None.
+
+  - **Acceptance Criteria:** The structured example succeeds; malformed
+    payloads fail with actionable errors; no valid non-plan tool behavior
+    changes; the generated schema describes the actual accepted shape.
+
+  - **Verification:** Focused unit tests for valid plans, each invalid status,
+    empty/missing steps, duplicate `in_progress`, and legacy input policy.
+
+#### Phase 2: Session lifecycle and compatibility
+
+**Objective:** Persist, restore, inject, update, and clear structured plans
+without breaking existing sessions or event consumers.
+
+**Prerequisites:** Phase 1.
+
+**Expected outcome:** Structured plans survive reload, appear in the next
+provider prompt, clear on `finish`, and retain existing plan guard behavior.
+
+**Estimated effort:** 1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Integrate canonical structured plans into `AgentSession`.
+
+  - **Description:** Replace string-only `_plan` assumptions with the canonical
+    representation, preserve `customType="plan"` persistence, restore legacy
+    string entries, emit compatible `plan_update` events, and retain the rule
+    that a newly created plan must be followed by a real execution/verification
+    step before `finish`.
+
+  - **Files:** `one/core/agent_session.py`, session persistence tests,
+    `tests/test_plan_tool.py`, event-contract tests.
+
+  - **Dependencies:** Phase 1 schema and normalization.
+
+  - **Acceptance Criteria:** New structured plans restore exactly; old string
+    plans restore without crashing; provider-visible context contains the
+    canonical plan; `finish` clears it; plan persistence remains out of the
+    ordinary provider message list.
+
+  - **Verification:** Extend plan lifecycle, reload, clear-on-finish, and
+    event tests; run the relevant agent/session regression tests.
+
+#### Phase 3: User-facing rendering and release verification
+
+**Objective:** Make structured plans understandable in TUI output and ensure
+the change is documented and regression-safe.
+
+**Prerequisites:** Phase 2.
+
+**Expected outcome:** TUI displays statuses as a readable checklist, existing
+string plans remain readable, and the full test/lint contract passes.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Update TUI rendering and plan-related documentation/tests.
+
+  - **Description:** Render each plan item with a stable status marker and
+    bounded text; preserve safe handling of long/malformed display values;
+    update snapshots only for intentional output changes; document the new
+    tool argument shape and any compatibility behavior.
+
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_streaming.py`,
+    TUI snapshots if affected, `README.md` or the authoritative tool docs if
+    the user-facing tool contract is documented there, `CHANGELOG.md` for the
+    user-visible change.
+
+  - **Dependencies:** Phase 2.
+
+  - **Acceptance Criteria:** Pending, active, completed, and blocked items are
+    distinguishable; long plans remain bounded; legacy plans remain readable;
+    no unrelated snapshot churn occurs.
+
+  - **Verification:** Targeted TUI/event tests, reviewed snapshot diff,
+    `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check .`, and
+    `git diff --check`.
+
+### Rollout & Rollback
+
+Ship behind the existing tool contract with compatibility handling enabled.
+Rollback is a code rollback only; do not rewrite session JSONL. The previous
+version must continue to read any newly written structured plan or the release
+must explicitly document that downgrade compatibility is unsupported.
+
+### Observability
+
+Preserve `tool_call_start`, `tool_call_end`, `plan_update`, and session
+`customType="plan"` events. Validation failures should identify the item index
+and field, without echoing unnecessary prompt contents. TUI output should show
+the status and step text but remain bounded by existing display limits.
+
+### Security Considerations
+
+Treat step text as untrusted model/user content. Do not interpret it as a
+command, path, or executable instruction in the plan layer. Keep plan text
+subject to existing tool-result/context size limits and avoid introducing a
+new path to leak full session data.
+
+### Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Local models continue sending string plans | Medium | High | Clear schema, repair errors, and legacy input compatibility |
+| Existing sessions contain string plans | High | High | Restore adapter and regression fixtures |
+| Event consumers expect string `plan_update` payloads | High | Medium | Preserve/add a documented compatibility rendering or version event payload deliberately |
+| Large/malformed plans bloat prompt or TUI | Medium | Medium | Bound item count/text and test truncation behavior |
+| Status rules reject useful model output | Medium | Medium | Start with shape validation plus one-active-step invariant; keep transitions configurable/open |
+
+### Project Acceptance Criteria
+
+- [ ] Structured list payload is the documented canonical `plan` format.
+- [ ] Existing string plans load and display without failure.
+- [ ] Plan persistence, prompt injection, update events, and finish clearing
+  remain correct.
+- [ ] TUI shows plan status clearly and safely.
+- [ ] Focused tests, full pytest, Ruff, and `git diff --check` pass.
+- [ ] Work is isolated to `feat/structured-plan-tool`; no merge/push occurs
+  without explicit approval.
+
+### Estimated Timeline
+
+2–3 engineering days. Main uncertainty is compatibility with existing event
+consumers and the exact rendering contract expected by local models.
