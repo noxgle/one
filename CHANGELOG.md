@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Subagent lifecycle timeouts** — subagents now use an activity-aware
+  `subagents.idleTimeoutSec` watchdog (default 1800 seconds) plus optional
+  `subagents.maxDurationSec` hard cap (default 0, disabled). Timed-out children
+  retain their session and return bounded partial diagnostics rather than success.
 - **Structured plans** — the `plan` tool now accepts validated step/status
   lists, persists them across sessions, and renders status-aware checklists.
 - **TUI logo asset** — startup artwork now loads from the packaged
@@ -19,6 +23,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Subagent timeout compatibility** — legacy `subagents.timeoutSec` remains an
+  idle-timeout alias when `idleTimeoutSec` is not configured.
 - **MCP disable persistence** — `/mcp disable <name>` now saves `enabled: false`,
   including unavailable servers with no live tools, until `/mcp enable <name>`.
 - **TUI MCP availability markers** — enabled MCP servers in the sidebar now

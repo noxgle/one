@@ -418,6 +418,9 @@ Compaction maintains a rolling summary plus recent messages:
 
 `spawn_subagent` delegates work to an isolated agent session:
 - Each subagent has its own session ID, model, and tool configuration.
+- Explicit non-empty tool lists and inherited tool sets automatically receive
+  `finish` when needed, so every child has a terminal path; order is preserved
+  and duplicates are removed.
 - Default timeout: `subagents.timeoutSec` (1800s / 30 min).
 - On timeout: abort, collect diagnostics, return typed result with session ID.
 - Parent can inspect/resume the subagent session via the session manager.

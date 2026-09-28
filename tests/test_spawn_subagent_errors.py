@@ -449,39 +449,60 @@ class TestInvalidTasks:
         with pytest.raises(RuntimeError, match="requires 'task' or 'tasks'"):
             asyncio.run(session._spawn_subagent({"tasks": []}))
 
+    def test_task_and_tasks_are_mutually_exclusive(self, tmp_path: Path) -> None:
+        """Supplying both task forms retains the existing validation error."""
+        session = _mk_session(tmp_path, tools=["spawn_subagent"])
 
-class TestExplicitToolsWithoutFinish:
-    """Explicit tool sets missing 'finish' must be rejected."""
+        with pytest.raises(RuntimeError, match="either 'task' or 'tasks'"):
+            asyncio.run(session._spawn_subagent({"task": "one", "tasks": ["two"]}))
 
-    def test_tools_without_finish_rejected(self, tmp_path: Path) -> None:
-        """A non-empty tools list that omits 'finish' must raise."""
+
+class TestSubagentFinishTool:
+    """Child tool sets always retain one finish path."""
+
+    def test_explicit_tools_get_finish_and_dispatch(self, tmp_path: Path) -> None:
+        """An explicit list without finish can dispatch the child's finish call."""
         session = _mk_session(
             tmp_path,
             tools=["spawn_subagent", "bash", "read", "write"],
-            settings={"tools": {"maxSteps": 2, "timeoutSec": 5}},
-        )
-
-        with pytest.raises(
-            RuntimeError,
-            match="must include 'finish'",
-        ):
-            asyncio.run(
-                session._spawn_subagent({"task": "test", "tools": ["bash", "read"]})
-            )
-
-    def test_tools_including_finish_allowed(self, tmp_path: Path) -> None:
-        """A tools list that includes 'finish' must be accepted."""
-        # This should NOT raise — finish is present.
-        spawn_json = json.dumps({"tool": "finish", "args": {"summary": "done", "goal_success": True}})
-        session = _mk_session(
-            tmp_path,
-            tools=["spawn_subagent", "bash", "finish"],
             settings={"tools": {"maxSteps": 4, "timeoutSec": 5}},
         )
-        session.providers = {"openai": _Provider([spawn_json])}
-        # Should not raise
-        result = asyncio.run(session._spawn_subagent({"task": "test", "tools": ["bash", "finish"]}))
-        assert isinstance(result, dict)
+        session.providers = {
+            "openai": _Provider([json.dumps({"tool": "finish", "args": {"summary": "done", "goal_success": True}})])
+        }
+
+        result = asyncio.run(session._spawn_subagent({"task": "test", "tools": ["bash", "read"]}))
+
+        assert result["ok"] is True
+        assert result["finished"] is True
+
+    def test_explicit_finish_is_not_duplicated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An explicit finish remains in order and appears only once."""
+        session = _mk_session(tmp_path, tools=["spawn_subagent", "bash", "finish"])
+        received: list[str] = []
+
+        async def run_subagent(task: str, model: Any, tools: list[str], depth: int, **kwargs: Any) -> dict[str, Any]:  # noqa: ARG001
+            received.extend(tools)
+            return {"ok": True, "summary": "done"}
+
+        monkeypatch.setattr(session, "_run_subagent", run_subagent)
+        asyncio.run(session._spawn_subagent({"task": "test", "tools": ["bash", "finish", "finish"]}))
+
+        assert received == ["bash", "finish"]
+
+    def test_inherited_tools_get_finish(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An inherited custom tool set without finish receives one."""
+        session = _mk_session(tmp_path, tools=["spawn_subagent", "bash"])
+        received: list[str] = []
+
+        async def run_subagent(task: str, model: Any, tools: list[str], depth: int, **kwargs: Any) -> dict[str, Any]:  # noqa: ARG001
+            received.extend(tools)
+            return {"ok": True, "summary": "done"}
+
+        monkeypatch.setattr(session, "_run_subagent", run_subagent)
+        asyncio.run(session._spawn_subagent({"task": "test"}))
+
+        assert received == ["spawn_subagent", "bash", "finish"]
 
     def test_explicit_empty_tools_list_rejected(self, tmp_path: Path) -> None:
         """Explicit empty tools list [] must be rejected — subagent cannot complete."""

@@ -336,6 +336,27 @@ See [Cooperation and safety](#cooperation-and-safety) and the slash-command
 help for configuration such as `tools.maxSteps` (`0` means unlimited tool steps)
 and optional `toolOutputPruning`.
 
+### Subagent timeouts
+
+Subagents use `subagents.idleTimeoutSec` (default `1800`) for time without
+meaningful provider text/reasoning or tool activity. Set it to `0` only to
+disable the idle watchdog. `subagents.maxDurationSec` defaults to `0`, which
+disables the separate hard wall-clock cap; a positive value stops even an active
+stream at that limit. Existing `subagents.timeoutSec` remains an idle-timeout
+alias only when `idleTimeoutSec` is absent.
+
+An idle or maximum-duration timeout returns a failed, incomplete child result
+with its session ID and bounded partial diagnostics. It does not claim external
+work stopped (`externalState` is `unknown`); inspect that session and external
+state before retrying any operation.
+
+### Subagent tools
+
+The optional `spawn_subagent` `tools` list must be non-empty. The child receives
+`finish` automatically when that explicit list, or its inherited tool set, omits
+it; duplicate tool names are removed while preserving order. Built-in and active
+MCP tool names are validated before the child starts.
+
 ### TUI session browser
 
 Persisted sessions are scoped to the current project/session directory. In the

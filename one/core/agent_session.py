@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from one.core.activity_watchdog import ActivityWatchdog
 from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.session_manager import SessionManager
@@ -122,6 +123,7 @@ class AgentSession:
         mcp_manager: McpManager | None = None,
         storage_dir: str = "",
         register_mcp_tools_callback: bool = True,
+        activity_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.session_manager = session_manager
         self.settings_manager = settings_manager
@@ -138,6 +140,7 @@ class AgentSession:
         self._plan_just_created = False
         self._restore_plan_from_messages(self.messages)
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
+        self._activity_callback = activity_callback
         self._is_streaming = False
         self._is_compacting = False
         self._retrying = False
@@ -194,6 +197,14 @@ class AgentSession:
             if self.model:
                 self.session_manager.append_model_change(self.model.provider, self.model.id)
             self.session_manager.append_thinking_level_change(self.thinking_level)
+
+    def _report_activity(self, kind: str) -> None:
+        """Notify an internal lifecycle observer with category-only metadata."""
+        if self._activity_callback is not None:
+            try:
+                self._activity_callback(kind)
+            except Exception:
+                pass
 
     def _restore_plan_from_messages(self, messages: list[dict[str, Any]]) -> None:
         """Restore _plan state from loaded messages and remove plan entries.
@@ -1000,13 +1011,10 @@ class AgentSession:
                 self._emit({"type": "plan_update", "plan": ""})
                 self.session_manager.append_message({"role": "user", "customType": "plan", "content": "", "timestamp": int(time.time() * 1000)})
         elif tool_name == "spawn_subagent":
-            # Compute the effective timeout for spawn_subagent (per-call >
-            # timeout_sec param > subagents setting) — passed to _spawn_subagent
-            # so the inner wait_for uses the same deadline as the outer one.
+            # The effective spawn timeout becomes the child idle timeout; the
+            # lifecycle watchdog separately enforces maxDurationSec.
             _spawn_timeout = effective_timeout
             effective_timeout = _spawn_timeout
-            # Return the coroutine (not awaited here) so the outer timeout
-            # wrapping (lines 683-698) can enforce the tool timeout.
             result = self._spawn_subagent(args, timeout_sec=int(_spawn_timeout) if _spawn_timeout is not None else None)
         elif tool_name == "ask_user":
             # ask_user has its own askUser.timeoutSec semantics; return the
@@ -1033,10 +1041,10 @@ class AgentSession:
                 if tool_name == "bash":
                     outer_timeout = (effective_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC
                 elif tool_name == "spawn_subagent":
-                    # Use the effective (per-call > subagents setting) timeout for
-                    # the outer wait_for wrapper — spawn_subagent still wraps
-                    # sub.prompt() internally so the two timeouts are identical.
-                    outer_timeout = effective_timeout
+                    # The lifecycle watchdog in _run_subagent owns both idle
+                    # and max-duration policy.  Do not race it with an absolute
+                    # parent tool timeout.
+                    outer_timeout = None
                 elif self._mcp_manager is not None and self._mcp_manager.has_tool(tool_name):
                     outer_timeout = (effective_timeout or 0) + _TOOL_TIMEOUT_GRACE_SEC if effective_timeout else None
                 # ask_user is invoked with timeout_sec=None (line 1671), so
@@ -1045,34 +1053,7 @@ class AgentSession:
                     try:
                         result = await asyncio.wait_for(task, timeout=outer_timeout)
                     except TimeoutError:
-                        # spawn_subagent has its own inner timeout; if the
-                        # outer timeout fires (race edge case), ensure we
-                        # return a typed SubagentTimeout result with cleanup.
-                        if tool_name == "spawn_subagent":
-                            # The inner timeout should have already returned a
-                            # structured result; just check and discard the
-                            # cancelled task.  If it hasn't, do minimal cleanup.
-                            if not task.done():
-                                task.cancel()
-                                try:
-                                    await task
-                                except (asyncio.CancelledError, Exception):
-                                    pass
-                            result = {
-                                "sessionId": "unknown",
-                                "summary": "Subagent timed out",
-                                "goalSuccess": False,
-                                "finished": False,
-                                "ok": False,
-                                "output": "Subagent timed out",
-                                "content": [{"type": "text", "text": "Subagent timed out"}],
-                                "error": "Subagent timed out",
-                                "errorType": "SubagentTimeout",
-                                "timedOut": True,
-                                "externalState": "unknown",
-                            }
-                        else:
-                            raise
+                        raise
                 else:
                     result = await task
             finally:
@@ -1217,6 +1198,7 @@ class AgentSession:
         # This value is also passed into execution below. Keep the event
         # additive, while making its timeout truthful for every tool class.
         effective_timeout = self._effective_tool_timeout(tool_name, args, timeout_sec)
+        self._report_activity("tool_started")
         # Listeners are observational. Give each start event an isolated args
         # value so a UI/logger cannot mutate the arguments about to execute.
         self._emit({"type": "tool_call_start", "tool": tool_name, "toolCallId": tool_call_id, "args": copy.deepcopy(emit_args), "effectiveTimeout": effective_timeout})
@@ -1379,6 +1361,7 @@ class AgentSession:
         if payload.get("aborted"):
             tool_call_end["aborted"] = True
         self._emit(tool_call_end)
+        self._report_activity("tool_finished" if payload.get("ok") else "tool_failed")
         return payload
 
     def _subagent_depth(self) -> int:
@@ -1441,8 +1424,9 @@ class AgentSession:
             if not sub_model:
                 raise RuntimeError(f"Unknown model: {model_spec}")
 
-        # Validate and normalise explicit tools.
-        sub_tools = tool_names or list(self._active_tools)
+        # A child must always retain a terminal path. Preserve caller order,
+        # including MCP tools, while removing duplicate names.
+        sub_tools = list(dict.fromkeys(tool_names if tool_names is not None else self._active_tools))
         if tool_names is not None:
             # Distinguish omitted (None) from explicit empty list.
             if len(tool_names) == 0:
@@ -1451,14 +1435,8 @@ class AgentSession:
                     "omit it to inherit the parent's tools, or include at "
                     "least 'finish' to allow the subagent to complete."
                 )
-            # Ensure the explicit tool set can actually complete — at minimum
-            # the 'finish' terminal tool must be present.
-            if "finish" not in tool_names:
-                raise RuntimeError(
-                    "The explicit 'tools' list must include 'finish' to allow "
-                    "the subagent to complete; add 'finish' to the list or omit "
-                    "'tools' to use the parent's default tools."
-                )
+        if "finish" not in sub_tools:
+            sub_tools.append("finish")
 
         if task:
             return await self._run_subagent(task, sub_model, sub_tools, depth, timeout_sec=timeout_sec)
@@ -1530,6 +1508,19 @@ class AgentSession:
             header["parentSession"] = self.session_manager.session_file
         header["subagentDepth"] = depth + 1
         manager._rewrite()  # noqa: SLF001
+        watchdog = ActivityWatchdog(
+            timeout_sec if timeout_sec is not None else self.settings_manager.get_subagents_idle_timeout_sec(),
+            self.settings_manager.get_subagents_max_duration_sec(),
+        )
+
+        def _child_activity(kind: str) -> None:
+            if kind == "tool_started":
+                watchdog.begin_operation(kind)
+            elif kind in {"tool_finished", "tool_failed"}:
+                watchdog.end_operation(kind)
+            else:
+                watchdog.touch(kind)
+
         sub = AgentSession(
             session_manager=manager,
             settings_manager=self.settings_manager,
@@ -1542,11 +1533,22 @@ class AgentSession:
             approval_callback=self.approval_callback,
             mcp_manager=self._mcp_manager,
             register_mcp_tools_callback=False,
+            activity_callback=_child_activity,
         )
         sub.providers = self.providers
 
+        last_event = "started"
+        last_tool_name = "unknown"
+
         def _sub_answer(event: dict[str, Any]) -> None:
+            nonlocal last_event, last_tool_name
+            last_event = str(event.get("type") or "unknown")
+            if event.get("type") in {"tool_call_start", "tool_call_end", "tool_call_error"}:
+                last_tool_name = str(event.get("tool") or "unknown")
             if event.get("type") == "ask_user":
+                # Receiving the question is activity even if delivery to the
+                # child fails because the pending question has already changed.
+                watchdog.touch("user_answer")
                 try:
                     sub.answer_question(event["id"], "(no answer channel in subagent; proceed with best judgment)")
                 except ValueError:
@@ -1558,18 +1560,20 @@ class AgentSession:
         ok = False
         error_text: str | None = None
         error_type: str | None = None
+        child_task: asyncio.Task[Any] | None = None
+        watchdog_task: asyncio.Task[str] | None = None
         self._emit({"type": "subagent_start", "sessionId": sub_id, "task": task_id})
-        sub_timeout_sec = timeout_sec or self.settings_manager.get_subagents_timeout_sec()
         try:
-            try:
-                await asyncio.wait_for(sub.prompt(task_id), timeout=sub_timeout_sec)
-            except TimeoutError:
+            child_task = asyncio.create_task(sub.prompt(task_id))
+            watchdog_task = asyncio.create_task(watchdog.wait_for_expiry())
+            done, _ = await asyncio.wait({child_task, watchdog_task}, return_when=asyncio.FIRST_COMPLETED)
+            if watchdog_task in done and not child_task.done():
+                timeout_kind = watchdog_task.result()
+                error_type = "SubagentIdleTimeout" if timeout_kind == "idle" else "SubagentMaxDuration"
+                error_text = "Subagent idle timed out" if timeout_kind == "idle" else "Subagent maximum duration exceeded"
                 # Graceful shutdown: abort + bounded dispose, then cancel any
-                # stragglers.  Never re-raise — the parent already has a
-                # wait_for wrapper that would retry.
+                # stragglers. Never claim remote operations have stopped.
                 ok = False
-                error_text = "Subagent timed out"
-                error_type = "SubagentTimeout"
                 try:
                     await sub.abort()
                 except Exception:
@@ -1596,6 +1600,12 @@ class AgentSession:
                         pass
                     except Exception:
                         pass
+                if not child_task.done():
+                    child_task.cancel()
+                try:
+                    await child_task
+                except (asyncio.CancelledError, Exception):
+                    pass
                 # Gather diagnostics from the subagent before it's torn down.
                 result = sub.get_last_finish_result()
                 assistant_text = sub.get_last_assistant_text() or ""
@@ -1609,30 +1619,9 @@ class AgentSession:
                 )
                 error_text = error_text[:512]
                 summary = f"{error_text} (elapsed {elapsed:.1f}s)" if not summary.startswith(("Subagent ", "Incompl")) else summary
-                # Extract last event type and last tool name from messages.
-                last_event = "unknown"
-                last_tool_name = "unknown"
-                for msg in reversed(sub.messages):
-                    ct = msg.get("customType")
-                    if ct:
-                        last_event = ct
-                        break
-                    role = msg.get("role")
-                    if role == "assistant":
-                        last_event = "message"
-                        break
-                    if role == "toolResult":
-                        content = msg.get("content", "")
-                        if isinstance(content, str):
-                            try:
-                                parsed = json.loads(content)
-                                last_tool_name = parsed.get("tool", "unknown")
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        break
                 diagnostic = {
                     "operation": "timed out",
-                    "errorType": "SubagentTimeout",
+                    "errorType": error_type,
                     "externalState": "unknown",
                     "sessionId": sub_id,
                     "elapsedSec": round(elapsed, 2),
@@ -1640,12 +1629,15 @@ class AgentSession:
                     "lastEvent": last_event,
                     "error": error_text,
                     "summary": summary,
-                    "lastAssistantText": assistant_text,
+                    "lastAssistantText": re.sub(
+                        r"(sk-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9\._\-~+/=]+)", "REDACTED", assistant_text
+                    )[:4096],
+                    "lastActivityKind": watchdog.last_activity_kind,
                     "actionableHint": (
-                        "Subagent exceeded the configured timeout. "
+                        "Subagent exceeded the configured lifecycle timeout. "
                         "Check: (1) the subagent's task complexity, "
                         "(2) bash/ask_user calls blocking indefinitely, "
-                        "(3) provider connectivity — increase `subagents.timeoutSec` or reduce task scope."
+                        "(3) provider connectivity — inspect its session before retrying."
                     ),
                 }
                 self._last_subagent_timeout = diagnostic
@@ -1658,19 +1650,27 @@ class AgentSession:
                 return {
                     "sessionId": sub_id,
                     "summary": summary,
-                    "goalSuccess": bool(result.get("goalSuccess")),
+                    "goalSuccess": False,
                     "finished": False,
                     "ok": False,
                     "output": summary,
                     "content": [{"type": "text", "text": summary}],
                     "error": error_text,
                     "errorType": error_type,
+                    "timedOut": True,
                     "elapsedSec": elapsed,
                     "externalState": "unknown",
                     "lastEvent": last_event,
                     "lastTool": last_tool_name,
-                    "lastAssistantText": redacted_assistant,
+                    "lastAssistantText": redacted_assistant[:4096],
                 }
+            if watchdog_task not in done:
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
+            await child_task
             result = sub.get_last_finish_result()
             assistant_text = sub.get_last_assistant_text() or ""
             summary = result.get("summary") or assistant_text or "(no output)"
@@ -1729,6 +1729,15 @@ class AgentSession:
                 "externalState": "unknown",
             }
         finally:
+            for pending in (watchdog_task, child_task):
+                if pending is not None and not pending.done():
+                    pending.cancel()
+            pending_tasks = [pending for pending in (watchdog_task, child_task) if pending is not None]
+            if pending_tasks:
+                try:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                except asyncio.CancelledError:
+                    pass
             try:
                 await sub.dispose()
             except Exception:
@@ -1963,6 +1972,7 @@ class AgentSession:
             if delta.strip():
                 stream_activity_generation += 1
                 stream_activity.set()
+                self._report_activity("provider_text")
             streamed_buffer += delta
             if streamed_suppressed:
                 return
@@ -2004,6 +2014,7 @@ class AgentSession:
             if delta.strip():
                 stream_activity_generation += 1
                 stream_activity.set()
+                self._report_activity("provider_reasoning")
             had_thinking = had_thinking or bool(delta.strip())
             # Emit exact original delta — no whitespace stripping.
             self._emit({"type": "thinking_delta", "delta": delta})

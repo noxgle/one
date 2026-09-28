@@ -669,6 +669,24 @@ class _SlowSubagentProvider:
         return None  # unreachable
 
 
+class _StreamingSubagentProvider:
+    def __init__(self, chunks: int, delay: float) -> None:
+        self.chunks = chunks
+        self.delay = delay
+
+    async def chat(self, *, on_delta: Callable[[str], None] | None = None, **kwargs: Any) -> Any:  # noqa: ARG002
+        from one.providers.base import ChatResult
+
+        for _ in range(self.chunks):
+            if on_delta is not None:
+                on_delta("progress")
+            await asyncio.sleep(self.delay)
+        return ChatResult(
+            text=json.dumps({"tool": "finish", "args": {"summary": "stream complete", "goal_success": True}}),
+            raw={}, usage={}, stop_reason="stop"
+        )
+
+
 @pytest.mark.asyncio
 async def test_spawn_subagent_timeout_terminates_parent_turn(tmp_path: Path):
     """spawn_subagent must respect the externally-controlled timeout.
@@ -779,6 +797,27 @@ async def test_spawn_subagent_falls_back_to_subagents_setting(tmp_path: Path):
     assert result["ok"] is False
 
 
+@pytest.mark.asyncio
+async def test_subagent_activity_survives_idle_window_but_max_duration_wins(tmp_path: Path) -> None:
+    """Provider text activity resets idle only; it never resets the hard cap."""
+    settings = {"subagents": {"idleTimeoutSec": 1, "maxDurationSec": 0}, "providers": {"timeoutSec": 10}}
+    parent = _mk_agent(tmp_path, tools=["finish"], settings_override=settings)
+    parent.providers = {"openai": _StreamingSubagentProvider(chunks=5, delay=0.04)}  # type: ignore[assignment]
+    result = await parent._run_subagent("stream", parent.model, ["finish"], 0)
+    assert result["ok"] is True
+
+    settings["subagents"] = {"idleTimeoutSec": 1, "maxDurationSec": 1}
+    # Use a per-call short max setting without relying on integer truncation by
+    # directly exercising the watchdog policy's normal second-based value.
+    parent = _mk_agent(tmp_path, tools=["finish"], settings_override=settings)
+    parent.providers = {"openai": _StreamingSubagentProvider(chunks=30, delay=0.05)}  # type: ignore[assignment]
+    # maxDurationSec is integer-configured, so make the stream exceed one second.
+    result = await parent._run_subagent("stream", parent.model, ["finish"], 0)
+    assert result["errorType"] == "SubagentMaxDuration"
+    assert result["ok"] is False and result["finished"] is False and result["goalSuccess"] is False
+    assert result["externalState"] == "unknown"
+
+
 def test_get_subagents_timeout_sec_robust_defaults() -> None:
     """get_subagents_timeout_sec must handle invalid / non-positive values."""
     # Default
@@ -789,9 +828,9 @@ def test_get_subagents_timeout_sec_robust_defaults() -> None:
     s = SettingsManager.in_memory({"subagents": {"timeoutSec": 300}})
     assert s.get_subagents_timeout_sec() == 300
 
-    # Zero → fallback to 1800
+    # Zero disables the idle watchdog, including through the legacy alias.
     s = SettingsManager.in_memory({"subagents": {"timeoutSec": 0}})
-    assert s.get_subagents_timeout_sec() == 1800
+    assert s.get_subagents_timeout_sec() == 0
 
     # Negative → fallback to 1800
     s = SettingsManager.in_memory({"subagents": {"timeoutSec": -10}})
@@ -804,3 +843,14 @@ def test_get_subagents_timeout_sec_robust_defaults() -> None:
     # None / missing → fallback to 1800
     s = SettingsManager.in_memory({"subagents": {"timeoutSec": None}})
     assert s.get_subagents_timeout_sec() == 1800
+
+    s = SettingsManager.in_memory({"subagents": {"idleTimeoutSec": 0, "maxDurationSec": 12}})
+    assert s.get_subagents_idle_timeout_sec() == 0
+    assert s.get_subagents_max_duration_sec() == 12
+
+
+def test_subagents_idle_timeout_uses_legacy_timeout_when_new_key_is_absent() -> None:
+    """Legacy timeoutSec remains the idle timeout until idleTimeoutSec is configured."""
+    settings = SettingsManager.in_memory({"subagents": {"timeoutSec": 42}})
+
+    assert settings.get_subagents_idle_timeout_sec() == 42

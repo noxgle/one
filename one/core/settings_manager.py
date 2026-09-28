@@ -42,7 +42,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "shellCommandPrefix": None,
     "tools": {"maxSteps": 100, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit", "plan", "apply_patch"]},
     "bash": {"showOutput": False},
-    "subagents": {"enabled": True, "maxConcurrent": 2, "maxDepth": 3, "timeoutSec": 1800},
+    "subagents": {
+        "enabled": True,
+        "maxConcurrent": 2,
+        "maxDepth": 3,
+        # Retained for serialized/default compatibility; new configurations use
+        # idleTimeoutSec and it takes precedence whenever explicitly supplied.
+        "timeoutSec": 1800,
+        "idleTimeoutSec": 1800,
+        "maxDurationSec": 0,
+    },
     "askUser": {"timeoutSec": 0},
     "providers": {"timeoutSec": 300},
     "packages": [],
@@ -73,6 +82,7 @@ class SettingsManager:
         self._project_path = Path(cwd) / ".one" / "settings.json" if not in_memory else None
         self._errors: list[dict[str, Any]] = []
         self._in_memory = in_memory
+        self._initial = deepcopy(initial or {}) if in_memory else None
         # Guard: refuse to overwrite a known-malformed global settings file.
         self._global_is_locked: bool = False
         if in_memory:
@@ -197,16 +207,40 @@ class SettingsManager:
         return self.merged().get("followUpMode", "queue")
 
     def get_subagents_timeout_sec(self) -> int:
-        """Return the subagents timeout in seconds.
+        """Compatibility alias for the normalized idle timeout."""
+        return self.get_subagents_idle_timeout_sec()
 
-        Default 1800.  Invalid or non-positive values fall back to 1800.
+    def get_subagents_idle_timeout_sec(self) -> int:
+        """Return idle timeout; zero explicitly disables the idle watchdog.
+
+        The legacy ``timeoutSec`` is used only when ``idleTimeoutSec`` is absent.
+        Invalid and negative values fall back to the safe 1800-second default.
         """
         try:
-            raw = self.merged().get("subagents", {}).get("timeoutSec", 1800)
+            # Inspect raw layers because merged defaults otherwise hide whether
+            # the new key was absent and prevent the legacy alias taking effect.
+            if self._initial is not None:
+                raw_subagents = self._initial.get("subagents", {})
+            else:
+                raw_subagents = _deep_merge(
+                    self._global.get("subagents", {}) if isinstance(self._global.get("subagents"), dict) else {},
+                    self._project.get("subagents", {}) if isinstance(self._project.get("subagents"), dict) else {},
+                )
+            if not isinstance(raw_subagents, dict):
+                raw_subagents = {}
+            raw = raw_subagents.get("idleTimeoutSec", raw_subagents.get("timeoutSec", 1800))
             value = int(raw) if raw is not None else 1800
-            return value if value > 0 else 1800
+            return value if value >= 0 else 1800
         except (TypeError, ValueError):
             return 1800
+
+    def get_subagents_max_duration_sec(self) -> int:
+        """Return hard subagent duration; zero disables only this absolute cap."""
+        try:
+            value = int((self.merged().get("subagents") or {}).get("maxDurationSec", 0) or 0)
+            return value if value >= 0 else 0
+        except (TypeError, ValueError):
+            return 0
 
     def get_transport(self) -> str:
         return self.merged().get("transport", "http")
