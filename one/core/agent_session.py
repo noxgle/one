@@ -6,6 +6,7 @@ import html
 import inspect
 import itertools
 import json
+import math
 import os
 import re
 import tempfile
@@ -162,6 +163,9 @@ class AgentSession:
                 set_callback(self.sync_mcp_tools)
         self._abort_requested = False
         self._session_started_at = time.monotonic()
+        self._generation_clock: Callable[[], float] = time.monotonic
+        self._compaction_clock: Callable[[], float] = time.monotonic
+        self._wall_clock: Callable[[], float] = time.time
         # In-memory sessions have no session dir; use a transient temp dir
         # for image blobs so --no-session vision still works without
         # creating a ./blobs directory in the workspace.
@@ -1951,6 +1955,7 @@ class AgentSession:
         messages: list[dict[str, Any]],
         *,
         allow_live_stream: bool = True,
+        count_output_generation: bool = True,
     ) -> dict[str, Any]:
         if not self.model:
             raise RuntimeError("No model selected")
@@ -2087,6 +2092,7 @@ class AgentSession:
         if is_streaming and "stream_transport_timeout" in sig.parameters:
             chat_kwargs["stream_transport_timeout"] = max(float(provider_timeout) * 2, 600.0)
 
+        generation_started_at = self._generation_clock() if count_output_generation else None
         task = asyncio.create_task(provider.chat(**chat_kwargs))
         self._active_chat_tasks.add(task)
         try:
@@ -2170,8 +2176,21 @@ class AgentSession:
             "_streamedSuppressed": streamed_suppressed,
             "_providerToolCallId": self._provider_tool_call_id(res.raw),
         }
-        # Ephemeral classification only; stripped after the first-response
-        # decision and never included in provider messages or persistence.
+        if count_output_generation and generation_started_at is not None:
+            output_usage = res.usage.get("completion_tokens")
+            if output_usage is None:
+                output_usage = res.usage.get("output_tokens")
+            # `_outputGeneration` is durable assistant-message data: persist it
+            # so output-generation stats survive a session JSONL reload. A null
+            # token count represents unavailable provider usage, not zero.
+            duration = self._generation_clock() - generation_started_at
+            assistant_message["_outputGeneration"] = {
+                "durationSec": duration if math.isfinite(duration) and duration > 0 else 0.0,
+                "outputTokens": int(output_usage) if output_usage is not None else None,
+            }
+        # Unlike durable `_outputGeneration`, these are ephemeral classification
+        # fields. Strip them after the first-response decision; never send or
+        # persist them.
         if had_thinking or bool(getattr(res, "had_thinking", False)):
             assistant_message["_hadThinking"] = True
         if bool(getattr(res, "had_native_tool_call", False)):
@@ -2421,7 +2440,11 @@ class AgentSession:
                                         f"Model '{self.model.id}' does not support image input"
                                     )
                                 await self._preflight_compact()
-                                assistant = await self._invoke_provider(self._flatten_messages_for_provider(), allow_live_stream=True)
+                                assistant = await self._invoke_provider(
+                                    self._flatten_messages_for_provider(),
+                                    allow_live_stream=True,
+                                    count_output_generation=attempt == 0,
+                                )
                             except _AbortSignal:
                                 self._abort_requested = True
                                 final_assistant = self._abort_assistant_message()
@@ -2466,6 +2489,7 @@ class AgentSession:
                                             }
                                         ],
                                         allow_live_stream=False,
+                                        count_output_generation=False,
                                     )
                                 except _AbortSignal:
                                     self._abort_requested = True
@@ -2515,6 +2539,7 @@ class AgentSession:
                                         self._flatten_messages_for_provider()
                                         + [{"role": "user", "content": self._tool_response_repair_prompt()}],
                                         allow_live_stream=False,
+                                        count_output_generation=False,
                                     )
                                 except _AbortSignal:
                                     self._abort_requested = True
@@ -2940,15 +2965,18 @@ class AgentSession:
         # error-recovery paths (e.g. context-limit) where the provider call has
         # already failed and the prompt loop is paused — safe to compact.
         if self._is_streaming and not allow_during_prompt:
+            self.session_manager.append_compaction_skipped(reason, busy=True)
             return {
                 "aborted": False, "summary": "", "tokensBefore": 0,
                 "kept": 0, "skipped": True, "busy": True,
             }
         self._is_compacting = True
+        compaction_started_at = self._compaction_clock()
         self._emit({"type": "compaction_start", "reason": reason})
         try:
             if not self.messages:
                 result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": 0, "skipped": True}
+                self.session_manager.append_compaction_skipped(reason)
                 self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                 return result
 
@@ -2973,6 +3001,7 @@ class AgentSession:
                 # context; when the raw recent window already contains
                 # everything, do not summarize.
                 result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total, "skipped": True}
+                self.session_manager.append_compaction_skipped(reason)
                 self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                 return result
 
@@ -3020,7 +3049,16 @@ class AgentSession:
             elif entry_ids:
                 first_kept_id = entry_ids[0]
 
-            compaction_id = self.session_manager.append_compaction(summary_text, first_kept_id, tokens_before=tokens_before)
+            duration_sec = self._compaction_clock() - compaction_started_at
+            if not math.isfinite(duration_sec) or duration_sec < 0:
+                duration_sec = 0.0
+            compaction_id = self.session_manager.append_compaction(
+                summary_text,
+                first_kept_id,
+                tokens_before=tokens_before,
+                reason=reason,
+                duration_ms=duration_sec * 1000,
+            )
             if retained_short_history:
                 self.messages = [
                     message
@@ -3090,7 +3128,9 @@ class AgentSession:
             {"role": "user", "content": prompt_text},
         ]
         try:
-            res = await self._invoke_provider(msgs, allow_live_stream=False)
+            res = await self._invoke_provider(
+                msgs, allow_live_stream=False, count_output_generation=False
+            )
             text = self._assistant_text(res).strip()
             return text or None
         except Exception:
@@ -3294,6 +3334,11 @@ class AgentSession:
         cache_read = 0
         cache_write = 0
         total_cost = 0
+        generation_tokens = 0
+        generation_duration = 0.0
+        generation_measurements = 0
+        generation_missing = 0
+        response_durations: list[float] = []
 
         for m in self.messages:
             if m.get("role") == "assistant":
@@ -3303,6 +3348,36 @@ class AgentSession:
                 cache_read += int(usage.get("cacheRead", 0))
                 cache_write += int(usage.get("cacheWrite", 0))
                 total_cost += float((usage.get("cost") or {}).get("total", 0))
+                generation = m.get("_outputGeneration")
+                if isinstance(generation, dict):
+                    tokens = generation.get("outputTokens")
+                    duration = generation.get("durationSec")
+                    if (
+                        isinstance(duration, (int, float))
+                        and not isinstance(duration, bool)
+                        and math.isfinite(duration)
+                    ):
+                        response_durations.append(max(0.0, float(duration)))
+                    if tokens is None or not isinstance(duration, (int, float)) or duration <= 0:
+                        generation_missing += 1
+                    else:
+                        generation_tokens += int(tokens)
+                        generation_duration += float(duration)
+                        generation_measurements += 1
+
+        output_rate = (
+            generation_tokens / generation_duration
+            if generation_measurements and generation_duration > 0
+            else None
+        )
+        created_at = self.session_manager.get_session_created_at()
+        try:
+            age = self._wall_clock() - created_at if created_at is not None else None
+            session_age = age if age is not None and math.isfinite(age) and age > 0 else 0.0 if age is not None else None
+        except (OverflowError, OSError, ValueError):
+            session_age = None
+        compaction_timing = self.session_manager.get_compaction_timing()
+        compaction_durations = compaction_timing["durationsSec"]
 
         return {
             "sessionFile": self.session_file,
@@ -3322,6 +3397,31 @@ class AgentSession:
             "cost": total_cost,
             "contextUsage": self.get_context_usage(),
             "toolOutputPruning": dict(self._last_tool_output_pruning),
+            "compaction": self.session_manager.get_compaction_stats(),
+            "outputGeneration": {
+                "tokensPerSecond": output_rate,
+                "outputTokens": generation_tokens,
+                "durationSec": generation_duration,
+                "measurements": generation_measurements,
+                "missingMeasurements": generation_missing,
+                "reliable": generation_measurements > 0 and generation_missing == 0,
+            },
+            "time": {
+                "sessionAgeSec": session_age,
+                "activeGenerationSec": sum(response_durations),
+                "averageResponseSec": (
+                    sum(response_durations) / len(response_durations)
+                    if response_durations else None
+                ),
+                "lastResponseSec": response_durations[-1] if response_durations else None,
+                "responseMeasurements": len(response_durations),
+                "compactionSec": sum(compaction_durations),
+                "averageCompactionSec": (
+                    sum(compaction_durations) / len(compaction_durations)
+                    if compaction_durations else None
+                ),
+                "lastCompactionSec": compaction_timing["lastSec"],
+            },
             "nudge": {
                 "fires": self._nudge_fires,
                 "conversions": dict(self._nudge_conversions),

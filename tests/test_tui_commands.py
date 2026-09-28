@@ -277,6 +277,9 @@ async def test_tui_command_stats_state_tools(tmp_path: Path):
         await _submit(app, pilot, "/tools")
         stream = "\n".join(app._stream_lines)
         assert '"userMessages"' in stream
+        assert '"compaction"' in stream
+        assert '"outputGeneration"' in stream
+        assert '"time"' in stream
         assert '"thinkingLevel": "medium"' in stream
         assert '"sessionId"' in stream
         assert '"pendingQueues"' in stream
@@ -468,7 +471,7 @@ async def test_tui_command_steer_follow_compact_tree(tmp_path: Path):
         assert '"skipped"' not in stream
         # The tree renders session entries with a '*' marker on the leaf.
         assert "model_change" in stream
-        assert "* thinking_level_change" in stream
+        assert "* compaction_skipped" in stream
         assert session.get_pending_queues()["steering"] == ["abc"]
         assert session.get_pending_queues()["followUp"] == ["def"]
 

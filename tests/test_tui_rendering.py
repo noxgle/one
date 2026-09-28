@@ -1256,6 +1256,7 @@ async def test_tui_lifecycle_separators_are_ordered_once_and_narrow_safe(tmp_pat
         separators = [i for i, line in enumerate(app._stream_lines) if set(line) == {"─"}]
         assert len(separators) == 2
         assert all(len(app._stream_lines[index]) >= 1 for index in separators)
+        assert all(index == 0 or app._stream_lines[index - 1] == "" for index in separators)
 
 
 @pytest.mark.asyncio

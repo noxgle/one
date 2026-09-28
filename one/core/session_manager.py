@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -298,20 +299,92 @@ class SessionManager:
         tokens_before: int,
         details: Any = None,
         from_hook: bool | None = None,
+        reason: str = "manual",
+        duration_ms: float | None = None,
     ) -> str:
+        entry = {
+            "type": "compaction",
+            "id": _id(),
+            "parentId": self._leaf_id,
+            "timestamp": _now_iso(),
+            "summary": summary,
+            "firstKeptEntryId": first_kept_entry_id,
+            "tokensBefore": tokens_before,
+            "details": details,
+            "fromHook": from_hook,
+            "reason": reason,
+        }
+        # Duration is optional so historical entries retain their exact shape.
+        # New completed compactions write this durable monotonic measurement.
+        if duration_ms is not None:
+            measured = float(duration_ms)
+            entry["durationMs"] = measured if math.isfinite(measured) and measured > 0 else 0.0
+        return self._append(entry)
+
+    def append_compaction_skipped(self, reason: str, *, busy: bool = False) -> str:
+        """Record a compaction request that deliberately made no summary."""
         return self._append(
             {
-                "type": "compaction",
+                "type": "compaction_skipped",
                 "id": _id(),
                 "parentId": self._leaf_id,
                 "timestamp": _now_iso(),
-                "summary": summary,
-                "firstKeptEntryId": first_kept_entry_id,
-                "tokensBefore": tokens_before,
-                "details": details,
-                "fromHook": from_hook,
+                "reason": reason,
+                "busy": busy,
             }
         )
+
+    def get_compaction_stats(self) -> dict[str, Any]:
+        """Return durable compaction metrics for the currently loaded session."""
+        breakdown = {"manual": 0, "automatic": 0, "recovery": 0}
+
+        def category(reason: Any) -> str:
+            if reason == "manual":
+                return "manual"
+            if reason == "context_limit_retry":
+                return "recovery"
+            return "automatic"
+
+        completed = skipped = tokens_before = 0
+        last: dict[str, Any] | None = None
+        for entry in self._entries[1:]:
+            if entry.get("type") == "compaction":
+                completed += 1
+                reason = str(entry.get("reason") or "manual")
+                breakdown[category(reason)] += 1
+                tokens_before += int(entry.get("tokensBefore") or 0)
+                last = {
+                    "id": entry.get("id"), "timestamp": entry.get("timestamp"),
+                    "reason": reason, "tokensBefore": int(entry.get("tokensBefore") or 0),
+                    "summary": entry.get("summary", ""),
+                }
+            elif entry.get("type") == "compaction_skipped":
+                skipped += 1
+        return {
+            "completed": completed, "skipped": skipped, "tokensBefore": tokens_before,
+            "byReason": breakdown, "last": last,
+        }
+
+    def get_compaction_timing(self) -> dict[str, Any]:
+        """Return durable completed-compaction timings, tolerating old JSONL."""
+        durations: list[float] = []
+        last_duration: float | None = None
+        for entry in self._entries[1:]:
+            if entry.get("type") != "compaction":
+                continue
+            value = entry.get("durationMs")
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value >= 0
+            ):
+                last_duration = float(value) / 1000
+                durations.append(last_duration)
+            else:
+                # The latest completed entry may be an old entry with no timing.
+                last_duration = None
+        return {"durationsSec": durations, "lastSec": last_duration}
 
     def append_branch_summary(
         self,
@@ -600,6 +673,20 @@ class SessionManager:
     @property
     def session_dir(self) -> str:
         return self._session_dir
+
+    def get_session_created_at(self) -> float | None:
+        """Return the durable session-header creation time as epoch seconds.
+
+        Session age intentionally uses the JSONL header rather than process
+        startup, so it includes idle time and survives a session reload.
+        """
+        timestamp = self._entries[0].get("timestamp") if self._entries else None
+        if not isinstance(timestamp, str):
+            return None
+        try:
+            return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+        except (OverflowError, OSError, ValueError):
+            return None
 
     @classmethod
     def create(cls, cwd: str, session_dir: str | None = None) -> SessionManager:

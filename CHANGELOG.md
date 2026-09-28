@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Session statistics** — `/stats`, interactive mode, and RPC now report
+  durable compaction counts/reasons and timings, session age, normal response
+  timings, and measured provider output tokens per second when available.
+
 - **Model temperature modes** — sessions default to balanced (`0.5`) and support
   coder (`0.2`), creative (`0.8`), and experimental (`1.2`) presets, plus
   numeric values from `0.0..1.2`. Temperature is available in the TUI, RPC,
@@ -52,6 +56,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   occur only when cooperation is enabled.
 
 ### Fixed
+
+- **TUI lifecycle separators** — horizontal rules now start after a blank line,
+  preventing assistant output from visually joining the separator.
 
 - **Write tool parsing** — write-content bodies now preserve exact text safely;
   escaped bodies omitted from feedback no longer leak or corrupt parser state.

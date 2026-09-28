@@ -1536,6 +1536,10 @@ if TEXTUAL_AVAILABLE:
                     width = max(1, current_width - 6)
             except Exception:
                 pass
+            # A separator is always a separate visual block. Do not add a
+            # second blank line when the preceding block already supplied one.
+            if self._stream_lines and self._stream_lines[-1] != "":
+                self._write("", render=False)
             self._write("─" * width)
 
         def _trim_stream(self, *, render: bool = True) -> int:

@@ -162,6 +162,25 @@ def test_get_last_compaction(tmp_path: Path):
     assert last["summary"] == "S2"
 
 
+def test_compaction_stats_persist_reasons_and_skips(tmp_path: Path):
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    first_kept = sm.get_entries()[0]["id"] if sm.get_entries() else "root"
+    sm.append_compaction("manual", first_kept, tokens_before=10, reason="manual")
+    sm.append_compaction("automatic", first_kept, tokens_before=20, reason="auto_preflight")
+    sm.append_compaction("recovery", first_kept, tokens_before=30, reason="context_limit_retry")
+    sm.append_compaction_skipped("auto")
+    assert sm.session_file is not None
+
+    reopened = SessionManager.open(sm.session_file, str(tmp_path / "sessions"))
+    stats = reopened.get_compaction_stats()
+    assert stats["completed"] == 3
+    assert stats["skipped"] == 1
+    assert stats["tokensBefore"] == 60
+    assert stats["byReason"] == {"manual": 1, "automatic": 1, "recovery": 1}
+    assert stats["last"]["reason"] == "context_limit_retry"
+    assert stats["last"]["timestamp"]
+
+
 def test_get_message_entry_ids_aligned_with_interleaved_entries(tmp_path: Path):
     sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
     sm.append_model_change("openai", "gpt-4.1")
