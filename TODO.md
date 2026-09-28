@@ -4693,3 +4693,549 @@ new path to leak full session data.
 
 2–3 engineering days. Main uncertainty is compatibility with existing event
 consumers and the exact rendering contract expected by local models.
+
+## Project: Subagent idle timeout and partial-result handling (`feat/subagent-idle-timeout`)
+
+### Goal
+
+Replace the current absolute-only subagent timeout behavior with two independent
+limits:
+
+- `idleTimeoutSec` — maximum period without meaningful activity.
+- `maxDurationSec` — optional hard limit for total subagent runtime.
+
+When a timeout occurs, preserve and return the partial result and diagnostics.
+The parent agent must not treat a timed-out subagent as successful and must be
+able to inspect the result before deciding whether to resume, verify external
+state, or stop.
+
+### Context
+
+The current subagent pipeline applies an absolute `asyncio.wait_for` in both the
+parent tool wrapper (`one/core/agent_session.py`) and `_run_subagent`. A child
+can continuously stream meaningful output while the parent-level absolute
+deadline still expires.
+
+Provider streaming already has partial idle-timeout behavior: meaningful text
+and reasoning reset the provider timer, while whitespace-only chunks and
+keepalives do not. That activity currently remains local to the child provider
+call and is not propagated to the parent subagent watchdog.
+
+Current timeout and diagnostic paths are concentrated in:
+
+- `one/core/agent_session.py:1031-1065` — outer tool timeout wrapper.
+- `one/core/agent_session.py:1515-1680` — child creation, timeout, cleanup, and diagnostics.
+- `one/core/agent_session.py:1959-1966` — text streaming activity.
+- `one/core/agent_session.py:2000-2007` — reasoning streaming activity.
+- `one/core/settings_manager.py` — timeout defaults and getters.
+
+### Scope
+
+#### In Scope
+
+- Activity-aware timeout for the complete subagent lifecycle.
+- Optional hard maximum duration independent of activity.
+- Propagation of meaningful child activity to the parent watchdog.
+- Correct handling of active provider, tool, MCP, bash, and user-question work.
+- Partial output and structured diagnostics on timeout.
+- Tests for streaming, stalls, tools, MCP, parallel subagents, and cleanup.
+- Configuration and user-facing documentation.
+
+#### Non-Goals
+
+- Automatically inferring whether a free-form plan step was semantically
+  completed.
+- Automatically retrying destructive bash, Docker, SSH, MCP, or deployment
+  operations after timeout.
+- Removing provider or individual-tool timeouts.
+- Guaranteeing that a remote operation stopped after client cancellation.
+- Introducing a general workflow scheduler.
+
+### Assumptions
+
+- `subagents.idleTimeoutSec` defaults to `1800` seconds.
+- `subagents.maxDurationSec` defaults to `0`, meaning no absolute limit.
+- Existing `subagents.timeoutSec` remains compatible as a legacy alias for the
+  idle timeout when `idleTimeoutSec` is not configured.
+- `providers.timeoutSec` continues to govern an individual provider call.
+- `tools.timeoutSec`, bash timeouts, and MCP timeouts continue to govern
+  individual tool calls.
+- Timeout results remain resumable/inspectable through the existing `sessionId`
+  and persisted child session where persistence is enabled.
+
+### Open Questions
+
+- Should `idleTimeoutSec=0` disable the idle watchdog, or should zero be rejected
+  to preserve a safety guard? Recommended: permit zero only as an explicit
+  disable value, but keep the default positive.
+- Should a timed-out child be resumable through a dedicated `spawn_subagent`
+  resume argument, or is returning the existing session ID sufficient for the
+  first implementation?
+- Should the TUI expose a direct “inspect/resume timed-out subagent” action, or
+  should the parent model receive only structured tool output initially?
+
+### Architecture
+
+Add an internal activity watchdog based on `time.monotonic()` and an
+`asyncio.Event` or generation counter. The child session reports meaningful
+activity through an internal callback that carries only an activity kind, not
+raw tokens or sensitive output.
+
+The parent `_run_subagent` owns the lifecycle watchdog and races the child task
+against:
+
+- an idle timeout task, reset by child activity;
+- an optional absolute maximum-duration task;
+- parent cancellation.
+
+The child provider keeps its existing per-provider idle timeout. Child tool
+execution keeps its own per-tool timeout. An active tool is represented as an
+active operation so the parent does not classify a running, bounded operation
+as idle. The tool's own timeout remains the circuit breaker for a stuck tool.
+
+Timeout cleanup preserves the child session identifier, bounded partial output,
+last event, last tool, and sanitized diagnostics. External side effects are
+reported with `externalState: "unknown"` unless completion is positively known.
+
+### Architecture Decisions
+
+#### ADR-001: Separate idle timeout from maximum duration
+
+**Decision:** Add `subagents.idleTimeoutSec` for inactivity and
+`subagents.maxDurationSec` for an optional absolute cap. Set the maximum
+duration default to `0`.
+
+**Alternatives:** Keep only the current absolute timeout; use only idle timeout;
+make the maximum duration mandatory for every subagent.
+
+**Rationale:** Active streaming should not be killed merely because work is
+long-running, while an optional hard cap is required for unattended tasks that
+must have a finite upper bound.
+
+**Trade-offs:** Two timers and more diagnostics are required. A disabled hard
+cap means correctness depends on activity and individual operation safeguards.
+
+**Consequences:** With `maxDurationSec=0`, a subagent can run indefinitely while
+active, subject to idle, provider, tool, step, budget, cancellation, and error
+limits. With `maxDurationSec=3600`, it is interrupted after one hour even while
+streaming.
+
+#### ADR-002: Preserve partial results on timeout
+
+**Decision:** Use a preserve-and-report policy. Never convert a timeout into a
+successful completion and never discard the partial child result.
+
+**Alternatives:** Discard the child session; retry automatically; treat the
+last assistant text as a successful final answer.
+
+**Rationale:** A timeout does not prove that an external operation stopped or
+that the partial output is complete. The parent needs evidence to decide the
+next safe action.
+
+**Trade-offs:** The parent model must handle an additional structured failure
+state and may need to inspect external state before continuing.
+
+**Consequences:** Timeout results use `finished=false`, `ok=false`,
+`goalSuccess=false`, preserve `sessionId`, and include bounded partial output
+and diagnostics.
+
+#### ADR-003: Propagate activity without raw stream forwarding
+
+**Decision:** Add an internal activity callback carrying categories such as
+`provider_text`, `provider_reasoning`, `tool_started`, `tool_finished`, and
+`user_answer`. Do not forward raw tokens through the watchdog callback.
+
+**Alternatives:** Subscribe the parent to all child events; poll child state;
+share the provider stream directly.
+
+**Rationale:** Activity needs to reset a timer but should not duplicate output,
+leak sensitive content, or expand the public event contract unnecessarily.
+
+**Trade-offs:** Every meaningful activity source must be wired explicitly.
+
+### Phases
+
+#### Phase 1: Timeout configuration
+
+**Objective:** Add explicit idle and maximum-duration settings while preserving
+existing configuration behavior.
+
+**Prerequisites:** None.
+
+**Expected outcome:** Settings expose both timeout semantics and old
+`subagents.timeoutSec` configurations continue to work.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Add subagent idle and maximum-duration settings.
+
+  - **Description:** Add `idleTimeoutSec` and `maxDurationSec` to the default
+    settings, implement getters and validation, and use legacy
+    `subagents.timeoutSec` as the idle-timeout fallback when the new setting is
+    absent. Document zero-value behavior.
+
+  - **Files:** `one/core/settings_manager.py`, configuration help/docs,
+    relevant settings tests.
+
+  - **Dependencies:** None.
+
+  - **Acceptance Criteria:** Defaults are `idleTimeoutSec=1800` and
+    `maxDurationSec=0`; legacy timeout configuration remains effective; invalid
+    values are handled deterministically; getters return normalized values.
+
+  - **Verification:** Settings unit tests for defaults, legacy alias, explicit
+    values, zero, negative, and malformed values.
+
+#### Phase 2: Activity watchdog
+
+**Objective:** Introduce a cancellation-safe monotonic activity watchdog that
+can be reset by child activity and can enforce idle and absolute deadlines.
+
+**Prerequisites:** Phase 1.
+
+**Expected outcome:** The watchdog can distinguish active streaming, active
+tool work, idle stalls, and maximum-duration expiry.
+
+**Estimated effort:** 1–1.5 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Implement the internal activity watchdog.
+
+  - **Description:** Add a small internal watchdog with monotonic timestamps,
+    `touch(kind)`, an event/generation wakeup, active-operation tracking, idle
+    waiting, optional maximum-duration waiting, and cancellation-safe cleanup.
+    Keep the implementation independent of TUI rendering.
+
+  - **Files:** `one/core/activity_watchdog.py` or
+    `one/core/agent_session.py`, focused watchdog tests.
+
+  - **Dependencies:** Phase 1.
+
+  - **Acceptance Criteria:** Meaningful activity resets idle timing; max
+    duration never resets; cancellation does not leak tasks; monotonic time is
+    used; active operation state is observable internally without exposing raw
+    content.
+
+  - **Verification:** Deterministic fake-clock or short-duration async tests
+    for reset, idle expiry, maximum expiry, active operation, and cancellation.
+
+#### Phase 3: Child activity propagation
+
+**Objective:** Make provider, tool, MCP, bash, and question activity visible to
+the parent subagent watchdog.
+
+**Prerequisites:** Phase 2.
+
+**Expected outcome:** A continuously streaming or actively operating child is
+not classified as idle, while a stalled child eventually is.
+
+**Estimated effort:** 1–2 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Add an internal `AgentSession` activity callback.
+
+  - **Description:** Add an optional callback receiving only activity kinds.
+    Preserve existing provider activity ordering by signaling before slow UI
+    listeners. Do not change public event payloads unless an additive timeout
+    event is needed.
+
+  - **Files:** `one/core/agent_session.py`, session construction tests.
+
+  - **Dependencies:** Phase 2.
+
+  - **Acceptance Criteria:** Parent can receive child activity without raw
+    token duplication; default sessions without a callback behave unchanged;
+    callback failures cannot crash the child.
+
+  - **Verification:** Unit tests for callback invocation, ordering, exception
+    isolation, and child construction.
+
+- [ ] **Task:** Wire provider streaming activity.
+
+  - **Description:** Forward meaningful text and reasoning deltas from the
+    existing `_invoke_provider` callbacks to the parent activity callback.
+    Preserve the rule that whitespace-only and metadata-only chunks do not
+    reset the timer.
+
+  - **Files:** `one/core/agent_session.py`,
+    `tests/test_provider_timeout_regression.py`, streaming tests.
+
+  - **Dependencies:** Activity callback task.
+
+  - **Acceptance Criteria:** Text and reasoning reset both local provider idle
+    timing and the parent subagent activity timer; whitespace and keepalive do
+    not; slow listeners do not cause false timeout.
+
+  - **Verification:** Existing provider timeout regressions plus child-to-parent
+    activity assertions.
+
+- [ ] **Task:** Wire tool and question activity.
+
+  - **Description:** Touch activity at tool start and completion, represent an
+    active bounded operation so it is not classified as idle, and preserve each
+    tool's own timeout. Include MCP, bash, `ask_user`, and tool failure paths.
+
+  - **Files:** `one/core/agent_session.py`, tool timeout tests,
+    MCP/subagent tests.
+
+  - **Dependencies:** Activity callback task.
+
+  - **Acceptance Criteria:** Long active tools do not trigger false subagent
+    idle timeout; a stuck tool still reaches its own timeout; question timeout
+    semantics remain independent; completion/error wakes the watchdog.
+
+  - **Verification:** Fake blocked bash/MCP/question tests with independent
+    tool and subagent timeout values.
+
+#### Phase 4: Replace absolute subagent timeout wrappers
+
+**Objective:** Make `_run_subagent` the single owner of idle and maximum
+duration enforcement.
+
+**Prerequisites:** Phases 2 and 3.
+
+**Expected outcome:** The parent waits for child completion, idle expiry, max
+duration expiry, or cancellation without duplicate competing deadlines.
+
+**Estimated effort:** 1–2 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Race child execution against watchdogs.
+
+  - **Description:** Replace the absolute `asyncio.wait_for` around
+    `sub.prompt(...)` with coordinated child, idle-watchdog, and optional
+    max-duration tasks. Ensure exactly one terminal reason wins and all losing
+    tasks are cancelled and awaited.
+
+  - **Files:** `one/core/agent_session.py`, subagent timeout tests.
+
+  - **Dependencies:** Child activity propagation.
+
+  - **Acceptance Criteria:** Continuous streaming longer than idle timeout
+    succeeds; stalled children timeout; max duration interrupts active
+    streaming; parent cancellation remains immediate and cleanup-safe; no child
+    or watchdog task leaks.
+
+  - **Verification:** Deterministic fake-provider tests for all race outcomes,
+    cancellation, and cleanup.
+
+- [ ] **Task:** Remove duplicate parent timeout enforcement.
+
+  - **Description:** Prevent `_execute_tool_by_name` from applying an
+    independent absolute timeout to `spawn_subagent`. Delegate lifecycle
+    timeout ownership to `_run_subagent` while retaining normal per-tool
+    timeout presentation and MCP/bash timeout behavior.
+
+  - **Files:** `one/core/agent_session.py`, timeout/event tests.
+
+  - **Dependencies:** Watchdog race implementation.
+
+  - **Acceptance Criteria:** One configured subagent timeout policy is applied;
+    no race causes a parent wrapper to kill an active child early; non-subagent
+    tool timeout behavior is unchanged.
+
+  - **Verification:** Effective-timeout tests and long-stream regression that
+    exceeds the old absolute wrapper deadline.
+
+#### Phase 5: Partial results and timeout diagnostics
+
+**Objective:** Return safe, structured, inspectable results for idle and
+maximum-duration timeouts.
+
+**Prerequisites:** Phase 4.
+
+**Expected outcome:** The parent model receives partial output and a clear
+failure state without false success or discarded session data.
+
+**Estimated effort:** 1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Add typed timeout results.
+
+  - **Description:** Distinguish `SubagentIdleTimeout` and
+    `SubagentMaxDuration`. Preserve `sessionId`, bounded `lastAssistantText`,
+    `summary`, `lastEvent`, `lastTool`, `elapsedSec`, and `externalState`.
+    Keep `finished=false`, `ok=false`, and `goalSuccess=false`.
+
+  - **Files:** `one/core/agent_session.py`, subagent result/diagnostic tests.
+
+  - **Dependencies:** Phase 4.
+
+  - **Acceptance Criteria:** Timeout results are structured and sanitized;
+    partial output is retained; external state is `unknown` unless completion
+    is positively known; normal successful results are unchanged.
+
+  - **Verification:** Timeout tests for partial text, redaction, diagnostics,
+    session ID, and success flags.
+
+- [ ] **Task:** Preserve child session and cleanup state.
+
+  - **Description:** Collect diagnostics before teardown, persist the child
+    session where persistence is enabled, abort provider/tool tasks, dispose
+    resources, and await remaining tasks within bounded cleanup windows.
+    Never automatically retry potentially destructive external operations.
+
+  - **Files:** `one/core/agent_session.py`, `tests/test_subagents.py`,
+    `tests/test_provider_timeout_regression.py`, MCP cleanup tests.
+
+  - **Dependencies:** Typed timeout results.
+
+  - **Acceptance Criteria:** No pending child task remains after timeout; no
+    secrets appear in diagnostics; parent receives a result rather than hanging;
+    persisted session remains inspectable.
+
+  - **Verification:** Blocked provider/tool cleanup tests, task-leak checks,
+    redaction assertions, and persisted-session inspection.
+
+#### Phase 6: Observability and user-facing behavior
+
+**Objective:** Make timeout causes and partial results visible without leaking
+raw output or changing unrelated event contracts.
+
+**Prerequisites:** Phase 5.
+
+**Expected outcome:** TUI/RPC/parent model can distinguish idle timeout,
+maximum duration, cancellation, and ordinary tool/provider failure.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Add additive timeout metadata and rendering.
+
+  - **Description:** Preserve existing subagent events and add timeout kind,
+    configured limits, last activity kind, and bounded diagnostics where the
+    event contract supports additive fields. Render concise timeout messages in
+    TUI/RPC and include `sessionId` and external-state warnings.
+
+  - **Files:** `one/core/agent_session.py`, `one/modes/tui_mode.py`,
+    `one/modes/rpc_mode.py`, event/snapshot tests.
+
+  - **Dependencies:** Phase 5.
+
+  - **Acceptance Criteria:** Users can distinguish inactivity from hard limit;
+    partial output is visible; raw sensitive stream content is not duplicated;
+    existing event consumers remain compatible.
+
+  - **Verification:** Event snapshot and TUI/RPC rendering tests for both
+    timeout kinds and normal completion.
+
+#### Phase 7: Documentation and release verification
+
+**Objective:** Document configuration and verify the complete implementation.
+
+**Prerequisites:** Phases 1–6.
+
+**Expected outcome:** Users understand idle versus absolute timeout semantics,
+and the feature is ready for review on its own branch.
+
+**Estimated effort:** 0.5 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Update configuration documentation and changelog.
+
+  - **Description:** Document `subagents.idleTimeoutSec`,
+    `subagents.maxDurationSec`, legacy `subagents.timeoutSec` behavior,
+    partial-result policy, external-state uncertainty, and safe follow-up
+    inspection. Add a user-visible changelog entry and version bump if required
+    by project policy.
+
+  - **Files:** `README.md`, authoritative configuration docs,
+    `CHANGELOG.md`, `one/config.py` if a version bump is required.
+
+  - **Dependencies:** Final semantics from all prior phases.
+
+  - **Acceptance Criteria:** Configuration examples are correct; timeout types
+    and zero-value behavior are documented; no documentation claims automatic
+    rollback or successful completion after timeout.
+
+  - **Verification:** Documentation assertions, version/snapshot consistency,
+    and reviewed diff.
+
+- [ ] **Task:** Run complete verification and review.
+
+  - **Description:** Run focused timeout/subagent/MCP/provider suites, the full
+    test suite, lint, whitespace checks, and an independent code review. Review
+    all timeout race paths and confirm no real provider, MCP server, Docker, or
+    SSH operation is used by automated tests.
+
+  - **Files:** All implementation and test files from previous phases.
+
+  - **Dependencies:** All implementation tasks.
+
+  - **Acceptance Criteria:** No high-severity review findings; no task leaks;
+    streaming survives idle windows; hard duration interrupts correctly;
+    partial results and diagnostics are preserved; existing timeout behavior for
+    providers and tools remains correct.
+
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q`
+    - `.venv/bin/ruff check .`
+    - `git diff --check`
+    - Focused subagent/provider/MCP timeout tests.
+
+### Rollout & Rollback
+
+Implement on `feat/subagent-idle-timeout` based on `main`. Roll out with the
+legacy timeout alias enabled. If regressions occur, roll back the code without
+rewriting persisted child sessions. Do not automatically retry timed-out
+external operations during rollout. No merge, push, or release publication
+without explicit approval.
+
+### Observability
+
+Keep existing `subagent_start`, `subagent_end`, tool lifecycle, provider, and
+diagnostic surfaces. Add timeout kind and activity metadata only additively.
+Record only bounded, sanitized summaries and last-event metadata. Avoid logging
+complete provider output, credentials, MCP payloads, or write bodies.
+
+### Security Considerations
+
+- Treat partial assistant text and tool output as untrusted data.
+- Preserve existing secret redaction before returning diagnostics.
+- Never claim rollback or remote cancellation merely because a local task was
+  cancelled.
+- Keep MCP, bash, Docker, SSH, and deployment state marked unknown until
+  explicitly inspected.
+- Ensure watchdog callbacks cannot execute tools or mutate files.
+
+### Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Child streams continuously but never makes useful progress | High | Medium | Keep optional `maxDurationSec` hard cap and retain max-step/budget limits |
+| Active tool is incorrectly classified as idle | High | Medium | Track active operations and test bash/MCP/question paths separately |
+| Duplicate parent and child deadlines race | High | High | Make `_run_subagent` the single lifecycle-timeout owner |
+| Timeout cleanup leaves provider/tool tasks running | High | Medium | Abort, dispose, cancel, await, and assert no pending tasks |
+| External operation continues after local timeout | High | Medium | Return `externalState=unknown`; require inspection before destructive recovery |
+| Partial output is mistaken for success | High | Medium | Always return `ok=false`, `finished=false`, `goalSuccess=false` |
+| Legacy timeout configuration changes behavior unexpectedly | Medium | Medium | Use `subagents.timeoutSec` as idle-timeout alias and add compatibility tests |
+| Activity callback leaks raw or sensitive output | Medium | Low | Send only activity categories, not token contents |
+| Background/parallel child activity crosses watchdog boundaries | Medium | Medium | Give every child its own watchdog and add parallel isolation tests |
+
+### Project Acceptance Criteria
+
+- [ ] Active streaming beyond `idleTimeoutSec` remains alive.
+- [ ] Inactivity beyond `idleTimeoutSec` produces `SubagentIdleTimeout`.
+- [ ] `maxDurationSec=0` disables the absolute cap.
+- [ ] Positive `maxDurationSec` interrupts the subagent even during streaming.
+- [ ] Timed-out subagents return partial output, diagnostics, and `sessionId`.
+- [ ] Timeout results are never reported as successful completion.
+- [ ] External state is marked unknown unless completion is confirmed.
+- [ ] Provider and individual-tool timeout semantics remain intact.
+- [ ] Cleanup leaves no pending child, provider, watchdog, or tool tasks.
+- [ ] Focused tests, full pytest, Ruff, and `git diff --check` pass.
+- [ ] Implementation is isolated to `feat/subagent-idle-timeout` until approved.
+
+### Estimated Timeline
+
+4–7 engineering days. Main uncertainties are coordinating provider/tool activity
+with parent cancellation and preserving cleanup behavior across MCP and external
+processes.
