@@ -5239,3 +5239,619 @@ complete provider output, credentials, MCP payloads, or write bodies.
 4–7 engineering days. Main uncertainties are coordinating provider/tool activity
 with parent cancellation and preserving cleanup behavior across MCP and external
 processes.
+
+## Project: Model temperature modes and subagent inheritance (`feat/model-temperature`)
+
+### Goal
+
+Add a persisted, provider-aware model temperature setting with named presets,
+TUI keyboard controls, RPC/CLI access, documentation, and explicit inheritance
+by subagents.
+
+The canonical presets are:
+
+```text
+coder        = 0.2
+balanced     = 0.5
+creative     = 0.8
+experimental = 1.2
+```
+
+The default mode is `balanced` (`0.5`). The numeric temperature is always
+bounded to `0.0..1.2` and adjusted in increments of `0.1`.
+
+### Context
+
+Temperature is not currently part of `AgentSession` state or the persisted
+session model. Provider behavior is inconsistent: OpenAI-compatible and Gemini
+use hard-coded `0.1`, Ollama does not send temperature, and Anthropic/Codex do
+not currently expose a temperature field. TUI currently exposes model and
+thinking state but no temperature state or adjustment shortcuts. Subagents
+inherit the parent model and thinking level but have no temperature override or
+temperature inheritance contract.
+
+Relevant current locations:
+
+- `one/providers/base.py` — provider chat interface.
+- `one/providers/openai_compatible.py` — hard-coded/default temperature payload.
+- `one/providers/gemini.py` — hard-coded generation temperature.
+- `one/providers/ollama.py` — native options payload.
+- `one/providers/anthropic.py` and `one/providers/codex_responses.py` — provider-specific payloads without temperature.
+- `one/core/agent_session.py` — model invocation and subagent construction.
+- `one/core/settings_manager.py` — defaults and persisted settings.
+- `one/core/session_manager.py` — session state restoration/persistence.
+- `one/modes/tui_mode.py` — sidebar, header, commands, bindings, and shortcuts.
+- `one/modes/rpc_mode.py` — RPC state and command handling.
+- `one/cli/args.py` and `one/cli/main.py` — CLI argument and runtime wiring.
+
+### Scope
+
+#### In Scope
+
+- Named temperature presets and numeric normalization.
+- Default/project/session persistence of temperature.
+- Provider request plumbing and capability-aware omission.
+- TUI display and Ctrl+Left/Ctrl+Right adjustment.
+- TUI commands, RPC commands/state, and CLI options.
+- Subagent inheritance and explicit numeric/preset overrides.
+- Warnings when a provider/model does not support temperature.
+- Tests, documentation, changelog, version, and snapshots.
+
+#### Non-Goals
+
+- Changing `thinking_level` semantics or replacing thinking modes.
+- Automatically changing temperature based on tool type, prompt length, or model output.
+- Sending unsupported temperature fields to providers.
+- Treating the displayed preset name as more authoritative than the exact numeric value.
+- Adding a provider-specific temperature range beyond the product-wide `0.0..1.2` UI range.
+
+### Confirmed Decisions
+
+- Preset values are decimal values `0.2`, `0.5`, `0.8`, and `1.2`.
+- The default temperature is `0.5` (`balanced`).
+- Manual values display the nearest preset name while preserving and displaying
+  the exact numeric value. For example, `0.9` displays as `creative (0.9)`.
+- If a provider/model does not support temperature, omit the field and emit a
+  warning; do not fail the request solely for that reason.
+- Temperature is exposed through TUI, RPC, and CLI.
+- Subagents inherit the parent's effective temperature unless they explicitly
+  provide a numeric temperature or named temperature mode.
+
+### Assumptions
+
+- The nearest preset is selected deterministically using the declared preset
+  order when two presets are equally close.
+- Numeric temperature takes precedence if both `temperature` and
+  `temperatureMode` are supplied to `spawn_subagent`.
+- A child override is local to that child and must not mutate the parent's
+  persisted setting or active session state.
+- Provider capability is determined by adapter/model policy at request time.
+- Existing provider behavior is preserved when no explicit temperature is
+  available or when the provider intentionally omits unsupported temperature.
+
+### Open Questions
+
+- Should `temperature=0.0` be sent explicitly to supported providers, or should
+  it be treated as an omitted/default value for providers where zero has special
+  semantics? Recommended: send explicit zero when the user selected it.
+- Should provider unsupported warnings appear once per session/model or on every
+  request? Recommended: emit a warning event per affected request and let the
+  UI deduplicate presentation if necessary.
+- Should CLI temperature options apply only to the current process/session or
+  also persist as the global/project default? Recommended: process/session only
+  unless an explicit config command is used.
+- Should RPC use one `set_temperature` method accepting either numeric or mode
+  input, or separate numeric and preset methods? Recommended: one method with
+  mutually exclusive `temperature` and `mode` fields.
+
+### Architecture
+
+Create one canonical temperature normalization layer shared by settings,
+sessions, TUI, RPC, CLI, provider dispatch, and subagent construction. It owns
+the preset map, bounds, step normalization, nearest-mode display name, and
+validation errors.
+
+`AgentSession` owns the effective temperature for a session. Settings provide
+the default; session restoration provides the latest persisted override; CLI,
+RPC, and TUI actions update the active session. Provider invocation receives the
+effective numeric temperature for every normal model request.
+
+Provider adapters accept an optional temperature and decide whether it can be
+serialized for the selected provider/model. Unsupported fields are omitted and
+an additive warning event is emitted. Provider payload tests must verify both
+supported serialization and unsupported omission.
+
+Subagent creation computes an effective child temperature before constructing
+the child `AgentSession`:
+
+```text
+explicit numeric temperature > explicit named mode > parent effective temperature
+```
+
+The child receives the resolved numeric value directly. It does not mutate the
+parent settings or session history.
+
+### Architecture Decisions
+
+#### ADR-001: Named modes are presentation presets over numeric temperature
+
+**Decision:** Store and transmit the exact numeric temperature. Derive the
+nearest named mode for display.
+
+**Alternatives:** Store only a mode name; store both mode and numeric value as
+independent mutable fields; use `custom` for every manually adjusted value.
+
+**Rationale:** Providers need a numeric value, while users need readable modes.
+Nearest-mode display satisfies the requested UI without losing precision.
+
+**Trade-offs:** A displayed mode may not exactly equal the displayed numeric
+value after manual adjustment; the UI must show both.
+
+**Consequences:** `0.9` is rendered as `creative (0.9)` rather than creating a
+new mode name.
+
+#### ADR-002: Omit unsupported provider fields and warn
+
+**Decision:** When a provider/model does not support temperature, omit the field
+from its request and emit a warning without failing the request.
+
+**Alternatives:** Fail the request; silently omit the field; clamp to a provider
+default and report success.
+
+**Rationale:** Provider compatibility is more important than forcing a field
+that can cause a request rejection. The warning prevents silent misconfiguration.
+
+**Trade-offs:** The requested behavior may not be honored by that provider, so
+the warning must be visible and testable.
+
+#### ADR-003: Subagent overrides are isolated effective state
+
+**Decision:** Resolve a child temperature at spawn time and pass it explicitly
+to the child session. Omitted values inherit the parent effective temperature.
+
+**Alternatives:** Share a mutable temperature reference; persist child changes
+into the parent; let the child read only global settings.
+
+**Rationale:** A child should inherit the parent's behavior by default while
+remaining independently configurable and preventing cross-session mutation.
+
+**Trade-offs:** The child construction path and tool schema gain override
+validation and tests.
+
+### Phases
+
+#### Phase 1: Canonical temperature model and settings
+
+**Objective:** Establish validated temperature values, presets, nearest-mode
+display mapping, and persisted defaults.
+
+**Prerequisites:** None.
+
+**Expected outcome:** All callers can obtain a normalized numeric temperature and
+mode label without duplicating range logic.
+
+**Estimated effort:** 1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Add shared temperature constants and normalization.
+
+  - **Description:** Add the preset map, minimum/maximum/step constants,
+    numeric validation, one-decimal normalization, preset lookup, and nearest
+    mode resolution. Define deterministic tie behavior using preset order.
+
+  - **Files:** `one/core/settings_manager.py` or a new focused module such as
+    `one/core/temperature.py`, unit tests for normalization.
+
+  - **Dependencies:** None.
+
+  - **Acceptance Criteria:** Values outside `0.0..1.2` are rejected or handled
+    according to one documented policy; values normalize to one decimal place;
+    all four presets resolve exactly; nearest-mode labels are deterministic.
+
+  - **Verification:** Unit tests for bounds, increments, decimal rounding,
+    exact presets, between-preset values, tie values, and malformed input.
+
+- [ ] **Task:** Add default temperature settings and persistence.
+
+  - **Description:** Add `defaultTemperature: 0.5`, getter/setter methods, and
+    settings validation. Persist active session changes through a new
+    `temperature_change` entry analogous to thinking-level persistence.
+
+  - **Files:** `one/core/settings_manager.py`, `one/core/session_manager.py`,
+    `one/core/agent_session.py`, `one/core/agent_session_runtime.py`,
+    `tests/test_settings.py`, session persistence tests.
+
+  - **Dependencies:** Temperature normalization.
+
+  - **Acceptance Criteria:** Fresh sessions start at `0.5`; global/project
+    defaults follow existing settings precedence; session reload restores the
+    latest temperature; malformed persisted values fall back safely.
+
+  - **Verification:** Settings precedence, setter persistence, JSONL restore,
+    and fresh-session default tests.
+
+#### Phase 2: Provider request plumbing
+
+**Objective:** Pass effective temperature to provider adapters and omit it safely
+when unsupported.
+
+**Prerequisites:** Phase 1.
+
+**Expected outcome:** Supported providers receive the selected numeric value;
+unsupported providers continue without an invalid payload and emit a warning.
+
+**Estimated effort:** 1.5–2 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Extend the provider adapter interface.
+
+  - **Description:** Add optional `temperature: float | None` to the provider
+    chat contract and maintain compatibility with fake/test providers and
+    adapters that do not accept the new keyword.
+
+  - **Files:** `one/providers/base.py`, all provider adapters, provider test
+    helpers and fixtures.
+
+  - **Dependencies:** Phase 1.
+
+  - **Acceptance Criteria:** Existing providers without temperature support do
+    not crash due to signature changes; effective temperature reaches supported
+    adapter code; compaction/non-chat calls remain unaffected.
+
+  - **Verification:** Provider adapter signature and fake-provider regression
+    tests across normal, streaming, and compaction paths.
+
+- [ ] **Task:** Serialize temperature per provider.
+
+  - **Description:** Replace OpenAI-compatible/Gemini hard-coded values; add
+    Ollama `options.temperature`; implement explicit capability policy for
+    Anthropic and Codex. Omit unsupported fields and emit a structured warning
+    with provider/model metadata.
+
+  - **Files:** `one/providers/openai_compatible.py`, `one/providers/gemini.py`,
+    `one/providers/ollama.py`, `one/providers/anthropic.py`,
+    `one/providers/codex_responses.py`, `one/core/agent_session.py`, provider
+    payload tests.
+
+  - **Dependencies:** Adapter interface.
+
+  - **Acceptance Criteria:** Wire payloads contain the exact value for supported
+    providers; unsupported payloads omit `temperature`; warnings are additive,
+    sanitized, and do not fail the request; existing reasoning-model behavior
+    remains compatible.
+
+  - **Verification:** Fake-transport wire tests for each adapter, unsupported
+    provider/model warnings, streaming and non-streaming requests, and payload
+    absence assertions.
+
+- [ ] **Task:** Pass the session temperature from `AgentSession`.
+
+  - **Description:** Add effective temperature to normal provider requests,
+    preserve the existing thinking-level flow, and ensure temporary provider
+    adapters created by `with_base_url()` retain temperature capability/config.
+
+  - **Files:** `one/core/agent_session.py`, provider registry/adapter tests.
+
+  - **Dependencies:** Adapter serialization.
+
+  - **Acceptance Criteria:** A session temperature change affects the next
+    provider request; no parent/session state is lost across provider retries;
+    compaction and retry behavior remain unchanged.
+
+  - **Verification:** Fake-provider request capture tests for initial value,
+    changed value, retry, and compaction.
+
+#### Phase 3: TUI display and keyboard controls
+
+**Objective:** Make temperature visible and adjustable from the TUI.
+
+**Prerequisites:** Phases 1 and 2.
+
+**Expected outcome:** Users see `Mode` and numeric temperature and can adjust it
+with Ctrl+Left/Ctrl+Right in `0.1` increments.
+
+**Estimated effort:** 1–1.5 days.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Add temperature to TUI state and display.
+
+  - **Description:** Include numeric temperature and nearest mode in sidebar
+    snapshots, header/status state, and the relevant TUI state refresh paths.
+    Display both values, for example `Mode: creative` and
+    `Temperature: 0.9`.
+
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_rendering.py`,
+    TUI snapshot fixtures.
+
+  - **Dependencies:** Session temperature state.
+
+  - **Acceptance Criteria:** Fresh TUI displays `balanced` and `0.5`; every
+    supported numeric value displays the nearest preset; state refreshes after
+    changes; long labels remain bounded and sanitized.
+
+  - **Verification:** Sidebar/header rendering tests and reviewed snapshot
+    updates.
+
+- [ ] **Task:** Add Ctrl+Left/Ctrl+Right temperature bindings.
+
+  - **Description:** Add `action_decrease_temperature` and
+    `action_increase_temperature`, bind them to Ctrl+Left/Ctrl+Right, clamp to
+    `0.0..1.2`, persist the session change, and avoid interfering with TextArea
+    cursor navigation.
+
+  - **Files:** `one/modes/tui_mode.py`, `tests/test_tui_input.py`,
+    `tests/test_tui_commands.py`, shortcut snapshots.
+
+  - **Dependencies:** TUI state/display.
+
+  - **Acceptance Criteria:** Each keypress changes temperature exactly by `0.1`;
+    lower/upper bounds are stable; ordinary Left/Right cursor behavior is
+    unchanged; state and persistence update once per keypress.
+
+  - **Verification:** Real Textual pilot keypress tests, boundary tests,
+    repeated-key tests, and no-regression cursor/selection tests.
+
+- [ ] **Task:** Add TUI temperature commands and shortcut documentation.
+
+  - **Description:** Add `/temperature`, preset selection, numeric selection,
+    help text, command palette entry if applicable, and shortcut overlay rows.
+
+  - **Files:** `one/modes/tui_mode.py`, TUI command tests, snapshots.
+
+  - **Dependencies:** Temperature actions.
+
+  - **Acceptance Criteria:** Preset and numeric commands share the same
+    validation path as keyboard actions; help and overlay show exact shortcuts;
+    invalid values produce actionable errors without changing state.
+
+  - **Verification:** Command dispatch, help text, overlay, and snapshot tests.
+
+#### Phase 4: RPC and CLI interfaces
+
+**Objective:** Expose temperature through non-TUI interfaces.
+
+**Prerequisites:** Phase 1 and session state.
+
+**Expected outcome:** RPC clients and CLI users can read/set the effective
+temperature consistently with the TUI.
+
+**Estimated effort:** 1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Add RPC temperature state and setter.
+
+  - **Description:** Add temperature and nearest mode to state responses and a
+    setter accepting either numeric `temperature` or named `mode`, with numeric
+    precedence or explicit mutual exclusion according to the selected API
+    contract. Emit an additive state/update event.
+
+  - **Files:** `one/modes/rpc_mode.py`, RPC schemas/types, RPC tests, event
+    snapshots if affected.
+
+  - **Dependencies:** Session temperature state.
+
+  - **Acceptance Criteria:** RPC can read current numeric/mode state, set a
+    preset, set a numeric value, reject invalid input, and persist the session
+    change without affecting unrelated sessions.
+
+  - **Verification:** RPC request/response tests, state assertions, invalid
+    input tests, and persistence tests.
+
+- [ ] **Task:** Add CLI temperature options.
+
+  - **Description:** Add `--temperature <0.0..1.2>` and
+    `--temperature-mode <coder|balanced|creative|experimental>` to the
+    appropriate run/interactive/TUI startup paths. CLI values apply to the
+    current process/session only unless an explicit config command is used.
+
+  - **Files:** `one/cli/args.py`, `one/cli/main.py`, runtime bootstrap/state
+    wiring, CLI tests.
+
+  - **Dependencies:** Session setter and normalization.
+
+  - **Acceptance Criteria:** CLI options select the expected effective value;
+    numeric value wins when both are provided; invalid values return the
+    contractual usage error; no unexpected global settings mutation occurs.
+
+  - **Verification:** CLI subprocess tests with isolated `ONE_CODING_AGENT_DIR`
+    and assertions for exit code, state, and provider payload.
+
+#### Phase 5: Subagent inheritance and overrides
+
+**Objective:** Make temperature inheritance and explicit child overrides
+deterministic.
+
+**Prerequisites:** Phases 1 and 2.
+
+**Expected outcome:** A subagent inherits the parent's effective temperature by
+default and can locally override it without mutating the parent.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Extend `spawn_subagent` temperature arguments.
+
+  - **Description:** Add optional `temperature` and `temperatureMode` fields to
+    the tool schema and dispatch. Resolve numeric temperature first, then mode,
+    then parent inheritance. Reject malformed/out-of-range values with an
+    actionable error.
+
+  - **Files:** `one/resources/resource_loader.py`, `one/tools/index.py`,
+    `one/core/agent_session.py`, subagent schema tests.
+
+  - **Dependencies:** Canonical normalization.
+
+  - **Acceptance Criteria:** The tool schema documents both fields; omitted
+    fields inherit; numeric override works; named mode override works; invalid
+    combinations follow the documented precedence; MCP/tools behavior remains
+    unchanged.
+
+  - **Verification:** Tool parsing and dispatch tests for inheritance, numeric
+    override, mode override, invalid values, and both-fields input.
+
+- [ ] **Task:** Pass isolated temperature into child sessions.
+
+  - **Description:** Add an explicit temperature constructor/runtime value to
+    the child `AgentSession`. Ensure child requests use it, child persistence
+    restores it when required, and parent settings/history remain unchanged.
+
+  - **Files:** `one/core/agent_session.py`, `one/core/session_manager.py`,
+    `tests/test_subagents.py`, provider request capture tests.
+
+  - **Dependencies:** `spawn_subagent` arguments.
+
+  - **Acceptance Criteria:** Parent `0.5` yields child `0.5`; child override
+    `0.8` yields only child `0.8`; parent remains `0.5`; parallel children can
+    use different values; provider payloads reflect each child value.
+
+  - **Verification:** Fake-provider inheritance/override tests, parallel child
+    isolation tests, and session reload tests.
+
+#### Phase 6: Documentation, compatibility, and release artifacts
+
+**Objective:** Document user-visible behavior and keep repository release
+artifacts consistent.
+
+**Prerequisites:** Phases 1–5.
+
+**Expected outcome:** Users can configure and operate temperature through every
+supported interface, and docs accurately describe provider caveats.
+
+**Estimated effort:** 0.5–1 day.
+
+**Confidence:** High.
+
+- [ ] **Task:** Update README, architecture docs, and changelog.
+
+  - **Description:** Document preset values, numeric range, nearest-mode display,
+    keyboard controls, TUI/RPC/CLI interfaces, subagent inheritance/override,
+    and unsupported-provider warning behavior. Add an Unreleased changelog
+    entry and bump the version according to project policy.
+
+  - **Files:** `README.md`, `docs/architecture.md`, `CHANGELOG.md`,
+    `one/config.py`.
+
+  - **Dependencies:** Finalized public interfaces.
+
+  - **Acceptance Criteria:** Documentation uses the exact preset values and
+    shortcuts; no documentation claims unsupported providers honor temperature;
+    version and changelog agree.
+
+  - **Verification:** Documentation search for stale shortcuts/values, version
+    assertions, and reviewed diff.
+
+- [ ] **Task:** Regenerate and review intentional TUI snapshots.
+
+  - **Description:** Regenerate only snapshots affected by Mode, Temperature,
+    and shortcut overlay changes. Review for unrelated layout or version churn.
+
+  - **Files:** `tests/snapshots/tui/base.txt`,
+    `tests/snapshots/tui/overlay.txt`,
+    `tests/snapshots/tui/widget_panel.txt`, other snapshots only if directly
+    affected.
+
+  - **Dependencies:** TUI implementation.
+
+  - **Acceptance Criteria:** Snapshot changes contain only intended temperature
+    display/shortcut updates and pass deterministic snapshot tests.
+
+  - **Verification:**
+    `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py`
+    followed by snapshot diff review and a normal snapshot test run.
+
+#### Phase 7: Complete verification and review
+
+**Objective:** Verify provider compatibility, UI behavior, subagent inheritance,
+and all public interfaces before merge.
+
+**Prerequisites:** Phases 1–6.
+
+**Expected outcome:** The feature is ready for independent code review and merge
+approval on `feat/model-temperature`.
+
+**Estimated effort:** 1 day.
+
+**Confidence:** Medium.
+
+- [ ] **Task:** Run focused and full verification.
+
+  - **Description:** Run focused temperature/settings/provider/TUI/RPC/CLI/
+    subagent suites, then the complete project gate. Review provider warning
+    behavior and ensure tests use fake transports only.
+
+  - **Files:** All implementation/test files from previous phases.
+
+  - **Dependencies:** All implementation tasks.
+
+  - **Acceptance Criteria:** No high-severity review findings; all supported
+    provider payloads are correct; unsupported fields are omitted with warnings;
+    TUI/RPC/CLI agree on state; child inheritance and overrides are isolated.
+
+  - **Verification:**
+    - `.venv/bin/python -m pytest -q`
+    - `.venv/bin/ruff check .`
+    - `git diff --check`
+    - Independent review of the complete diff.
+
+### Rollout & Rollback
+
+Implement on `feat/model-temperature` based on `main`. Preserve existing
+provider behavior when no explicit temperature is configured or when a provider
+does not support it. Roll back code without rewriting session history; old
+sessions without temperature entries must continue to load with the `balanced`
+default. Do not use real provider APIs in automated tests.
+
+### Observability
+
+Use additive state/event fields for numeric temperature, nearest mode, and
+unsupported-provider warnings. Warning events must identify provider/model and
+effective temperature without including prompts, credentials, or raw payloads.
+Provider request diagnostics should record whether temperature was sent or
+omitted, not complete request bodies.
+
+### Security Considerations
+
+- Validate all TUI, RPC, CLI, and model-provided numeric values centrally.
+- Treat `spawn_subagent` temperature arguments as untrusted input.
+- Do not allow a child override to mutate parent settings or another session.
+- Avoid logging full provider payloads when reporting unsupported temperature.
+- Preserve existing provider authentication and secret-redaction behavior.
+
+### Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Provider rejects temperature for reasoning/model-specific requests | High | Medium | Capability-aware omission and visible warning; wire tests |
+| Ctrl+Arrow conflicts with TextArea cursor movement | High | Medium | Real Textual pilot dispatch tests and binding review |
+| Session/default persistence diverges across TUI/RPC/CLI | High | Medium | Shared normalization/state setter and cross-mode tests |
+| Nearest preset label misrepresents exact numeric value | Medium | Medium | Always display both mode and numeric value; deterministic nearest mapping |
+| Child override mutates parent temperature | High | Low | Resolve immutable child value before construction; isolation tests |
+| Existing fake providers reject new keyword | Medium | High | Optional-compatible dispatch/signature update and test helper migration |
+| Unsupported temperature is silently ignored | Medium | Medium | Additive warning event and UI/RPC warning presentation |
+| Snapshot churn hides unrelated TUI regressions | Medium | Medium | Regenerate only targeted snapshots and review the complete diff |
+
+### Project Acceptance Criteria
+
+- [ ] Default session temperature is `balanced (0.5)`.
+- [ ] Presets resolve to `0.2`, `0.5`, `0.8`, and `1.2`.
+- [ ] Numeric values are bounded to `0.0..1.2` and adjusted by `0.1`.
+- [ ] TUI displays the numeric value and nearest preset mode.
+- [ ] Ctrl+Left/Ctrl+Right adjusts temperature without breaking cursor movement.
+- [ ] TUI, RPC, and CLI can read and set temperature.
+- [ ] Supported providers receive temperature in the correct native payload.
+- [ ] Unsupported providers omit the field and emit a warning without failing.
+- [ ] Subagents inherit parent temperature by default.
+- [ ] Subagent numeric/preset overrides are isolated from the parent.
+- [ ] Existing sessions and provider behavior remain compatible.
+- [ ] Focused tests, full pytest, Ruff, and `git diff --check` pass.
+- [ ] No merge, push, or publication occurs without explicit approval.
+
+### Estimated Timeline
+
+5–8 engineering days. Main uncertainties are provider-specific support,
+backward-compatible adapter signatures, and avoiding TUI keybinding conflicts.
