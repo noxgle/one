@@ -207,7 +207,7 @@ async def test_plan_approval_invokes_callback(tmp_path: Path):
     agent = _make_agent(
         tmp_path,
         [
-            '{"tool":"plan","args":{"plan":"step one"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"step one","status":"pending"}]}}',
             '{"tool":"read","args":{"path":"missing.txt"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
         ],
@@ -218,7 +218,7 @@ async def test_plan_approval_invokes_callback(tmp_path: Path):
     # plan_update event emitted with the plan text
     plan_events = [e for e in events if e.get("type") == "plan_update"]
     assert len(plan_events) >= 1
-    assert plan_events[0]["plan"] == "step one"
+    assert plan_events[0]["plan"] == "[ ] step one"
     assert agent.get_last_assistant_text() == "done"
     assert any(e["type"] == "turn_end" for e in events)
 
@@ -229,7 +229,7 @@ async def test_plan_approval_reject_emits_rejection(tmp_path: Path):
     agent = _make_agent(
         tmp_path,
         [
-            '{"tool":"plan","args":{"plan":"bad plan"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"bad plan","status":"pending"}]}}',
             '{"tool":"finish","args":{"summary":"ok not planning","goal_success":true}}',
         ],
         approval_callback=lambda tool, args: (False, "plans not allowed"),

@@ -1946,7 +1946,7 @@ if TEXTUAL_AVAILABLE:
                 mcp_lines = ["none"]
             else:
                 mcp_lines = []
-            plan_text = getattr(self.session, "_plan", None)
+            plan = getattr(self.session, "_plan", None)
 
             info_block = Text()
             info_block.append_text(Text.from_markup(f"[b {self._theme.info}]Info[/]"))
@@ -1967,8 +1967,10 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Session: {sanitize_display_text(s['sessionId'])}\n")
 
             plan_block = Text()
-            if plan_text:
-                display = plan_text[:_PLAN_SIDEBAR_MAX] + "…" if len(plan_text) > _PLAN_SIDEBAR_MAX else plan_text
+            if plan:
+                from one.tools.plan import render_plan
+
+                display = render_plan(plan, max_chars=_PLAN_SIDEBAR_MAX)
                 display = sanitize_display_text(display)
                 plan_block.append_text(Text.from_markup(f"[b {self._theme.info}]Plan[/]"))
                 plan_block.append("\n")
@@ -3841,7 +3843,10 @@ if TEXTUAL_AVAILABLE:
             elif et == "plan_update":
                 plan = event.get("plan", "")
                 if plan:
-                    self._write_tool_block(f"Plan:\n{plan}")
+                    from one.tools.plan import render_plan
+
+                    display = render_plan(plan, max_chars=_PLAN_SIDEBAR_MAX)
+                    self._write_tool_block(f"Plan:\n{display}")
                 else:
                     self._write_tool_block("Plan: cleared")
 

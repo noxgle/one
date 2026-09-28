@@ -10,6 +10,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Structured plans** — the `plan` tool now accepts validated step/status
+  lists, persists them across sessions, and renders status-aware checklists.
 - **TUI logo asset** — startup artwork now loads from the packaged
   `one/assets/logo.txt`, which is also linked from the main documentation.
 - **Ollama Cloud image input** — `glm-5.3-flash:cloud` is registered as a

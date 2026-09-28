@@ -466,6 +466,26 @@ async def test_compaction_preserves_plan_state(tmp_path):
     assert "1. analyze" in prompt
 
 
+@pytest.mark.asyncio
+async def test_compaction_preserves_structured_plan_state(tmp_path):
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": False, "recentTokens": 50}},
+    )
+    _seed(agent, count=15)
+    plan = [{"step": "analyze", "status": "in_progress"}, {"step": "fix", "status": "pending"}]
+    agent._plan = plan
+    agent.session_manager.append_message(
+        {"role": "user", "customType": "plan", "content": plan, "timestamp": 1234567890}
+    )
+
+    result = await agent.compact()
+
+    assert result["skipped"] is False
+    assert agent._plan == plan
+    assert "[>] analyze\n[ ] fix" in agent._build_runtime_system_prompt()
+
+
 def test_runtime_prompt_contains_current_date(tmp_path):
     """Phase 16: the runtime system prompt ends with a fresh '# Current Date' section."""
     from datetime import datetime

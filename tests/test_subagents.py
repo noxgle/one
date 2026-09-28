@@ -555,7 +555,7 @@ async def test_child_plan_tool_approval_in_cooperation(tmp_path: Path):
         return True, ""
 
     spawn_json = json.dumps({"tool": "spawn_subagent", "args": {"task": "create a plan"}})
-    plan_json = json.dumps({"tool": "plan", "args": {"plan": "step 1"}})
+    plan_json = json.dumps({"tool": "plan", "args": {"plan": [{"step": "step 1", "status": "pending"}]}})
     finish_json = json.dumps({"tool": "finish", "args": {"summary": "planned", "goal_success": True}})
 
     session_dir = str(tmp_path / "sessions")

@@ -30,13 +30,13 @@ def test_prompt_includes_plan_schema():
     from one.resources.resource_loader import TOOL_ARG_SCHEMAS
 
     assert "plan" in TOOL_ARG_SCHEMAS
-    assert "{plan}" in TOOL_ARG_SCHEMAS["plan"]
+    assert "{plan: [{step, status}]}" in TOOL_ARG_SCHEMAS["plan"]
 
     settings = _make_settings()
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
     tools = ["read", "bash", "plan", "finish"]
     prompt = loader.get_system_prompt(selected_tools=tools)
-    assert "- plan {plan}" in prompt
+    assert "- plan {plan: [{step, status}]}" in prompt
     # PLANNING RULES mention the plan tool
     assert "Use the plan tool to store the plan." in prompt
 
@@ -109,7 +109,7 @@ def test_prompt_includes_all_schemas_regression():
     assert "- find {pattern?, path?}" in prompt
     assert "- ls {path?}" in prompt
     assert "- finish {summary, goal_success}" in prompt
-    assert "- plan {plan}" in prompt
+    assert "- plan {plan: [{step, status}]}" in prompt
 
 
 def test_prompt_with_custom_system_prompt_skips_builtins():

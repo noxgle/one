@@ -546,7 +546,7 @@ async def test_tui_sidebar_shows_plan_section(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
-    session._plan = "my plan text"
+    session._plan = [{"step": "my plan text", "status": "in_progress"}]
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -554,7 +554,30 @@ async def test_tui_sidebar_shows_plan_section(tmp_path: Path):
         await pilot.pause()
         sidebar = app.query_one("#sidebar", Static)
         assert "Plan" in sidebar.content
-        assert "my plan text" in sidebar.content
+        assert "[>] my plan text" in sidebar.content
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_renders_all_structured_plan_statuses(tmp_path: Path):
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = [
+        {"step": "queued", "status": "pending"},
+        {"step": "running", "status": "in_progress"},
+        {"step": "done", "status": "completed"},
+        {"step": "waiting", "status": "blocked"},
+    ]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        for marker in ("[ ] queued", "[>] running", "[x] done", "[!] waiting"):
+            assert marker in sidebar.content
 
 
 @pytest.mark.asyncio

@@ -222,7 +222,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "ls": "{path?}",
     "evidence_read": "{evidenceId, offset?, maxChars?}  # retrieve a bounded chunk of prior durable tool evidence; use nextOffset to continue",
     "finish": "{summary, goal_success}  # end the task; summary is shown to the user",
-    "plan": "{plan}  # the execution plan for the current task; visible to you on every step",
+    "plan": "{plan: [{step, status}]}  # status is pending|in_progress|completed|blocked; send the complete plan on every update",
     "spawn_subagent": "{task, tasks?, model?, tools?}  # delegate a subtask to an isolated subagent (returns summary)",
     "ask_user": "{question, timeoutSec?}  # ask the human a question and wait for their answer",
     "apply_patch": "{patchText}  # non-empty string in OpenCode patch format, NOT ---/+++ unified diff. Exact Update example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch. Supports Add/Update/Delete/Move; Add/Move targets must be absent; conflicts and symlinks rejected; staged backup/rollback-protected",
@@ -243,6 +243,7 @@ REASONING & ADAPTATION
 
 PLANNING RULES
 - Use the plan tool to store the plan.
+- Plan arguments are structured: {"plan":[{"step":"inspect files","status":"in_progress"}]}. Every item needs a non-empty step and one of pending, in_progress, completed, or blocked; only one item may be in_progress.
 - Create a plan ONLY if no active plan exists and the user explicitly requests planning, or the task is genuinely complex: it has 3+ dependent phases, multiple components or files, security/infrastructure/operational risk, validation or rollback gates, or required approval.
 
 - Do NOT plan simple questions, simple single-file fixes with clear requirements, straightforward tests or formatting, single commands, simple reads, or stateless queries.

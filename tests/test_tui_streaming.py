@@ -226,14 +226,14 @@ async def test_tui_plan_update_renders_block(tmp_path: Path):
         session._emit(
             {
                 "type": "plan_update",
-                "plan": "1. read file\n2. edit content",
+                "plan": "[>] read file\n[ ] edit content",
             }
         )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "Plan:" in stream
-        assert "1. read file" in stream
-        assert "2. edit content" in stream
+        assert "[>] read file" in stream
+        assert "[ ] edit content" in stream
 
 
 @pytest.mark.asyncio
@@ -249,6 +249,21 @@ async def test_tui_plan_clear_emits_block(tmp_path: Path):
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "Plan: cleared" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_plan_update_is_bounded(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({"type": "plan_update", "plan": "x" * 300})
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert stream.count("x") == 199
+        assert "…" in stream
 
 
 @pytest.mark.asyncio

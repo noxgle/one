@@ -409,21 +409,40 @@ def test_sanitize_display_text_fullscreen_dump_sanitized():
     assert "\ufffd" in clean  # the C1 byte was replaced
 
 
-def test_plan_tool_stores_text() -> None:
+def test_plan_tool_normalizes_structured_steps() -> None:
     from one.tools.plan import plan_tool
 
-    result = plan_tool("1. read file\n2. edit content")
+    result = plan_tool([
+        {"step": " read file ", "status": "pending"},
+        {"step": "edit content", "status": "in_progress"},
+        {"step": "verify", "status": "completed"},
+        {"step": "await input", "status": "blocked"},
+    ])
     assert result["ok"] is True
     assert "Plan stored" in result["result"]
+    assert result["plan"] == [
+        {"step": "read file", "status": "pending"},
+        {"step": "edit content", "status": "in_progress"},
+        {"step": "verify", "status": "completed"},
+        {"step": "await input", "status": "blocked"},
+    ]
 
 
-def test_plan_tool_rejects_empty() -> None:
+@pytest.mark.parametrize(
+    ("plan", "message"),
+    [
+        ([], "at least one step"),
+        ([{"step": "", "status": "pending"}], r"plan\[0\]\.step"),
+        ([{"step": "one", "status": "unknown"}], r"plan\[0\]\.status"),
+        ([{"step": "one", "status": "in_progress"}, {"step": "two", "status": "in_progress"}], "at most one"),
+        ("legacy text", "must be a list"),
+    ],
+)
+def test_plan_tool_rejects_invalid_payloads(plan: object, message: str) -> None:
     from one.tools.plan import plan_tool
 
-    with pytest.raises(ValueError):
-        plan_tool("")
-    with pytest.raises(ValueError):
-        plan_tool("   ")
+    with pytest.raises(ValueError, match=message):
+        plan_tool(plan)
 
 
 def test_sanitize_display_text_plain_and_safe_controls_passthrough():

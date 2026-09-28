@@ -11,6 +11,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.tools.plan import render_plan
 
 
 class _Loader:
@@ -84,6 +85,27 @@ def _plan_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+@pytest.mark.parametrize(
+    ("plan", "max_chars", "expected"),
+    [
+        (None, None, ""),
+        (None, 10, ""),
+        ("abc", None, "abc"),
+        ("abc", 3, "abc"),
+        ("abcd", 3, "ab…"),
+        ("abcd", 1, "…"),
+        ("abcd", 0, ""),
+        ("abcd", -1, ""),
+    ],
+)
+def test_render_plan_handles_none_and_respects_truncation_bounds(
+    plan: str | None, max_chars: int | None, expected: str
+):
+    assert render_plan(plan, max_chars=max_chars) == expected
+    if max_chars is not None and max_chars > 0:
+        assert len(render_plan(plan, max_chars=max_chars)) <= max_chars
+
+
 # ---------------------------------------------------------------------------
 # Session-level: plan call sets state, emits events, injects into system prompt
 # ---------------------------------------------------------------------------
@@ -95,7 +117,7 @@ async def test_plan_sets_session_plan_and_system_prompt(tmp_path: Path):
     agent = _make_agent(
         tmp_path,
         [
-            '{"tool":"plan","args":{"plan":"1. read file\\n2. edit content\\n3. finish"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"read file","status":"in_progress"},{"step":"edit content","status":"pending"},{"step":"finish","status":"pending"}]}}',
             '{"tool":"read","args":{"path":"missing.txt"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
         ],
@@ -108,7 +130,8 @@ async def test_plan_sets_session_plan_and_system_prompt(tmp_path: Path):
     # plan_update event emitted with the plan text
     plan_events = [e for e in events if e.get("type") == "plan_update"]
     assert len(plan_events) >= 1
-    assert plan_events[0]["plan"] == "1. read file\n2. edit content\n3. finish"
+    assert plan_events[0]["plan"] == "[>] read file\n[ ] edit content\n[ ] finish"
+    assert plan_events[0]["planItems"][0] == {"step": "read file", "status": "in_progress"}
 
     # Next provider call's system prompt contains the plan
     provider = agent.providers["openai"]  # type: ignore[index]
@@ -119,7 +142,7 @@ async def test_plan_sets_session_plan_and_system_prompt(tmp_path: Path):
         if m.get("role") == "system":
             system_text += str(m.get("content", ""))
     assert "# Active Plan" in system_text
-    assert "1. read file" in system_text
+    assert "[>] read file" in system_text
 
 
 @pytest.mark.asyncio
@@ -128,7 +151,7 @@ async def test_plan_finish_clears_plan_and_emits_empty_update(tmp_path: Path):
     agent = _make_agent(
         tmp_path,
         [
-            '{"tool":"plan","args":{"plan":"step one"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"step one","status":"pending"}]}}',
             '{"tool":"read","args":{"path":"missing.txt"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
         ],
@@ -159,21 +182,21 @@ async def test_plan_persists_as_custom_type_message(tmp_path: Path):
     agent = _make_agent(
         tmp_path,
         [
-            '{"tool":"plan","args":{"plan":"persist me"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"persist me","status":"pending"}]}}',
         ],
         tools=["read", "plan", "finish"],
     )
     events: list[dict[str, Any]] = []
     agent.subscribe(events.append)
     # Don't call prompt — just simulate a plan call by calling _run_tool_call directly
-    result = await agent._run_tool_call("plan", {"plan": "persist me"})
+    result = await agent._run_tool_call("plan", {"plan": [{"step": "persist me", "status": "pending"}]})
     assert result["ok"] is True
 
     # The plan message is in the session manager's jsonl entries
     entries = agent.session_manager.get_entries()
     plan_entries = _plan_entries(entries)
     assert len(plan_entries) >= 1
-    assert plan_entries[-1]["content"] == "persist me"
+    assert plan_entries[-1]["content"] == [{"step": "persist me", "status": "pending"}]
 
     # Plan messages are NOT in self.messages
     assert not any(m.get("customType") == "plan" for m in agent.messages)
@@ -193,17 +216,34 @@ async def test_plan_restored_on_session_reload(tmp_path: Path):
     loader = _Loader()
 
     agent1 = AgentSession(session, settings, registry, loader, model, "medium", tools=["read", "plan", "finish"])
-    await agent1._run_tool_call("plan", {"plan": "restored plan"})
-    assert agent1._plan == "restored plan"
+    await agent1._run_tool_call("plan", {"plan": [{"step": "restored plan", "status": "pending"}]})
+    assert agent1._plan == [{"step": "restored plan", "status": "pending"}]
 
     # Plan messages are not in messages
     assert not any(m.get("customType") == "plan" for m in agent1.messages)
 
     # Create a new session over the same session_manager
     agent2 = AgentSession(session, settings, registry, loader, model, "medium")
-    assert agent2._plan == "restored plan"
+    assert agent2._plan == [{"step": "restored plan", "status": "pending"}]
     # Plan messages still not in the provider message list
     assert not any(m.get("customType") == "plan" for m in agent2.messages)
+
+
+def test_legacy_string_plan_restores_and_renders_in_context(tmp_path: Path):
+    """Old JSONL string plans remain provider-visible without re-persisting them."""
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    session = SessionManager.in_memory(str(tmp_path))
+    session.append_message({"role": "user", "customType": "plan", "content": "1. legacy step", "timestamp": 1})
+
+    agent = AgentSession(session, SettingsManager.in_memory(), registry, _Loader(), model, "medium")
+
+    assert agent._plan == "1. legacy step"
+    assert "1. legacy step" in agent._build_runtime_system_prompt()
+    assert not any(message.get("customType") == "plan" for message in agent.messages)
 
 
 @pytest.mark.asyncio
@@ -220,8 +260,8 @@ async def test_plan_cleared_on_finish_and_restored_as_none(tmp_path: Path):
 
     agent1 = AgentSession(session, settings, registry, loader, model, "medium", tools=["read", "plan", "finish"])
     # Set plan
-    await agent1._run_tool_call("plan", {"plan": "will be cleared"})
-    assert agent1._plan == "will be cleared"
+    await agent1._run_tool_call("plan", {"plan": [{"step": "will be cleared", "status": "pending"}]})
+    assert agent1._plan == [{"step": "will be cleared", "status": "pending"}]
 
     # A non-plan tool step permits finish and clears the plan.
     await agent1._run_tool_call("read", {"path": "missing.txt"})
@@ -245,7 +285,7 @@ async def test_plan_finish_goal_success_false_clears_plan_and_preserves_flag(tmp
     agent = _make_agent(
         tmp_path,
         [
-            '{"tool":"plan","args":{"plan":"step one"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"step one","status":"pending"}]}}',
             '{"tool":"read","args":{"path":"missing.txt"}}',
             '{"tool":"finish","args":{"summary":"failed task","goal_success":false}}',
         ],
@@ -284,8 +324,8 @@ async def test_plan_finish_goal_success_false_restored_none(tmp_path: Path):
     loader = _Loader()
 
     agent1 = AgentSession(session, settings, registry, loader, model, "medium", tools=["read", "plan", "finish"])
-    await agent1._run_tool_call("plan", {"plan": "will be cleared"})
-    assert agent1._plan == "will be cleared"
+    await agent1._run_tool_call("plan", {"plan": [{"step": "will be cleared", "status": "pending"}]})
+    assert agent1._plan == [{"step": "will be cleared", "status": "pending"}]
 
     await agent1._run_tool_call("read", {"path": "missing.txt"})
     await agent1._run_tool_call("finish", {"summary": "failed", "goal_success": False})
@@ -312,7 +352,7 @@ async def test_plan_then_finish_is_rejected_and_session_continues(tmp_path: Path
     agent = _make_agent(
         tmp_path,
         [
-            '{"tool":"plan","args":{"plan":"1. inspect file"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"inspect file","status":"pending"}]}}',
             '{"tool":"finish","args":{"summary":"premature","goal_success":true}}',
             '{"tool":"read","args":{"path":"input.txt"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
@@ -336,7 +376,7 @@ async def test_plan_then_read_then_finish_is_allowed(tmp_path: Path):
     agent = _make_agent(
         tmp_path,
         [
-            '{"tool":"plan","args":{"plan":"1. inspect file"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"inspect file","status":"pending"}]}}',
             '{"tool":"read","args":{"path":"input.txt"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
         ],

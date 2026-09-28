@@ -28,7 +28,7 @@ from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
 from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, find_worktree
 from one.tools.index import all_tools
-from one.tools.plan import plan_tool
+from one.tools.plan import plan_tool, render_plan
 
 # Grace period added to the effective tool timeout for the outer asyncio.wait_for backstop.
 _TOOL_TIMEOUT_GRACE_SEC = 5
@@ -133,7 +133,7 @@ class AgentSession:
         self.scoped_models = scoped_models or []
         self.providers = build_provider_registry()
         self.messages: list[dict[str, Any]] = self.session_manager.build_session_context()["messages"]
-        self._plan: str | None = None
+        self._plan: list[dict[str, str]] | str | None = None
         self._plan_just_created = False
         self._restore_plan_from_messages(self.messages)
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
@@ -201,14 +201,21 @@ class AgentSession:
         whether a plan is active (empty/None content → plan cleared).
         All plan messages are removed from the provider-visible message list.
         """
-        plan_value: str | None = None
+        plan_value: list[dict[str, str]] | str | None = None
         plan_indices: list[int] = []
         for i, m in enumerate(messages):
             if m.get("customType") == "plan":
                 plan_indices.append(i)
                 content = m.get("content")
-                if content:
-                    plan_value = str(content)
+                if isinstance(content, list):
+                    # New persisted plans were validated before writing. Keep a
+                    # defensive legacy fallback if a hand-edited session is malformed.
+                    try:
+                        plan_value = plan_tool(content)["plan"]
+                    except ValueError:
+                        plan_value = None
+                elif isinstance(content, str) and content:
+                    plan_value = content
         # The last plan message determines whether plan is active.
         # If the last plan message has empty/None content, plan is cleared.
         if plan_indices:
@@ -307,7 +314,9 @@ class AgentSession:
                 lines.append(f"- {name} (server: {server}): {description} args={schema}")
             prompt = f"{prompt}\n" + "\n".join(lines)
         if self._plan is not None:
-            prompt = f"{prompt}\n\n# Active Plan\n{self._plan}\nFollow this plan; adapt it via the plan tool only when the situation changes materially."
+            active_plan = self._plan
+            plan_text = render_plan(active_plan, max_chars=self._TOOL_RESULT_MAX_CHARS)
+            prompt = f"{prompt}\n\n# Active Plan\n{plan_text}\nFollow this plan; adapt it via the plan tool only when the situation changes materially."
         now = datetime.now().astimezone()
         offset = now.strftime("%z") or "+0000"
         offset_fmt = f"{offset[:3]}:{offset[3:]}"
@@ -985,7 +994,7 @@ class AgentSession:
         elif tool_name == "finish":
             result = fn(args.get("summary", ""), bool(args.get("goal_success", True)))
             # Clear plan when finish is called (terminal tool)
-            if self._plan:
+            if self._plan is not None:
                 self._plan = None
                 self._emit({"type": "plan_update", "plan": ""})
                 self.session_manager.append_message({"role": "user", "customType": "plan", "content": "", "timestamp": int(time.time() * 1000)})
@@ -1003,12 +1012,15 @@ class AgentSession:
             # coroutine but skip timeout wrapping below.
             result = self._ask_user(args)
         elif tool_name == "plan":
-            plan_text = args.get("plan", "")
-            result = plan_tool(plan_text)
-            self._plan = plan_text
+            result = plan_tool(args.get("plan"))
+            normalized_plan = result["plan"]
+            assert isinstance(normalized_plan, list)
+            self._plan = normalized_plan
             self._plan_just_created = True
-            self._emit({"type": "plan_update", "plan": self._plan})
-            self.session_manager.append_message({"role": "user", "customType": "plan", "content": plan_text, "timestamp": int(time.time() * 1000)})
+            # Keep the string field for existing event consumers; planItems is
+            # additive canonical data for structured-aware consumers.
+            self._emit({"type": "plan_update", "plan": render_plan(self._plan), "planItems": self._plan})
+            self.session_manager.append_message({"role": "user", "customType": "plan", "content": self._plan, "timestamp": int(time.time() * 1000)})
         else:
             raise RuntimeError(f"Unsupported tool: {tool_name}")
 
