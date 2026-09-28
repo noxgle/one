@@ -8,11 +8,13 @@ from typing import Any
 
 from one.config import get_agent_dir
 from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_private_file, load_json_text_safe
+from one.core.temperature import DEFAULT_TEMPERATURE, normalize_temperature
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "defaultProvider": None,
     "defaultModel": None,
     "defaultThinkingLevel": "medium",
+    "defaultTemperature": DEFAULT_TEMPERATURE,
     "enabledModels": [],
     "compaction": {
         "enabled": True,
@@ -176,6 +178,12 @@ class SettingsManager:
     def get_default_thinking_level(self) -> str:
         level = self.merged().get("defaultThinkingLevel", "medium")
         return level if level in THINKING_LEVELS else "medium"
+
+    def get_default_temperature(self) -> float:
+        try:
+            return normalize_temperature(self.merged().get("defaultTemperature", DEFAULT_TEMPERATURE))
+        except ValueError:
+            return DEFAULT_TEMPERATURE
 
     def get_enabled_models(self) -> list[str]:
         return list(self.merged().get("enabledModels", []))
@@ -474,6 +482,12 @@ class SettingsManager:
         if level not in THINKING_LEVELS:
             raise ValueError(f"Invalid thinking level: {level}")
         self._global["defaultThinkingLevel"] = level
+        self._save_global()
+
+    def set_default_temperature(self, temperature: float) -> None:
+        self._require_writable_global()
+        value = normalize_temperature(temperature)
+        self._global["defaultTemperature"] = value
         self._save_global()
 
     def set_tool_settings(self, max_steps: int | None = None, timeout_sec: int | None = None) -> None:

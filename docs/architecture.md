@@ -1,5 +1,14 @@
 # Architecture of `one`
 
+## Temperature state
+
+`one.core.temperature` defines the named presets and 0.0–1.2 normalization.
+`AgentSession` owns and persists effective numeric temperature. Supported
+adapters receive it as OpenAI `temperature`, Gemini `generationConfig.temperature`,
+or Ollama `options.temperature`; Anthropic and Codex omit it and emit an
+additive warning. Child sessions resolve numeric override, named override, then
+parent inheritance into isolated state.
+
 ```
  ██████╗ ███╗   ██╗███████╗
 ██╔═══██╗████╗  ██║██╔════╝

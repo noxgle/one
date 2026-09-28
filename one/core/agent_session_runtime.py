@@ -10,6 +10,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
+from one.core.temperature import normalize_temperature
 from one.resources.resource_loader import DefaultResourceLoader
 from one.tools.index import DEFAULT_TOOL_NAMES
 
@@ -125,6 +126,13 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
     if model and not model.reasoning:
         thinking_level = "off"
 
+    temperature = bootstrap.get("temperature", settings_manager.get_default_temperature())
+    if not options.get("freshSession") and restored.get("temperature") is not None:
+        try:
+            temperature = normalize_temperature(restored["temperature"])
+        except ValueError:
+            temperature = settings_manager.get_default_temperature()
+
     tools = bootstrap.get("tools")
     if tools:
         tool_names = [t.name if hasattr(t, "name") else str(t) for t in tools]
@@ -138,6 +146,7 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         resource_loader=resource_loader,
         model=model,
         thinking_level=thinking_level,
+        temperature=temperature,
         scoped_models=bootstrap.get("scopedModels") or [],
         tools=tool_names,
         mcp_manager=bootstrap.get("mcpManager"),

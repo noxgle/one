@@ -737,8 +737,11 @@ async def test_gemini_thinking_payload_maps_every_level(monkeypatch, level: str,
             return _Resp()
 
     monkeypatch.setattr(gemini_mod.httpx, "AsyncClient", lambda *args, **kwargs: _Client())
-    await GeminiAdapter().chat("key", "gemini-2.5-flash", [{"role": "user", "content": "hi"}], level)
+    await GeminiAdapter().chat(
+        "key", "gemini-2.5-flash", [{"role": "user", "content": "hi"}], level, temperature=1.2
+    )
     generation_config = captured["body"]["generationConfig"]
+    assert generation_config["temperature"] == 1.2
     assert generation_config.get("thinkingConfig") == (
         {"thinkingBudget": budget} if budget is not None else None
     )

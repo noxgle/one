@@ -21,7 +21,7 @@ def test_prompt_includes_spawn_subagent_schema():
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
     tools = ["read", "bash", "spawn_subagent", "ask_user", "edit", "write", "grep", "find", "ls", "finish", "plan"]
     prompt = loader.get_system_prompt(selected_tools=tools)
-    assert "- spawn_subagent {task, tasks?, model?, tools?}" in prompt
+    assert "- spawn_subagent {task, tasks?, model?, tools?, temperature?, temperatureMode?}" in prompt
     assert "- ask_user {question, timeoutSec?}" in prompt
 
 

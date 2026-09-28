@@ -275,6 +275,10 @@ class SessionManager:
             }
         )
 
+    def append_temperature_change(self, temperature: float) -> str:
+        return self._append({"type": "temperature_change", "id": _id(), "parentId": self._leaf_id,
+                             "timestamp": _now_iso(), "temperature": temperature})
+
     def append_model_change(self, provider: str, model_id: str) -> str:
         return self._append(
             {
@@ -469,6 +473,7 @@ class SessionManager:
         path = self.get_branch()
         messages: list[dict[str, Any]] = []
         thinking_level = "off"
+        temperature = None
         model = None
         compaction = None
 
@@ -476,6 +481,8 @@ class SessionManager:
             t = e.get("type")
             if t == "thinking_level_change":
                 thinking_level = e.get("thinkingLevel", thinking_level)
+            elif t == "temperature_change":
+                temperature = e.get("temperature", temperature)
             elif t == "model_change":
                 model = {"provider": e.get("provider"), "modelId": e.get("modelId")}
             elif t == "message":
@@ -538,6 +545,7 @@ class SessionManager:
         return {
             "messages": messages,
             "thinkingLevel": thinking_level,
+            "temperature": temperature,
             "model": model,
         }
 

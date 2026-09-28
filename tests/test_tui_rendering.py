@@ -211,6 +211,33 @@ async def test_tui_info_panel_layouts_are_mutually_exclusive(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_tui_temperature_mode_renders_in_compact_header_and_wide_sidebar(tmp_path: Path) -> None:
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    compact = _OneTextualApp(_mk_app_session(tmp_path))
+    async with compact.run_test() as pilot:
+        await pilot.pause()
+        header = str(compact.query_one("#header", Static).content)
+        assert "Mode: balanced (0.5)" in header
+        assert "THINK:" in header
+        assert "COOP: OFF" in header
+        assert "STATUS: ready" in header
+
+    wide = _OneTextualApp(_mk_app_session(tmp_path, settings_override={"tui": {"infoPanel": "sidebar"}}))
+    async with wide.run_test() as pilot:
+        await pilot.pause()
+        sidebar = str(wide.query_one("#sidebar", Static).content)
+        assert "Mode: balanced (0.5)" in sidebar
+        assert "Mode: balanced\n" not in sidebar
+        assert "Temperature:" not in sidebar
+        assert "Retry:" in sidebar
+        assert "Status:" in sidebar
+        assert "Delivery:" in sidebar
+
+
+@pytest.mark.asyncio
 async def test_tui_compact_to_wide_aligns_conversation_and_sidebar_frames(tmp_path: Path) -> None:
     from textual.containers import VerticalScroll
     from textual.widgets import Static, TextArea

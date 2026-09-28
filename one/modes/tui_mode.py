@@ -108,6 +108,8 @@ def build_sidebar_snapshot(
     return {
         "model": f"{session.model.provider}/{session.model.id}" if session.model else "none",
         "thinking": getattr(session, "thinking_level", "medium"),
+        "temperature": float(getattr(session, "temperature", 0.5)),
+        "temperatureMode": getattr(session, "temperature_mode", "balanced"),
         "cwd": getattr(getattr(session, "session_manager", None), "cwd", "."),
         "sessionId": getattr(session, "session_id", "-"),
         "streaming": bool(getattr(session, "is_streaming", False)),
@@ -185,6 +187,7 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+Shift+V", "paste terminal text (SSH-safe)"),
     ("Ctrl+Alt+V", "paste image from the system clipboard"),
     ("Ctrl+R", "cycle retry mode"),
+    ("Ctrl+Left / Ctrl+Right", "decrease / increase temperature"),
     ("Ctrl+Up / Ctrl+Down", "navigate input history (50 entries)"),
     ("Ctrl+F1", "show slash-command help"),
     ("Esc", "close the shortcuts panel"),
@@ -400,6 +403,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/providers",
     "/thinking",
     "/thinking-cycle",
+    "/temperature",
     "/theme",
     "/steer",
     "/follow",
@@ -606,6 +610,15 @@ if TEXTUAL_AVAILABLE:
                 # Ctrl+V is intercepted directly, not via a Binding, to prevent
                 # duplicate app-level handling.
                 self.action_paste()
+                event.stop()
+                event.prevent_default()
+                return
+            if event.key in {"ctrl+left", "ctrl+right"}:
+                # TextArea handles word navigation before bubbled App bindings.
+                # Dispatch the priority app shortcut here and consume the key so
+                # the editor cannot move the cursor as well.
+                action = "action_decrease_temperature" if event.key == "ctrl+left" else "action_increase_temperature"
+                getattr(self.app, action)()
                 event.stop()
                 event.prevent_default()
                 return
@@ -879,6 +892,8 @@ if TEXTUAL_AVAILABLE:
             Binding("ctrl+o", "toggle_bash_show", "Toggle details output", priority=True),
             Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
             Binding("ctrl+k", "show_model_picker", "Model picker", priority=True),
+            Binding("ctrl+left", "decrease_temperature", "Decrease temperature", priority=True),
+            Binding("ctrl+right", "increase_temperature", "Increase temperature", priority=True),
             # Ctrl+Shift+V is intentionally unbound: terminals turn it into a
             # bracketed events.Paste event, which _CommandTextArea consumes.
             Binding("ctrl+alt+v", "paste_image", "Paste image from clipboard", priority=True),
@@ -1883,7 +1898,11 @@ if TEXTUAL_AVAILABLE:
                 coop += " (PENDING)"
             thinking = sanitize_display_text(str(snapshot["thinking"]))
             runtime_status = self._runtime_status(snapshot)
-            suffix = f" | THINK: {thinking} | COOP: {coop} | STATUS: {runtime_status}"
+            temperature_mode = sanitize_display_text(str(snapshot["temperatureMode"]))
+            suffix = (
+                f" | Mode: {temperature_mode} ({snapshot['temperature']:.1f})"
+                f" | THINK: {thinking} | COOP: {coop} | STATUS: {runtime_status}"
+            )
             prefix = f"v{VERSION} | "
             # Account for main padding, header borders, and header padding.
             # Keep the variable provider/model segment within the available
@@ -1955,6 +1974,7 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Model: {sanitize_display_text(s['model'])}\n")
             info_block.append(f"Theme: {sanitize_display_text(self._theme.name)}\n")
             info_block.append(f"Thinking: {sanitize_display_text(s['thinking'])}\n")
+            info_block.append(f"Mode: {sanitize_display_text(s['temperatureMode'])} ({s['temperature']:.1f})\n")
             context = self._context_meter(s["contextPercent"]) if s["contextKnown"] else "unknown"
             info_block.append(f"Context: {context}\n")
             info_block.append(f"Retry: {sanitize_display_text(s['retry'])}\n")
@@ -2444,6 +2464,22 @@ if TEXTUAL_AVAILABLE:
             if cmd == "/thinking-cycle":
                 level = session.cycle_thinking_level()
                 self._write(f"Thinking level cycled to {level}", "info")
+                self._refresh_sidebar()
+                return
+            if cmd == "/temperature":
+                self._write(f"Temperature: {session.temperature_mode} ({session.temperature:.1f})", "info")
+                self._write("Usage: /temperature <0.0..1.2|coder|balanced|creative|experimental>", "info")
+                return
+            if cmd.startswith("/temperature "):
+                value = cmd[len("/temperature ") :].strip()
+                try:
+                    from one.core.temperature import temperature_for_mode
+                    temperature = temperature_for_mode(value) if value.isalpha() else float(value)
+                    session.set_temperature(temperature)
+                except ValueError as exc:
+                    self._write(str(exc), "error")
+                    return
+                self._write(f"Temperature set to {session.temperature_mode} ({session.temperature:.1f})", "info")
                 self._refresh_sidebar()
                 return
             if cmd == "/queue":
@@ -3563,6 +3599,14 @@ if TEXTUAL_AVAILABLE:
             self._write(f"Auto-retry set to {new_mode}.", "info")
             self._refresh_sidebar()
 
+        def action_decrease_temperature(self) -> None:
+            self.session.adjust_temperature(-0.1)
+            self._refresh_sidebar()
+
+        def action_increase_temperature(self) -> None:
+            self.session.adjust_temperature(0.1)
+            self._refresh_sidebar()
+
         def action_clear_stream(self) -> None:
             # Clear is a lifecycle barrier: apply pending state transitions
             # first, then intentionally discard the visible transcript.
@@ -3611,7 +3655,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 

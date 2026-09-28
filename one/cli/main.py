@@ -14,6 +14,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.persistence import ensure_private_dir
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
+from one.core.temperature import temperature_for_mode
 from one.mcp import McpManager
 from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode, run_run_mode
 from one.resources.resource_loader import DefaultResourceLoader
@@ -412,6 +413,9 @@ async def _run(argv: list[str]) -> int:
         "resourceLoader": loader,
         "model": model,
         "thinkingLevel": parsed.thinking or settings.get_default_thinking_level(),
+        "temperature": parsed.temperature if parsed.temperature is not None else (
+            temperature_for_mode(parsed.temperature_mode) if parsed.temperature_mode else settings.get_default_temperature()
+        ),
         "scopedModels": scoped_models,
         "tools": [all_tools[t] for t in tool_names],
         "mcpManager": mcp_manager,

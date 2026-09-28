@@ -289,6 +289,19 @@ effort may be used for `xhigh`/`minimal`); Anthropic and Gemini 2.5 use
 deterministic thinking-token budgets. Provider and model API restrictions still
 determine which controls a request accepts.
 
+### Temperature
+
+Temperature defaults to **balanced (0.5)**. Presets are `coder` (0.2),
+`balanced` (0.5), `creative` (0.8), and `experimental` (1.2); numeric values
+are rounded to tenths and bounded to `0.0..1.2`. The TUI shows the nearest mode
+and exact value and changes it with **Ctrl+Left/Right** or
+`/temperature <value|mode>`. Startup accepts `--temperature` and
+`--temperature-mode`; numeric wins when both are supplied. `get_state` exposes
+temperature through RPC, and `set_temperature` accepts a numeric `temperature`
+or preset `mode`. Subagents inherit their parent's effective value unless their
+`spawn_subagent` call supplies `temperature` (which wins) or `temperatureMode`.
+Anthropic and Codex omit temperature and emit a warning; requests still run.
+
 OpenRouter uses its native `reasoning: {"effort": ...}` request dialect and
 streams reasoning separately. Ollama Cloud uses native `think`; `minimal` and
 `low` map to `"low"`, `medium` to `"medium"`, `high` and `xhigh` to `"high"`,

@@ -12,6 +12,34 @@ from tests.support.tui import _mk_app_session, _submit, _visible_text_area_text
 
 
 @pytest.mark.asyncio
+async def test_tui_temperature_shortcuts_win_over_focused_textarea_word_navigation(tmp_path: Path) -> None:
+    """Priority temperature shortcuts must not be consumed by TextArea."""
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, runtime_key="sk-test")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.text = "alpha beta"
+        input_widget.move_cursor(input_widget.document.end)
+        await pilot.press("ctrl+left")
+        assert session.temperature == 0.4
+        assert input_widget.selection.end == input_widget.document.end
+        await pilot.press("ctrl+right")
+        assert session.temperature == 0.5
+        assert input_widget.selection.end == input_widget.document.end
+        # Ordinary editor navigation and edits remain TextArea behavior.
+        await pilot.press("left")
+        assert input_widget.selection.end == (0, 9)
+        await pilot.press("right")
+        assert input_widget.selection.end == input_widget.document.end
+        await pilot.press("backspace")
+        assert input_widget.text == "alpha bet"
+
+
+@pytest.mark.asyncio
 async def test_tui_prompt_queued_while_streaming(tmp_path: Path) -> None:
     """A plain prompt submitted while the agent is streaming is queued as a
     steer (default for followUpMode='queue') instead of failing with

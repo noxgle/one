@@ -205,6 +205,8 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                         {
                             "model": {"provider": session.model.provider, "id": session.model.id} if session.model else None,
                             "thinkingLevel": session.thinking_level,
+                            "temperature": session.temperature,
+                            "temperatureMode": session.temperature_mode,
                             "isStreaming": session.is_streaming,
                             "isCompacting": session.is_compacting,
                             "steeringMode": session.steering_mode,
@@ -241,6 +243,15 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
             elif ctype == "cycle_thinking_level":
                 level = session.cycle_thinking_level()
                 output(success(cid, ctype, {"level": level}))
+            elif ctype == "set_temperature":
+                if cmd.get("temperature") is not None:
+                    value = session.set_temperature(cmd["temperature"])
+                elif cmd.get("mode") is not None:
+                    from one.core.temperature import temperature_for_mode
+                    value = session.set_temperature(temperature_for_mode(cmd["mode"]))
+                else:
+                    raise ValueError("temperature or mode is required")
+                output(success(cid, ctype, {"temperature": value, "temperatureMode": session.temperature_mode}))
             elif ctype == "set_steering_mode":
                 session.set_steering_mode(cmd.get("mode", "interrupt"))
                 output(success(cid, ctype))

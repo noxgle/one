@@ -123,6 +123,8 @@ async def test_rpc_get_state_snapshot(tmp_path: Path, monkeypatch: pytest.Monkey
     data = r["data"]
     assert data["model"] == {"provider": "openai", "id": "gpt-4.1"}
     assert data["thinkingLevel"] == "medium"
+    assert data["temperature"] == 0.5
+    assert data["temperatureMode"] == "balanced"
     assert data["isStreaming"] is False
     assert data["isCompacting"] is False
     assert data["sessionId"] == session.session_id
@@ -135,6 +137,22 @@ async def test_rpc_get_state_snapshot(tmp_path: Path, monkeypatch: pytest.Monkey
     # Task 4 — lastSubagentTimeout diagnostic field is present.
     assert "lastSubagentTimeout" in data
     assert data["lastSubagentTimeout"] == {}  # no timeout has occurred yet
+
+
+@pytest.mark.asyncio
+async def test_rpc_set_temperature_accepts_numeric_and_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    session = _mk_session(tmp_path)
+    responses = await _run_rpc(
+        monkeypatch,
+        capsys,
+        session,
+        [
+            json.dumps({"type": "set_temperature", "id": "numeric", "temperature": "0.2"}),
+            json.dumps({"type": "set_temperature", "id": "mode", "mode": "experimental"}),
+        ],
+    )
+    assert _resp(responses, "set_temperature", "numeric")["data"] == {"temperature": 0.2, "temperatureMode": "coder"}
+    assert _resp(responses, "set_temperature", "mode")["data"] == {"temperature": 1.2, "temperatureMode": "experimental"}
 
 
 @pytest.mark.asyncio

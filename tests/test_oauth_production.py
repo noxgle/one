@@ -94,7 +94,7 @@ class TestNoExperimentalLabels:
             sys.stdout = old_stdout
 
         output = captured.getvalue().lower()
-        assert "experimental" not in output
+        assert "experimental oauth" not in output
         assert "beta" not in output
 
 

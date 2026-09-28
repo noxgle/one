@@ -115,7 +115,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         return content
 
     def _build_payload(self, model: str, messages: list[dict[str, Any]], thinking_level: str,
-                       images: list[dict[str, Any]] | None = None, storage_dir: str = "") -> dict[str, Any]:
+                       images: list[dict[str, Any]] | None = None, storage_dir: str = "", temperature: float | None = None) -> dict[str, Any]:
         # Validate all image blobs are present BEFORE building payload / making HTTP.
         if images:
             for img in images:
@@ -149,7 +149,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "model": model,
             "messages": messages,
         }
-        if self.default_temperature is not None:
+        if temperature is not None:
+            payload["temperature"] = temperature
+        elif self.default_temperature is not None:
             payload["temperature"] = self.default_temperature
         if self.reasoning_mode == "openrouter":
             effort = _REASONING_EFFORT_BY_LEVEL.get(thinking_level)
@@ -240,9 +242,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         max_tokens: int | None = None,
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        temperature: float | None = None,
         stream_transport_timeout: float | None = None,
     ) -> ChatResult:
-        payload = self._build_payload(model, messages, thinking_level, images=images, storage_dir=storage_dir)
+        payload = self._build_payload(model, messages, thinking_level, images=images, storage_dir=storage_dir, temperature=temperature)
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         use_stream = callable(on_delta)

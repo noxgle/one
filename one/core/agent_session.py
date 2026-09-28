@@ -22,6 +22,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import THINKING_LEVELS, SettingsManager
+from one.core.temperature import nearest_temperature_mode, normalize_temperature, temperature_for_mode
 from one.core.tool_output_pruning import prune_stale_tool_outputs
 from one.core.types import ModelInfo
 from one.mcp import McpManager
@@ -117,6 +118,7 @@ class AgentSession:
         resource_loader: Any,
         model: ModelInfo | None,
         thinking_level: str,
+        temperature: float | None = None,
         scoped_models: list[dict[str, Any]] | None = None,
         tools: list[str] | None = None,
         approval_callback: Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]] | None = None,
@@ -133,6 +135,7 @@ class AgentSession:
         if thinking_level not in THINKING_LEVELS:
             raise ValueError(f"Invalid thinking level: {thinking_level}")
         self.thinking_level = "off" if self.model and not self.model.reasoning else thinking_level
+        self.temperature = normalize_temperature(settings_manager.get_default_temperature() if temperature is None else temperature)
         self.scoped_models = scoped_models or []
         self.providers = build_provider_registry()
         self.messages: list[dict[str, Any]] = self.session_manager.build_session_context()["messages"]
@@ -1393,6 +1396,12 @@ class AgentSession:
             raise RuntimeError("spawn_subagent requires 'task' or 'tasks'")
 
         model_spec = str(args.get("model") or "").strip() or None
+        if args.get("temperature") is not None:
+            child_temperature = normalize_temperature(args["temperature"])
+        elif args.get("temperatureMode") is not None:
+            child_temperature = temperature_for_mode(args["temperatureMode"])
+        else:
+            child_temperature = self.temperature
         tool_names = args.get("tools")
         if tool_names is not None:
             if not isinstance(tool_names, list) or not all(isinstance(t, str) for t in tool_names):
@@ -1439,8 +1448,8 @@ class AgentSession:
             sub_tools.append("finish")
 
         if task:
-            return await self._run_subagent(task, sub_model, sub_tools, depth, timeout_sec=timeout_sec)
-        results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth, timeout_sec=timeout_sec) for t in tasks))
+            return await self._run_subagent(task, sub_model, sub_tools, depth, temperature=child_temperature, timeout_sec=timeout_sec)
+        results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth, temperature=child_temperature, timeout_sec=timeout_sec) for t in tasks))
         # Aggregate: per-child results + top-level ok + error when any fails.
         all_ok = all(r.get("ok") for r in results)
         combined = "\n".join(f"- {r.get('summary', '(no summary)')}" for r in results)
@@ -1491,7 +1500,7 @@ class AgentSession:
         self._tool_images.append(image)
 
     async def _run_subagent(
-        self, task: str, sub_model: Any, sub_tools: list[str], depth: int, *, timeout_sec: int | None = None
+        self, task: str, sub_model: Any, sub_tools: list[str], depth: int, temperature: float | None = None, *, timeout_sec: int | None = None
     ) -> dict[str, Any]:
         # Use the parent's session_dir so subagent files go to the same directory.
         # Use __init__ directly to bypass SessionManager.create()'s "session_dir or
@@ -1528,6 +1537,7 @@ class AgentSession:
             resource_loader=self.resource_loader,
             model=sub_model,
             thinking_level=self.thinking_level,
+            temperature=self.temperature if temperature is None else temperature,
             scoped_models=self.scoped_models,
             tools=sub_tools,
             approval_callback=self.approval_callback,
@@ -1903,6 +1913,22 @@ class AgentSession:
         self.set_thinking_level(next_level)
         return next_level
 
+    @property
+    def temperature_mode(self) -> str:
+        return nearest_temperature_mode(self.temperature)
+
+    def set_temperature(self, temperature: float, *, persist_default: bool = True) -> float:
+        value = normalize_temperature(temperature)
+        if persist_default:
+            self.settings_manager.set_default_temperature(value)
+        self.temperature = value
+        self.session_manager.append_temperature_change(value)
+        self._emit({"type": "temperature_change", "temperature": value, "temperatureMode": self.temperature_mode})
+        return value
+
+    def adjust_temperature(self, delta: float) -> float:
+        return self.set_temperature(max(0.0, min(1.2, self.temperature + delta)))
+
     async def cycle_model(self) -> ModelCycleResult | None:
         if self.scoped_models:
             current = next((i for i, m in enumerate(self.scoped_models) if self.model and m["model"].id == self.model.id and m["model"].provider == self.model.provider), -1)
@@ -2030,6 +2056,11 @@ class AgentSession:
         # Combines explicit prompt images and `read_image` tool results.
         images = self._all_images()
         sig = inspect.signature(provider.chat)
+        if "temperature" in sig.parameters:
+            chat_kwargs["temperature"] = self.temperature
+        elif self.model.provider in {"anthropic", "chatgpt"}:
+            self._emit({"type": "warning", "warning": "temperature_unsupported", "provider": self.model.provider,
+                        "model": self.model.id, "message": "Temperature is not supported by this provider/model; it was omitted."})
         if images and "images" not in sig.parameters:
             # Adapter cannot accept images — raise explicit capability error
             # instead of silently dropping them.

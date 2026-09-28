@@ -54,6 +54,7 @@ class OllamaCloudAdapter(ProviderAdapter):
         self, model: str, messages: list[dict[str, Any]], thinking_level: str,
         max_tokens: int | None = None, images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        temperature: float | None = None,
     ) -> dict[str, Any]:
         """Build a native Ollama chat payload.
 
@@ -110,8 +111,12 @@ class OllamaCloudAdapter(ProviderAdapter):
             "messages": payload_messages,
             "think": self._think_value(thinking_level),
         }
-        if max_tokens is not None:
-            payload["options"] = {"num_predict": max_tokens}
+        if max_tokens is not None or temperature is not None:
+            payload["options"] = {}
+            if max_tokens is not None:
+                payload["options"]["num_predict"] = max_tokens
+            if temperature is not None:
+                payload["options"]["temperature"] = temperature
         return payload
 
     async def chat(
@@ -121,10 +126,11 @@ class OllamaCloudAdapter(ProviderAdapter):
         on_thinking_delta: Callable[[str], None] | None = None,
         max_tokens: int | None = None, images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        temperature: float | None = None,
         stream_transport_timeout: float | None = None,
     ) -> ChatResult:
         payload = self._build_payload(
-            model, messages, thinking_level, max_tokens, images, storage_dir
+            model, messages, thinking_level, max_tokens, images, storage_dir, temperature
         )
         use_stream = callable(on_delta)
         transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT

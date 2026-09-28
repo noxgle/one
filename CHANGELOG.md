@@ -10,6 +10,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Model temperature modes** — sessions default to balanced (`0.5`) and support
+  coder (`0.2`), creative (`0.8`), and experimental (`1.2`) presets, plus
+  numeric values from `0.0..1.2`. Temperature is available in the TUI, RPC,
+  CLI, and isolated subagent overrides.
+
 - **Subagent lifecycle timeouts** — subagents now use an activity-aware
   `subagents.idleTimeoutSec` watchdog (default 1800 seconds) plus optional
   `subagents.maxDurationSec` hard cap (default 0, disabled). Timed-out children

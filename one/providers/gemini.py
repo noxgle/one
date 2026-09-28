@@ -127,6 +127,7 @@ class GeminiAdapter(ProviderAdapter):
         max_tokens: int | None = None,
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        temperature: float | None = None,
         stream_transport_timeout: float | None = None,
     ) -> ChatResult:
         # Validate all image blobs are present BEFORE building payload / making HTTP.
@@ -159,7 +160,9 @@ class GeminiAdapter(ProviderAdapter):
                 parts = [{"text": str(content)}]
             contents.append({"role": role, "parts": parts})
 
-        generation_config: dict[str, Any] = {"temperature": 0.1}
+        generation_config: dict[str, Any] = {}
+        if temperature is not None:
+            generation_config["temperature"] = temperature
         # Gemini 2.5 Pro rejects a zero thinking budget, so omit the field to
         # disable thinking; recognized non-off levels use deterministic budgets.
         budget = _THINKING_BUDGET_BY_LEVEL.get(thinking_level)

@@ -223,7 +223,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "evidence_read": "{evidenceId, offset?, maxChars?}  # retrieve a bounded chunk of prior durable tool evidence; use nextOffset to continue",
     "finish": "{summary, goal_success}  # end the task; summary is shown to the user",
     "plan": "{plan: [{step, status}]}  # status is pending|in_progress|completed|blocked; send the complete plan on every update",
-    "spawn_subagent": "{task, tasks?, model?, tools?}  # delegate a subtask to an isolated subagent (returns summary); tools must be non-empty when supplied and automatically include finish if omitted",
+    "spawn_subagent": "{task, tasks?, model?, tools?, temperature?, temperatureMode?}  # delegate a subtask; numeric temperature overrides temperatureMode, otherwise inherits parent",
     "ask_user": "{question, timeoutSec?}  # ask the human a question and wait for their answer",
     "apply_patch": "{patchText}  # non-empty string in OpenCode patch format, NOT ---/+++ unified diff. Exact Update example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch. Supports Add/Update/Delete/Move; Add/Move targets must be absent; conflicts and symlinks rejected; staged backup/rollback-protected",
     "read_image": "{path}  # read an image file and return its content as a base64-encoded blob with metadata",

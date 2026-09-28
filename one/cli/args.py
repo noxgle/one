@@ -4,6 +4,7 @@ import argparse
 from dataclasses import dataclass, field
 
 from one.config import APP_NAME
+from one.core.temperature import TEMPERATURE_MODES, normalize_temperature
 
 VALID_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
 VALID_MODES = {"text", "json", "rpc", "tui"}
@@ -21,6 +22,8 @@ class ParsedArgs:
     system_prompt: str | None = None
     append_system_prompt: str | None = None
     thinking: str | None = None
+    temperature: float | None = None
+    temperature_mode: str | None = None
     continue_session: bool = False
     resume: bool = False
     help: bool = False
@@ -78,7 +81,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
             # (this mirrors argparse's nargs="?" behaviour for --list-models).
             _VALUE_FLAGS = {
                 "--provider", "--model", "--api-key", "--llama-cpp-url", "--ollama-url",
-                "--system-prompt", "--append-system-prompt", "--thinking", "--mode",
+                "--system-prompt", "--append-system-prompt", "--thinking", "--temperature", "--temperature-mode", "--mode",
                 "--session", "--session-dir", "--models", "--tools", "--export",
                 "--export-format", "--theme", "--prompt-template", "--skill",
                 "--extension", "-e", "--list-models", "--answer-file", "--steer-file",
@@ -121,6 +124,8 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--system-prompt")
     parser.add_argument("--append-system-prompt")
     parser.add_argument("--thinking")
+    parser.add_argument("--temperature")
+    parser.add_argument("--temperature-mode")
     parser.add_argument("--continue", "-c", dest="continue_session", action="store_true")
     parser.add_argument("--resume", "-r", action="store_true")
     parser.add_argument("--mode")
@@ -174,6 +179,15 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     thinking = ns.thinking
     if thinking and thinking not in VALID_THINKING_LEVELS:
         errors.append(f"Invalid --thinking value: {thinking}. Allowed: {', '.join(sorted(VALID_THINKING_LEVELS))}")
+    temperature = None
+    if ns.temperature is not None:
+        try:
+            temperature = normalize_temperature(ns.temperature)
+        except ValueError as exc:
+            errors.append(f"Invalid --temperature value: {exc}")
+    temperature_mode = ns.temperature_mode.lower() if ns.temperature_mode else None
+    if temperature_mode and temperature_mode not in TEMPERATURE_MODES:
+        errors.append(f"Invalid --temperature-mode value: {ns.temperature_mode}. Allowed: {', '.join(TEMPERATURE_MODES)}")
 
     mode = ns.mode
     if mode and mode not in VALID_MODES:
@@ -209,6 +223,8 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         system_prompt=ns.system_prompt,
         append_system_prompt=ns.append_system_prompt,
         thinking=thinking,
+        temperature=temperature,
+        temperature_mode=temperature_mode,
         continue_session=ns.continue_session,
         resume=ns.resume,
         help=ns.help,
@@ -265,7 +281,9 @@ Options:
   --llama-cpp-url <url>
   --ollama-url <url>
   --system-prompt <text>
-  --append-system-prompt <text>
+   --append-system-prompt <text>
+   --temperature <0.0..1.2>
+   --temperature-mode <coder|balanced|creative|experimental>
   --mode <text|json|rpc|tui>
   --print, -p
   --continue, -c
