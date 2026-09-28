@@ -14,6 +14,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 from one.core.types import ModelInfo
+from one.mcp import McpTool
 
 
 class _Loader:
@@ -46,10 +47,29 @@ class _Provider:
         return ChatResult(text=self.responses[idx], raw={}, usage={}, stop_reason="stop")
 
 
+class _StubMcpManager:
+    """In-memory MCP manager for subagent dispatch tests."""
+
+    def __init__(self) -> None:
+        self._tools = [McpTool(name="web_deepsearch", description="Search", input_schema={"type": "object"}, server="fake")]
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def tools(self) -> list[McpTool]:
+        return self._tools
+
+    def has_tool(self, name: str) -> bool:
+        return any(tool.name == name for tool in self._tools)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG002
+        self.calls.append((name, arguments))
+        return {"ok": True, "output": "search result", "content": [{"type": "text", "text": "search result"}]}
+
+
 def _mk_agent(
     tmp_path: Path,
     tools: list[str] | None = None,
     settings_override: dict[str, Any] | None = None,
+    mcp_manager: _StubMcpManager | None = None,
 ) -> AgentSession:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
@@ -58,7 +78,7 @@ def _mk_agent(
     assert model is not None
     settings = SettingsManager.in_memory(settings_override or {"tools": {"maxSteps": 4, "timeoutSec": 5}})
     session = SessionManager.in_memory(str(tmp_path))
-    return AgentSession(session, settings, registry, _Loader(), model, "medium", tools=tools)
+    return AgentSession(session, settings, registry, _Loader(), model, "medium", tools=tools, mcp_manager=mcp_manager)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -257,6 +277,55 @@ async def test_spawn_subagent_unknown_tools_rejected(tmp_path: Path):
     content = json.loads(tool_results[0].get("content", "{}"))
     error_text = content.get("error", "")
     assert "Unknown tools: nope" in error_text
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_explicit_mcp_tool_dispatches(tmp_path: Path):
+    """An explicitly selected active MCP tool is available to the child."""
+    mcp = _StubMcpManager()
+    agent = _mk_agent(tmp_path, tools=["spawn_subagent", "finish"], mcp_manager=mcp)
+    agent.providers = {
+        "openai": _Provider(
+            [
+                json.dumps({"tool": "spawn_subagent", "args": {"task": "search", "tools": ["web_deepsearch", "finish"]}}),
+                json.dumps({"tool": "web_deepsearch", "args": {"query": "MCP subagent"}}),
+                json.dumps({"tool": "finish", "args": {"summary": "searched", "goal_success": True}}),
+            ]
+        )
+    }
+
+    await agent.prompt("go")
+
+    assert mcp.calls == [("web_deepsearch", {"query": "MCP subagent"})]
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_inherits_and_dispatches_mcp_tool(tmp_path: Path):
+    """An inherited active MCP tool remains dispatchable in the child."""
+    mcp = _StubMcpManager()
+    agent = _mk_agent(tmp_path, tools=["spawn_subagent", "finish"], mcp_manager=mcp)
+    agent.providers = {
+        "openai": _Provider(
+            [
+                json.dumps({"tool": "spawn_subagent", "args": {"task": "search"}}),
+                json.dumps({"tool": "web_deepsearch", "args": {"query": "inherited MCP"}}),
+                json.dumps({"tool": "finish", "args": {"summary": "searched", "goal_success": True}}),
+            ]
+        )
+    }
+
+    await agent.prompt("go")
+
+    assert mcp.calls == [("web_deepsearch", {"query": "inherited MCP"})]
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_rejects_unknown_tool_with_mcp_manager(tmp_path: Path):
+    """MCP availability does not permit arbitrary explicit tool names."""
+    agent = _mk_agent(tmp_path, tools=["spawn_subagent", "finish"], mcp_manager=_StubMcpManager())
+
+    with pytest.raises(RuntimeError, match="Unknown tools: unavailable_tool"):
+        await agent._spawn_subagent({"task": "search", "tools": ["unavailable_tool", "finish"]})
 
 
 @pytest.mark.asyncio

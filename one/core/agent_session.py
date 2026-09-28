@@ -121,6 +121,7 @@ class AgentSession:
         approval_callback: Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]] | None = None,
         mcp_manager: McpManager | None = None,
         storage_dir: str = "",
+        register_mcp_tools_callback: bool = True,
     ) -> None:
         self.session_manager = session_manager
         self.settings_manager = settings_manager
@@ -151,7 +152,7 @@ class AgentSession:
             mcp_names = [t.name for t in mcp_manager.tools()]
             self._active_tools = list(dict.fromkeys(self._active_tools + mcp_names))
             set_callback = getattr(mcp_manager, "set_tools_changed_callback", None)
-            if callable(set_callback):
+            if register_mcp_tools_callback and callable(set_callback):
                 set_callback(self.sync_mcp_tools)
         self._abort_requested = False
         self._session_started_at = time.monotonic()
@@ -1413,7 +1414,12 @@ class AgentSession:
         if tool_names is not None:
             if not isinstance(tool_names, list) or not all(isinstance(t, str) for t in tool_names):
                 raise RuntimeError("'tools' must be a list of tool names")
-            bad = [t for t in tool_names if t not in all_tools]
+            active_mcp_tools = {
+                name
+                for name in self._active_tools
+                if self._mcp_manager is not None and self._mcp_manager.has_tool(name)
+            }
+            bad = [t for t in tool_names if t not in all_tools and t not in active_mcp_tools]
             if bad:
                 raise RuntimeError(f"Unknown tools: {', '.join(bad)}")
 
@@ -1534,6 +1540,8 @@ class AgentSession:
             scoped_models=self.scoped_models,
             tools=sub_tools,
             approval_callback=self.approval_callback,
+            mcp_manager=self._mcp_manager,
+            register_mcp_tools_callback=False,
         )
         sub.providers = self.providers
 
