@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from one.modes.tui_mode import (
     build_sidebar_snapshot,
     evaluate_waiting,
     format_tui_shortcuts,
+    get_git_branch,
     resolve_tui_theme,
 )
 from tests.support.tui import _mk_app_session
@@ -181,6 +183,62 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     assert snapshot["mcpEnabled"] is False
     assert snapshot["mcpServers"] == []
     assert snapshot["retry"] == "on"
+
+
+def test_get_git_branch_handles_nested_repositories_and_fallbacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "sidebar-test", str(repo)], check=True)
+    nested = repo / "nested" / "directory"
+    nested.mkdir(parents=True)
+
+    assert get_git_branch(nested) == "sidebar-test"
+    assert get_git_branch(tmp_path / "not-a-repo") is None
+
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "TUI test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "--allow-empty", "-qm", "initial"], check=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True)
+    assert get_git_branch(nested) is None
+
+    monkeypatch.setattr(
+        "one.modes.tui_mode.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, "", ""),
+    )
+    assert get_git_branch(repo) is None
+
+
+def test_get_git_branch_is_safe_for_subprocess_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def raise_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr("one.modes.tui_mode.subprocess.run", raise_timeout)
+    assert get_git_branch(tmp_path) is None
+
+    def raise_oserror(*args, **kwargs):
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr("one.modes.tui_mode.subprocess.run", raise_oserror)
+    assert get_git_branch(tmp_path) is None
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_includes_attached_branch_only_when_available(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from textual.widgets import Static
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, settings_override={"tui": {"infoPanel": "sidebar"}})
+    session.session_manager._cwd = "/safe/project"
+    app = _OneTextualApp(session)
+    monkeypatch.setattr(tui_mode, "get_git_branch", lambda cwd: "feature/test")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "CWD: /safe/project (feature/test)" in app.query_one("#sidebar", Static).content
+
+        monkeypatch.setattr(tui_mode, "get_git_branch", lambda cwd: None)
+        app._refresh_sidebar()
+        assert "CWD: /safe/project\n" in app.query_one("#sidebar", Static).content
 
 
 @pytest.mark.asyncio
@@ -647,7 +705,8 @@ async def test_tui_bash_error_output_shown_when_enabled(tmp_path: Path):
         )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "tool err: bash" in stream
+        assert "Tool: × bash" in stream
+        assert "Result:" in stream
         assert "No such file" in stream
         assert "'/nonexistent'" in stream
         assert "Command exited with code 2" in stream
@@ -674,7 +733,7 @@ async def test_tui_bash_error_output_hidden_when_disabled(tmp_path: Path):
         )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "tool err: bash" in stream
+        assert "Tool: × bash" in stream
         assert "No such file" not in stream
         assert "'/nonexistent'" not in stream
         assert "Command exited with code 2" not in stream
@@ -698,7 +757,8 @@ async def test_tui_ls_output_shown_when_enabled(tmp_path: Path):
         )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "tool ok: ls" in stream
+        assert "Tool: ✓ ls" in stream
+        assert "Result:" in stream
         assert "file1.txt" in stream
         assert "file2.txt" in stream
 
@@ -721,7 +781,7 @@ async def test_tui_finish_output_not_duplicated(tmp_path: Path):
         )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "tool ok: finish" in stream
+        assert "Tool: ✓ finish" in stream
         assert "THE-FINAL-SUMMARY" not in stream
 
 
@@ -744,7 +804,7 @@ async def test_tui_ls_output_hidden_when_disabled(tmp_path: Path):
         )
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert "tool ok: ls" in stream
+        assert "Tool: ✓ ls" in stream
         assert "file1.txt" not in stream
         assert "file2.txt" not in stream
 
@@ -1379,6 +1439,51 @@ async def test_tui_separate_tool_output_appears_once(tmp_path: Path):
         assert stream.count("tool (timeout 5s)") == 1
         # Output block appears exactly once.
         assert stream.count("hello output") == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_lifecycle_and_result_panels_have_distinct_headings(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({"type": "tool_call_start", "tool": "read", "args": {"path": "a.txt"}})
+        await pilot.pause()
+        assert "Tool: ○" in "\n".join(app._stream_lines)
+
+        session._emit(
+            {"type": "tool_call_end", "tool": "read", "ok": True, "result": {"outputText": "file body"}}
+        )
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Tool: ✓ read" in stream
+        assert "Result:" in stream
+        assert "Result: ○" not in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_persisted_tool_result_and_bash_output_use_result_panel(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.messages.append({"role": "toolResult", "content": "saved output"})
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._rebuild_session_transcript()
+        assert "Result:" in "\n".join(app._stream_lines)
+
+        async def execute_bash(command: str) -> dict[str, object]:
+            assert command == "echo result"
+            return {"output": "bash output", "exitCode": 0}
+
+        session.execute_bash = execute_bash  # type: ignore[method-assign]
+        await app._handle_command("/bash echo result")
+        stream = "\n".join(app._stream_lines)
+        assert stream.count("Result:") == 2
+        assert "bash output" in stream
 
 
 @pytest.mark.asyncio

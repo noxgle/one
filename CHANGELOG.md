@@ -32,6 +32,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **TUI tool panels** — lifecycle status remains under `Tool:`, while command
+  and tool output now render under a distinct `Result:` heading; the sidebar
+  also shows the attached Git branch beside its CWD when available.
 - **Subagent timeout compatibility** — legacy `subagents.timeoutSec` remains an
   idle-timeout alias when `idleTimeoutSec` is not configured.
 - **MCP disable persistence** — `/mcp disable <name>` now saves `enabled: false`,

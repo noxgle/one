@@ -135,6 +135,25 @@ def build_sidebar_snapshot(
     }
 
 
+def get_git_branch(cwd: str | os.PathLike[str]) -> str | None:
+    """Return the attached Git branch for *cwd*, without surfacing failures."""
+    try:
+        if not Path(cwd).is_dir():
+            return None
+        result = subprocess.run(
+            ["git", "-C", os.fspath(cwd), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            stdout=subprocess.PIPE,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=0.2,
+        )
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return None
+    branch = result.stdout.strip()
+    return branch if result.returncode == 0 and branch else None
+
+
 # Braille spinner frames shown in the chat stream while the model is working.
 _THINKING_FRAMES = "░▒▓█▓▒"
 # Sentinel prefix marking the animated "waiting" line inside _stream_lines so
@@ -1110,7 +1129,7 @@ if TEXTUAL_AVAILABLE:
                     if not historical_abort:
                         self._write_chat_block(role, str(content))
                 elif role == "toolResult":
-                    self._write_tool_block(str(content))
+                    self._write_result_block(str(content))
                 elif role == "custom":
                     self._write_chat_block("custom", str(content))
             self._render_stream()
@@ -1711,10 +1730,10 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.append("")
             self._trim_stream()
 
-        def _write_tool_block(self, text: str) -> tuple[int, int]:
+        def _write_bounded_panel(self, heading: str, text: str) -> tuple[int, int]:
             self._remove_thinking_line()
             self._stream_lines.append("")
-            self._stream_lines.append("Tool: ○")
+            self._stream_lines.append(heading)
             start = len(self._stream_lines)
             panel_lines = self._bounded_tool_panel(text)
             self._stream_lines.extend(panel_lines)
@@ -1724,6 +1743,12 @@ if TEXTUAL_AVAILABLE:
             # Return post-trim indices so callers get positions that are
             # valid against the current (trimmed) _stream_lines list.
             return start - dropped, end - dropped
+
+        def _write_tool_block(self, text: str) -> tuple[int, int]:
+            return self._write_bounded_panel("Tool: ○", text)
+
+        def _write_result_block(self, text: str) -> tuple[int, int]:
+            return self._write_bounded_panel("Result:", text)
 
         def _bounded_tool_panel(self, text: str) -> list[str]:
             panel_lines = self._format_chat_panel("tool", text, pad_y=0)
@@ -1987,7 +2012,10 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"COOP: {'ON' if s['coop'] == 'on' or self._approval_pending is not None else 'OFF'}\n")
             info_block.append(f"Subagents: {'on' if s['subagents'] else 'off'}\n")
             info_block.append(f"Details: {'on' if s['bashOutput'] else 'off'}\n")
-            info_block.append(f"CWD: {sanitize_display_text(s['cwd'])}\n")
+            cwd = sanitize_display_text(s["cwd"])
+            branch = get_git_branch(s["cwd"])
+            cwd_display = f"{cwd} ({sanitize_display_text(branch)})" if branch else cwd
+            info_block.append(f"CWD: {cwd_display}\n")
             info_block.append(f"Session: {sanitize_display_text(s['sessionId'])}\n")
 
             plan_block = Text()
@@ -3011,13 +3039,13 @@ if TEXTUAL_AVAILABLE:
                             self._write(f"[bash] {error_msg}", "warn")
                             stripped = output[: -len("Command timed out")].rstrip()
                             if stripped:
-                                self._write_tool_block(stripped)
+                                self._write_result_block(stripped)
                         else:
                             self._write(f"[bash] {error_msg}", "warn")
                             if output:
-                                self._write_tool_block(output)
+                                self._write_result_block(output)
                     elif getattr(session.settings_manager, "get_bash_show_output", lambda: True)() and output:
-                        self._write_tool_block(output)
+                        self._write_result_block(output)
                     else:
                         self._write(f"[bash] exitCode={result.get('exitCode')}", "info")
                 except asyncio.CancelledError:
@@ -3875,7 +3903,8 @@ if TEXTUAL_AVAILABLE:
                 tool_name = str(event.get("tool") or "tool")
                 self._finalize_thinking_block()
                 if not self._finish_tool_block(tool_name, status):
-                    self._write_tool_block(f"tool {status}: {tool_name}")
+                    badge = "✓" if status == "ok" else "×"
+                    self._write_bounded_panel(f"Tool: {badge} {tool_name}", f"tool {status}: {tool_name}")
                 if (
                     tool_name != "finish"
                     and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)()
@@ -3886,7 +3915,7 @@ if TEXTUAL_AVAILABLE:
                     else:
                         out = str(payload.get("error") or "").rstrip()
                     if out:
-                        self._write_tool_block(out)
+                        self._write_result_block(out)
             elif et == "tool_call_nudge_start":
                 self._finalize_thinking_block()
             elif et == "turn_end":
