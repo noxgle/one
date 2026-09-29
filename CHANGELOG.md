@@ -57,6 +57,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Native tool-call diagnostics** — malformed native calls are rejected without
+  execution and shown as a concise safe TUI diagnostic while the agent performs
+  its bounded repair path.
 - **Cooperation-off human-input invariant** — model `ask_user` calls now proceed
   deterministically without creating a prompt or blocking when cooperation is
   disabled; pending model questions and TUI approvals are released on disable.

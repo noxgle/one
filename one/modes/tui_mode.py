@@ -3799,6 +3799,12 @@ if TEXTUAL_AVAILABLE:
                     self._write_lifecycle_separator()
                 start, end = self._write_tool_block(text)
                 self._active_tool_block = (tool_name, start, end, text)
+            elif et == "tool_call_parse_failed":
+                # Do not show model-supplied arguments or raw fragments here:
+                # they can be malformed/untrusted.  The session will make its
+                # single bounded repair attempt when applicable.
+                reason = str(event.get("reason") or "invalid tool-call candidate")
+                self._write(f"[Tool] {reason}; model output was not executed.", "warn")
             elif et == "tool_approval_rejected":
                 self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
             elif et == "ask_user":

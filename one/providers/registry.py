@@ -23,7 +23,7 @@ def build_provider_registry() -> dict[str, ProviderAdapter]:
     groq_base = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
     registry: dict[str, ProviderAdapter] = {
-        "openai": OpenAICompatibleAdapter("openai", openai_base),
+        "openai": OpenAICompatibleAdapter("openai", openai_base, supports_native_tools=True),
         "anthropic": AnthropicAdapter(),
         "gemini": GeminiAdapter(),
         # ChatGPT/Codex subscription backend (Responses API, OAuth only).
@@ -54,6 +54,6 @@ def build_provider_registry() -> dict[str, ProviderAdapter]:
     }
 
     if azure_base:
-        registry["azure-openai"] = OpenAICompatibleAdapter("azure-openai", azure_base)
+        registry["azure-openai"] = OpenAICompatibleAdapter("azure-openai", azure_base, supports_native_tools=True)
 
     return registry

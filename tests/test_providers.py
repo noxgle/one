@@ -224,6 +224,46 @@ async def test_codex_responses_without_visible_callback_uses_sse_and_accumulates
 
 
 @pytest.mark.asyncio
+async def test_codex_responses_correlates_function_call_item_and_call_ids() -> None:
+    """Argument deltas use item_id while terminal items use call_id."""
+    result, _, _ = await _stream_with(CodexResponsesAdapter(), _sse(
+        {
+            "type": "response.output_item.added",
+            "output_index": 2,
+            "item": {"type": "function_call", "id": "fc_item_1", "name": "read"},
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_item_1",
+            "output_index": 2,
+            "delta": '{"path":"a',
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_item_1",
+            "output_index": 2,
+            "delta": '.txt"}',
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 2,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "read",
+                "arguments": '{"path":"a.txt"}',
+            },
+        },
+        {"type": "response.completed", "response": {"status": "completed"}},
+    ))
+
+    assert result.native_tool_calls == [
+        {"id": "call_123", "name": "read", "arguments": {"path": "a.txt"}}
+    ]
+    assert result.had_native_tool_call is True
+
+
+@pytest.mark.asyncio
 async def test_openrouter_stream_routes_reasoning_fields_without_final_text() -> None:
     adapter = OpenAICompatibleAdapter(
         "openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter"

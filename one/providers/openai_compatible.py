@@ -10,7 +10,7 @@ import httpx
 
 from one.core.attachments import AttachmentStorageError
 
-from .base import ChatResult, ProviderAdapter
+from .base import ChatResult, ProviderAdapter, native_tool_replay_pairs
 
 # 120 s is the direct-call/default finite transport watchdog. AgentSession
 # overrides it with a longer value for managed streams so its meaningful-token
@@ -43,6 +43,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         supports_reasoning_effort: bool = True,
         default_temperature: float | None = 0.1,
         reasoning_mode: str = "openai",
+        supports_native_tools: bool = False,
     ) -> None:
         self.name = name
         self.base_url = base_url.rstrip("/")
@@ -53,6 +54,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         # control and trace fields are provider-specific.  Keep this opt-in so
         # local llama.cpp and every other compatible endpoint retain behavior.
         self.reasoning_mode = reasoning_mode
+        # OpenAI-compatible does not imply tool-compatible.  Local/custom
+        # endpoints retain JSON-in-text unless explicitly opted in.
+        self.supports_native_tools = supports_native_tools
 
     def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
         """Build an ``image_url`` part from an image reference.
@@ -115,7 +119,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         return content
 
     def _build_payload(self, model: str, messages: list[dict[str, Any]], thinking_level: str,
-                       images: list[dict[str, Any]] | None = None, storage_dir: str = "", temperature: float | None = None) -> dict[str, Any]:
+                       images: list[dict[str, Any]] | None = None, storage_dir: str = "", temperature: float | None = None, tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         # Validate all image blobs are present BEFORE building payload / making HTTP.
         if images:
             for img in images:
@@ -129,6 +133,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     raise MissingBlobError(
                         f"required image blob missing or corrupt before HTTP: {blob_hash}"
                     )
+        if self.supports_native_tools:
+            messages = self._serialize_native_replay_messages(messages)
         # Attach images to the last user message (current turn), so tool-loaded
         # images follow the tool result instead of rewriting the first prompt.
         if images:
@@ -166,7 +172,54 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         # OpenAI-compatible APIs do not share this extension.
         if self.name == "llama.cpp" and thinking_level == "off":
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        # Native tools are opt-in: local/legacy endpoints retain the proven
+        # JSON-in-text contract even though they share this adapter.
+        if tools and self.supports_native_tools:
+            payload["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t.get("description", ""), "parameters": t["parameters"]}} for t in tools]
         return payload
+
+    @staticmethod
+    def _serialize_native_replay_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Translate only complete durable pairs to Chat Completions items."""
+        paired_calls, paired_outputs = native_tool_replay_pairs(messages)
+        serialized: list[dict[str, Any]] = []
+        for message_index, message in enumerate(messages):
+            content = message.get("content", "")
+            if message_index in paired_outputs:
+                call_index = paired_outputs[message_index][1]
+                call = messages[paired_outputs[message_index][0]]["_nativeToolCalls"][call_index]
+                serialized.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": str(content),
+                })
+                continue
+            role = message.get("role", "user")
+            if role == "assistant" and isinstance(message.get("_nativeToolCalls"), list):
+                tool_calls = []
+                for call_index, call in enumerate(message["_nativeToolCalls"]):
+                    if (message_index, call_index) not in paired_calls:
+                        continue
+                    tool_calls.append({
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                        },
+                    })
+                if tool_calls:
+                    item: dict[str, Any] = {"role": "assistant", "tool_calls": tool_calls}
+                    # Chat Completions accepts text alongside tool calls.
+                    item["content"] = content if content else None
+                    serialized.append(item)
+                    continue
+                if not content:
+                    # Do not send a dangling empty assistant tool-call turn as
+                    # an ordinary message; it is invalid for some providers.
+                    continue
+            serialized.append({"role": role, "content": content})
+        return serialized
 
     def with_base_url(self, base_url: str) -> OpenAICompatibleAdapter:
         return OpenAICompatibleAdapter(
@@ -176,6 +229,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             supports_reasoning_effort=self.supports_reasoning_effort,
             default_temperature=self.default_temperature,
             reasoning_mode=self.reasoning_mode,
+            supports_native_tools=self.supports_native_tools,
         )
 
     def _build_headers(self, api_key: str, headers: dict[str, str] | None = None) -> dict[str, str]:
@@ -244,8 +298,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         storage_dir: str = "",
         temperature: float | None = None,
         stream_transport_timeout: float | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ChatResult:
-        payload = self._build_payload(model, messages, thinking_level, images=images, storage_dir=storage_dir, temperature=temperature)
+        payload = self._build_payload(model, messages, thinking_level, images=images, storage_dir=storage_dir, temperature=temperature, tools=tools)
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         use_stream = callable(on_delta)
@@ -281,13 +336,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             text = content
             usage = data.get("usage") or {}
             stop = choice.get("finish_reason")
+            native_calls = self._parse_native_calls(msg)
             return ChatResult(
                 text=text,
                 raw=data,
                 usage=usage,
                 stop_reason=stop,
                 had_thinking=bool(str(thinking).strip()),
-                had_native_tool_call=bool(msg.get("tool_calls") or msg.get("toolCalls") or msg.get("function_call")),
+                had_native_tool_call=bool(native_calls), native_tool_calls=native_calls or None,
             )
 
         text_parts: list[str] = []
@@ -296,6 +352,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         raw_last: dict[str, Any] = {}
         had_thinking = False
         had_native_tool_call = False
+        calls_by_index: dict[int, dict[str, Any]] = {}
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30), follow_redirects=True) as client:
             async with client.stream("POST", f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers) as resp:
@@ -335,6 +392,17 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     had_native_tool_call = had_native_tool_call or bool(
                         delta.get("tool_calls") or delta.get("toolCalls") or delta.get("function_call")
                     )
+                    for call_delta in delta.get("tool_calls") or delta.get("toolCalls") or []:
+                        if not isinstance(call_delta, dict):
+                            continue
+                        index = int(call_delta.get("index", 0))
+                        call = calls_by_index.setdefault(index, {"id": str(call_delta.get("id") or ""), "name": "", "arguments": ""})
+                        if call_delta.get("id"):
+                            call["id"] = str(call_delta["id"])
+                        fn = call_delta.get("function") or {}
+                        if isinstance(fn, dict):
+                            call["name"] = str(fn.get("name") or call["name"])
+                            call["arguments"] += str(fn.get("arguments") or "")
                     piece = delta.get("content")
                     if piece:
                         text_parts.append(str(piece))
@@ -369,11 +437,36 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         break
 
         full_text = "".join(text_parts)
+        native_calls = []
+        for call in calls_by_index.values():
+            try:
+                call["arguments"] = json.loads(call["arguments"])
+            except json.JSONDecodeError:
+                pass
+            native_calls.append(call)
         return ChatResult(
             text=full_text,
             raw=raw_last,
             usage=usage,
             stop_reason=stop_reason,
             had_thinking=had_thinking,
-            had_native_tool_call=had_native_tool_call,
+            had_native_tool_call=had_native_tool_call or bool(native_calls), native_tool_calls=native_calls or None,
         )
+
+    @staticmethod
+    def _parse_native_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_calls = message.get("tool_calls") or message.get("toolCalls") or []
+        if isinstance(message.get("function_call"), dict):
+            raw_calls = [message["function_call"]]
+        calls = []
+        for raw in raw_calls:
+            if not isinstance(raw, dict):
+                continue
+            fn = raw.get("function") if isinstance(raw.get("function"), dict) else raw
+            arguments = fn.get("arguments", "")
+            try:
+                arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+            except json.JSONDecodeError:
+                pass
+            calls.append({"id": str(raw.get("id") or ""), "name": str(fn.get("name") or ""), "arguments": arguments})
+        return calls

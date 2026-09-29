@@ -528,3 +528,15 @@ async def test_bash_tool_cancel_returns_structured_result(tmp_path: Path):
     exit_code = result.get("exitCode")
     assert exit_code is not None
     assert exit_code != 0
+
+def test_every_builtin_native_tool_has_a_meaningful_json_schema() -> None:
+    """Native providers must never receive the old empty placeholder schema."""
+    from one.tools.index import all_tools, native_tool_definitions
+
+    definitions = native_tool_definitions(list(all_tools))
+    assert {definition["name"] for definition in definitions} == set(all_tools)
+    for definition in definitions:
+        schema = definition["parameters"]
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is False
+        assert schema.get("properties"), definition["name"]

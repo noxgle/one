@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,7 +14,163 @@ from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
 from one.core.types import ModelInfo
 from one.providers.base import ChatResult
+from one.providers.codex_responses import CodexResponsesAdapter
+from one.providers.gemini import GeminiAdapter
 from tests.support.agents import _FakeProvider, _Loader
+
+
+class _RecordingCodex(CodexResponsesAdapter):
+    """Fake transport retaining the exact native payload passed between turns."""
+
+    def __init__(self, responses: list[ChatResult]) -> None:
+        self.responses = responses
+        self.payloads: list[dict[str, Any]] = []
+
+    async def chat(
+        self, api_key: str, model: str, messages: list[dict[str, Any]], thinking_level: str,
+        headers: dict[str, str] | None = None, on_delta: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None, max_tokens: int | None = None,
+        images: list[dict[str, Any]] | None = None, storage_dir: str = "",
+        tools: list[dict[str, Any]] | None = None,
+        stream_transport_timeout: float | None = None,
+    ) -> ChatResult:
+        self.payloads.append(self._build_payload(model, messages, thinking_level, True, tools=tools))
+        return self.responses.pop(0)
+
+
+class _RecordingNative:
+    supports_native_tools = True
+
+    def __init__(self, responses: list[ChatResult]) -> None:
+        self.responses = responses
+        self.requests: list[list[dict[str, Any]]] = []
+
+    async def chat(self, api_key: str, model: str, messages: list[dict[str, Any]], thinking_level: str, **kwargs: Any) -> ChatResult:
+        self.requests.append(messages)
+        return self.responses.pop(0)
+
+
+def _chatgpt_agent(session: SessionManager, tmp_path: Path, **kwargs: Any) -> AgentSession:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("chatgpt", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("chatgpt", "gpt-5.6-sol")
+    assert model is not None
+    return AgentSession(
+        session, SettingsManager.in_memory({"tools": {"maxSteps": 3}}), registry,
+        _Loader(), model, "medium", tools=["read", "bash"], **kwargs,
+    )
+
+
+def _native_read() -> ChatResult:
+    return ChatResult(
+        text="", raw={}, usage={}, had_native_tool_call=True,
+        native_tool_calls=[{"id": "call_native_read", "name": "read", "arguments": {"path": "a.txt"}}],
+    )
+
+
+def test_compaction_keeps_both_sides_of_retained_native_replay_pair() -> None:
+    messages = [
+        {"role": "user", "content": "read"},
+        {"role": "assistant", "content": "", "_nativeToolCalls": [
+            {"id": "call_compact", "name": "read", "arguments": {"path": "a.txt"}},
+        ]},
+        {"role": "toolResult", "content": "result", "_nativeToolCallId": "call_compact"},
+    ]
+
+    assert AgentSession._native_replay_keep_start(messages, 2) == 1
+
+
+@pytest.mark.asyncio
+async def test_codex_native_tool_replay_survives_flattening_and_session_reload(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("safe contents\n", encoding="utf-8")
+    session = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    agent = _chatgpt_agent(session, tmp_path)
+    provider = _RecordingCodex([_native_read(), ChatResult(text="done", raw={}, usage={})])
+    agent.providers = {"chatgpt": provider}
+
+    await agent.prompt("read a.txt")
+
+    replay = provider.payloads[1]["input"]
+    assert [item["type"] for item in replay if item["type"] != "message"] == [
+        "function_call", "function_call_output"
+    ]
+    assert replay[-2]["call_id"] == replay[-1]["call_id"] == "call_native_read"
+    assert replay[-1]["output"].startswith("<untrusted-tool-output>")
+    assert not any(
+        item["type"] == "message" and "safe contents" in str(item["content"])
+        for item in replay
+    )
+
+    path = session.session_file
+    assert path is not None
+    reloaded = _chatgpt_agent(SessionManager.open(path), tmp_path)
+    replay_provider = _RecordingCodex([ChatResult(text="after reload", raw={}, usage={})])
+    reloaded.providers = {"chatgpt": replay_provider}
+    await reloaded.prompt("continue")
+    restored_replay = replay_provider.payloads[0]["input"]
+    assert [item["type"] for item in restored_replay if item["type"] != "message"] == [
+        "function_call", "function_call_output"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_codex_native_rejected_tool_replays_matching_output(tmp_path: Path):
+    async def reject(_: str, __: dict[str, Any]) -> tuple[bool, str]:
+        return False, "not now"
+
+    agent = _chatgpt_agent(SessionManager.in_memory(str(tmp_path)), tmp_path, approval_callback=reject)
+    provider = _RecordingCodex([
+        ChatResult(
+            text="", raw={}, usage={}, had_native_tool_call=True,
+            native_tool_calls=[{"id": "call_rejected", "name": "bash", "arguments": {"command": "true"}}],
+        ),
+        ChatResult(text="done", raw={}, usage={}),
+    ])
+    agent.providers = {"chatgpt": provider}
+
+    await agent.prompt("run safely")
+
+    replay = provider.payloads[1]["input"]
+    assert [(item["type"], item.get("call_id")) for item in replay if item["type"] != "message"] == [
+        ("function_call", "call_rejected"),
+        ("function_call_output", "call_rejected"),
+    ]
+    assert "User rejected the command: not now" in replay[-1]["output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name,model_id", [
+    ("openai", "gpt-4.1"), ("anthropic", "claude-3-7-sonnet-latest"), ("gemini", "gemini-2.5-pro"),
+])
+async def test_native_adapters_preserve_and_persist_call_result_pairs(
+    tmp_path: Path, provider_name: str, model_id: str,
+) -> None:
+    (tmp_path / "a.txt").write_text("safe\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key(provider_name, "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find(provider_name, model_id)
+    assert model is not None
+    session = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    agent = AgentSession(session, SettingsManager.in_memory({"tools": {"maxSteps": 2}}), registry, _Loader(), model, "medium", tools=["read"])
+    provider = _RecordingNative([
+        ChatResult(text="", raw={}, usage={}, native_tool_calls=[{"id": "call_pair", "name": "read", "arguments": {"path": "a.txt"}}]),
+        ChatResult(text="done", raw={}, usage={}),
+    ])
+    agent.providers = {provider_name: provider}
+    await agent.prompt("read")
+    replay = provider.requests[1]
+    assistant = next(message for message in replay if message.get("_nativeToolCalls"))
+    result = next(message for message in replay if message.get("_nativeToolCallId") == "call_pair")
+    assert assistant["_nativeToolCalls"][0]["id"] == result["_nativeToolCallId"] == "call_pair"
+    path = session.session_file
+    assert path is not None
+    restored = AgentSession(SessionManager.open(path), SettingsManager.in_memory({"tools": {"maxSteps": 2}}), registry, _Loader(), model, "medium", tools=["read"])
+    restored_provider = _RecordingNative([ChatResult(text="after reload", raw={}, usage={})])
+    restored.providers = {provider_name: restored_provider}
+    await restored.prompt("continue")
+    assert any(message.get("_nativeToolCallId") == "call_pair" for message in restored_provider.requests[0])
 
 
 @pytest.mark.asyncio
@@ -177,6 +335,96 @@ async def test_openai_raw_tool_call_id_is_propagated_to_tool_events(tmp_path: Pa
 
     lifecycle = [event for event in events if event["type"] in {"tool_call_start", "tool_call_end"}]
     assert [event["toolCallId"] for event in lifecycle] == ["call_openai_123", "call_openai_123"]
+
+
+@pytest.mark.asyncio
+async def test_missing_native_id_is_persisted_and_replayed_for_gemini(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("gemini", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("gemini", "gemini-2.5-pro")
+    assert model is not None
+    agent = AgentSession(SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory({"tools": {"maxSteps": 2}}), registry, _Loader(), model, "medium", tools=["read"])
+    provider = _RecordingNative([
+        ChatResult(text='{"tool":"bash","args":{"command":"false"}}', raw={}, usage={}, native_tool_calls=[{"id": "", "name": "read", "arguments": {"path": "a.txt"}}]),
+        ChatResult(text="DONE", raw={}, usage={}),
+    ])
+    agent.providers = {"gemini": provider}
+    events: list[dict[str, object]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("read")
+    start = next(event for event in events if event["type"] == "tool_call_start")
+    assert start["tool"] == "read"
+    assert str(start["toolCallId"]).startswith("native-")
+    replay = provider.requests[1]
+    assistant = next(message for message in replay if message.get("_nativeToolCalls"))
+    result = next(message for message in replay if message.get("_nativeToolCallId"))
+    fallback_id = str(start["toolCallId"])
+    assert assistant["_nativeToolCalls"][0]["id"] == result["_nativeToolCallId"] == fallback_id
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            return {"candidates": []}
+
+    class Client:
+        payload: dict[str, Any] = {}
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> bool:
+            return False
+
+        async def post(self, *args: Any, **kwargs: Any) -> Response:
+            Client.payload = kwargs["json"]
+            return Response()
+
+    from one.providers import gemini as gemini_module
+
+    monkeypatch.setattr(gemini_module.httpx, "AsyncClient", Client)
+    await GeminiAdapter().chat("key", "gemini-2.5-pro", replay, "off")
+    function_call = next(
+        part["functionCall"]
+        for content in Client.payload["contents"]
+        for part in content["parts"]
+        if "functionCall" in part
+    )
+    function_response = next(
+        part["functionResponse"]
+        for content in Client.payload["contents"]
+        for part in content["parts"]
+        if "functionResponse" in part
+    )
+    assert function_call["id"] == function_response["id"] == fallback_id
+
+
+@pytest.mark.asyncio
+async def test_multiple_native_calls_are_repaired_without_execution(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory({"tools": {"maxSteps": 2}}), registry, _Loader(), model, "medium", tools=["bash"])
+    agent.providers = {"openai": _FakeProvider([
+        ChatResult(text="", raw={}, usage={}, native_tool_calls=[{"id": "a", "name": "bash", "arguments": {"command": "false"}}, {"id": "b", "name": "bash", "arguments": {"command": "false"}}]),
+        "repaired answer",
+    ])}
+    events: list[dict[str, object]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("go")
+    assert not [event for event in events if event["type"] == "tool_call_start"]
+    assert any(event.get("reason") == "multiple_native_tool_calls" for event in events)
+    assert any(event["type"] == "tool_response_repair_start" for event in events)
 
 
 @pytest.mark.asyncio

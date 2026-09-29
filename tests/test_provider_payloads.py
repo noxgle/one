@@ -66,6 +66,99 @@ def test_openai_compatible_payload_without_reasoning() -> None:
     assert "temperature" not in payload
 
 
+@pytest.mark.parametrize("adapter", [
+    OpenAICompatibleAdapter("openai", "https://api.openai.com", supports_native_tools=True),
+])
+def test_openai_native_replay_serializes_only_complete_pairs(adapter: OpenAICompatibleAdapter) -> None:
+    messages = [
+        {"role": "assistant", "content": "I will read.", "_nativeToolCalls": [
+            {"id": "dup", "name": "read", "arguments": {"path": "one"}},
+            {"id": "dup", "name": "read", "arguments": {"path": "two"}},
+            {"id": "dangling", "name": "read", "arguments": {"path": "three"}},
+        ]},
+        {"role": "user", "content": "first result", "_nativeToolCallId": "dup"},
+        {"role": "user", "content": "second result", "_nativeToolCallId": "dup"},
+        {"role": "assistant", "content": "", "_nativeToolCalls": [
+            {"id": "unpaired", "name": "read", "arguments": {"path": "four"}},
+        ]},
+        {"role": "assistant", "content": "kept context", "_nativeToolCalls": [
+            {"id": "also_unpaired", "name": "read", "arguments": {"path": "five"}},
+        ]},
+        {"role": "user", "content": "orphan", "_nativeToolCallId": "missing"},
+    ]
+    payload = adapter._build_payload("gpt", messages, "off")
+    wire = payload["messages"]
+    assert wire[0]["tool_calls"][0]["id"] == "dup"
+    assert len(wire[0]["tool_calls"]) == 2
+    assert wire[1] == {"role": "tool", "tool_call_id": "dup", "content": "first result"}
+    assert wire[2] == {"role": "tool", "tool_call_id": "dup", "content": "second result"}
+    assert wire[3] == {"role": "assistant", "content": "kept context"}
+    assert wire[4] == {"role": "user", "content": "orphan"}
+    assert "_nativeToolCalls" not in repr(payload)
+    assert "_nativeToolCallId" not in repr(payload)
+
+
+def test_anthropic_and_gemini_native_replay_payloads_hide_private_metadata() -> None:
+    messages = [
+        {"role": "assistant", "content": "calling", "_nativeToolCalls": [
+            {"id": "call_1", "name": "read", "arguments": {"path": "a.txt"}},
+        ]},
+        {"role": "user", "content": "untrusted result", "_nativeToolCallId": "call_1"},
+        {"role": "assistant", "content": "", "_nativeToolCalls": [
+            {"id": "unpaired", "name": "read", "arguments": {"path": "missing.txt"}},
+        ]},
+        {"role": "assistant", "content": "kept context", "_nativeToolCalls": [
+            {"id": "also_unpaired", "name": "read", "arguments": {"path": "missing.txt"}},
+        ]},
+        {"role": "user", "content": "orphan", "_nativeToolCallId": "nope"},
+    ]
+    # Exercise the message construction without transport by using lightweight
+    # fake clients that retain JSON sent by each adapter.
+    class Response:
+        def raise_for_status(self) -> None: pass
+        def json(self): return {"content": [], "candidates": []}
+    class Client:
+        captured: dict[str, Any] = {}
+        def __init__(self, *args: Any, **kwargs: Any) -> None: pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args: Any): return False
+        async def post(self, *args: Any, **kwargs: Any):
+            Client.captured = kwargs["json"]
+            return Response()
+
+    # The async paths are covered by dedicated provider transport tests; use
+    # their deterministic message builders below through a local event loop.
+    import asyncio
+
+    from one.providers import anthropic as anthropic_module
+    from one.providers import gemini as gemini_module
+    original_anthropic, original_gemini = anthropic_module.httpx.AsyncClient, gemini_module.httpx.AsyncClient
+    try:
+        anthropic_module.httpx.AsyncClient = Client
+        asyncio.run(AnthropicAdapter().chat("key", "claude", messages, "off"))
+        anthropic_payload = Client.captured
+        gemini_module.httpx.AsyncClient = Client
+        asyncio.run(GeminiAdapter().chat("key", "gemini", messages, "off"))
+        gemini_payload = Client.captured
+    finally:
+        anthropic_module.httpx.AsyncClient = original_anthropic
+        gemini_module.httpx.AsyncClient = original_gemini
+    assert anthropic_payload["messages"][0]["content"][1] == {
+        "type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "a.txt"},
+    }
+    assert anthropic_payload["messages"][1]["content"][0]["tool_use_id"] == "call_1"
+    assert gemini_payload["contents"][0]["parts"][1]["functionCall"]["id"] == "call_1"
+    response = gemini_payload["contents"][1]["parts"][0]["functionResponse"]
+    assert response == {"name": "read", "id": "call_1", "response": {"content": "untrusted result"}}
+    assert anthropic_payload["messages"][2] == {
+        "role": "assistant", "content": [{"type": "text", "text": "kept context"}],
+    }
+    assert anthropic_payload["messages"][3]["content"][0]["text"] == "orphan"
+    assert gemini_payload["contents"][2] == {"role": "model", "parts": [{"text": "kept context"}]}
+    assert gemini_payload["contents"][3] == {"role": "user", "parts": [{"text": "orphan"}]}
+    assert "_nativeTool" not in repr(anthropic_payload) + repr(gemini_payload)
+
+
 @pytest.mark.parametrize(
     ("level", "effort"),
     [("off", None), ("minimal", "minimal"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
@@ -761,6 +854,73 @@ def test_other_adapters_unchanged_by_cache_control(monkeypatch) -> None:
     import json
 
     json.loads(json.dumps(payload))
+
+
+def test_codex_replays_native_calls_as_responses_input_items() -> None:
+    adapter = CodexResponsesAdapter()
+    payload = adapter._build_payload("gpt", [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": "", "_nativeToolCalls": [
+            {"id": "call_123", "name": "read", "arguments": {"path": "a.txt"}},
+        ]},
+        {"role": "toolResult", "content": "file contents", "_nativeToolCallId": "call_123"},
+    ], "medium", stream=True)
+
+    assert payload["input"] == [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "read it"}]},
+        {"type": "function_call", "call_id": "call_123", "name": "read", "arguments": '{"path": "a.txt"}'},
+        {"type": "function_call_output", "call_id": "call_123", "output": "file contents"},
+    ]
+    assert "tools" not in payload
+
+
+def test_codex_replay_omits_malformed_empty_native_call_name() -> None:
+    """Malformed calls are repaired by the session, never sent as API-invalid input."""
+    payload = CodexResponsesAdapter()._build_payload("gpt", [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": "", "_nativeToolCalls": [
+            {"id": "call_bad", "name": "  ", "arguments": {"path": "a.txt"}},
+        ]},
+    ], "medium", stream=True)
+
+    assert not [item for item in payload["input"] if item["type"] == "function_call"]
+
+
+def test_codex_replay_uses_call_id_after_generic_tool_result_flattening() -> None:
+    payload = CodexResponsesAdapter()._build_payload("gpt", [
+        {"role": "assistant", "content": "", "_nativeToolCalls": [
+            {"id": "call_flattened", "name": "read", "arguments": {"path": "a.txt"}},
+        ]},
+        {
+            "role": "user",
+            "content": "<untrusted-tool-output>\ncontents\n</untrusted-tool-output>",
+            "_nativeToolCallId": "call_flattened",
+        },
+    ], "medium", stream=True)
+
+    assert payload["input"] == [
+        {"type": "function_call", "call_id": "call_flattened", "name": "read", "arguments": '{"path": "a.txt"}'},
+        {
+            "type": "function_call_output",
+            "call_id": "call_flattened",
+            "output": "<untrusted-tool-output>\ncontents\n</untrusted-tool-output>",
+        },
+    ]
+
+
+def test_codex_replay_omits_dangling_calls_and_preserves_orphan_output_as_user_context() -> None:
+    payload = CodexResponsesAdapter()._build_payload("gpt", [
+        {"role": "assistant", "content": "", "_nativeToolCalls": [
+            {"id": "call_missing", "name": "read", "arguments": {"path": "a.txt"}},
+        ]},
+        {"role": "user", "content": "orphan context", "_nativeToolCallId": "call_orphan"},
+    ], "medium", stream=True)
+
+    assert payload["input"] == [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "orphan context"}]},
+    ]
 
 
 # ---------------------------------------------------------------------------

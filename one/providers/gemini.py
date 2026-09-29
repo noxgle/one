@@ -10,7 +10,7 @@ import httpx
 
 from one.core.attachments import AttachmentStorageError
 
-from .base import ChatResult, ProviderAdapter
+from .base import ChatResult, ProviderAdapter, native_tool_replay_pairs
 
 # 120 s is the direct-call/default finite transport watchdog. AgentSession
 # overrides it with a longer value for managed streams so its meaningful-token
@@ -31,6 +31,7 @@ class MissingBlobError(AttachmentStorageError):
 
 
 class GeminiAdapter(ProviderAdapter):
+    supports_native_tools = True
     name = "gemini"
 
     def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
@@ -129,6 +130,7 @@ class GeminiAdapter(ProviderAdapter):
         storage_dir: str = "",
         temperature: float | None = None,
         stream_transport_timeout: float | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ChatResult:
         # Validate all image blobs are present BEFORE building payload / making HTTP.
         if images:
@@ -148,12 +150,35 @@ class GeminiAdapter(ProviderAdapter):
         for i, m in enumerate(messages):
             if m.get("role") == "user":
                 last_user_idx = i
+        paired_calls, paired_outputs = native_tool_replay_pairs(messages)
         contents = []
         for i, m in enumerate(messages):
             if m.get("role") == "system":
                 continue
             role = "user" if m.get("role") == "user" else "model"
             content = m.get("content", "")
+            if i in paired_outputs:
+                call_message_index, call_index = paired_outputs[i]
+                call = messages[call_message_index]["_nativeToolCalls"][call_index]
+                contents.append({"role": "user", "parts": [{"functionResponse": {
+                    "name": call["name"], "id": call["id"], "response": {"content": str(content)},
+                }}]})
+                continue
+            if m.get("role") == "assistant" and isinstance(m.get("_nativeToolCalls"), list):
+                parts: list[dict[str, Any]] = []
+                if content:
+                    parts.append({"text": str(content)})
+                for call_index, call in enumerate(m["_nativeToolCalls"]):
+                    if (i, call_index) in paired_calls:
+                        parts.append({"functionCall": {
+                            "name": call["name"], "id": call["id"], "args": call["arguments"],
+                        }})
+                if parts:
+                    contents.append({"role": "model", "parts": parts})
+                    continue
+                # Do not turn a dangling empty function-call turn into an
+                # ordinary empty model message.
+                continue
             if role == "user" and images and i == last_user_idx:
                 parts = self._resolve_message_parts(role, content, images, storage_dir)
             else:
@@ -176,6 +201,11 @@ class GeminiAdapter(ProviderAdapter):
             "contents": contents,
             "generationConfig": generation_config,
         }
+        if tools:
+            payload["tools"] = [{"functionDeclarations": [
+                {"name": t["name"], "description": t.get("description", ""), "parameters": t["parameters"]}
+                for t in tools
+            ]}]
 
         h = {"Content-Type": "application/json"}
         if headers:
@@ -200,7 +230,22 @@ class GeminiAdapter(ProviderAdapter):
                         text += part.get("text", "")
             usage = data.get("usageMetadata") or {}
             stop = candidates[0].get("finishReason") if candidates else None
-            return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop)
+            calls = []
+            parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+            for part in parts:
+                if not isinstance(part, dict) or not isinstance(part.get("functionCall"), dict):
+                    continue
+                function_call = part["functionCall"]
+                calls.append({
+                    "id": str(function_call.get("id") or ""),
+                    "name": str(function_call.get("name") or ""),
+                    "arguments": (
+                        function_call.get("args")
+                        if isinstance(function_call.get("args"), dict)
+                        else ""
+                    ),
+                })
+            return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop, had_native_tool_call=bool(calls), native_tool_calls=calls or None)
 
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}"
@@ -209,6 +254,7 @@ class GeminiAdapter(ProviderAdapter):
         usage: dict[str, Any] = {}
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
+        calls: list[dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30)) as client:
             async with client.stream("POST", url, json=payload, headers=h) as resp:
                 resp.raise_for_status()
@@ -243,6 +289,9 @@ class GeminiAdapter(ProviderAdapter):
                     c0 = candidates[0]
                     parts = (c0.get("content") or {}).get("parts") or []
                     for part in parts:
+                        if isinstance(part, dict) and isinstance(part.get("functionCall"), dict):
+                            fn = part["functionCall"]
+                            calls.append({"id": str(fn.get("id") or ""), "name": str(fn.get("name") or ""), "arguments": fn.get("args") if isinstance(fn.get("args"), dict) else ""})
                         if not isinstance(part, dict) or not part.get("text"):
                             continue
                         piece = str(part["text"])
@@ -259,4 +308,4 @@ class GeminiAdapter(ProviderAdapter):
                         stop_reason = c0.get("finishReason")
                         break
 
-        return ChatResult(text="".join(text_parts), raw=raw_last, usage=usage, stop_reason=stop_reason)
+        return ChatResult(text="".join(text_parts), raw=raw_last, usage=usage, stop_reason=stop_reason, had_native_tool_call=bool(calls), native_tool_calls=calls or None)

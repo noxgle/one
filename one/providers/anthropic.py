@@ -10,7 +10,7 @@ import httpx
 
 from one.core.attachments import AttachmentStorageError
 
-from .base import ChatResult, ProviderAdapter
+from .base import ChatResult, ProviderAdapter, native_tool_replay_pairs
 
 # 120 s is the direct-call/default finite transport watchdog. AgentSession
 # overrides it with a longer value for managed streams so its meaningful-token
@@ -36,6 +36,7 @@ class MissingBlobError(AttachmentStorageError):
 
 
 class AnthropicAdapter(ProviderAdapter):
+    supports_native_tools = True
     name = "anthropic"
 
     def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
@@ -160,6 +161,7 @@ class AnthropicAdapter(ProviderAdapter):
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
         stream_transport_timeout: float | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ChatResult:
         # Validate all image blobs are present BEFORE building payload / making HTTP.
         if images:
@@ -189,13 +191,35 @@ class AnthropicAdapter(ProviderAdapter):
                 expanded.append({"role": role, "content": content})
             messages = expanded
 
+        paired_calls, paired_outputs = native_tool_replay_pairs(messages)
         content_messages = []
         system = None
-        for m in messages:
+        for message_index, m in enumerate(messages):
             if m.get("role") == "system":
                 system = m.get("content", "")
                 continue
-            content_messages.append({"role": m.get("role"), "content": m.get("content", "")})
+            content = m.get("content", "")
+            if message_index in paired_outputs:
+                call_message_index, call_index = paired_outputs[message_index]
+                call = messages[call_message_index]["_nativeToolCalls"][call_index]
+                content_messages.append({"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": call["id"], "content": str(content),
+                }]})
+                continue
+            if m.get("role") == "assistant" and isinstance(m.get("_nativeToolCalls"), list):
+                parts: list[dict[str, Any]] = []
+                if content:
+                    parts.append({"type": "text", "text": str(content)})
+                for call_index, call in enumerate(m["_nativeToolCalls"]):
+                    if (message_index, call_index) in paired_calls:
+                        parts.append({"type": "tool_use", "id": call["id"], "name": call["name"], "input": call["arguments"]})
+                if parts:
+                    content_messages.append({"role": "assistant", "content": parts})
+                    continue
+                # A dangling empty tool-use turn must not become an ordinary
+                # empty assistant message on the wire.
+                continue
+            content_messages.append({"role": m.get("role"), "content": content})
 
         # ── cache_control breakpoints (Anthropic prompt caching) ──
         payload_system: list[dict[str, Any]] | None = None
@@ -245,6 +269,8 @@ class AnthropicAdapter(ProviderAdapter):
             payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
         if payload_system is not None:
             payload["system"] = payload_system
+        if tools:
+            payload["tools"] = [{"name": t["name"], "description": t.get("description", ""), "input_schema": t["parameters"]} for t in tools]
         req_headers = {
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
@@ -264,13 +290,23 @@ class AnthropicAdapter(ProviderAdapter):
             text = "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
             usage = data.get("usage") or {}
             stop_reason = data.get("stop_reason")
-            return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop_reason)
+            calls = []
+            for part in data.get("content", []):
+                if not isinstance(part, dict) or part.get("type") != "tool_use":
+                    continue
+                calls.append({
+                    "id": str(part.get("id") or ""),
+                    "name": str(part.get("name") or ""),
+                    "arguments": part.get("input") if isinstance(part.get("input"), dict) else "",
+                })
+            return ChatResult(text=text, raw=data, usage=usage, stop_reason=stop_reason, had_native_tool_call=bool(calls), native_tool_calls=calls or None)
 
         payload["stream"] = True
         text_parts: list[str] = []
         usage: dict[str, Any] = {}
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
+        tool_blocks: dict[int, dict[str, Any]] = {}
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30)) as client:
             async with client.stream("POST", "https://api.anthropic.com/v1/messages", json=payload, headers=req_headers) as resp:
@@ -301,6 +337,9 @@ class AnthropicAdapter(ProviderAdapter):
                     ctype = chunk.get("type")
                     if ctype == "content_block_delta":
                         delta_obj = chunk.get("delta") or {}
+                        if delta_obj.get("type") == "input_json_delta":
+                            block = tool_blocks.setdefault(int(chunk.get("index", 0)), {"id": "", "name": "", "arguments": ""})
+                            block["arguments"] += str(delta_obj.get("partial_json") or "")
                         delta = delta_obj.get("thinking") if delta_obj.get("type") == "thinking_delta" else delta_obj.get("text")
                         if delta:
                             delta_s = str(delta)
@@ -317,6 +356,10 @@ class AnthropicAdapter(ProviderAdapter):
                         msg_usage = (chunk.get("message") or {}).get("usage")
                         if isinstance(msg_usage, dict):
                             usage.update(msg_usage)
+                    if ctype == "content_block_start":
+                        block = chunk.get("content_block") or {}
+                        if block.get("type") == "tool_use":
+                            tool_blocks[int(chunk.get("index", 0))] = {"id": str(block.get("id") or ""), "name": str(block.get("name") or ""), "arguments": ""}
                         if stop_reason:
                             break
                     if ctype == "message_delta":
@@ -327,4 +370,10 @@ class AnthropicAdapter(ProviderAdapter):
                         if isinstance(msg_usage, dict):
                             usage.update(msg_usage)
 
-        return ChatResult(text="".join(text_parts), raw=raw_last, usage=usage, stop_reason=stop_reason)
+        calls = list(tool_blocks.values())
+        for call in calls:
+            try:
+                call["arguments"] = json.loads(call["arguments"])
+            except json.JSONDecodeError:
+                pass
+        return ChatResult(text="".join(text_parts), raw=raw_last, usage=usage, stop_reason=stop_reason, had_native_tool_call=bool(calls), native_tool_calls=calls or None)

@@ -25,6 +25,7 @@ class _FakeProvider:
         max_tokens: int | None = None,
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        **kwargs: Any,
     ) -> Any:
         from one.providers.base import ChatResult
 

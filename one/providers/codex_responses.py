@@ -26,13 +26,13 @@ import base64
 import json
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from one.core.attachments import AttachmentStorageError
 
-from .base import ChatResult, ProviderAdapter
+from .base import ChatResult, NativeToolCall, ProviderAdapter, native_tool_replay_pairs
 
 
 class MissingBlobError(AttachmentStorageError):
@@ -72,6 +72,7 @@ def _error_with_body(status_code: int, body: str) -> RuntimeError:
 
 class CodexResponsesAdapter(ProviderAdapter):
     name = "chatgpt"
+    supports_native_tools = True
 
     def _headers(self, api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = {
@@ -135,9 +136,11 @@ class CodexResponsesAdapter(ProviderAdapter):
         max_tokens: int | None = None,
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         instructions = ""
         input_items: list[dict[str, Any]] = []
+        paired_calls, paired_outputs = native_tool_replay_pairs(messages)
 
         # Validate all image blobs BEFORE building the payload (no HTTP).
         if images:
@@ -162,6 +165,50 @@ class CodexResponsesAdapter(ProviderAdapter):
         for idx, m in enumerate(messages):
             role = m.get("role")
             content = m.get("content", "")
+            # Stateless Responses replay requires the original function_call
+            # item followed by its function_call_output, not a textual summary.
+            if role == "assistant" and isinstance(m.get("_nativeToolCalls"), list):
+                for call_index, call in enumerate(m["_nativeToolCalls"]):
+                    # Do not send malformed calls back to Responses.  They are
+                    # retained in the normalized result so AgentSession can
+                    # issue its bounded diagnostic/repair, but Responses
+                    # rejects an empty function name with HTTP 400 before that
+                    # repair can run.
+                    if (
+                        (idx, call_index) in paired_calls
+                        and isinstance(call, dict)
+                        and isinstance(call.get("id"), str)
+                        and call["id"].strip()
+                        and isinstance(call.get("name"), str)
+                        and call["name"].strip()
+                    ):
+                        arguments = call.get("arguments")
+                        input_items.append(
+                            {
+                                "type": "function_call",
+                                "call_id": call["id"],
+                                "name": call["name"],
+                                "arguments": (
+                                    json.dumps(arguments, ensure_ascii=False)
+                                    if isinstance(arguments, dict)
+                                    else str(arguments or "")
+                                ),
+                            }
+                        )
+                if not content:
+                    continue
+            if idx in paired_outputs:
+                # Retain the untrusted-output boundary added by flattening.
+                # Exact call-id matching has already established that this is
+                # a valid Responses item rather than an orphaned user message.
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": m["_nativeToolCallId"],
+                        "output": str(content),
+                    }
+                )
+                continue
             if role == "system":
                 instructions = str(content)
                 continue
@@ -205,6 +252,11 @@ class CodexResponsesAdapter(ProviderAdapter):
         if effort:
             # Request readable summaries rather than only invisible reasoning.
             payload["reasoning"] = {"effort": effort, "summary": "auto"}
+        if tools:
+            # Built-in schemas intentionally have optional properties; do not
+            # claim Responses strict-mode conformance (which requires every
+            # property to be required) on this compatibility schema.
+            payload["tools"] = [{"type": "function", "name": t["name"], "description": t.get("description", ""), "parameters": t["parameters"]} for t in tools]
         return payload
 
     @staticmethod
@@ -229,6 +281,20 @@ class CodexResponsesAdapter(ProviderAdapter):
         usage = data.get("usage") or {}
         status = data.get("status")
         return "".join(text_parts), usage if isinstance(usage, dict) else {}, status if isinstance(status, str) else None
+
+    @staticmethod
+    def _native_calls(data: dict[str, Any]) -> list[NativeToolCall]:
+        calls: list[NativeToolCall] = []
+        for item in data.get("output", []) if isinstance(data.get("output"), list) else []:
+            if not isinstance(item, dict) or item.get("type") != "function_call":
+                continue
+            raw_args = item.get("arguments", "")
+            try:
+                args: dict[str, Any] | str = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                args = raw_args
+            calls.append({"id": str(item.get("call_id") or item.get("id") or ""), "name": str(item.get("name") or ""), "arguments": args})
+        return calls
 
     @staticmethod
     def _extract_reasoning_summaries(data: dict[str, Any]) -> list[str]:
@@ -292,6 +358,7 @@ class CodexResponsesAdapter(ProviderAdapter):
         max_tokens: int | None = None,
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
+        tools: list[dict[str, Any]] | None = None,
         stream_transport_timeout: float | None = None,
     ) -> ChatResult:
         url = f"{BASE_URL}/responses"
@@ -301,7 +368,7 @@ class CodexResponsesAdapter(ProviderAdapter):
             # for compaction where AgentSession intentionally supplies no live
             # callback.
             stream=True, max_tokens=max_tokens,
-            images=images, storage_dir=storage_dir,
+            images=images, storage_dir=storage_dir, tools=tools,
         )
         req_headers = self._headers(api_key, extra=headers)
         transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
@@ -312,6 +379,69 @@ class CodexResponsesAdapter(ProviderAdapter):
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
         summary_delta_keys: set[tuple[Any, ...]] = set()
+        call_parts: dict[str, dict[str, Any]] = {}
+        call_aliases: dict[str, str] = {}
+
+        def call_aliases_for(value: dict[str, Any]) -> list[str]:
+            """Return every Responses identity which can name one call item."""
+            aliases: list[str] = []
+            for field, alias_kind in (
+                ("item_id", "item"),
+                ("id", "item"),
+                ("call_id", "call"),
+                ("output_index", "output"),
+            ):
+                raw = value.get(field)
+                if raw is not None and str(raw):
+                    # `item_id` in deltas is the `id` carried by output items.
+                    # Namespace output indexes so numeric indexes cannot collide
+                    # with provider-generated item/call ids.
+                    aliases.append(f"{alias_kind}:{raw}")
+            return aliases
+
+        def get_call(value: dict[str, Any]) -> dict[str, Any]:
+            aliases = call_aliases_for(value)
+            keys = {call_aliases[alias] for alias in aliases if alias in call_aliases}
+            if keys:
+                key = next(iter(keys))
+                call = call_parts[key]
+                # A later event may bridge two formerly separate aliases.
+                for other_key in keys - {key}:
+                    other = call_parts.pop(other_key)
+                    if not call.get("name") and other.get("name"):
+                        call["name"] = other["name"]
+                    if not call.get("arguments") and other.get("arguments"):
+                        call["arguments"] = other["arguments"]
+                    for alias, mapped_key in list(call_aliases.items()):
+                        if mapped_key == other_key:
+                            call_aliases[alias] = key
+            else:
+                key = f"call-{len(call_parts)}"
+                call = {"id": "", "name": "", "arguments": ""}
+                call_parts[key] = call
+            for alias in aliases:
+                call_aliases[alias] = key
+            return call
+
+        def update_call(
+            value: dict[str, Any], *, delta: str | None = None, final_arguments: bool = False
+        ) -> None:
+            call = get_call(value)
+            name = value.get("name")
+            if isinstance(name, str) and name:
+                call["name"] = name
+            # call_id is the id that function_call_output must reference.  An
+            # argument delta commonly has only item_id; retain it until a later
+            # output-item event supplies the real call_id.
+            call_id = value.get("call_id") or value.get("id")
+            if call_id is not None and str(call_id):
+                call["id"] = str(call_id)
+            if delta is not None:
+                call["arguments"] += delta
+            elif final_arguments and "arguments" in value and value.get("arguments") is not None:
+                # Final item payload is authoritative and contains the complete
+                # arguments, rather than another streamed fragment.
+                call["arguments"] = value["arguments"]
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30)) as client:
             async with client.stream("POST", url, json=payload, headers=req_headers) as resp:
@@ -389,6 +519,32 @@ class CodexResponsesAdapter(ProviderAdapter):
                                 on_thinking_delta(summary_text)
                             except Exception:
                                 pass
+                    elif ctype == "response.function_call_arguments.delta":
+                        update_call(chunk, delta=str(chunk.get("delta") or ""))
+                    elif ctype == "response.output_item.added":
+                        item: dict[str, Any] = (
+                            chunk["item"] if isinstance(chunk.get("item"), dict) else chunk
+                        )
+                        if item.get("type") == "function_call":
+                            # The added event frequently carries the call name
+                            # and call_id before argument deltas arrive.
+                            item_with_event_ids = {**chunk, **item}
+                            update_call(item_with_event_ids)
+                    elif ctype == "response.function_call_arguments.done":
+                        # This terminal arguments event has no output item in
+                        # some Responses versions, but still bridges item_id to
+                        # call_id and carries the complete JSON arguments.
+                        update_call(chunk, final_arguments=True)
+                    elif ctype == "response.output_item.done":
+                        item: dict[str, Any] = (
+                            chunk["item"] if isinstance(chunk.get("item"), dict) else chunk
+                        )
+                        if item.get("type") == "function_call":
+                            # Deltas identify this item with item_id, while the
+                            # terminal item commonly uses call_id.  Keep both
+                            # aliases on the same normalized call.
+                            item_with_event_ids = {**chunk, **item}
+                            update_call(item_with_event_ids, final_arguments=True)
                     elif ctype == "response.completed":
                         response_obj = chunk.get("response") or {}
                         if not isinstance(response_obj, dict):
@@ -413,9 +569,19 @@ class CodexResponsesAdapter(ProviderAdapter):
                     elif ctype == "response.incomplete":
                         raise self._incomplete_error(chunk.get("response") or chunk)
 
+        native_calls: list[NativeToolCall] = self._native_calls(raw_last) if raw_last else []
+        if not native_calls:
+            for call in call_parts.values():
+                raw_args = call["arguments"]
+                try:
+                    call["arguments"] = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except json.JSONDecodeError:
+                    pass
+            native_calls = cast(list[NativeToolCall], list(call_parts.values()))
         return ChatResult(
             text="".join(text_parts), raw=raw_last, usage=usage,
-            stop_reason=stop_reason, had_thinking=had_thinking,
+            stop_reason=stop_reason, had_thinking=had_thinking, native_tool_calls=native_calls or None,
+            had_native_tool_call=bool(native_calls),
         )
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
