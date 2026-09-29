@@ -3518,8 +3518,8 @@ if TEXTUAL_AVAILABLE:
         def action_toggle_cooperation(self) -> None:
             """Ctrl+Z: toggle ask-before-running (cooperation) mode.
 
-            Affects future tool calls only; a pending approval prompt keeps
-            waiting for its answer.
+            Disabling cooperation releases pending approvals and model
+            questions.
             """
             enabled = self.session.approval_callback is None
             try:
@@ -3811,6 +3811,28 @@ if TEXTUAL_AVAILABLE:
                     input_widget.focus()
                 except Exception:
                     pass
+            elif et == "ask_user_released":
+                # The session released a model question after cooperation was
+                # disabled. Do not leave a stale input prompt/spinner behind.
+                self._ask_user_pending = None
+                try:
+                    self.query_one("#input", TextArea).placeholder = "Type a command or /help"
+                except Exception:
+                    pass
+                self._render_stream()
+                self._refresh_sidebar()
+            elif et == "cooperation_changed" and not event.get("enabled"):
+                # Release the UI-owned approval callback as well. The callback
+                # then returns an ordinary rejection to the existing tool flow.
+                queue = self._approval_queue
+                if queue is not None:
+                    queue.put_nowait(("no", "cooperation disabled"))
+                self._approval_pending = None
+                try:
+                    self.query_one("#input", TextArea).placeholder = "Type a command or /help"
+                except Exception:
+                    pass
+                self._refresh_sidebar()
             elif et == "ask_user_answered":
                 self._write(f"[AskUser] answer: {event.get('answer')}", "info")
             elif et == "extension_ui_request":

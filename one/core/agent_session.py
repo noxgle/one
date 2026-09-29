@@ -127,6 +127,7 @@ class AgentSession:
         storage_dir: str = "",
         register_mcp_tools_callback: bool = True,
         activity_callback: Callable[[str], None] | None = None,
+        cooperation_state: dict[str, bool] | None = None,
     ) -> None:
         self.session_manager = session_manager
         self.settings_manager = settings_manager
@@ -197,7 +198,10 @@ class AgentSession:
         self._last_subagent_timeout: dict[str, Any] | None = None
         # Provider-only context diagnostics; durable session messages stay raw.
         self._last_tool_output_pruning: dict[str, int] = {"count": 0, "tokensReclaimed": 0}
-        self.approval_callback = approval_callback
+        # Children share this state so a parent toggle applies to already
+        # running child sessions as well.
+        self._cooperation_state = cooperation_state or {"enabled": approval_callback is not None}
+        self._approval_callback = approval_callback
         self._approval_tools = set(settings_manager.get_tool_approval_tools())
 
         if not self.messages:
@@ -306,7 +310,7 @@ class AgentSession:
             prompt = "You are an expert coding assistant."
         else:
             try:
-                prompt = getter(selected_tools=self._active_tools)
+                prompt = getter(selected_tools=self._model_visible_tools())
             except TypeError:
                 # Backward compatibility with older loaders/mocks.
                 prompt = getter()
@@ -345,6 +349,39 @@ class AgentSession:
             f"Today is {now:%Y-%m-%d} ({now:%A}), local time ({tz_name}, UTC{offset_fmt})."
         )
         return prompt
+
+    def _model_visible_tools(self) -> list[str]:
+        """Return tools advertised to the model in the current mode."""
+        if self.cooperation_enabled:
+            return list(self._active_tools)
+        return [tool for tool in self._active_tools if tool != "ask_user"]
+
+    @property
+    def cooperation_enabled(self) -> bool:
+        return bool(self._cooperation_state.get("enabled"))
+
+    @property
+    def approval_callback(self) -> Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]] | None:
+        return self._approval_callback
+
+    @approval_callback.setter
+    def approval_callback(self, callback: Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]] | None) -> None:
+        was_enabled = self.cooperation_enabled
+        self._approval_callback = callback
+        self._cooperation_state["enabled"] = callback is not None
+        if callback is None:
+            self._release_pending_questions()
+        if was_enabled != self.cooperation_enabled:
+            self._emit({"type": "cooperation_changed", "enabled": self.cooperation_enabled})
+
+    def _release_pending_questions(self) -> None:
+        """Release model questions without producing a human-input event."""
+        pending = list(self._pending_questions.items())
+        for _qid, entry in pending:
+            entry["answer"] = "Cooperation is disabled; proceed with best judgment without asking the user."
+            entry["event"].set()
+        if pending:
+            self._emit({"type": "ask_user_released", "reason": "cooperation disabled"})
 
     def _try_parse_tool_call(self, text: str, provider_tool_call_id: str | None = None) -> dict[str, Any] | None:
         def normalize_tool_args(tool: str, raw_args: Any) -> dict[str, Any] | None:
@@ -911,6 +948,10 @@ class AgentSession:
         effective_timeout = self._effective_tool_timeout(tool_name, args, timeout_sec)
         if tool_name not in self._active_tools:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
+        # Stale prompt context and direct callers must not be able to create a
+        # human-input wait after cooperation has been disabled.
+        if tool_name == "ask_user" and not self.cooperation_enabled:
+            return self._ask_user_disabled_result()
         if tool_name == "finish" and self._plan_just_created:
             return {
                 "ok": False,
@@ -1118,7 +1159,8 @@ class AgentSession:
         if tool_name not in {"plan", "finish"}:
             self._plan_just_created = False
         if (
-            self.approval_callback is not None
+            self.cooperation_enabled
+            and self.approval_callback is not None
             and tool_name != "finish"
             and tool_name in self._approval_tools
         ):
@@ -1545,6 +1587,7 @@ class AgentSession:
             scoped_models=self.scoped_models,
             tools=sub_tools,
             approval_callback=self.approval_callback,
+            cooperation_state=self._cooperation_state,
             mcp_manager=self._mcp_manager,
             register_mcp_tools_callback=False,
             activity_callback=_child_activity,
@@ -1770,6 +1813,8 @@ class AgentSession:
         Emits an `ask_user` event; the UI channel answers via `answer_question`.
         Returns the answer as the tool result so it lands in the model context.
         """
+        if not self.cooperation_enabled:
+            return self._ask_user_disabled_result()
         question = str(args.get("question") or "").strip()
         if not question:
             raise RuntimeError("ask_user requires a non-empty 'question'")
@@ -1788,21 +1833,30 @@ class AgentSession:
             else:
                 await entry["event"].wait()
         except TimeoutError:
-            self._pending_questions.pop(qid, None)
             raise RuntimeError(f"No answer received within timeout ({timeout}s)") from None
+        finally:
+            # Covers normal answers, timeout, task cancellation, and abort.
+            self._pending_questions.pop(qid, None)
         # Check abort after receiving answer.
         if self._abort_requested:
-            self._pending_questions.pop(qid, None)
             raise _AbortSignal()
         answer = entry["answer"] or ""
-        self._pending_questions.pop(qid, None)
         return {"output": answer, "content": [{"type": "text", "text": answer}]}
+
+    @staticmethod
+    def _ask_user_disabled_result() -> dict[str, Any]:
+        message = "Cooperation is disabled; proceed with best judgment without asking the user."
+        return {"output": message, "content": [{"type": "text", "text": message}]}
 
     def answer_question(self, question_id: str, answer: str) -> None:
         """Answer a pending ask_user question (called by UI channels)."""
         entry = self._pending_questions.get(question_id)
         if entry is None:
             raise ValueError(f"No pending question with id {question_id}")
+        # A cooperation toggle may have released this question, or another UI
+        # answer may have won the race. Preserve the first answer and event.
+        if entry["answer"] is not None:
+            return
         entry["answer"] = str(answer)
         entry["event"].set()
         self._emit({"type": "ask_user_answered", "id": question_id, "answer": str(answer)})

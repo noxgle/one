@@ -111,6 +111,7 @@ def _mk_host(
     tmp_path: Path,
     responses: list[str],
     tools: list[str] | None = None,
+    cooperation: bool = False,
 ) -> _MockHost:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
@@ -120,6 +121,10 @@ def _mk_host(
     settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
     session = SessionManager.in_memory(str(tmp_path))
     agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=tools)
+    if cooperation:
+        async def approve(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+            return True, ""
+        agent.approval_callback = approve
     agent.providers = {"openai": _Provider(responses)}
     return _MockHost(agent)
 
@@ -242,7 +247,7 @@ async def test_run_mode_answer_file(tmp_path: Path):
             '{"tool":"ask_user","args":{"question":"which dir?"}}',
             '{"tool":"finish","args":{"summary":"answered","goal_success":true}}',
             "DONE",
-        ],
+        ], cooperation=True,
     )
     answer_file = tmp_path / "answers.txt"
     task = asyncio.create_task(run_run_mode(host, {"task": "go", "answer_file": str(answer_file)}))
@@ -268,7 +273,7 @@ async def test_run_mode_no_answer_file_canned(tmp_path: Path, capsys):
             '{"tool":"ask_user","args":{"question":"q?"}}',
             '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
             "DONE",
-        ],
+        ], cooperation=True,
     )
     code = await run_run_mode(host, {"task": "go"})
     assert code == 0

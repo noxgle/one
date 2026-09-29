@@ -15,7 +15,11 @@ from one.core.settings_manager import SettingsManager
 
 
 class _Loader:
+    def __init__(self) -> None:
+        self.selected_tools: list[str] | None = None
+
     def get_system_prompt(self, selected_tools: list[str] | None = None) -> str:  # noqa: ARG002
+        self.selected_tools = selected_tools
         return "You are a coding agent."
 
 
@@ -43,6 +47,7 @@ def _mk_agent(
     tmp_path: Path,
     tools: list[str] | None = None,
     settings_override: dict[str, Any] | None = None,
+    cooperation: bool = False,
 ) -> AgentSession:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
@@ -51,7 +56,12 @@ def _mk_agent(
     assert model is not None
     settings = SettingsManager.in_memory(settings_override or {"tools": {"maxSteps": 4, "timeoutSec": 5}})
     session = SessionManager.in_memory(str(tmp_path))
-    return AgentSession(session, settings, registry, _Loader(), model, "medium", tools=tools)
+    agent = AgentSession(session, settings, registry, _Loader(), model, "medium", tools=tools)
+    if cooperation:
+        async def approve(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+            return True, ""
+        agent.approval_callback = approve
+    return agent
 
 
 @pytest.mark.asyncio
@@ -60,7 +70,7 @@ async def test_ask_user_returns_answer(tmp_path: Path):
     ask_user_json = json.dumps({"tool": "ask_user", "args": {"question": "which dir?"}})
     finish_json = json.dumps({"tool": "finish", "args": {"summary": "done", "goal_success": True}})
 
-    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"])
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"], cooperation=True)
     agent.providers = {"openai": _Provider([ask_user_json, finish_json])}
 
     events: list[dict[str, Any]] = []
@@ -111,6 +121,7 @@ async def test_ask_user_timeout(tmp_path: Path):
         tmp_path,
         tools=["ask_user", "finish"],
         settings_override={"tools": {"maxSteps": 4, "timeoutSec": 5}, "askUser": {"timeoutSec": 1}},
+        cooperation=True,
     )
     agent.providers = {"openai": _Provider([ask_user_json, finish_json])}
 
@@ -145,7 +156,7 @@ async def test_ask_user_requires_question(tmp_path: Path):
     empty_json = json.dumps({"tool": "ask_user", "args": {}})
     finish_json = json.dumps({"tool": "finish", "args": {"summary": "done", "goal_success": True}})
 
-    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"])
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"], cooperation=True)
     agent.providers = {"openai": _Provider([empty_json, finish_json])}
 
     events: list[dict[str, Any]] = []
@@ -160,9 +171,100 @@ async def test_ask_user_requires_question(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_ask_user_off_returns_deterministic_result_without_event_or_wait(tmp_path: Path):
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"])
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    result = await asyncio.wait_for(agent._run_tool_call("ask_user", {"question": "stale context?"}), timeout=0.1)
+
+    assert result["ok"] is True
+    assert result["result"] == "Cooperation is disabled; proceed with best judgment without asking the user."
+    assert agent.get_pending_questions() == []
+    assert not [event for event in events if event["type"] == "ask_user"]
+
+
+def test_ask_user_is_hidden_from_prompt_when_cooperation_is_off(tmp_path: Path):
+    agent = _mk_agent(tmp_path, tools=["read", "ask_user", "finish"])
+    loader = agent.resource_loader
+
+    agent._build_runtime_system_prompt()
+    assert loader.selected_tools == ["read", "finish"]
+
+    async def approve(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+        return True, ""
+
+    agent.approval_callback = approve
+    agent._build_runtime_system_prompt()
+    assert loader.selected_tools == ["read", "ask_user", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_disabling_cooperation_releases_pending_question(tmp_path: Path):
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"], cooperation=True)
+    released = asyncio.Event()
+    agent.subscribe(lambda event: released.set() if event["type"] == "ask_user_released" else None)
+
+    task = asyncio.create_task(agent._ask_user({"question": "continue?"}))
+    await asyncio.sleep(0)
+    assert len(agent.get_pending_questions()) == 1
+
+    agent.approval_callback = None
+    result = await task
+
+    assert released.is_set()
+    assert result["output"] == "Cooperation is disabled; proceed with best judgment without asking the user."
+    assert agent.get_pending_questions() == []
+
+
+@pytest.mark.asyncio
+async def test_answer_question_ignores_released_or_duplicate_answers(tmp_path: Path):
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"], cooperation=True)
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    task = asyncio.create_task(agent._ask_user({"question": "continue?"}))
+    await asyncio.sleep(0)
+    question_id = agent.get_pending_questions()[0]["id"]
+
+    agent.approval_callback = None
+    agent.answer_question(question_id, "late answer")
+    result = await task
+
+    assert result["output"] == "Cooperation is disabled; proceed with best judgment without asking the user."
+    assert not [event for event in events if event["type"] == "ask_user_answered"]
+
+    async def approve(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+        return True, ""
+
+    agent.approval_callback = approve
+    duplicate_task = asyncio.create_task(agent._ask_user({"question": "again?"}))
+    await asyncio.sleep(0)
+    duplicate_id = agent.get_pending_questions()[0]["id"]
+    agent.answer_question(duplicate_id, "first answer")
+    agent.answer_question(duplicate_id, "second answer")
+    duplicate_result = await duplicate_task
+
+    assert duplicate_result["output"] == "first answer"
+    answered_events = [event for event in events if event["type"] == "ask_user_answered"]
+    assert answered_events == [{"type": "ask_user_answered", "id": duplicate_id, "answer": "first answer"}]
+
+
+@pytest.mark.asyncio
+async def test_ask_user_cancellation_clears_pending_question(tmp_path: Path):
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"], cooperation=True)
+    task = asyncio.create_task(agent._ask_user({"question": "cancel?"}))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert agent.get_pending_questions() == []
+
+
+@pytest.mark.asyncio
 async def test_answer_question_unknown_id(tmp_path: Path):
     """Calling answer_question with a nonexistent id raises ValueError."""
-    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"])
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"], cooperation=True)
     with pytest.raises(ValueError):
         agent.answer_question("nope", "x")
 
@@ -173,7 +275,7 @@ async def test_get_pending_questions(tmp_path: Path):
     ask_user_json = json.dumps({"tool": "ask_user", "args": {"question": "which dir?"}})
     finish_json = json.dumps({"tool": "finish", "args": {"summary": "done", "goal_success": True}})
 
-    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"])
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"], cooperation=True)
     agent.providers = {"openai": _Provider([ask_user_json, finish_json])}
 
     question_event = asyncio.Event()
@@ -202,7 +304,7 @@ async def test_ask_user_abort_cancels_wait(tmp_path: Path):
     ask_user_json = json.dumps({"tool": "ask_user", "args": {"question": "halt?"}})
     finish_json = json.dumps({"tool": "finish", "args": {"summary": "done", "goal_success": True}})
 
-    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"])
+    agent = _mk_agent(tmp_path, tools=["ask_user", "finish"], cooperation=True)
     agent.providers = {"openai": _Provider([ask_user_json, finish_json])}
 
     events: list[dict[str, Any]] = []

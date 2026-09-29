@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,29 @@ async def test_tui_spinner_paused_shows_ask_user_wait(tmp_path: Path):
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "waiting for your response" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_disabling_cooperation_clears_pending_ask_user(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_toggle_cooperation()
+        task = asyncio.create_task(session._ask_user({"question": "continue?"}))
+        await pilot.pause()
+        assert app._ask_user_pending is not None
+
+        app.action_toggle_cooperation()
+        await pilot.pause()
+        assert app._ask_user_pending is None
+        app._turn_active = True
+        app._last_delta_ts = 0.0
+        app._tick_waiting()
+        assert "waiting for your response" not in "\n".join(app._stream_lines)
+        await task
 
 
 @pytest.mark.asyncio

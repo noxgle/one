@@ -57,6 +57,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Cooperation-off human-input invariant** — model `ask_user` calls now proceed
+  deterministically without creating a prompt or blocking when cooperation is
+  disabled; pending model questions and TUI approvals are released on disable.
 - **TUI lifecycle separators** — horizontal rules now start after a blank line,
   preventing assistant output from visually joining the separator.
 
