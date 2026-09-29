@@ -108,30 +108,77 @@ tracked files). `MANIFEST.in` packaging claims verified clean.
 - [x] **Manual versus automatic compaction:** `/compact` forces a summary for
   non-empty history below the automatic threshold; automatic and recovery paths
   remain threshold-driven.
-- [ ] **Normalize provider-native tool calls.** Evaluate a common adapter layer
-  for native OpenAI-compatible, Anthropic, and Gemini function/tool-call
-  payloads. The current JSON-in-text parser remains the production contract
-  until this work is designed, implemented, and covered by compatibility tests.
-  - **Description:** Design and implement a normalized result shape
-    `{id, name, arguments}` that absorbs provider-native structured tool-call
-    outputs and maps them into the existing JSON-in-text path. Provider
-    adapters emit normalized results; the agent session loop treats them
-    identically to parsed JSON-in-text results.
+- [ ] **Normalize provider-native tool calls.** Replace the current
+  JSON-in-text-only production path with a provider-neutral native tool-call
+  layer while preserving JSON-in-text as a compatibility fallback. This is
+  especially required for the ChatGPT/Codex Responses adapter: it currently
+  sends no native `tools` definitions and parses no Responses `function_call`
+  items, so Codex can emit unsupported recipient text such as `to=bash`,
+  `to=read`, or `to=plan` instead of an executable tool call.
+  - **Current gap:** `one/providers/codex_responses.py` sends only prompt text
+    and parses `output_text`/reasoning events. `AgentSession` recognizes JSON
+    envelopes and selected text formats, but not Codex recipient syntax or
+    native Responses function-call streams. The result is visible pseudo-tool
+    text, no `tool_call_start`, and no tool result.
+  - **Architecture:** Add a canonical tool-definition/schema interface and
+    extend the provider result contract with normalized calls shaped as
+    `{id, name, arguments}`. Provider adapters translate native calls into
+    this shape; `AgentSession` dispatches native calls through the existing
+    approval, timeout, event, evidence, and result paths. Keep reasoning
+    summaries non-executable and give native calls precedence over text
+    parsing.
+  - **Provider order:** Implement and verify ChatGPT/Codex Responses first
+    (`tools` payload, streamed argument assembly, `function_call_output`
+    replay), then OpenAI-compatible, Anthropic tool-use, and Gemini function
+    calls. Preserve the existing JSON-in-text path for local and legacy
+    providers.
+  - **Compatibility policy:** Native calls are authoritative when present.
+    If a response contains no native call, use JSON-in-text fallback. Reject
+    malformed or unknown native calls with a structured diagnostic; define and
+    test a deterministic policy for multiple calls in one response. Never
+    execute the same call once through native data and again through parsed
+    assistant text. Do not interpret reasoning-only recipient text as a tool.
+  - **Interim safety:** Until native support is complete, recognize Codex-like
+    `to=<known-tool>` output as an unsupported/malformed tool attempt, suppress
+    it from normal assistant rendering, and issue at most one bounded format
+    repair requesting the exact JSON-in-text envelope. This mitigation must
+    not execute unvalidated arguments or alter local-model behavior.
+  - **Files:** `one/providers/base.py`,
+    `one/providers/codex_responses.py`,
+    `one/providers/openai_compatible.py`, `one/providers/anthropic.py`,
+    `one/providers/gemini.py`, `one/core/agent_session.py`,
+    `one/resources/resource_loader.py`, `one/tools/index.py`, and provider,
+    parser, replay, event, and prompt tests under `tests/`.
+  - **Dependencies:** Define canonical JSON schemas and the normalized result
+    contract before changing adapters. Preserve the synchronous session loop,
+    existing event contract, cooperation/approval gates, tool timeouts,
+    evidence sidecars, and JSONL replay semantics.
   - **Acceptance Criteria:**
-    - Normalized `{id, name, arguments}` result from every supported provider.
-    - OpenAI-compatible native tool schemas preserved through the adapter.
-    - Streamed function-call fragments assemble into the same normalized result.
-    - Assistant/tool replay works with native payloads (no duplicate or missing
-      messages in session history).
-    - Native tool calls take precedence over text-parsed calls; no duplicate
-      tool invocations on a single provider response.
-    - Malformed/unknown/multiple native calls: documented policy — reject,
-      fallback to text-parsed, or route to `invalid` catch-all as appropriate.
-    - JSON-in-text fallback remains functional when a provider omits native
-      structured output.
-    - Wire, adversarial, and replay test coverage for each provider path.
-    - Authorized llama.cpp/Qwen spot check confirms no regression on
-      JSON-in-text with a local model.
+    - Normalized `{id, name, arguments}` result from every supported native
+      provider, including ChatGPT/Codex Responses.
+    - Native tool schemas are sent in each provider's required wire format;
+      Codex receives valid Responses `tools` definitions.
+    - Streamed function-call fragments assemble into one validated call.
+    - Codex assistant calls and `function_call_output` results replay correctly
+      in the next stateless request, with no missing or duplicate messages.
+    - Native calls take precedence over text-parsed calls; one provider
+      response cannot invoke the same tool twice.
+    - Malformed, unknown, and multiple native calls follow the documented
+      deterministic policy and cannot bypass approval, timeout, or capability
+      checks.
+    - JSON-in-text fallback remains functional for providers/models without
+      native structured output, including llama.cpp/Qwen.
+    - Codex recipient text such as `to=bash` is never silently presented as a
+      successful tool execution or treated as executable reasoning text.
+    - Wire, streamed-fragment, parser, adversarial, approval, timeout, and
+      session-replay tests cover every provider path.
+    - An authorized llama.cpp/Qwen spot check confirms no regression on the
+      existing JSON-in-text contract.
+  - **Verification:** Run focused provider/parser/replay suites, then
+    `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check .`, and
+    `git diff --check`. Use only fake transports in automated tests; any real
+    ChatGPT/Codex verification requires separate authorization and sanitized
+    logs.
 - [ ] **Windows shell support and CI.** Add Windows CI and either implement
   equivalent shell/process-group semantics or explicitly limit shell features
   on Windows. Until then Windows remains best-effort/experimental.
