@@ -264,6 +264,36 @@ async def test_codex_responses_correlates_function_call_item_and_call_ids() -> N
 
 
 @pytest.mark.asyncio
+async def test_codex_responses_finalizes_streamed_call_once_with_completed_snapshot() -> None:
+    result, _, _ = await _stream_with(CodexResponsesAdapter(), _sse(
+        {"type": "response.output_item.added", "item": {"type": "function_call", "id": "item-1", "call_id": "call-1", "name": "read"}},
+        {"type": "response.function_call_arguments.delta", "item_id": "item-1", "delta": '{"path":"a'},
+        {"type": "response.function_call_arguments.done", "item_id": "item-1", "arguments": '{"path":"a.txt"}'},
+        {"type": "response.output_item.done", "item": {"type": "function_call", "call_id": "call-1", "name": "read", "arguments": '{"path":"a.txt"}'}},
+        {"type": "response.completed", "response": {"status": "completed", "output": [
+            {"type": "function_call", "id": "item-1", "call_id": "call-1", "name": "read", "arguments": '{"path":"a.txt"}'},
+        ]}},
+    ))
+    assert result.native_tool_calls == [{"id": "call-1", "name": "read", "arguments": {"path": "a.txt"}}]
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_completed_fallback_keeps_distinct_equal_calls_and_discards_unfinished() -> None:
+    result, _, _ = await _stream_with(CodexResponsesAdapter(), _sse(
+        {"type": "response.output_item.added", "item": {"type": "function_call", "id": "unfinished", "name": "read"}},
+        {"type": "response.function_call_arguments.delta", "item_id": "unfinished", "delta": '{"path":"lost"}'},
+        {"type": "response.completed", "response": {"status": "completed", "output": [
+            {"type": "function_call", "id": "item-a", "call_id": "call-a", "name": "read", "arguments": '{"path":"same"}'},
+            {"type": "function_call", "id": "item-b", "call_id": "call-b", "name": "read", "arguments": '{"path":"same"}'},
+        ]}},
+    ))
+    assert result.native_tool_calls == [
+        {"id": "call-a", "name": "read", "arguments": {"path": "same"}},
+        {"id": "call-b", "name": "read", "arguments": {"path": "same"}},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_openrouter_stream_routes_reasoning_fields_without_final_text() -> None:
     adapter = OpenAICompatibleAdapter(
         "openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter"

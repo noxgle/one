@@ -26,7 +26,7 @@ import base64
 import json
 import uuid
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import httpx
 
@@ -283,20 +283,6 @@ class CodexResponsesAdapter(ProviderAdapter):
         return "".join(text_parts), usage if isinstance(usage, dict) else {}, status if isinstance(status, str) else None
 
     @staticmethod
-    def _native_calls(data: dict[str, Any]) -> list[NativeToolCall]:
-        calls: list[NativeToolCall] = []
-        for item in data.get("output", []) if isinstance(data.get("output"), list) else []:
-            if not isinstance(item, dict) or item.get("type") != "function_call":
-                continue
-            raw_args = item.get("arguments", "")
-            try:
-                args: dict[str, Any] | str = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-            except json.JSONDecodeError:
-                args = raw_args
-            calls.append({"id": str(item.get("call_id") or item.get("id") or ""), "name": str(item.get("name") or ""), "arguments": args})
-        return calls
-
-    @staticmethod
     def _extract_reasoning_summaries(data: dict[str, Any]) -> list[str]:
         """Extract only human-readable reasoning summaries from Responses output."""
         summaries: list[str] = []
@@ -379,53 +365,50 @@ class CodexResponsesAdapter(ProviderAdapter):
         stop_reason: str | None = None
         raw_last: dict[str, Any] = {}
         summary_delta_keys: set[tuple[Any, ...]] = set()
+        # Responses identifies a streamed output item by item.id/item_id.  A
+        # call_id identifies the eventual replay item, not another pending
+        # stream item.  Keeping those namespaces separate prevents one logical
+        # call from being accumulated twice when terminal events omit item.id.
         call_parts: dict[str, dict[str, Any]] = {}
-        call_aliases: dict[str, str] = {}
+        item_keys: dict[str, str] = {}
+        output_keys: dict[str, str] = {}
+        finalized_item_ids: set[str] = set()
+        finalized_call_ids: set[str] = set()
+        finalized_calls: list[NativeToolCall] = []
+        call_sequence = 0
 
-        def call_aliases_for(value: dict[str, Any]) -> list[str]:
-            """Return every Responses identity which can name one call item."""
-            aliases: list[str] = []
-            for field, alias_kind in (
-                ("item_id", "item"),
-                ("id", "item"),
-                ("call_id", "call"),
-                ("output_index", "output"),
-            ):
+        def item_identity(value: dict[str, Any]) -> str | None:
+            for field in ("item_id", "id"):
                 raw = value.get(field)
                 if raw is not None and str(raw):
-                    # `item_id` in deltas is the `id` carried by output items.
-                    # Namespace output indexes so numeric indexes cannot collide
-                    # with provider-generated item/call ids.
-                    aliases.append(f"{alias_kind}:{raw}")
-            return aliases
+                    return str(raw)
+            return None
 
         def get_call(value: dict[str, Any]) -> dict[str, Any]:
-            aliases = call_aliases_for(value)
-            keys = {call_aliases[alias] for alias in aliases if alias in call_aliases}
-            if keys:
-                key = next(iter(keys))
-                call = call_parts[key]
-                # A later event may bridge two formerly separate aliases.
-                for other_key in keys - {key}:
-                    other = call_parts.pop(other_key)
-                    if not call.get("name") and other.get("name"):
-                        call["name"] = other["name"]
-                    if not call.get("arguments") and other.get("arguments"):
-                        call["arguments"] = other["arguments"]
-                    for alias, mapped_key in list(call_aliases.items()):
-                        if mapped_key == other_key:
-                            call_aliases[alias] = key
-            else:
-                key = f"call-{len(call_parts)}"
-                call = {"id": "", "name": "", "arguments": ""}
-                call_parts[key] = call
-            for alias in aliases:
-                call_aliases[alias] = key
+            nonlocal call_sequence
+            item_id = item_identity(value)
+            output_index = value.get("output_index")
+            key = item_keys.get(item_id) if item_id else None
+            if key is None and item_id is None and output_index is not None:
+                key = output_keys.get(str(output_index))
+            if key is None:
+                key = f"call-{call_sequence}"
+                call_sequence += 1
+                call_parts[key] = {"id": "", "name": "", "arguments": ""}
+            call = call_parts[key]
+            if item_id:
+                item_keys[item_id] = key
+                call["_item_id"] = item_id
+            # Keep the provider's output position as a fallback bridge for
+            # terminal events which omit item_id; it never becomes a second
+            # pending identity when a stable item id is available.
+            if output_index is not None:
+                output_keys[str(output_index)] = key
             return call
 
         def update_call(
             value: dict[str, Any], *, delta: str | None = None, final_arguments: bool = False
-        ) -> None:
+        ) -> dict[str, Any]:
             call = get_call(value)
             name = value.get("name")
             if isinstance(name, str) and name:
@@ -433,7 +416,7 @@ class CodexResponsesAdapter(ProviderAdapter):
             # call_id is the id that function_call_output must reference.  An
             # argument delta commonly has only item_id; retain it until a later
             # output-item event supplies the real call_id.
-            call_id = value.get("call_id") or value.get("id")
+            call_id = value.get("call_id")
             if call_id is not None and str(call_id):
                 call["id"] = str(call_id)
             if delta is not None:
@@ -442,6 +425,47 @@ class CodexResponsesAdapter(ProviderAdapter):
                 # Final item payload is authoritative and contains the complete
                 # arguments, rather than another streamed fragment.
                 call["arguments"] = value["arguments"]
+            return call
+
+        def finalize_call(value: dict[str, Any]) -> None:
+            """Finalize one output item once; only output_item.done is decisive."""
+            item_id = item_identity(value)
+            call_id = str(value.get("call_id") or "")
+            if (item_id and item_id in finalized_item_ids) or (call_id and call_id in finalized_call_ids):
+                return
+            call = update_call(value, final_arguments=True)
+            # A terminal item can contain the authoritative id even when no
+            # preceding added event supplied one.
+            call_id = str(value.get("call_id") or call.get("id") or "")
+            raw_args = call.get("arguments", "")
+            try:
+                arguments: dict[str, Any] | str = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                arguments = raw_args
+            finalized_calls.append({"id": call_id, "name": str(call.get("name") or ""), "arguments": arguments})
+            if item_id:
+                finalized_item_ids.add(item_id)
+            if call_id:
+                finalized_call_ids.add(call_id)
+            # Pending records are intentionally not emitted at stream end.
+            for key, pending in list(call_parts.items()):
+                if pending is call:
+                    del call_parts[key]
+                    break
+
+        def ingest_completed_calls(response: dict[str, Any]) -> None:
+            """Use the completed response only for calls without a done event."""
+            output = response.get("output")
+            if not isinstance(output, list):
+                return
+            for item in output:
+                if not isinstance(item, dict) or item.get("type") != "function_call":
+                    continue
+                item_id = item_identity(item)
+                call_id = str(item.get("call_id") or "")
+                if (item_id and item_id in finalized_item_ids) or (call_id and call_id in finalized_call_ids):
+                    continue
+                finalize_call(item)
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30)) as client:
             async with client.stream("POST", url, json=payload, headers=req_headers) as resp:
@@ -544,7 +568,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                             # terminal item commonly uses call_id.  Keep both
                             # aliases on the same normalized call.
                             item_with_event_ids = {**chunk, **item}
-                            update_call(item_with_event_ids, final_arguments=True)
+                            finalize_call(item_with_event_ids)
                     elif ctype == "response.completed":
                         response_obj = chunk.get("response") or {}
                         if not isinstance(response_obj, dict):
@@ -555,6 +579,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                         status = response_obj.get("status")
                         stop_reason = status if isinstance(status, str) else None
                         raw_last = response_obj or chunk
+                        ingest_completed_calls(response_obj)
                         if stop_reason == "failed":
                             raise RuntimeError(f"chatgpt responses failed: {response_obj.get('error')}")
                         if stop_reason == "incomplete":
@@ -569,15 +594,9 @@ class CodexResponsesAdapter(ProviderAdapter):
                     elif ctype == "response.incomplete":
                         raise self._incomplete_error(chunk.get("response") or chunk)
 
-        native_calls: list[NativeToolCall] = self._native_calls(raw_last) if raw_last else []
-        if not native_calls:
-            for call in call_parts.values():
-                raw_args = call["arguments"]
-                try:
-                    call["arguments"] = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                except json.JSONDecodeError:
-                    pass
-            native_calls = cast(list[NativeToolCall], list(call_parts.values()))
+        # Never promote unfinished stream accumulators: a function call is
+        # executable only after output_item.done or a completed-output fallback.
+        native_calls = finalized_calls
         return ChatResult(
             text="".join(text_parts), raw=raw_last, usage=usage,
             stop_reason=stop_reason, had_thinking=had_thinking, native_tool_calls=native_calls or None,

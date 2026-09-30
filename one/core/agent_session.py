@@ -2336,8 +2336,8 @@ class AgentSession:
             )
         return prompt + "Choose one of the active tools; finish is not available."
 
-    def _native_tool_call(self, assistant: dict[str, Any], step: int) -> tuple[dict[str, Any] | None, bool]:
-        """Validate one normalized call; never fall back to assistant text.
+    def _native_tool_calls(self, assistant: dict[str, Any], step: int) -> tuple[list[dict[str, Any]], bool]:
+        """Validate a native batch atomically; never fall back to assistant text.
 
         Native output is authoritative, including malformed output.  A missing
         provider correlation id gets a stable session-local id so dispatch and
@@ -2346,27 +2346,101 @@ class AgentSession:
         """
         calls = assistant.get("_nativeToolCalls")
         if not isinstance(calls, list) or not calls:
-            return None, False
-        if len(calls) != 1:
-            self._emit({"type": "tool_call_parse_failed", "reason": "multiple_native_tool_calls", "count": len(calls)})
-            return None, True
-        call = calls[0]
-        if (
-            not isinstance(call, dict)
-            or not isinstance(call.get("name"), str)
-            or not call["name"].strip()
-            or not isinstance(call.get("arguments"), dict)
-        ):
-            self._emit({"type": "tool_call_parse_failed", "reason": "malformed_native_tool_call"})
-            return None, True
-        call_id = str(call.get("id") or "")
-        tool_call_id = call_id or f"native-{self._turn_sequence}-{step}-0"
-        # Gemini GenerateContent calls may omit an id. Persist the session-local
-        # fallback on the normalized call so its eventual output is replayable
-        # as the same native protocol pair.
-        if not call_id:
-            call["id"] = tool_call_id
-        return {"tool": call["name"], "args": call["arguments"], "toolCallId": tool_call_id}, True
+            return [], False
+        normalized: list[dict[str, Any]] = []
+        seen: dict[str, tuple[str, dict[str, Any]]] = {}
+        for index, call in enumerate(calls):
+            if (
+                not isinstance(call, dict)
+                or not isinstance(call.get("name"), str)
+                or not call["name"].strip()
+                or not isinstance(call.get("arguments"), dict)
+            ):
+                self._emit({"type": "tool_call_parse_failed", "reason": "malformed_native_tool_call"})
+                return [], True
+            name = call["name"].strip()
+            arguments = call["arguments"]
+            call_id = str(call.get("id") or "") or f"native-{self._turn_sequence}-{step}-{index}"
+            call["id"] = call_id
+            prior = seen.get(call_id)
+            if prior:
+                if prior != (name, arguments):
+                    self._emit({"type": "tool_call_parse_failed", "reason": "conflicting_native_tool_call_id", "toolCallId": call_id})
+                    return [], True
+                continue
+            seen[call_id] = (name, arguments)
+            normalized.append({"tool": name, "args": arguments, "toolCallId": call_id})
+        # Persist exactly the calls we will replay.  Duplicate equivalent wire
+        # records are one logical call, not two protocol pairs.
+        assistant["_nativeToolCalls"] = [
+            {"id": call["toolCallId"], "name": call["tool"], "arguments": call["args"]}
+            for call in normalized
+        ]
+        controls = [call for call in normalized if call["tool"] in {"finish", "ask_user"}]
+        if controls and len(normalized) != 1:
+            self._emit({"type": "tool_call_parse_failed", "reason": "control_tool_in_native_batch", "count": len(normalized)})
+            return [], True
+        return normalized, True
+
+    def _budget_exceeded_assistant_message(self, message: str) -> dict[str, Any]:
+        return {
+            "role": "assistant",
+            "content": [{"type": "text", "text": message}],
+            "provider": self.model.provider if self.model else None,
+            "model": self.model.id if self.model else None,
+            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+            "stopReason": "budget_exceeded",
+            "timestamp": int(time.time() * 1000),
+        }
+
+    def _record_cancelled_tool_call(
+        self, tool_call: dict[str, Any], *, native_batch: bool, aborted: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": False,
+            "tool": tool_call["tool"],
+            "args": tool_call["args"],
+            "error": "aborted before execution" if aborted else "budget exceeded before execution",
+            "cancelled": True,
+        }
+        if aborted:
+            payload["aborted"] = True
+        else:
+            payload["budgetExceeded"] = True
+        evidence_id, evidence_error = self._store_tool_evidence(payload)
+        if evidence_id:
+            payload["evidenceId"] = evidence_id
+        message_payload = self._build_tool_result_message_payload(
+            payload if evidence_id or not evidence_error else {**payload, "evidenceUnavailable": evidence_error}
+        )
+        msg = {
+            "role": "toolResult",
+            "content": json.dumps(message_payload, ensure_ascii=False),
+            "timestamp": int(time.time() * 1000),
+        }
+        if native_batch:
+            msg["_nativeToolCallId"] = tool_call["toolCallId"]
+        self.messages.append(msg)
+        self.session_manager.append_message(msg)
+        self._emit({
+            "type": "tool_call_start",
+            "tool": tool_call["tool"],
+            "toolCallId": tool_call["toolCallId"],
+            "args": copy.deepcopy(tool_call["args"]),
+            "cancelled": True,
+        })
+        event: dict[str, Any] = {
+            "type": "tool_call_end",
+            "tool": tool_call["tool"],
+            "toolCallId": tool_call["toolCallId"],
+            "ok": False,
+            "result": payload,
+        }
+        if aborted:
+            event["aborted"] = True
+        self._emit(event)
+        self._report_activity("tool_failed")
+        return payload
 
     @staticmethod
     def _native_replay_keep_start(messages: list[dict[str, Any]], keep_start: int) -> int:
@@ -2550,15 +2624,7 @@ class AgentSession:
                             if budget_hit is not None:
                                 kind, message = budget_hit
                                 self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
-                                final_assistant = {
-                                    "role": "assistant",
-                                    "content": [{"type": "text", "text": message}],
-                                    "provider": self.model.provider if self.model else None,
-                                    "model": self.model.id if self.model else None,
-                                    "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                                    "stopReason": "budget_exceeded",
-                                    "timestamp": int(time.time() * 1000),
-                                }
+                                final_assistant = self._budget_exceeded_assistant_message(message)
                                 break
                             try:
                                 # Capability gate: if images are present but the model does not
@@ -2592,20 +2658,21 @@ class AgentSession:
                             # in the tool loop — they were attached to the prompt and
                             # should not be re-sent on subsequent provider calls.
                             self._tool_images = []
-                            tool_call, native_present = self._native_tool_call(assistant, step)
+                            tool_calls, native_present = self._native_tool_calls(assistant, step)
                             if not native_present:
-                                tool_call = self._try_parse_tool_call(assistant_text, provider_tool_call_id)
+                                parsed = self._try_parse_tool_call(assistant_text, provider_tool_call_id)
+                                tool_calls = [parsed] if parsed else []
                             # Codex recipient syntax is neither JSON nor a
                             # native call.  It is deliberately non-executable;
                             # hide it and allow exactly the existing bounded
                             # format-repair request.
                             pseudo_recipient = self._is_pseudo_recipient(assistant_text)
-                            if pseudo_recipient and tool_call is None:
+                            if pseudo_recipient and not tool_calls:
                                 assistant["content"] = [{"type": "text", "text": ""}]
                                 assistant["_streamedSuppressed"] = True
                                 assistant_text = ""
                             if (
-                                tool_call is None
+                                not tool_calls
                                 and not native_present
                                 and not pseudo_recipient
                                 and self._should_tool_nudge(
@@ -2641,13 +2708,14 @@ class AgentSession:
                                     final_assistant = self._abort_assistant_message()
                                     break
                                 nudged_text = self._assistant_text(nudged)
-                                nudged_tool_call, nudged_native = self._native_tool_call(nudged, step)
+                                nudged_tool_calls, nudged_native = self._native_tool_calls(nudged, step)
                                 if not nudged_native:
-                                    nudged_tool_call = self._try_parse_tool_call(
+                                    nudged_parsed = self._try_parse_tool_call(
                                         nudged_text, nudged.pop("_providerToolCallId", None)
                                     )
-                                if nudged_tool_call:
-                                    tool_call = nudged_tool_call
+                                    nudged_tool_calls = [nudged_parsed] if nudged_parsed else []
+                                if nudged_tool_calls:
+                                    tool_calls = nudged_tool_calls
                                     assistant = nudged
                                     self.messages[-1] = assistant
                                     assistant_text = nudged_text
@@ -2670,7 +2738,7 @@ class AgentSession:
                             assistant.pop("_hadThinking", None)
                             assistant.pop("_hadNativeToolCall", None)
                             if (
-                                tool_call is None
+                                not tool_calls
                                 and not format_repair_attempted
                                 and (self._should_repair_tool_response(tool_results) or pseudo_recipient or native_present)
                             ):
@@ -2694,13 +2762,14 @@ class AgentSession:
                                     final_assistant = self._abort_assistant_message()
                                     break
                                 repaired_text = self._assistant_text(repaired)
-                                repaired_tool_call, repaired_native = self._native_tool_call(repaired, step)
+                                repaired_tool_calls, repaired_native = self._native_tool_calls(repaired, step)
                                 if not repaired_native:
-                                    repaired_tool_call = self._try_parse_tool_call(
+                                    repaired_parsed = self._try_parse_tool_call(
                                         repaired_text, repaired.pop("_providerToolCallId", None)
                                     )
-                                if repaired_tool_call is not None:
-                                    tool_call = repaired_tool_call
+                                    repaired_tool_calls = [repaired_parsed] if repaired_parsed else []
+                                if repaired_tool_calls:
+                                    tool_calls = repaired_tool_calls
                                     assistant = repaired
                                     self.messages[-1] = assistant
                                     assistant_text = repaired_text
@@ -2711,7 +2780,7 @@ class AgentSession:
                                     assistant = repaired
                                     assistant_text = repaired_text
                                     self._emit({"type": "tool_response_repair_end", "used": False})
-                            if tool_call is None:
+                            if not tool_calls:
                                 toolish = (
                                     '"tool"' in assistant_text
                                     and '"args"' in assistant_text
@@ -2729,39 +2798,59 @@ class AgentSession:
                                         }
                                     )
 
-                            if tool_call:
-                                self._omit_write_call_from_assistant_context(assistant, tool_call)
+                            if tool_calls:
+                                for tool_call in tool_calls:
+                                    self._omit_write_call_from_assistant_context(assistant, tool_call)
                                 # Persist native tool-turn assistant messages before
                                 # their results for every adapter that opts in.
                                 # Adapters consume private metadata internally;
                                 # it is never emitted as a public message payload.
                                 provider = self.providers.get(self.model.provider)
-                                native_replay_id = tool_call.get("toolCallId")
-                                if (
+                                native_batch = (
                                     getattr(provider, "supports_native_tools", False)
                                     and isinstance(assistant.get("_nativeToolCalls"), list)
+                                )
+                                if (
+                                    native_batch
                                 ):
                                     self.session_manager.append_message(assistant)
-                                sub_timeout = None if tool_call["tool"] == "ask_user" else tool_timeout_sec
-                                tool_payload = await self._run_tool_call(
-                                    tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout,
-                                    tool_call_id=tool_call.get("toolCallId"),
-                                    native_replay_call_id=(
-                                        native_replay_id
-                                        if isinstance(native_replay_id, str)
-                                        and native_replay_id
-                                        and isinstance(assistant.get("_nativeToolCalls"), list)
-                                        and getattr(provider, "supports_native_tools", False)
-                                        else None
-                                    ),
-                                )
-                                tool_results.append(tool_payload)
-                                if tool_call["tool"] == "finish" and tool_payload.get("ok"):
+                                terminal_payload: dict[str, Any] | None = None
+                                for call_index, tool_call in enumerate(tool_calls):
+                                    budget_hit = None if self._abort_requested else self._budget_exceeded()
+                                    if self._abort_requested or budget_hit is not None:
+                                        aborted = self._abort_requested
+                                        # A native replay must have one output per accepted
+                                        # call even when a terminal condition stops the batch.
+                                        for skipped in tool_calls[call_index:]:
+                                            tool_results.append(self._record_cancelled_tool_call(
+                                                skipped, native_batch=native_batch, aborted=aborted,
+                                            ))
+                                        if aborted:
+                                            final_assistant = self._abort_assistant_message()
+                                        else:
+                                            assert budget_hit is not None
+                                            kind, message = budget_hit
+                                            self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
+                                            final_assistant = self._budget_exceeded_assistant_message(message)
+                                        break
+                                    sub_timeout = None if tool_call["tool"] == "ask_user" else tool_timeout_sec
+                                    tool_payload = await self._run_tool_call(
+                                        tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout,
+                                        tool_call_id=tool_call.get("toolCallId"),
+                                        native_replay_call_id=tool_call["toolCallId"] if native_batch else None,
+                                    )
+                                    tool_results.append(tool_payload)
+                                    if tool_call["tool"] == "finish" and tool_payload.get("ok"):
+                                        terminal_payload = tool_payload
+                                        break
+                                if terminal_payload is not None:
                                     # Terminal tool: end the turn with the summary as the
                                     # final assistant message; no further provider calls.
                                     # (Plan cleanup is handled inside _execute_tool_by_name.)
                                     finished_with_tool = True
-                                    final_assistant = self._finish_assistant_message(tool_payload)
+                                    final_assistant = self._finish_assistant_message(terminal_payload)
+                                    break
+                                if final_assistant is not None:
                                     break
                                 # Any completed non-terminal tool is a recovery boundary,
                                 # including a failed tool result. The next post-tool response

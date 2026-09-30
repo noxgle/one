@@ -60,6 +60,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Codex native calls** — Responses stream fragments now normalize each completed
+  function-call item exactly once, preventing duplicate-call diagnostics.
+- **Native tool batches** — distinct provider-native calls now execute sequentially
+  with ordered replay results; mixed control-tool batches are safely rejected.
 - **Native tool-call diagnostics** — malformed native calls are rejected without
   execution and shown as a concise safe TUI diagnostic while the agent performs
   its bounded repair path.
