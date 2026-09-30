@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Beginner documentation** — added a five-minute Quickstart, copy-and-paste
+  prompt examples, and an FAQ/troubleshooting guide, linked from the README and
+  included in source distributions.
 - **Session statistics** — `/stats`, interactive mode, and RPC now report
   durable compaction counts/reasons and timings, session age, normal response
   timings, and measured provider output tokens per second when available.

@@ -30,6 +30,7 @@ tools, extensions, skills, and image input.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
+- [Beginner guides](#beginner-guides)
 - [Updating](#updating)
 - [Choose a mode](#choose-a-mode)
 - [Headless tasks with `one run`](#headless-tasks-with-one-run)
@@ -56,6 +57,12 @@ For an interactive terminal UI, start `one` (the default mode is TUI) or use
 /login openai sk-... gpt-4o-mini
 /login status
 ```
+
+## Beginner guides
+
+New to `one`? Follow the five-minute [Quickstart](docs/QUICKSTART.md), then
+copy a task from the [prompt examples](docs/EXAMPLES.md). If something does
+not work, use the [FAQ and troubleshooting guide](docs/FAQ.md).
 
 ## Installation
 
@@ -545,6 +552,9 @@ future target, while Windows 10 support is deferred.
 - [CHANGELOG.md](CHANGELOG.md) — release notes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development guide
 - [SECURITY.md](SECURITY.md) — security policy and reporting
+- [docs/QUICKSTART.md](docs/QUICKSTART.md) — five-minute beginner guide
+- [docs/EXAMPLES.md](docs/EXAMPLES.md) — copy-and-paste prompt examples
+- [docs/FAQ.md](docs/FAQ.md) — FAQ and troubleshooting
 - [docs/architecture.md](docs/architecture.md) — internal architecture
 - [docs/EXTENSIONS.md](docs/EXTENSIONS.md) — extension contract
 - [docs/SKILLS.md](docs/SKILLS.md) — skills contract

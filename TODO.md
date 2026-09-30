@@ -5933,8 +5933,11 @@ advanced providers or tools.
   repository context.
 - [ ] **Consider an optional localhost web UI:** Offer a browser interface for
   users who do not prefer the terminal TUI.
-- [ ] **Add a README happy path:** Document one short flow from installation to
-  first launch, `/login`, first prompt, and tool approval.
+- [x] **Add a README happy path:** Document one short flow from installation to
+  first launch, `/login`, first prompt, and tool approval. See
+  [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+- [x] **Add beginner prompt examples and troubleshooting:** See
+  [`docs/EXAMPLES.md`](docs/EXAMPLES.md) and [`docs/FAQ.md`](docs/FAQ.md).
 
 ### Suggested priority
 
