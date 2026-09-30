@@ -5,83 +5,74 @@ on:
     tags:
       - "v*"
 
-# Do not allow publishing from arbitrary PRs — only triggered by tag pushes.
-# Publishing uses PyPI Trusted Publishing (GitHub Actions OIDC).
-#
-# NOTE: Configure a protected GitHub environment named `pypi` and register this
-# workflow as a trusted publisher for the `noxgle/one` project on PyPI.
-# The release tag must equal VERSION in one/config.py.
-
 permissions:
   contents: read
 
 jobs:
-  release:
+  verify-build-publish:
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/one-agent
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out source
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - name: Install build dependencies
+      - name: Verify tag matches package version
+        shell: bash
         run: |
-          python -m venv .venv
-          . .venv/bin/activate
-          pip install build twine
-
-      # Tag == version check: the git tag (without 'v' prefix) must match
-      # the VERSION defined in one/config.py.  This prevents publishing a
-      # release whose artifacts do not match the tag.
-      - name: Tag == version
-        run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          PKG_VERSION=$(python - <<'PY'
-          import ast
-          from pathlib import Path
-
-          tree = ast.parse(Path("one/config.py").read_text(encoding="utf-8"))
-          for node in tree.body:
-              if isinstance(node, ast.Assign) and any(
-                  isinstance(target, ast.Name) and target.id == "VERSION"
-                  for target in node.targets
-              ):
-                  print(ast.literal_eval(node.value))
-                  break
-          else:
-              raise SystemExit("VERSION was not found in one/config.py")
-          PY
-          )
-          echo "Tag version:  $TAG_VERSION"
-          echo "Package version: $PKG_VERSION"
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Version mismatch: tag=$TAG_VERSION != package=$PKG_VERSION"
+          version="$(python -c 'from one.config import VERSION; print(VERSION)')"
+          expected="v${version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package version ${expected}." >&2
             exit 1
           fi
 
-      - name: Build wheel and sdist
-        run: |
-          . .venv/bin/activate
-          python -m build
+      - name: Install release dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,release]"
 
-      - name: Check package metadata
-        run: |
-          . .venv/bin/activate
-          twine check dist/*
+      - name: Run test suite
+        run: python -m pytest -q
 
-      - name: Upload artifacts
+      - name: Run lint
+        run: ruff check .
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Validate distributions
+        run: twine check dist/*
+
+      - name: Smoke-test wheel in a clean environment
+        shell: bash
+        run: |
+          smoke_dir="$(mktemp -d)"
+          python -m venv "${smoke_dir}/venv"
+          "${smoke_dir}/venv/bin/python" -m pip install --no-cache-dir dist/*.whl
+          env -u PYTHONPATH "${smoke_dir}/venv/bin/one" --version
+          env -u PYTHONPATH "${smoke_dir}/venv/bin/one" --help >/dev/null
+          rm -rf "${smoke_dir}"
+
+      - name: Upload distributions as workflow artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: dist
+          name: one-agent-${{ github.ref_name }}
           path: dist/*
 
-      - name: Publish to PyPI
+      - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "${GITHUB_REF_NAME}"
