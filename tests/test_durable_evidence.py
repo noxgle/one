@@ -75,11 +75,48 @@ async def test_write_content_is_omitted_from_context_but_retained_in_evidence(tm
     result = await agent._run_tool_call("write", {"path": "page.html", "content": expected})
 
     message = json.loads(agent.messages[-1]["content"])
-    assert message["args"]["content"] == "[omitted from model context]"
+    assert "content" not in message["args"]
+    assert "text" not in message["args"]
+    assert "writeContentOmitted" not in message["args"]
+    assert message["writeContentOmitted"] is True
     assert expected not in agent._flatten_messages_for_provider()[-1]["content"]
     evidence = manager.read_evidence(result["evidenceId"])
     assert evidence is not None
     assert evidence["args"]["content"] == expected
+
+
+@pytest.mark.parametrize(("payload", "omitted"), [
+    ({"ok": False, "tool": "write", "args": {"path": "x", "content": "failed"}, "error": "failed"}, True),
+    ({"ok": False, "tool": "write", "args": {"path": "x", "text": "rejected"}, "error": "rejected", "rejected": True}, True),
+    ({"ok": False, "tool": "write", "args": {"path": "x", "content": "cancelled"}, "error": "cancelled", "cancelled": True}, True),
+    ({"ok": False, "tool": "write", "args": {"path": "x", "writeContentOmitted": True}, "error": "invalid"}, False),
+    ({"ok": False, "tool": "write", "args": {"path": "x", "content": None}, "error": "invalid"}, False),
+])
+def test_write_preview_omits_source_only_when_a_string_source_exists(
+    tmp_path: Path, payload: dict[str, object], omitted: bool,
+) -> None:
+    agent = _agent(SessionManager.in_memory(str(tmp_path)), tmp_path)
+
+    preview = agent._build_tool_result_message_payload(payload)
+
+    assert not {"content", "text", "writeContentOmitted"} & set(preview["args"])
+    assert ("writeContentOmitted" in preview) is omitted
+
+
+def test_cancelled_native_write_preview_is_omitted_and_remains_correlated(tmp_path: Path) -> None:
+    agent = _agent(SessionManager.in_memory(str(tmp_path)), tmp_path)
+
+    result = agent._record_cancelled_tool_call(
+        {"tool": "write", "args": {"path": "x", "content": "private"}, "toolCallId": "call_cancelled"},
+        native_batch=True,
+        aborted=True,
+    )
+    assert result["cancelled"] is True
+    message = agent.messages[-1]
+    preview = json.loads(message["content"])
+    assert message["_nativeToolCallId"] == "call_cancelled"
+    assert preview["writeContentOmitted"] is True
+    assert not {"content", "text", "writeContentOmitted"} & set(preview["args"])
 
 
 def test_parsed_write_call_source_is_omitted_before_next_provider_request(tmp_path: Path) -> None:
@@ -90,7 +127,48 @@ def test_parsed_write_call_source_is_omitted_before_next_provider_request(tmp_pa
     agent._omit_write_call_from_assistant_context(assistant, {"tool": "write", "args": {"path": "x", "content": source}})
     visible = agent._flatten_messages_for_provider()[-1]["content"]
     assert source not in visible
-    assert "writeContentOmitted" in visible
+    assert "Historical write call" in visible
+    assert '"tool": "write"' not in visible
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [
+    {"path": "missing.txt"},
+    {"path": "existing.txt"},
+    {"path": "existing.txt", "content": None},
+    {"path": "existing.txt", "content": 1},
+    {"path": "existing.txt", "content": None, "text": "must not win"},
+    {"file": "existing.txt", "text": None},
+    {"file": "", "text": "replacement"},
+    {"path": "", "content": "replacement"},
+    {"path": "existing.txt", "content": "replacement", "writeContentOmitted": False},
+    {"path": "existing.txt", "content": "[omitted from model context]"},
+])
+async def test_invalid_write_arguments_do_not_modify_or_create_files(tmp_path: Path, args: dict[str, object]) -> None:
+    agent = _agent(SessionManager.in_memory(str(tmp_path)), tmp_path)
+    existing = tmp_path / "existing.txt"
+    existing.write_text("keep", encoding="utf-8")
+
+    result = await agent._run_tool_call("write", args)
+
+    assert result["ok"] is False
+    assert result["errorType"] == "ValueError"
+    assert existing.read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "missing.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_write_empty_content_and_legacy_text_are_explicitly_supported(tmp_path: Path) -> None:
+    agent = _agent(SessionManager.in_memory(str(tmp_path)), tmp_path)
+    target = tmp_path / "target.txt"
+    target.write_text("old", encoding="utf-8")
+
+    empty = await agent._run_tool_call("write", {"path": "target.txt", "content": ""})
+    legacy = await agent._run_tool_call("write", {"file": "target.txt", "text": "legacy"})
+
+    assert empty["ok"] is True
+    assert legacy["ok"] is True
+    assert target.read_text(encoding="utf-8") == "legacy"
 
 
 @pytest.mark.asyncio

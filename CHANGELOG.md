@@ -63,6 +63,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Write argument safety** — write calls now require explicit string content,
+  reject omission metadata, and keep source bodies out of ordinary model-context
+  previews while retaining durable evidence.
 - **Codex native calls** — Responses stream fragments now normalize each completed
   function-call item exactly once, preventing duplicate-call diagnostics.
 - **Native tool batches** — distinct provider-native calls now execute sequentially

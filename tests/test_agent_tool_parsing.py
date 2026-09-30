@@ -144,6 +144,35 @@ async def test_codex_native_rejected_tool_replays_matching_output(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_native_write_failure_then_correction_replays_original_arguments(tmp_path: Path) -> None:
+    agent = _chatgpt_agent(SessionManager.in_memory(str(tmp_path)), tmp_path, tools=["write"])
+    provider = _RecordingCodex([
+        ChatResult(text="", raw={}, usage={}, had_native_tool_call=True, native_tool_calls=[
+            {"id": "call_bad_write", "name": "write", "arguments": {"path": "page.txt"}},
+        ]),
+        ChatResult(text="", raw={}, usage={}, had_native_tool_call=True, native_tool_calls=[
+            {"id": "call_good_write", "name": "write", "arguments": {"path": "page.txt", "content": "fixed"}},
+        ]),
+        ChatResult(text="done", raw={}, usage={}),
+    ])
+    agent.providers = {"chatgpt": provider}
+
+    await agent.prompt("write safely")
+
+    assert (tmp_path / "page.txt").read_text(encoding="utf-8") == "fixed"
+    first_replay = provider.payloads[1]["input"]
+    assert [(item["type"], item.get("call_id")) for item in first_replay if item["type"] != "message"] == [
+        ("function_call", "call_bad_write"), ("function_call_output", "call_bad_write"),
+    ]
+    assert "requires explicit string" in first_replay[-1]["output"]
+    second_replay = provider.payloads[2]["input"]
+    calls = [item for item in second_replay if item["type"] == "function_call"]
+    assert json.loads(calls[0]["arguments"]) == {"path": "page.txt"}
+    assert json.loads(calls[1]["arguments"]) == {"path": "page.txt", "content": "fixed"}
+    assert not any("Historical write call" in str(item) for item in second_replay)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider_name,model_id", [
     ("openai", "gpt-4.1"), ("anthropic", "claude-3-7-sonnet-latest"), ("gemini", "gemini-2.5-pro"),
 ])
@@ -298,15 +327,43 @@ async def test_write_e2e_preserves_html_unicode_entities_bom_and_marker_strings(
 
     assert (tmp_path / "page.html").read_text(encoding="utf-8") == expected
     tool_message = json.loads(next(m for m in agent.messages if m.get("role") == "toolResult")["content"])
-    assert tool_message["args"]["content"] == "[omitted from model context]"
-    assert tool_message["args"]["writeContentOmitted"] is True
+    assert "content" not in tool_message["args"]
+    assert tool_message["writeContentOmitted"] is True
     provider_tool_result = next(
         message
         for message in agent._flatten_messages_for_provider()
         if message["content"].startswith("<untrusted-tool-output>")
     )
-    assert "[omitted from model context]" in provider_tool_result["content"]
+    assert '"writeContentOmitted": true' in provider_tool_result["content"]
     assert expected not in provider_tool_result["content"]
+
+
+@pytest.mark.asyncio
+async def test_text_write_failure_then_correction_preserves_existing_file(tmp_path: Path) -> None:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    target = tmp_path / "page.txt"
+    target.write_text("keep", encoding="utf-8")
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory({"tools": {"maxSteps": 3}}),
+        registry, _Loader(), model, "medium", tools=["write"],
+    )
+    agent.providers = {"openai": _FakeProvider([
+        '{"tool":"write","args":{"path":"page.txt"}}',
+        '{"tool":"write","args":{"path":"page.txt","content":"corrected"}}',
+        "DONE",
+    ])}
+
+    await agent.prompt("write safely")
+
+    assert target.read_text(encoding="utf-8") == "corrected"
+    results = [json.loads(message["content"]) for message in agent.messages if message.get("role") == "toolResult"]
+    assert results[0]["ok"] is False
+    assert "requires explicit string" in results[0]["error"]
+    assert results[1]["ok"] is True
 
 
 @pytest.mark.asyncio

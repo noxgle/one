@@ -41,6 +41,17 @@ def test_prompt_includes_plan_schema():
     assert "Use the plan tool to store the plan." in prompt
 
 
+def test_prompt_describes_explicit_write_content_safety() -> None:
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+    prompt = loader.get_system_prompt(selected_tools=["write"])
+
+    assert "content must be an explicit string" in prompt
+    assert "content:'' deliberately empties" in prompt
+    assert "writeContentOmitted" in prompt
+    assert "<<'ONE_EOF'" in prompt
+    assert "when available" in prompt
+
+
 def test_prompt_describes_opencode_apply_patch_format() -> None:
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
     prompt = loader.get_system_prompt(selected_tools=["apply_patch"])

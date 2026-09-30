@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,18 @@ def test_write_and_read_basic(tmp_path: Path):
     out = read_tool(str(tmp_path), "a.txt", offset=1, limit=2)
     assert "line1" in out["content"][0]["text"]
     assert "Use offset=3 to continue." in out["content"][0]["text"]
+
+
+def test_quoted_posix_heredoc_preserves_literal_shell_characters(tmp_path: Path) -> None:
+    if shutil.which("bash") is None:
+        pytest.skip("bash is unavailable")
+    target = tmp_path / "literal.txt"
+    body = "dollar=$HOME backtick=`uname` slash=\\ keep\n"
+    command = "cat <<'ONE_LITERAL' > \"$1\"\n" + body + "ONE_LITERAL\n"
+
+    subprocess.run(["bash", "-c", command, "--", str(target)], check=True)
+
+    assert target.read_text(encoding="utf-8") == body
 
 
 def test_read_errors_and_truncation(tmp_path: Path):
@@ -540,3 +554,11 @@ def test_every_builtin_native_tool_has_a_meaningful_json_schema() -> None:
         assert schema["type"] == "object"
         assert schema["additionalProperties"] is False
         assert schema.get("properties"), definition["name"]
+    write = next(definition for definition in definitions if definition["name"] == "write")
+    assert write["parameters"] == {
+        "type": "object",
+        "properties": {"path": {"type": "string", "minLength": 1}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    }
+    assert "content:'' deliberately empties" in write["description"]

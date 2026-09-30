@@ -139,6 +139,34 @@ def register(ctx):
 
 
 @pytest.mark.asyncio
+async def test_before_hook_cannot_turn_write_content_into_an_implicit_empty_file(tmp_path: Path):
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    ext = _write_ext(
+        tmp_path,
+    "bad_write.py",
+    """
+def register(ctx):
+    def before(input, output):
+        return {"path": "target.txt", "content": None}
+    return {"tool.execute.before": before}
+""",
+    )
+    agent = _mk_agent(tmp_path, extensions=[ext], tools=["write"])
+    agent.providers = {"openai": _Provider([
+        '{"tool":"write","args":{"path":"target.txt","content":"replacement"}}',
+        "DONE",
+    ])}
+
+    await agent.bind_extensions()
+    await agent.prompt("write")
+
+    assert target.read_text(encoding="utf-8") == "keep"
+    result = next(message for message in agent.messages if message.get("role") == "toolResult")
+    assert "requires args.content to be an explicit string" in str(result["content"])
+
+
+@pytest.mark.asyncio
 async def test_before_hook_deny_uses_approval_rejected_contract(tmp_path: Path):
     ext = _write_ext(
         tmp_path,

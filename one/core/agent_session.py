@@ -764,14 +764,19 @@ class AgentSession:
             # evidence when persistence is enabled. Do not replay an entire
             # source file into ordinary model context through toolResult args.
             for key in ("content", "text"):
-                if key in args:
-                    args[key] = "[omitted from model context]"
-            args["writeContentOmitted"] = True
+                args.pop(key, None)
+            # This is provider-context metadata, not an argument that can be
+            # copied into a future write call.
+            args.pop("writeContentOmitted", None)
         msg_payload: dict[str, Any] = {
             "ok": bool(payload.get("ok", False)),
             "tool": payload.get("tool"),
             "args": args,
         }
+        if payload.get("tool") == "write" and isinstance(payload.get("args"), dict) and any(
+            isinstance(payload["args"].get(key), str) for key in ("content", "text")
+        ):
+            msg_payload["writeContentOmitted"] = True
         if payload.get("evidenceId"):
             msg_payload["evidenceId"] = payload["evidenceId"]
             msg_payload["evidenceInstruction"] = "Use evidence_read with this evidenceId to retrieve complete durable evidence in bounded chunks."
@@ -852,13 +857,39 @@ class AgentSession:
         """Retain write source in evidence, not in the next provider request."""
         if tool_call.get("tool") != "write" or not isinstance(tool_call.get("args"), dict):
             return
-        args = dict(tool_call["args"])
-        if "content" not in args and "text" not in args:
+        # Native calls need their original arguments for provider protocol
+        # replay and pairing; never replace their assistant content with a
+        # textual pseudo-call.
+        if assistant.get("_nativeToolCalls"):
             return
-        args.pop("content", None)
-        args.pop("text", None)
-        args["writeContentOmitted"] = True
-        assistant["content"] = [{"type": "text", "text": json.dumps({"tool": "write", "args": args})}]
+        if "content" not in tool_call["args"] and "text" not in tool_call["args"]:
+            return
+        assistant["content"] = [{
+            "type": "text",
+            "text": "Historical write call recorded; source omitted from provider context.",
+        }]
+
+    @staticmethod
+    def _validate_write_args(args: dict[str, Any]) -> tuple[str, str]:
+        """Validate write arguments before any filesystem effect."""
+        if "writeContentOmitted" in args:
+            raise ValueError("writeContentOmitted is history metadata and cannot be used in a write call")
+        path = args.get("path") if "path" in args else args.get("file")
+        if not isinstance(path, str) or not path:
+            raise ValueError("write requires args.path (or legacy args.file) to be a non-empty string")
+        if "content" in args:
+            content = args["content"]
+            if not isinstance(content, str):
+                raise ValueError("write requires args.content to be an explicit string")
+        elif "text" in args:
+            content = args["text"]
+            if not isinstance(content, str):
+                raise ValueError("write requires legacy args.text to be a string")
+        else:
+            raise ValueError("write requires explicit string args.content (or legacy args.text)")
+        if content == "[omitted from model context]":
+            raise ValueError("'[omitted from model context]' is history metadata and cannot be used as write content")
+        return path, content
 
     @staticmethod
     def _evidence_normalize(value: Any, key: str = "") -> Any:
@@ -946,6 +977,8 @@ class AgentSession:
             patch_text = args.get("patchText")
             if not isinstance(patch_text, str) or not patch_text:
                 raise ValueError("apply_patch requires args.patchText to be a non-empty string")
+        if tool_name == "write":
+            self._validate_write_args(args)
         effective_timeout = self._effective_tool_timeout(tool_name, args, timeout_sec)
         if tool_name not in self._active_tools:
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
@@ -1034,10 +1067,8 @@ class AgentSession:
         elif tool_name == "read_image":
             result = fn(cwd, path_arg or "", self._storage_dir or "")
         elif tool_name == "write":
-            content_arg = args.get("content")
-            if content_arg is None:
-                content_arg = args.get("text", "")
-            result = fn(cwd, path_arg or "", content_arg)
+            write_path, content_arg = self._validate_write_args(args)
+            result = fn(cwd, write_path, content_arg)
         elif tool_name == "edit":
             result = fn(cwd, path_arg or "", args.get("edits", []))
         elif tool_name == "apply_patch":
