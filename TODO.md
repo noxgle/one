@@ -5902,3 +5902,43 @@ omitted, not complete request bodies.
 
 5–8 engineering days. Main uncertainties are provider-specific support,
 backward-compatible adapter signatures, and avoiding TUI keybinding conflicts.
+
+## Product usability roadmap
+
+Ideas focused on making `one` easier for new users and lowering the barrier to
+first successful use. Prioritize onboarding and diagnostics before adding more
+advanced providers or tools.
+
+- [ ] **First-run onboarding wizard:** Guide new users through provider, model,
+  API key, and mode selection on the first launch, without requiring manual
+  `settings.json` editing.
+- [ ] **Add `one doctor`:** Diagnose Python, provider/model configuration,
+  authentication, network access, permissions, clipboard, MCP, and extensions;
+  finish with actionable repair instructions.
+- [ ] **Improve error messages:** Explain what failed, likely causes, and a
+  concrete command or action to fix authentication, model, rate-limit, and
+  timeout errors.
+- [ ] **Add usage profiles:** Provide ready-made `coding`, `research`,
+  `writing`, and `local/offline` profiles that configure model, retry, limits,
+  and tools (for example, `one profile use coding`).
+- [ ] **Add TUI onboarding:** Show a clear help hint, example prompts, and short
+  explanations of `/login`, `/sessions`, `/retry`, `/compact`, and image paste.
+- [ ] **Add a safe beginner mode:** Confirm file and shell operations by default
+  with clear risk descriptions; offer an explicit opt-in trusted mode for
+  experienced users.
+- [ ] **Improve session recovery:** Add an easy `one resume` flow for the last
+  session and session search by text.
+- [ ] **Add project initialization templates:** Provide `one init` to create
+  project instructions such as `.one/project.md` so the agent starts with
+  repository context.
+- [ ] **Consider an optional localhost web UI:** Offer a browser interface for
+  users who do not prefer the terminal TUI.
+- [ ] **Add a README happy path:** Document one short flow from installation to
+  first launch, `/login`, first prompt, and tool approval.
+
+### Suggested priority
+
+1. First-run onboarding wizard.
+2. `one doctor`.
+3. Actionable error messages.
+4. Usage profiles.
