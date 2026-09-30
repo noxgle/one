@@ -29,7 +29,22 @@ jobs:
       - name: Verify tag matches package version
         shell: bash
         run: |
-          version="$(python -c 'from one.config import VERSION; print(VERSION)')"
+          version="$(python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          tree = ast.parse(Path("one/config.py").read_text(encoding="utf-8"))
+          for node in tree.body:
+              if isinstance(node, ast.Assign) and any(
+                  isinstance(target, ast.Name) and target.id == "VERSION"
+                  for target in node.targets
+              ):
+                  print(ast.literal_eval(node.value))
+                  break
+          else:
+              raise SystemExit("VERSION was not found in one/config.py")
+          PY
+          )"
           expected="v${version}"
           if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
             echo "Tag ${GITHUB_REF_NAME} does not match package version ${expected}." >&2
