@@ -4,7 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>one — autonomous terminal agent</title>
-<meta name="description" content="one is an autonomous Python terminal agent. Give it a goal. It plans, uses tools, executes work, verifies results, and reports back.">
+<meta name="description" content="one is an open-source autonomous Python terminal agent. Give it a goal, inspect and change your repository, verify the result, and report back from the terminal.">
+<meta name="theme-color" content="#0a0a0b">
+<meta property="og:title" content="one — autonomous terminal agent">
+<meta property="og:description" content="Give your terminal a goal. one plans, uses tools, verifies the result, and reports back.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://one.noxgle.com/">
+<link rel="canonical" href="https://one.noxgle.com/">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -388,10 +394,10 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
           <div class="agent-line"><span class="icon arrow">&#8594;</span> editing <code style="color:var(--text-muted)">src/auth.py</code></div>
           <div class="agent-line"><span class="icon arrow">&#8594;</span> editing <code style="color:var(--text-muted)">src/middleware.py</code></div>
           <div class="agent-line"><span class="icon arrow">&#8594;</span> running <code style="color:var(--text-muted)">pytest</code></div>
-          <div class="agent-line done"><span class="icon check">&#10003;</span> <span style="color:var(--green)">128 tests passed</span></div>
+          <div class="agent-line done"><span class="icon check">&#10003;</span> <span style="color:var(--green)">verification complete</span></div>
           <div class="agent-line done"><span class="icon check">&#10003;</span> goal completed</div>
           <div><br><span class="agent-line" style="color:var(--text-muted)">Fixed auth session handling and middleware error propagation.</span></div>
-          <div><span class="agent-line" style="color:var(--text-muted)">128 tests passed. 2 files modified.</span></div>
+          <div><span class="agent-line" style="color:var(--text-muted)">result verified. Changes summarized.</span></div>
         </div>
       </div>
     </div>
@@ -503,14 +509,14 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
           </div>
           <div class="t-body">
             <div class="line"><span class="t-blue">one</span> <span class="t-muted">v0.1.x &mdash; session: parser fix</span></div>
-            <div class="line" style="margin-top:8px"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> read_file(</div>
+            <div class="line" style="margin-top:8px"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> read(</div>
             <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;parser/tokenize.py</div>
             <div class="line"><span class="t-muted">thought:</span> Checking the regression&hellip;</div>
-            <div class="line"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> edit_file(</div>
+            <div class="line"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> edit(</div>
             <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;parser/tokenize.py:23</div>
             <div class="line"><span class="t-muted">thought:</span> Applying fix and retesting.</div>
             <div class="line" style="margin-top:8px"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> bash(python -m pytest -q)</div>
-            <div class="line"><span class="t-muted">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-green">84 passed</span></div>
+            <div class="line"><span class="t-muted">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-green">focused verification passed</span></div>
             <div class="line" style="margin-top:8px"><span class="t-blue">&#8594;</span> <span class="t-muted">/details-show</span> <span class="t-muted">[Ctrl+D]</span></div>
           </div>
         </div>
@@ -655,7 +661,7 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
           <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Found regression in parser/tokenize.py</div>
           <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Applying patch</div>
           <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Running tests</div>
-          <div class="tree-node tree-leaf tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&#9492;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&ndash; <span class="tree-ok">84 passed</span></div>
+          <div class="tree-node tree-leaf tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&#9492;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&ndash; <span class="tree-ok">verification passed</span></div>
           <div class="tree-node tree-branch">&#9492;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&ndash; Verifying diff</div>
           <div style="margin-top:8px" class="tree-done">&#10003; Goal completed</div>
           <div style="margin-top:4px" class="tree-node"><span class="t-muted">Fixed parser handling for escaped delimiters.</span></div>
@@ -794,7 +800,7 @@ one --help</pre>
     </div>
     <ul class="footer-links">
       <li><a href="https://github.com/noxgle/one" target="_blank" rel="noopener">GitHub</a></li>
-      <li><a href="https://github.com/noxgle/one#readme" target="_blank" rel="noopener">Docs</a></li>
+      <li><a href="https://github.com/noxgle/one/blob/main/docs/QUICKSTART.md" target="_blank" rel="noopener">Quickstart</a></li>
       <li><a href="https://github.com/noxgle/one/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
       <li><a href="https://github.com/noxgle/one/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
       <li><a href="https://github.com/noxgle/one/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
@@ -802,10 +808,10 @@ one --help</pre>
   </div>
   <div class="container">
     <div class="built-by-one">
-      <div class="built-by-label">Built by <strong>one</strong></div>
+      <div class="built-by-label">Updated by <strong>one</strong></div>
       <div class="built-by-meta">Autonomous terminal agent &middot; <span class="build-status">Task: landing page &middot; Status: completed</span></div>
       <div class="built-by-runtime">
-        <code>provider</code>: llama.cpp &middot; <code>model</code>: qwen3.6-35ba3b-q5-k-m-mtp
+        Runtime provider/model metadata unavailable for this execution.
       </div>
     </div>
   </div>
