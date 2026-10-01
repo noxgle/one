@@ -10,6 +10,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Lifecycle elapsed timing** — durable, monotonic `timing` entries record whole
+  turns, attempts, provider requests, and tool handling without entering the
+  provider conversation context. `/stats` and RPC summarize current-branch
+  timing by scope and outcome; the TUI displays completed tool durations and a
+  single completed-turn timing summary.
+
 - **Beginner documentation** — added a five-minute Quickstart, copy-and-paste
   prompt examples, and an FAQ/troubleshooting guide, linked from the README and
   included in source distributions.

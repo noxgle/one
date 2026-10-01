@@ -175,6 +175,7 @@ async def test_rpc_get_session_stats_and_queue(tmp_path: Path, monkeypatch: pyte
     assert stats["data"]["totalMessages"] == 1
     assert "sessionId" in stats["data"] and "tokens" in stats["data"]
     assert "compaction" in stats["data"] and "outputGeneration" in stats["data"]
+    assert set(stats["data"]["elapsedTiming"]) == {"turn", "attempt", "provider_request", "tool"}
     assert set(stats["data"]["time"]) == {
         "sessionAgeSec", "activeGenerationSec", "averageResponseSec", "lastResponseSec",
         "responseMeasurements", "compactionSec", "averageCompactionSec", "lastCompactionSec",

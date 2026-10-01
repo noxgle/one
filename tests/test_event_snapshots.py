@@ -128,6 +128,10 @@ def _mk_agent(tmp_path: Path, tools: list[str] | None = None, settings_override:
 def _compact(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for e in events:
+        # Provider request telemetry is additive and has its own focused
+        # assertions; keep these legacy lifecycle projections readable.
+        if e.get("type") in {"provider_request_start", "provider_request_end"}:
+            continue
         item = {"type": e.get("type")}
         if "attempt" in e:
             item["attempt"] = e.get("attempt")
@@ -174,6 +178,32 @@ async def test_event_snapshot_tool_success(tmp_path: Path):
         {"type": "turn_end", "attempt": 1, "ok": True, "reason": "stop", "aborted": False},
         {"type": "agent_end"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_provider_request_timing_is_additive_and_correlates_parent_request(tmp_path: Path):
+    agent = _mk_agent(tmp_path)
+    agent.providers = {"openai": _Provider(["DONE"])}
+    now = [10.0]
+    agent._elapsed_clock = lambda: now[0]
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("go", options={"requestId": "rpc-parent"})
+
+    starts = [event for event in events if event["type"] == "provider_request_start"]
+    ends = [event for event in events if event["type"] == "provider_request_end"]
+    assert len(starts) == len(ends)
+    assert len(starts) >= 1
+    assert [event["requestId"] for event in starts] == [event["requestId"] for event in ends]
+    assert starts[0]["parentRequestId"] == "rpc-parent"
+    assert starts[0]["purpose"] == "response"
+    assert ends[0]["elapsedMs"] == 0
+    timing = [entry for entry in agent.session_manager.get_entries() if entry.get("type") == "timing"]
+    provider_timing = [entry for entry in timing if entry["scope"] == "provider_request"]
+    assert len(provider_timing) == len(starts)
+    assert provider_timing[0]["parentRequestId"] == "rpc-parent"
+    assert agent.session_manager.build_session_context()["messages"]
 
 
 @pytest.mark.asyncio
@@ -480,7 +510,7 @@ async def test_multi_invocation_reasoning_tool_sequencing(tmp_path: Path):
     assert len(turn_starts) == 1
 
     # Filter out lifecycle events (agent_start, agent_end) to get the meaningful sequence
-    meaningful = [e for e in events if e.get("type") not in ("agent_start", "agent_end")]
+    meaningful = [e for e in events if e.get("type") not in ("agent_start", "agent_end", "provider_request_start", "provider_request_end")]
 
     # Assert exact filtered sequence of existing meaningful events
     expected_types = [

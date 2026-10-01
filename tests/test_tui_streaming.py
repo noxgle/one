@@ -12,9 +12,72 @@ from one.modes.tui_mode import (
     _THINKING_FRAMES,
     _THINKING_MARK,
     MAX_RENDERED_LINES,
+    _format_elapsed_ms,
     advance_thinking_frame,
 )
 from tests.support.tui import _mk_app_session, _submit
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(0, "0 ms"), (125, "125 ms"), (1000, "1.00 s"), (1250, "1.25 s"),
+     (None, None), (True, None), (float("nan"), None), (-1, None), ("125", None)],
+)
+def test_format_elapsed_ms(value: object, expected: str | None) -> None:
+    assert _format_elapsed_ms(value) == expected
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_elapsed_headings_and_turn_summary_are_safe(tmp_path: Path) -> None:
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.settings_manager.set_bash_show_output(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        # No active turn means an unscoped completion cannot enter totals.
+        app._handle_session_event({"type": "provider_request_end", "requestId": "outside", "elapsedMs": 900})
+        app._handle_session_event({"type": "tool_call_start", "tool": "read", "args": {"x": "[b]"}})
+        app._handle_session_event({"type": "tool_call_end", "tool": "read", "ok": True, "elapsedMs": 0,
+                                   "result": {"outputText": "only once"}})
+        app._handle_session_event({"type": "tool_call_end", "tool": "write", "ok": False, "elapsedMs": 1250})
+        app._handle_session_event({"type": "tool_call_end", "tool": "bad", "ok": True, "elapsedMs": True})
+        app._handle_session_event({"type": "agent_start", "turnId": "turn-1"})
+        app._handle_session_event({"type": "provider_request_end", "turnId": "turn-1", "requestId": "a", "elapsedMs": 100})
+        app._handle_session_event({"type": "turn_end", "turnId": "turn-1", "ok": False, "willRetry": True})
+        app._handle_session_event({"type": "provider_request_end", "turnId": "turn-1", "requestId": "a", "elapsedMs": 100})
+        app._handle_session_event({"type": "provider_request_end", "turnId": "turn-1", "requestId": "retry", "elapsedMs": 50})
+        app._handle_session_event({"type": "provider_request_end", "turnId": "other", "requestId": "b", "elapsedMs": 99})
+        app._handle_session_event({"type": "agent_end", "turnId": "turn-1", "elapsedMs": 3420})
+        app._handle_session_event({"type": "provider_request_end", "requestId": "after", "elapsedMs": 900})
+        app._handle_session_event({"type": "agent_end", "turnId": "turn-1", "elapsedMs": 3420})
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Tool: ✓ read · 0 ms" in stream
+        assert "Tool: × write · 1.25 s" in stream
+        assert "Tool: ✓ bad ·" not in stream
+        assert stream.count("Result:") == 0
+        assert stream.count("Time: turn 3.42 s · provider 150 ms / 2 requests") == 1
+        assert "[b]" in app.query_one("#stream", Static).content
+
+
+@pytest.mark.asyncio
+async def test_tui_timing_clear_and_legacy_agent_end_reset_state(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        app._handle_session_event({"type": "agent_start", "turnId": "old"})
+        app._handle_session_event({"type": "provider_request_end", "turnId": "old", "requestId": "old-request", "elapsedMs": 1})
+        app.action_clear_stream()
+        app._handle_session_event({"type": "agent_end", "turnId": "old", "elapsedMs": 1})
+        app._handle_session_event({"type": "agent_start", "turnId": "legacy"})
+        app._handle_session_event({"type": "provider_request_end", "turnId": "legacy", "requestId": "legacy-request", "elapsedMs": 1})
+        app._handle_session_event({"type": "agent_end", "turnId": "legacy"})
+        await pilot.pause()
+        assert "Time: turn" not in "\n".join(app._stream_lines)
 
 
 class _StreamingProvider:

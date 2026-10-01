@@ -200,6 +200,14 @@ def _normalize_event(obj: dict[str, Any]) -> dict[str, Any]:
     # Recursively strip all nested timestamps (e.g. message.timestamp,
     # tool_results[].timestamp, etc.) and top-level timestamp.
     cleaned = _strip_timestamps(cleaned)
+    # Elapsed timing is deliberately monotonic/runtime-dependent.
+    cleaned.pop("elapsedMs", None)
+    # Provider request IDs are generated per actual invocation and therefore
+    # intentionally cannot be golden values.
+    if cleaned.get("type") in {"provider_request_start", "provider_request_end"}:
+        for key in ("requestId", "providerRequestId"):
+            if key in cleaned:
+                cleaned[key] = "<provider-request-id>"
     return cleaned
 
 

@@ -166,6 +166,9 @@ class AgentSession:
         self._abort_requested = False
         self._session_started_at = time.monotonic()
         self._generation_clock: Callable[[], float] = time.monotonic
+        # Lifecycle elapsed time is separate from output-generation and
+        # compaction clocks so tests and stats retain their existing semantics.
+        self._elapsed_clock: Callable[[], float] = time.monotonic
         self._compaction_clock: Callable[[], float] = time.monotonic
         self._wall_clock: Callable[[], float] = time.time
         # In-memory sessions have no session dir; use a transient temp dir
@@ -195,6 +198,11 @@ class AgentSession:
         self._turn_sequence = 0
         self._active_turn_id: str | None = None
         self._active_request_id: str | None = None
+        self._active_attempt: int | None = None
+        self._elapsed_agent_started_at: float | None = None
+        self._elapsed_attempt_started_at: dict[int, float] = {}
+        self._elapsed_tool_started_at: dict[str, list[float]] = {}
+        self._elapsed_terminal_outcome: str | None = None
         # Last subagent-timeout diagnostic (Task 4 — inspect-timeout).
         self._last_subagent_timeout: dict[str, Any] | None = None
         # Provider-only context diagnostics; durable session messages stay raw.
@@ -1197,12 +1205,13 @@ class AgentSession:
         # Do not count the guarded finish itself as that step.
         if tool_name not in {"plan", "finish"}:
             self._plan_just_created = False
-        if (
+        requires_approval = (
             self.cooperation_enabled
             and self.approval_callback is not None
             and tool_name != "finish"
             and tool_name in self._approval_tools
-        ):
+        )
+        if requires_approval:
             # Cooperation mode: ask the user before executing a mutating tool.
             decision = self.approval_callback(tool_name, args)
             if inspect.isawaitable(decision):
@@ -1240,6 +1249,9 @@ class AgentSession:
                     end_result = _sanitise_read_image_payload(payload)
                 self._emit({"type": "tool_call_end", "tool": tool_name, "toolCallId": tool_call_id, "ok": False, "result": end_result})
                 return payload
+        # Rejections are timed as zero; accepted approvals intentionally do not
+        # include the human wait. Hooks and all execution handling do.
+        self._elapsed_tool_started_at.setdefault(tool_call_id, []).append(self._elapsed_clock())
         # Extension hooks: tool.execute.before (opencode contract). A raising
         # hook denies the call using the same contract as a user rejection.
         if self._extension_runtime is not None and self._extension_runtime.has_hooks("tool.execute.before"):
@@ -1454,6 +1466,10 @@ class AgentSession:
         tool_call_end: dict[str, Any] = {"type": "tool_call_end", "tool": tool_name, "toolCallId": tool_call_id, "ok": payload.get("ok", False), "result": event_result}
         if payload.get("aborted"):
             tool_call_end["aborted"] = True
+        if payload.get("timedOut"):
+            tool_call_end["timedOut"] = True
+        if payload.get("cancelled"):
+            tool_call_end["cancelled"] = True
         self._emit(tool_call_end)
         self._report_activity("tool_finished" if payload.get("ok") else "tool_failed")
         return payload
@@ -1918,7 +1934,76 @@ class AgentSession:
 
         return off
 
+    def _elapsed_ms(self, started_at: float | None) -> int:
+        if started_at is None:
+            return 0
+        duration = self._elapsed_clock() - started_at
+        return int(duration * 1000) if math.isfinite(duration) and duration > 0 else 0
+
+    @staticmethod
+    def _timing_outcome(event: dict[str, Any]) -> str:
+        if event.get("reason") == "budget_exceeded" or event.get("budgetExceeded"):
+            return "budget_exceeded"
+        if event.get("aborted") or event.get("cancelled") or event.get("reason") == "abort":
+            return "cancelled"
+        if event.get("rejected"):
+            return "rejected"
+        if event.get("timedOut") or event.get("reason") == "timeout":
+            return "timeout"
+        return "success" if event.get("ok", True) else "error"
+
+    def _append_timing(self, scope: str, elapsed_ms: int, outcome: str, **metadata: Any) -> None:
+        try:
+            self.session_manager.append_timing(scope, elapsed_ms, outcome, **metadata)
+        except Exception:
+            # Telemetry must never duplicate or alter the actual lifecycle.
+            pass
+
     def _emit(self, event: dict[str, Any]) -> None:
+        """Emit an event, adding durable elapsed timing at terminal boundaries."""
+        event_type = event.get("type")
+        if event_type == "agent_start":
+            self._elapsed_agent_started_at = self._elapsed_clock()
+        elif event_type == "turn_start":
+            attempt = int(event.get("attempt", 0))
+            self._active_attempt = attempt
+            self._elapsed_attempt_started_at[attempt] = self._elapsed_clock()
+        elif event_type == "tool_call_end":
+            call_id = str(event.get("toolCallId") or "")
+            if call_id:
+                starts = self._elapsed_tool_started_at.get(call_id, [])
+                started = starts.pop(0) if starts else None
+                if not starts:
+                    self._elapsed_tool_started_at.pop(call_id, None)
+                # A before-tool extension is timed while it decides whether to
+                # deny a call, but a denial never begins tool execution.  Pop
+                # its timer normally while recording the rejection as zero.
+                rejected = isinstance(event.get("result"), dict) and event["result"].get("rejected")
+                event["elapsedMs"] = 0 if rejected else self._elapsed_ms(started)
+                if rejected:
+                    event["rejected"] = True
+                self._append_timing(
+                    "tool", event["elapsedMs"], self._timing_outcome(event),
+                    turnId=self._active_turn_id, attempt=self._active_attempt,
+                    tool=event.get("tool"), toolCallId=call_id,
+                )
+        elif event_type == "turn_end":
+            attempt = int(event.get("attempt", 0))
+            started = self._elapsed_attempt_started_at.pop(attempt, None)
+            event["elapsedMs"] = self._elapsed_ms(started)
+            if started is not None:
+                self._append_timing(
+                    "attempt", event["elapsedMs"], self._timing_outcome(event),
+                    turnId=self._active_turn_id, attempt=attempt,
+                )
+            if not event.get("willRetry"):
+                self._elapsed_terminal_outcome = self._timing_outcome(event)
+        elif event_type == "agent_end" and self._elapsed_agent_started_at is not None:
+            event["elapsedMs"] = self._elapsed_ms(self._elapsed_agent_started_at)
+            outcome = self._elapsed_terminal_outcome or "error"
+            self._append_timing("turn", event["elapsedMs"], outcome, turnId=self._active_turn_id,
+                                parentRequestId=self._active_request_id)
+            self._elapsed_agent_started_at = None
         for l in list(self._listeners):
             l(event)
 
@@ -2055,6 +2140,7 @@ class AgentSession:
         *,
         allow_live_stream: bool = True,
         count_output_generation: bool = True,
+        purpose: str = "response",
     ) -> dict[str, Any]:
         if not self.model:
             raise RuntimeError("No model selected")
@@ -2202,9 +2288,31 @@ class AgentSession:
             chat_kwargs["stream_transport_timeout"] = max(float(provider_timeout) * 2, 600.0)
 
         generation_started_at = self._generation_clock() if count_output_generation else None
-        task = asyncio.create_task(provider.chat(**chat_kwargs))
-        self._active_chat_tasks.add(task)
+        provider_request_id = str(uuid.uuid4())
+        provider_started_at = self._elapsed_clock()
+        provider_event: dict[str, Any] = {
+            "type": "provider_request_start",
+            "requestId": provider_request_id,
+            "providerRequestId": provider_request_id,
+            "provider": self.model.provider,
+            "model": self.model.id,
+            "purpose": purpose,
+        }
+        if self._active_turn_id:
+            provider_event["turnId"] = self._active_turn_id
+        if self._active_attempt is not None:
+            provider_event["attempt"] = self._active_attempt
+        if self._active_request_id:
+            provider_event["parentRequestId"] = self._active_request_id
+        # Listeners may mutate their event argument. Keep this captured request
+        # metadata separate so provider end events and durable timing retain
+        # their original correlation fields.
+        self._emit(dict(provider_event))
+        provider_outcome = "success"
+        task: asyncio.Task[Any] | None = None
         try:
+            task = asyncio.create_task(provider.chat(**chat_kwargs))
+            self._active_chat_tasks.add(task)
             if not is_streaming:
                 res = await asyncio.wait_for(task, timeout=provider_timeout)
             else:
@@ -2234,6 +2342,7 @@ class AgentSession:
                     # No meaningful provider activity and no completion in the
                     # configured interval: this is the centralized idle expiry.
                     if not task.done():
+                        provider_outcome = "timeout"
                         task.cancel()
                         try:
                             await task
@@ -2245,26 +2354,49 @@ class AgentSession:
                         ) from None
                 res = await task
         except TimeoutError:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            provider_outcome = "timeout"
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             raise RuntimeError(
                 f"provider timed out after {provider_timeout}s — "
                 "the request did not resolve within the configured deadline"
             ) from None
         except asyncio.CancelledError:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            provider_outcome = "cancelled"
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             if self._abort_requested:
                 raise _AbortSignal() from None
             raise
+        except Exception:
+            if provider_outcome != "timeout":
+                provider_outcome = "error"
+            raise
+        except BaseException:
+            provider_outcome = "error"
+            raise
         finally:
-            self._active_chat_tasks.discard(task)
+            if task is not None:
+                self._active_chat_tasks.discard(task)
+            elapsed_ms = self._elapsed_ms(provider_started_at)
+            provider_end = dict(provider_event)
+            provider_end.update({"type": "provider_request_end", "elapsedMs": elapsed_ms,
+                                 "outcome": provider_outcome, "ok": provider_outcome == "success"})
+            self._append_timing(
+                "provider_request", elapsed_ms, provider_outcome,
+                providerRequestId=provider_request_id, parentRequestId=provider_event.get("parentRequestId"),
+                turnId=provider_event.get("turnId"), attempt=provider_event.get("attempt"),
+                provider=provider_event["provider"], model=provider_event["model"], purpose=provider_event["purpose"],
+            )
+            self._emit(provider_end)
 
         assistant_message = {
             "role": "assistant",
@@ -2475,6 +2607,8 @@ class AgentSession:
         }
         if aborted:
             event["aborted"] = True
+        else:
+            event["budgetExceeded"] = True
         self._emit(event)
         self._report_activity("tool_failed")
         return payload
@@ -2680,6 +2814,7 @@ class AgentSession:
                                     self._flatten_messages_for_provider(),
                                     allow_live_stream=True,
                                     count_output_generation=attempt == 0,
+                                    purpose="response",
                                 )
                             except _AbortSignal:
                                 self._abort_requested = True
@@ -2739,6 +2874,7 @@ class AgentSession:
                                         ],
                                         allow_live_stream=False,
                                         count_output_generation=False,
+                                        purpose="nudge",
                                     )
                                 except _AbortSignal:
                                     self._abort_requested = True
@@ -2793,6 +2929,7 @@ class AgentSession:
                                         + [{"role": "user", "content": self._tool_response_repair_prompt()}],
                                         allow_live_stream=False,
                                         count_output_generation=False,
+                                        purpose="repair",
                                     )
                                 except _AbortSignal:
                                     self._abort_requested = True
@@ -3144,11 +3281,12 @@ class AgentSession:
             self._retrying = False
             self._abort_requested = False
             if not isinstance(e, _CapabilityErrorCooperative):
+                attempt = self._active_attempt or 1
                 self._emit(
                     {
                         "type": "turn_end",
                         "ok": False,
-                        "attempt": 1,
+                        "attempt": attempt,
                         "reason": "error",
                         "error": "session error — provider call or tool loop failed unexpectedly",
                         "willRetry": False,
@@ -3161,6 +3299,10 @@ class AgentSession:
             # them before post-turn queue handling or the next prompt.
             self._active_turn_id = None
             self._active_request_id = None
+            self._active_attempt = None
+            self._elapsed_attempt_started_at.clear()
+            self._elapsed_tool_started_at.clear()
+            self._elapsed_terminal_outcome = None
 
         self._is_streaming = False
 
@@ -3426,7 +3568,7 @@ class AgentSession:
         ]
         try:
             res = await self._invoke_provider(
-                msgs, allow_live_stream=False, count_output_generation=False
+                msgs, allow_live_stream=False, count_output_generation=False, purpose="compaction"
             )
             text = self._assistant_text(res).strip()
             return text or None
@@ -3695,6 +3837,7 @@ class AgentSession:
             "contextUsage": self.get_context_usage(),
             "toolOutputPruning": dict(self._last_tool_output_pruning),
             "compaction": self.session_manager.get_compaction_stats(),
+            "elapsedTiming": self.session_manager.get_lifecycle_timing_stats(),
             "outputGeneration": {
                 "tokensPerSecond": output_rate,
                 "outputTokens": generation_tokens,

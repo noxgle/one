@@ -280,6 +280,7 @@ async def test_tui_command_stats_state_tools(tmp_path: Path):
         assert '"compaction"' in stream
         assert '"outputGeneration"' in stream
         assert '"time"' in stream
+        assert '"elapsedTiming"' in stream
         assert '"thinkingLevel": "medium"' in stream
         assert '"sessionId"' in stream
         assert '"pendingQueues"' in stream

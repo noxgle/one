@@ -265,6 +265,47 @@ class SessionManager:
             }
         )
 
+    def append_timing(
+        self,
+        scope: str,
+        elapsed_ms: float | int,
+        outcome: str,
+        **metadata: Any,
+    ) -> str:
+        """Append non-provider-context lifecycle timing metadata.
+
+        Timing is deliberately its own entry type: it remains available in the
+        JSONL graph without becoming a message supplied to a provider.
+        """
+        measured = float(elapsed_ms)
+        elapsed = int(measured) if math.isfinite(measured) and measured > 0 else 0
+        scopes = {"turn", "attempt", "provider_request", "tool"}
+        outcomes = {"success", "error", "timeout", "cancelled", "rejected", "budget_exceeded"}
+        if scope not in scopes:
+            raise ValueError(f"Invalid timing scope: {scope}")
+        if outcome not in outcomes:
+            raise ValueError(f"Invalid timing outcome: {outcome}")
+        entry: dict[str, Any] = {
+            "type": "timing",
+            "id": _id(),
+            "parentId": self._leaf_id,
+            "timestamp": _now_iso(),
+            "scope": scope,
+            "elapsedMs": elapsed,
+            "outcome": outcome,
+        }
+        # Keep durable telemetry correlation-only. Do not permit request bodies,
+        # prompts, results, errors, credentials, or arbitrary event payloads.
+        allowed = {
+            "turnId", "attempt", "providerRequestId", "parentRequestId",
+            "provider", "model", "purpose", "tool", "toolCallId",
+        }
+        for key in allowed:
+            value = metadata.get(key)
+            if value is not None:
+                entry[key] = str(value)[:128] if key not in {"attempt"} else int(value)
+        return self._append(entry)
+
     def append_thinking_level_change(self, level: str) -> str:
         return self._append(
             {
@@ -385,6 +426,65 @@ class SessionManager:
                 # The latest completed entry may be an old entry with no timing.
                 last_duration = None
         return {"durationsSec": durations, "lastSec": last_duration}
+
+    def get_lifecycle_timing_stats(self) -> dict[str, dict[str, Any]]:
+        """Summarize valid durable lifecycle timings on the current branch.
+
+        Unknown outcomes are deliberately ignored: the public outcome contract
+        stays stable when a newer writer adds an outcome this reader does not
+        understand.  Timing entries are correlation metadata, so walking the
+        active ancestry retains pre-compaction measurements while excluding
+        sibling branch work.
+        """
+        outcomes = ("success", "error", "timeout", "cancelled", "rejected", "budget_exceeded")
+        scopes = ("turn", "attempt", "provider_request", "tool")
+        values: dict[str, list[float]] = {scope: [] for scope in scopes}
+        by_outcome: dict[str, dict[str, int]] = {
+            scope: {outcome: 0 for outcome in outcomes} for scope in scopes
+        }
+        totals: dict[str, float] = {scope: 0.0 for scope in scopes}
+        for entry in self.get_branch():
+            scope = entry.get("scope")
+            if entry.get("type") != "timing" or not isinstance(scope, str) or scope not in values:
+                continue
+            elapsed = entry.get("elapsedMs")
+            outcome = entry.get("outcome")
+            try:
+                valid_elapsed = (
+                    not isinstance(elapsed, bool)
+                    and isinstance(elapsed, (int, float))
+                    and math.isfinite(elapsed)
+                    and elapsed >= 0
+                )
+            except OverflowError:
+                valid_elapsed = False
+            if (
+                not valid_elapsed
+                or outcome not in outcomes
+            ):
+                continue
+            assert isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+            # Keep JSON output finite when malformed legacy records contain
+            # individually finite, near-maximum floats.
+            if not math.isfinite(totals[scope] + float(elapsed)):
+                continue
+            values[scope].append(float(elapsed))
+            totals[scope] += float(elapsed)
+            by_outcome[scope][outcome] += 1
+        result: dict[str, dict[str, Any]] = {}
+        for scope in scopes:
+            measured = values[scope]
+            total = totals[scope]
+            result[scope] = {
+                "measurements": len(measured),
+                "totalMs": total,
+                "averageMs": total / len(measured) if measured else None,
+                "minMs": min(measured) if measured else None,
+                "maxMs": max(measured) if measured else None,
+                "lastMs": measured[-1] if measured else None,
+                "byOutcome": by_outcome[scope],
+            }
+        return result
 
     def append_branch_summary(
         self,

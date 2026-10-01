@@ -3,18 +3,26 @@
 {"message": {"content": "do something", "role": "user"}, "type": "message_start"}
 {"message": {"content": "do something", "role": "user"}, "type": "message_end"}
 {"attempt": 1, "type": "turn_start"}
+{"attempt": 1, "model": "gpt-4.1", "parentRequestId": "p2", "provider": "openai", "providerRequestId": "<provider-request-id>", "purpose": "response", "requestId": "<provider-request-id>", "turnId": "turn-1", "type": "provider_request_start"}
+{"attempt": 1, "model": "gpt-4.1", "ok": false, "outcome": "error", "parentRequestId": "p2", "provider": "openai", "providerRequestId": "<provider-request-id>", "purpose": "response", "requestId": "<provider-request-id>", "turnId": "turn-1", "type": "provider_request_end"}
 {"attempt": 1, "error": "boom", "ok": false, "reason": "error", "type": "turn_end", "willRetry": true}
 {"attempt": 1, "delayMs": 5, "errorMessage": "boom", "maxAttempts": 3, "type": "auto_retry_start"}
 {"aborted": false, "attempt": 1, "type": "auto_retry_end", "willRetry": true}
 {"attempt": 2, "type": "turn_start"}
+{"attempt": 2, "model": "gpt-4.1", "parentRequestId": "p2", "provider": "openai", "providerRequestId": "<provider-request-id>", "purpose": "response", "requestId": "<provider-request-id>", "turnId": "turn-1", "type": "provider_request_start"}
+{"attempt": 2, "model": "gpt-4.1", "ok": false, "outcome": "error", "parentRequestId": "p2", "provider": "openai", "providerRequestId": "<provider-request-id>", "purpose": "response", "requestId": "<provider-request-id>", "turnId": "turn-1", "type": "provider_request_end"}
 {"attempt": 2, "error": "boom", "ok": false, "reason": "error", "type": "turn_end", "willRetry": true}
 {"attempt": 2, "delayMs": 10, "errorMessage": "boom", "maxAttempts": 3, "type": "auto_retry_start"}
 {"aborted": false, "attempt": 2, "type": "auto_retry_end", "willRetry": true}
 {"attempt": 3, "type": "turn_start"}
+{"attempt": 3, "model": "gpt-4.1", "parentRequestId": "p2", "provider": "openai", "providerRequestId": "<provider-request-id>", "purpose": "response", "requestId": "<provider-request-id>", "turnId": "turn-1", "type": "provider_request_start"}
+{"attempt": 3, "model": "gpt-4.1", "ok": false, "outcome": "error", "parentRequestId": "p2", "provider": "openai", "providerRequestId": "<provider-request-id>", "purpose": "response", "requestId": "<provider-request-id>", "turnId": "turn-1", "type": "provider_request_end"}
 {"attempt": 3, "error": "boom", "ok": false, "reason": "error", "type": "turn_end", "willRetry": true}
 {"attempt": 3, "delayMs": 20, "errorMessage": "boom", "maxAttempts": 3, "type": "auto_retry_start"}
 {"aborted": false, "attempt": 3, "type": "auto_retry_end", "willRetry": true}
 {"attempt": 4, "type": "turn_start"}
+{"attempt": 4, "model": "gpt-4.1", "parentRequestId": "p2", "provider": "openai", "providerRequestId": "<provider-request-id>", "purpose": "response", "requestId": "<provider-request-id>", "turnId": "turn-1", "type": "provider_request_start"}
+{"attempt": 4, "model": "gpt-4.1", "ok": false, "outcome": "error", "parentRequestId": "p2", "provider": "openai", "providerRequestId": "<provider-request-id>", "purpose": "response", "requestId": "<provider-request-id>", "turnId": "turn-1", "type": "provider_request_end"}
 {"attempt": 4, "error": "boom", "ok": false, "reason": "error", "type": "turn_end", "willRetry": false}
 {"message": {"content": [{"text": "boom", "type": "text"}], "model": "gpt-4.1", "provider": "openai", "role": "assistant", "stopReason": "error", "usage": {"cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}, "input": 0, "output": 0}}, "type": "message_start"}
 {"assistantMessageEvent": {"delta": "boom", "type": "text_delta"}, "type": "message_update"}

@@ -95,6 +95,26 @@ The default mode (when none is specified) is `tui`.
 
 **File:** `one/core/agent_session.py`
 
+Lifecycle telemetry uses a dedicated monotonic clock. Durable `timing` entries
+record nonnegative integer `elapsedMs` for whole turns, attempts, provider
+requests, and tool handling; these correlation-only entries are retained in
+session history but are never replayed into provider context.
+`turn` spans the whole prompt (including approvals, retries, backoff, and
+compaction), while `attempt` ends before later retry backoff. Tool timing starts
+after approval, so rejected calls are zero. Entries accept only the documented
+scope/outcome enums and a correlation-only metadata whitelist; invalid values
+are rejected rather than silently reclassified. Outcomes are `success`, `error`,
+`timeout`, `cancelled`, `rejected`, or `budget_exceeded`.
+
+`SessionManager.get_lifecycle_timing_stats()` traverses only the active branch,
+so it retains shared ancestry through compaction but excludes sibling work. It
+reports independent per-scope aggregates for `turn`, `attempt`,
+`provider_request`, and `tool`; no timestamp is inferred for older entries.
+Malformed measurements and unknown outcomes are ignored to preserve the stable
+public outcome set. The TUI renders validated completed-tool elapsed values and
+emits one validated whole-turn summary at `agent_end`, accumulating uniquely
+identified, turn-scoped provider requests across retries.
+
 The `AgentSession` class is the central component. It implements a synchronous
 event-emitting loop that:
 

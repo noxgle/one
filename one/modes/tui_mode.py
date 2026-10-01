@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -25,6 +26,19 @@ from one.core.provider_login import run_oauth_login, validate_and_fetch
 from one.core.session_manager import SessionInfo, SessionManager, normalize_session_name
 from one.core.types import ModelInfo
 from one.tools.common import sanitize_display_text
+
+
+def _format_elapsed_ms(value: Any) -> str | None:
+    """Format only trustworthy lifecycle durations for literal stream headings."""
+    try:
+        valid = not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+    except OverflowError:
+        valid = False
+    if not valid:
+        return None
+    if value < 1000:
+        return f"{int(value)} ms"
+    return f"{value / 1000:.2f} s"
 
 try:
     from textual import events
@@ -937,6 +951,11 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines: list[str] = []
             self._rendered_stream_lines: tuple[str, ...] = ()
             self._retry_state = "idle"
+            self._turn_timing_id: str | None = None
+            self._turn_provider_ids: set[str] = set()
+            self._turn_provider_elapsed_ms = 0.0
+            self._turn_provider_measurements = 0
+            self._turn_timing_reported = False
             self._last_auto_copied = ""
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
@@ -1100,6 +1119,7 @@ if TEXTUAL_AVAILABLE:
         def _rebuild_session_transcript(self) -> None:
             """Replace the viewport cache with the loaded durable transcript."""
             self._stream_lines = []
+            self._reset_turn_timing()
             self._rendered_stream_lines = ()
             self._assistant_stream = ""
             self._assistant_stream_open = False
@@ -1757,7 +1777,7 @@ if TEXTUAL_AVAILABLE:
                 return ["[tool output preview; full result remains in evidence]", *panel_lines[:display_limit]]
             return panel_lines
 
-        def _finish_tool_block(self, tool_name: str, status: str) -> bool:
+        def _finish_tool_block(self, tool_name: str, status: str, elapsed_ms: Any = None) -> bool:
             """Append a completed status to the matching active tool block."""
             active = self._active_tool_block
             if active is None:
@@ -1768,11 +1788,43 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines[start:end] = self._bounded_tool_panel(f"{text} [{status}]")
             badge = "✓" if status in {"ok", "success"} else "△" if status in {"warning", "disabled"} else "×"
             if start > 0 and self._stream_lines[start - 1].startswith("Tool:"):
-                self._stream_lines[start - 1] = f"Tool: {badge} {tool_name}"
+                elapsed = _format_elapsed_ms(elapsed_ms)
+                self._stream_lines[start - 1] = f"Tool: {badge} {tool_name}" + (f" · {elapsed}" if elapsed else "")
             self._active_tool_block = None
             self._trim_stream(render=False)
             self._render_stream()
             return True
+
+        def _reset_turn_timing(self) -> None:
+            self._turn_timing_id = None
+            self._turn_provider_ids.clear()
+            self._turn_provider_elapsed_ms = 0.0
+            self._turn_provider_measurements = 0
+            self._turn_timing_reported = False
+
+        def _write_turn_timing_summary(self, event: dict[str, Any]) -> None:
+            turn_id = event.get("turnId")
+            if self._turn_timing_reported or not turn_id or turn_id != self._turn_timing_id:
+                return
+            self._turn_timing_reported = True
+            elapsed = _format_elapsed_ms(event.get("elapsedMs"))
+            if elapsed is None:
+                self._turn_timing_id = None
+                self._turn_provider_ids.clear()
+                self._turn_provider_elapsed_ms = 0.0
+                self._turn_provider_measurements = 0
+                return
+            summary = f"Time: turn {elapsed}"
+            if self._turn_provider_measurements:
+                provider = _format_elapsed_ms(self._turn_provider_elapsed_ms)
+                if provider:
+                    request_word = "request" if self._turn_provider_measurements == 1 else "requests"
+                    summary += f" · provider {provider} / {self._turn_provider_measurements} {request_word}"
+            self._write(summary, "info")
+            self._turn_timing_id = None
+            self._turn_provider_ids.clear()
+            self._turn_provider_elapsed_ms = 0.0
+            self._turn_provider_measurements = 0
 
         def _apply_theme(self, theme_name: str) -> bool:
             theme = BUILTIN_TUI_THEMES.get((theme_name or "").strip().lower())
@@ -2636,6 +2688,7 @@ if TEXTUAL_AVAILABLE:
                 stream_widget = self.query_one("#stream")
                 stream_widget.update("")
                 self._stream_lines = []
+                self._reset_turn_timing()
                 self._assistant_has_live_delta = False
                 self._assistant_live_start_idx = -1
                 self._assistant_live_buffer = ""
@@ -3658,6 +3711,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_buffer = ""
             self._assistant_live_line_count = 0
             self._active_tool_block = None
+            self._reset_turn_timing()
             self._thinking_active = False
             self._thinking_label_shown = False
             self._thinking_buffer = ""
@@ -3803,7 +3857,30 @@ if TEXTUAL_AVAILABLE:
                 # drained after the previous turn), which never pass through
                 # on_input_submitted.
                 self._turn_active = True
+                # Retries preserve the agent/turn id and provider totals.
+                if event.get("turnId") and event.get("turnId") != self._turn_timing_id:
+                    self._reset_turn_timing()
+                    self._turn_timing_id = str(event["turnId"])
                 self._finalize_thinking_block()
+            elif et == "agent_start":
+                self._reset_turn_timing()
+                if event.get("turnId"):
+                    self._turn_timing_id = str(event["turnId"])
+            elif et == "provider_request_end":
+                turn_id = event.get("turnId")
+                request_id = event.get("providerRequestId") or event.get("requestId")
+                elapsed = event.get("elapsedMs")
+                if (
+                    self._turn_timing_id
+                    and not self._turn_timing_reported
+                    and turn_id == self._turn_timing_id
+                    and request_id
+                    and str(request_id) not in self._turn_provider_ids
+                    and _format_elapsed_ms(elapsed) is not None
+                ):
+                    self._turn_provider_ids.add(str(request_id))
+                    self._turn_provider_elapsed_ms += float(elapsed)
+                    self._turn_provider_measurements += 1
             elif et == "compaction_start":
                 self._write_lifecycle_separator()
             elif et == "tool_call_start":
@@ -3902,9 +3979,13 @@ if TEXTUAL_AVAILABLE:
                 status = "ok" if event.get("ok") else "err"
                 tool_name = str(event.get("tool") or "tool")
                 self._finalize_thinking_block()
-                if not self._finish_tool_block(tool_name, status):
+                elapsed = _format_elapsed_ms(event.get("elapsedMs"))
+                if not self._finish_tool_block(tool_name, status, event.get("elapsedMs")):
                     badge = "✓" if status == "ok" else "×"
-                    self._write_bounded_panel(f"Tool: {badge} {tool_name}", f"tool {status}: {tool_name}")
+                    self._write_bounded_panel(
+                        f"Tool: {badge} {tool_name}" + (f" · {elapsed}" if elapsed else ""),
+                        f"tool {status}: {tool_name}",
+                    )
                 if (
                     tool_name != "finish"
                     and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)()
@@ -3928,6 +4009,8 @@ if TEXTUAL_AVAILABLE:
                 if event.get("ok") is False:
                     err = str(event.get("error") or "Unknown error").strip()
                     self._write(f"[error] {err}", "error")
+            elif et == "agent_end":
+                self._write_turn_timing_summary(event)
             elif et == "auto_retry_end":
                 self._retry_state = "idle"
                 self._turn_active = False
