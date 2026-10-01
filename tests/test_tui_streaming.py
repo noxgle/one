@@ -295,6 +295,7 @@ async def test_tui_plan_update_renders_block(tmp_path: Path):
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "Plan:" in stream
+        assert "Tool: ○" not in stream
         assert "[>] read file" in stream
         assert "[ ] edit content" in stream
 
@@ -312,6 +313,7 @@ async def test_tui_plan_clear_emits_block(tmp_path: Path):
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
         assert "Plan: cleared" in stream
+        assert "Tool: ○" not in stream
 
 
 @pytest.mark.asyncio
@@ -325,8 +327,29 @@ async def test_tui_plan_update_is_bounded(tmp_path: Path):
         session._emit({"type": "plan_update", "plan": "x" * 300})
         await pilot.pause()
         stream = "\n".join(app._stream_lines)
-        assert stream.count("x") == 199
-        assert "…" in stream
+        # Main plan updates use the normal bounded panel rather than the
+        # sidebar's former 200-character slice.
+        assert stream.count("x") == 300
+
+
+@pytest.mark.asyncio
+async def test_tui_plan_update_preserves_lifecycle_tool_block_and_full_plan(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    plan = [{"step": f"step {index}", "status": "pending"} for index in range(1, 7)]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({"type": "tool_call_start", "tool": "plan", "args": {}})
+        session._emit({"type": "plan_update", "plan": plan})
+        session._emit({"type": "tool_call_end", "tool": "plan", "ok": True, "result": {}})
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Plan:" in stream
+        assert all(f"[ ] step {index}" in stream for index in range(1, 7))
+        assert stream.count("Tool: ○") == 0
+        assert "Tool: ✓ plan" in stream
 
 
 @pytest.mark.asyncio

@@ -643,6 +643,31 @@ async def test_tui_sidebar_shows_plan_section(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_sidebar_plan_window_is_literal_and_bounds_long_rows(tmp_path: Path):
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session._plan = [
+        {"step": "completed", "status": "completed"},
+        {"step": "[b]current[/] " + "very long label " * 12, "status": "in_progress"},
+        {"step": "next", "status": "pending"},
+        {"step": "outside window", "status": "pending"},
+    ]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static).content
+        assert "[>] [b]current[/]" in sidebar
+        assert "…" in sidebar
+        assert "[ ] next" in sidebar
+        assert "outside window" not in sidebar
+
+
+@pytest.mark.asyncio
 async def test_tui_sidebar_renders_all_structured_plan_statuses(tmp_path: Path):
     from textual.widgets import Static
 
@@ -661,8 +686,77 @@ async def test_tui_sidebar_renders_all_structured_plan_statuses(tmp_path: Path):
         app._refresh_sidebar()
         await pilot.pause()
         sidebar = app.query_one("#sidebar", Static)
-        for marker in ("[ ] queued", "[>] running", "[x] done", "[!] waiting"):
+        # The narrow sidebar retains the focused three-item window, not all
+        # four rows in a character-truncated plan string.
+        for marker in ("[ ] queued", "[>] running", "[x] done"):
             assert marker in sidebar.content
+        assert "[!] waiting" not in sidebar.content
+
+
+@pytest.mark.parametrize(
+    ("active_index", "expected"),
+    [
+        (0, ["one", "two", "three"]),
+        (1, ["one", "two", "three"]),
+        (2, ["two", "three", "four"]),
+        (3, ["three", "four", "five"]),
+        (4, ["four", "five", "six"]),
+        (5, ["four", "five", "six"]),
+    ],
+)
+def test_sidebar_plan_window_tracks_each_active_item(active_index: int, expected: list[str]):
+    from one.modes.tui_mode import _sidebar_plan_window
+
+    plan = [
+        {"step": step, "status": "in_progress" if index == active_index else "pending"}
+        for index, step in enumerate(("one", "two", "three", "four", "five", "six"))
+    ]
+
+    assert _sidebar_plan_window(plan).splitlines() == [
+        f"{'[>]' if step == plan[active_index]['step'] else '[ ]'} {step}" for step in expected
+    ]
+    assert plan[active_index]["status"] == "in_progress"
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_sidebar_plan_window_keeps_short_structured_plans(count: int):
+    from one.modes.tui_mode import _sidebar_plan_window
+
+    plan = [{"step": str(index), "status": "pending"} for index in range(count)]
+    assert _sidebar_plan_window(plan).splitlines() == [f"[ ] {index}" for index in range(count)]
+
+
+def test_sidebar_plan_window_focuses_first_unfinished_or_final_completed_items():
+    from one.modes.tui_mode import _sidebar_plan_window
+
+    unfinished = [
+        {"step": "one", "status": "completed"},
+        {"step": "two", "status": "completed"},
+        {"step": "three", "status": "blocked"},
+        {"step": "four", "status": "pending"},
+        {"step": "five", "status": "pending"},
+        {"step": "six", "status": "pending"},
+    ]
+    assert _sidebar_plan_window(unfinished).splitlines() == ["[x] two", "[!] three", "[ ] four"]
+
+    completed = [{"step": str(index), "status": "completed"} for index in range(6)]
+    assert _sidebar_plan_window(completed).splitlines() == ["[x] 3", "[x] 4", "[x] 5"]
+
+
+def test_sidebar_plan_window_handles_legacy_and_compacts_each_structured_item():
+    from one.modes.tui_mode import _sidebar_plan_window
+
+    assert _sidebar_plan_window("[x] one\n[>] two\n[ ] three\n[ ] four").splitlines() == [
+        "[x] one",
+        "[>] two",
+        "[ ] three",
+    ]
+    assert _sidebar_plan_window("unmarked legacy plan") == "unmarked legacy plan"
+    long_plan = [{"step": "long\n\nlabel " * 20, "status": "blocked"}]
+    row = _sidebar_plan_window(long_plan, max_item_chars=24)
+    assert row.startswith("[!] long label")
+    assert row.endswith("…")
+    assert len(row) <= 24
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **TUI plan display** — the sidebar now keeps a focused three-step window
+  around the active or next unfinished structured-plan item, while standalone
+  plan updates render their full bounded plan panel without a `Tool:` label.
 - **TUI tool panels** — lifecycle status remains under `Tool:`, while command
   and tool output now render under a distinct `Result:` heading; the sidebar
   also shows the attached Git branch beside its CWD when available.

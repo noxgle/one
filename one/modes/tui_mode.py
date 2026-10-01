@@ -16,6 +16,7 @@ from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 
+from rich.cells import cell_len, set_cell_size
 from rich.markup import escape as rich_escape
 from rich.text import Text
 
@@ -201,8 +202,75 @@ _TUI_LOGO_LINES = _load_tui_logo_lines()
 MAX_RENDERED_LINES = 500
 _TRUNCATED_ASSISTANT_MARKER = "[earlier assistant output truncated in viewport]"
 
-# Maximum characters for the plan section in the sidebar (truncated with …).
-_PLAN_SIDEBAR_MAX = 200
+# The sidebar shows a focused plan window rather than a character slice of the
+# entire plan. This is display-only; session and provider plan state is intact.
+_PLAN_SIDEBAR_ITEMS = 3
+# Sidebar width is 42 cells including its border and horizontal padding.
+_PLAN_SIDEBAR_ITEM_MAX = 38
+
+
+def _sidebar_plan_window(
+    plan: list[dict[str, str]] | str | None, *, max_item_chars: int = _PLAN_SIDEBAR_ITEM_MAX
+) -> str:
+    """Render at most three focused plan rows for the narrow TUI sidebar."""
+    if not plan:
+        return ""
+
+    markers = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]", "blocked": "[!]"}
+
+    def window_start(statuses: list[str | None]) -> int:
+        count = len(statuses)
+        if count <= _PLAN_SIDEBAR_ITEMS:
+            return 0
+        try:
+            focus = statuses.index("in_progress")
+        except ValueError:
+            try:
+                focus = next(index for index, status in enumerate(statuses) if status != "completed")
+            except StopIteration:
+                focus = count - 1
+        return max(0, min(focus - 1, count - _PLAN_SIDEBAR_ITEMS))
+
+    def compact(marker: str, label: str) -> str:
+        # Keep one row per item and preserve its status marker on small panes.
+        normalized = " ".join(label.split())
+        available = max(1, max_item_chars - len(marker) - 1)
+        if cell_len(normalized) > available:
+            normalized = set_cell_size(normalized, max(0, available - 1)).rstrip() + "…"
+        return f"{marker} {normalized}"
+
+    if isinstance(plan, list):
+        rows: list[tuple[str, str, str]] = []
+        for item in plan:
+            if not isinstance(item, dict):
+                continue
+            status = item.get("status")
+            step = item.get("step")
+            if status in markers and isinstance(step, str):
+                rows.append((markers[status], step, status))
+        if not rows:
+            return ""
+        start = window_start([status for _marker, _step, status in rows])
+        return "\n".join(compact(marker, step) for marker, step, _status in rows[start : start + _PLAN_SIDEBAR_ITEMS])
+
+    # Legacy strings remain strings: marker inspection only chooses a visual
+    # window and never turns arbitrary persisted text into canonical state.
+    lines = plan.splitlines() or [plan]
+    statuses: list[str | None] = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("[>]"):
+            statuses.append("in_progress")
+        elif stripped.startswith("[x]"):
+            statuses.append("completed")
+        elif stripped.startswith("[!]"):
+            statuses.append("blocked")
+        elif stripped.startswith("[ ]"):
+            statuses.append("pending")
+        else:
+            statuses.append(None)
+    start = window_start(statuses)
+    return "\n".join(" ".join(line.split()) for line in lines[start : start + _PLAN_SIDEBAR_ITEMS])
 
 # One source of truth for user-visible keyboard shortcuts. Textual itself
 # provides many widget/editor bindings, but these are the application-level
@@ -1770,6 +1838,15 @@ if TEXTUAL_AVAILABLE:
         def _write_result_block(self, text: str) -> tuple[int, int]:
             return self._write_bounded_panel("Result:", text)
 
+        def _write_plan_block(self, text: str | None) -> None:
+            """Render a standalone plan update without claiming a tool block."""
+            if text:
+                self._write_bounded_panel("Plan:", text)
+                return
+            self._remove_thinking_line()
+            self._stream_lines.extend(("", "Plan: cleared", ""))
+            self._trim_stream()
+
         def _bounded_tool_panel(self, text: str) -> list[str]:
             panel_lines = self._format_chat_panel("tool", text, pad_y=0)
             display_limit = 40
@@ -2072,9 +2149,7 @@ if TEXTUAL_AVAILABLE:
 
             plan_block = Text()
             if plan:
-                from one.tools.plan import render_plan
-
-                display = render_plan(plan, max_chars=_PLAN_SIDEBAR_MAX)
+                display = _sidebar_plan_window(plan)
                 display = sanitize_display_text(display)
                 plan_block.append_text(Text.from_markup(f"[b {self._theme.info}]Plan[/]"))
                 plan_block.append("\n")
@@ -4033,10 +4108,13 @@ if TEXTUAL_AVAILABLE:
                 if plan:
                     from one.tools.plan import render_plan
 
-                    display = render_plan(plan, max_chars=_PLAN_SIDEBAR_MAX)
-                    self._write_tool_block(f"Plan:\n{display}")
+                    # This is an informational standalone block. Do not make
+                    # it the active lifecycle tool block: the surrounding
+                    # plan tool's later tool_call_end must still finish its
+                    # own Tool: status panel.
+                    self._write_plan_block(render_plan(plan))
                 else:
-                    self._write_tool_block("Plan: cleared")
+                    self._write_plan_block(None)
 
             # Delta batches repaint only the stream. Sidebar work stays tied
             # to lifecycle/state-changing events, never token rate.
