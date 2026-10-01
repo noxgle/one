@@ -63,6 +63,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Plan completion guard** — status-only plan updates no longer re-arm the
+  post-plan finish guard after a tool step has executed.
 - **Write argument safety** — write calls now require explicit string content,
   reject omission metadata, and keep source bodies out of ordinary model-context
   previews while retaining durable evidence.

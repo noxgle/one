@@ -11,6 +11,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.providers.base import ChatResult
 from one.tools.plan import render_plan
 
 
@@ -46,6 +47,21 @@ class _RecordingProvider:
         idx = min(self.calls, len(self.responses) - 1)
         self.calls += 1
         return ChatResult(text=self.responses[idx], raw={}, usage={}, stop_reason="stop")
+
+
+class _RecordingNativeProvider:
+    supports_native_tools = True
+
+    def __init__(self, responses: list[ChatResult]) -> None:
+        self.responses = responses
+        self.calls = 0
+        self.requests: list[list[dict[str, Any]]] = []
+
+    async def chat(self, api_key: str, model: str, messages: list[dict[str, Any]], thinking_level: str, **kwargs: Any) -> ChatResult:
+        self.requests.append(messages)
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
 
 
 def _make_agent(
@@ -385,6 +401,129 @@ async def test_plan_then_read_then_finish_is_allowed(tmp_path: Path):
     await agent.prompt("Make a plan, inspect, and complete it.")
 
     assert agent.providers["openai"].calls == 3  # type: ignore[index,union-attr]
+    assert agent._plan is None
+
+
+@pytest.mark.asyncio
+async def test_completed_plan_update_after_action_does_not_rearm_finish_guard(tmp_path: Path):
+    (tmp_path / "input.txt").write_text("observed\n", encoding="utf-8")
+    agent = _make_agent(
+        tmp_path,
+        [
+            '{"tool":"plan","args":{"plan":[{"step":"inspect","status":"pending"}]}}',
+            '{"tool":"read","args":{"path":"input.txt"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"inspect","status":"completed"}]}}',
+            '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
+        ],
+    )
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Plan, inspect, mark complete, and finish.")
+
+    assert agent.providers["openai"].calls == 4  # type: ignore[index,union-attr]
+    assert not [e for e in events if e.get("type") == "tool_call_end" and e.get("tool") == "finish" and not e.get("ok")]
+    assert agent._plan is None
+    assert _plan_entries(agent.session_manager.get_entries())[-1]["content"] == ""
+
+
+@pytest.mark.asyncio
+async def test_multiple_plan_updates_after_action_never_rearm_finish_guard(tmp_path: Path):
+    (tmp_path / "input.txt").write_text("observed\n", encoding="utf-8")
+    agent = _make_agent(
+        tmp_path,
+        [
+            '{"tool":"plan","args":{"plan":[{"step":"inspect","status":"pending"}]}}',
+            '{"tool":"read","args":{"path":"input.txt"}}',
+            '{"tool":"plan","args":{"plan":[{"step":"inspect","status":"in_progress"}]}}',
+            '{"tool":"plan","args":{"plan":[{"step":"inspect","status":"completed"}]}}',
+            '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
+        ],
+    )
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Plan, inspect, update twice, and finish.")
+
+    assert agent.providers["openai"].calls == 5  # type: ignore[index,union-attr]
+    assert not [e for e in events if e.get("type") == "tool_call_end" and e.get("tool") == "finish" and not e.get("ok")]
+    assert agent._plan is None
+
+
+@pytest.mark.asyncio
+async def test_completed_plan_update_before_action_keeps_finish_guard(tmp_path: Path):
+    (tmp_path / "input.txt").write_text("observed\n", encoding="utf-8")
+    agent = _make_agent(
+        tmp_path,
+        [
+            '{"tool":"plan","args":{"plan":[{"step":"inspect","status":"pending"}]}}',
+            '{"tool":"plan","args":{"plan":[{"step":"inspect","status":"completed"}]}}',
+            '{"tool":"finish","args":{"summary":"premature","goal_success":true}}',
+            '{"tool":"finish","args":{"summary":"still premature","goal_success":true}}',
+            '{"tool":"read","args":{"path":"input.txt"}}',
+            '{"tool":"finish","args":{"summary":"done","goal_success":true}}',
+        ],
+    )
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Plan, update it, then finish only after inspection.")
+
+    rejected = [e for e in events if e.get("type") == "tool_call_end" and e.get("tool") == "finish" and not e.get("ok")]
+    assert len(rejected) == 2
+    assert agent.providers["openai"].calls == 6  # type: ignore[index,union-attr]
+    requests = agent.providers["openai"].requests  # type: ignore[index,union-attr]
+    assert any("# Active Plan" in str(message.get("content", "")) for message in requests[3] if message.get("role") == "system")
+    assert agent._plan is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_plan_update_preserves_existing_guard_state(tmp_path: Path):
+    agent = _make_agent(tmp_path, [])
+    original = [{"step": "inspect", "status": "pending"}]
+    await agent._run_tool_call("plan", {"plan": original})
+
+    invalid = await agent._run_tool_call("plan", {"plan": [{"step": "inspect", "status": "invalid"}]})
+    assert invalid["ok"] is False
+    assert "plan[0].status" in invalid["error"]
+    assert agent._plan == original
+    assert agent._plan_just_created is True
+
+    await agent._run_tool_call("read", {"path": "missing.txt"})
+    assert agent._plan_just_created is False
+    invalid = await agent._run_tool_call("plan", {"plan": [{"step": "inspect", "status": "invalid"}]})
+    assert invalid["ok"] is False
+    assert "plan[0].status" in invalid["error"]
+    assert agent._plan == original
+    assert agent._plan_just_created is False
+
+
+@pytest.mark.asyncio
+async def test_native_completed_plan_update_after_action_allows_finish(tmp_path: Path):
+    (tmp_path / "input.txt").write_text("observed\n", encoding="utf-8")
+    agent = _make_agent(tmp_path, [], tools=["read", "plan", "finish"])
+    provider = _RecordingNativeProvider([
+        ChatResult(text="", raw={}, usage={}, had_native_tool_call=True, native_tool_calls=[
+            {"id": "plan-create", "name": "plan", "arguments": {"plan": [{"step": "inspect", "status": "pending"}]}},
+        ]),
+        ChatResult(text="", raw={}, usage={}, had_native_tool_call=True, native_tool_calls=[
+            {"id": "read", "name": "read", "arguments": {"path": "input.txt"}},
+        ]),
+        ChatResult(text="", raw={}, usage={}, had_native_tool_call=True, native_tool_calls=[
+            {"id": "plan-complete", "name": "plan", "arguments": {"plan": [{"step": "inspect", "status": "completed"}]}},
+        ]),
+        ChatResult(text="", raw={}, usage={}, had_native_tool_call=True, native_tool_calls=[
+            {"id": "finish", "name": "finish", "arguments": {"summary": "done", "goal_success": True}},
+        ]),
+    ])
+    agent.providers = {"openai": provider}  # type: ignore[assignment]
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Plan, inspect, update, and finish.")
+
+    assert provider.calls == 4
+    assert not [e for e in events if e.get("type") == "tool_call_end" and e.get("tool") == "finish" and not e.get("ok")]
     assert agent._plan is None
 
 

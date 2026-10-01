@@ -1101,11 +1101,17 @@ class AgentSession:
             # coroutine but skip timeout wrapping below.
             result = self._ask_user(args)
         elif tool_name == "plan":
+            # A replacement plan is an update, not a newly created plan.  In
+            # particular, an update after a real tool step must not re-arm the
+            # finish guard.  Capture this before validation/assignment so an
+            # invalid update leaves both state and the guard untouched.
+            initial_plan_creation = self._plan is None
             result = plan_tool(args.get("plan"))
             normalized_plan = result["plan"]
             assert isinstance(normalized_plan, list)
             self._plan = normalized_plan
-            self._plan_just_created = True
+            if initial_plan_creation:
+                self._plan_just_created = True
             # Keep the string field for existing event consumers; planItems is
             # additive canonical data for structured-aware consumers.
             self._emit({"type": "plan_update", "plan": render_plan(self._plan), "planItems": self._plan})
