@@ -656,7 +656,8 @@ async def test_tui_command_bash_uses_restricted_profile(tmp_path: Path):
         assert "/bash pwd" in stream
         assert "Result:" in stream
         assert "evidence" not in stream.lower()
-        assert str(tmp_path) in stream
+        normalized_stream = "".join(stream.split())
+        assert str(tmp_path) in normalized_stream
         await _submit(app, pilot, "/bash rm -rf .")
         stream = "\n".join(app._stream_lines)
         assert "/bash rm -rf ." in stream
