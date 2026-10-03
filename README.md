@@ -595,8 +595,8 @@ future target, while Windows 10 support is deferred.
 
 - [Website](https://one.noxgle.com/)
 - [TODO.md](TODO.md) — roadmap
-- [DONE.md](DONE.md) — delivered work
 - [CHANGELOG.md](CHANGELOG.md) — release notes
+- [Git history](https://github.com/noxgle/one/commits/main/) — implementation history
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development guide
 - [SECURITY.md](SECURITY.md) — security policy and reporting
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — five-minute beginner guide

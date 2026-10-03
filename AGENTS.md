@@ -6,8 +6,9 @@
   console command are `one`.
 - `main` is the integration branch. Create a feature branch for changes. Do not
   commit, push, merge, tag, or create a PR unless explicitly requested.
-- Read `TODO.md` for open work, `DONE.md` for delivered work, and
-  `CONTRIBUTING.md` for contributor/release detail before substantial changes.
+- Read `TODO.md` for current open work, `CHANGELOG.md` for user-facing changes,
+  Git history for implementation details, and `CONTRIBUTING.md` for
+  contributor/release guidance before substantial changes.
 
 ## Commands
 

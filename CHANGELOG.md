@@ -8,6 +8,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Changed
+
+- **Project roadmap** — `TODO.md` now lists only current, verified work;
+  completed implementation details are available in Git history rather than a
+  separate delivered-work ledger.
+
 ### Added
 
 - **Restricted TUI manual commands** — `/bash` now uses a fail-closed,
