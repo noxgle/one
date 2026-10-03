@@ -34,7 +34,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
     "theme": "hacker",
-    "tui": {"infoPanel": "top"},
+    "tui": {"infoPanel": "top", "manualBashMode": "strict"},
     "defaultMode": "tui",
     "quietStartup": False,
     "steeringMode": "interrupt",
@@ -200,6 +200,16 @@ class SettingsManager:
         tui = self.merged().get("tui", {})
         value = tui.get("infoPanel", "top") if isinstance(tui, dict) else "top"
         return value if value in {"top", "sidebar"} else "top"
+
+    def get_tui_manual_bash_mode(self) -> str:
+        """Return the global-only manual-command policy mode.
+
+        A repository must not be able to relax this safety setting through its
+        project settings file.
+        """
+        tui = self.get_global_settings().get("tui", {})
+        value = tui.get("manualBashMode", "strict") if isinstance(tui, dict) else "strict"
+        return value if isinstance(value, str) and value in {"strict", "dev"} else "strict"
 
     def get_default_mode(self) -> str:
         mode = str(self.merged().get("defaultMode") or "tui").lower()

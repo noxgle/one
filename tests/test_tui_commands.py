@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -639,16 +640,111 @@ async def test_tui_command_logout_and_cooperation(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_tui_command_bash_echo(tmp_path: Path):
+async def test_tui_command_bash_uses_restricted_profile(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        await _submit(app, pilot, "/bash echo hi")
+        await _submit(app, pilot, "/bash pwd")
         stream = "\n".join(app._stream_lines)
-        assert "hi" in stream
+        assert "Command:" in stream
+        assert "/bash pwd" in stream
+        assert "Result:" in stream
+        assert "evidence" not in stream.lower()
+        assert str(tmp_path) in stream
+        await _submit(app, pilot, "/bash rm -rf .")
+        stream = "\n".join(app._stream_lines)
+        assert "/bash rm -rf ." in stream
+        assert "denied" in stream.lower()
+
+
+@pytest.mark.asyncio
+async def test_tui_manual_bash_keeps_command_and_status_when_output_hidden(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.settings_manager.set_bash_show_output(False)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/bash pwd")
+        stream = "\n".join(app._stream_lines)
+        assert "Command:" in stream and "/bash pwd" in stream
+        assert "Result:" in stream and "exitCode=0" in stream
+        assert str(tmp_path) not in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_manual_bash_result_after_session_switch_stays_out_of_new_view(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    old_session = _mk_app_session(tmp_path)
+    new_session = _mk_app_session(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_manual(command: str) -> dict[str, object]:
+        assert command == "pwd"
+        started.set()
+        await release.wait()
+        old_session.messages.append({"role": "bashExecution", "command": command, "output": "OLD_RESULT_SECRET", "exitCode": 0})
+        return {"ok": True, "output": "OLD_RESULT_SECRET", "exitCode": 0}
+
+    old_session.execute_tui_command = delayed_manual  # type: ignore[method-assign]
+    app = _OneTextualApp(old_session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pending = asyncio.create_task(app._handle_command("/bash pwd"))
+        await started.wait()
+        app.session = new_session
+        app._bind_session()
+        app._rebuild_session_transcript()
+        release.set()
+        await pending
+        assert any(message.get("output") == "OLD_RESULT_SECRET" for message in old_session.messages)
+        assert "OLD_RESULT_SECRET" not in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
+async def test_tui_config_manual_bash_mode_query_uses_global_effective_value(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.settings_manager._project = {"tui": {"manualBashMode": "dev"}}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._handle_command("/config tui.manualBashMode")
+        assert '"strict"' in "\n".join(app._stream_lines)
+        await app._handle_command("/config tui.manualBashMode dev")
+        await app._handle_command("/config tui.manualBashMode")
+        assert '"dev"' in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
+async def test_tui_config_dev_mode_enables_manual_mkdir_without_real_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    calls = []
+    monkeypatch.setattr("one.core.manual_command_policy._resolve_system_executable", lambda name: f"/usr/bin/{name}")
+
+    async def fake_manual(plan, timeout=None):
+        calls.append(plan)
+        return {"ok": True, "output": "", "exitCode": 0, "content": [{"type": "text", "text": ""}]}
+
+    monkeypatch.setattr("one.tools.bash.manual_command_tool", fake_manual)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._handle_command("/bash mkdir created")
+        assert not calls
+        await app._handle_command("/config tui.manualBashMode dev")
+        await app._handle_command("/bash mkdir created")
+        assert calls
+        assert calls[0].argv[1:] == (str(tmp_path / "created"),)
 
 
 @pytest.mark.asyncio

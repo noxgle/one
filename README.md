@@ -197,6 +197,48 @@ Current application shortcuts are:
 
 Use `/paste-image` if the terminal intercepts `Ctrl+Alt+V`.
 
+### TUI `/bash` command profile
+
+TUI `/bash <command>` is a restricted, shell-free manual-command interface. Its
+default `strict` profile permits a small read-only set (workspace file views,
+searches, disk information, and selected Git inspection). Query/change the
+**global** profile with `/config tui.manualBashMode` and
+`/config tui.manualBashMode dev` (or global `settings.json`); project
+`.one/settings.json` cannot enable `dev`.
+
+| Profile | Permitted purpose |
+| --- | --- |
+| `strict` (default) | `pwd`, conservative `ls`/`tree`/file/search/disk forms, and selected read-only Git forms |
+| `dev` | strict plus selected workspace mutations and fixed Python, npm, Cargo, and Go development forms |
+
+Strict families are `pwd`; conservative `ls`, `tree -L`, `cat`, `head`/`tail
+-n`, `wc`, `stat`, `file`, `rg`, `grep`, `du`, and `df`; and selected
+`git status`, `diff`, `log`, `show`, `branch`, and `rev-parse` forms. The
+executables must resolve from `/usr/bin` or `/bin`; a missing tool is denied.
+
+Dev additionally permits `mkdir [-p]`, `touch`, and no-clobber `cp`/`mv` with
+selected workspace paths; `git add -- <paths>` and `git restore --staged --
+<paths>`; `python -m pytest [-q|-x|--tb=short] [tests]`,
+`.venv/bin/python -m ruff check .`, `python -m ruff format --check .`,
+`python -m compileall [-q]`, `python -m build`, and `python -m pip check`,
+`python -m pip list`, or `python -m pip show <package>`; plus exact `npm test`,
+`npm run lint`, `npm run build`, `cargo check`, `cargo test`, `cargo fmt
+--check`, `go test`, and `go vet` forms. These are
+grammars, not general executable permissions: arbitrary flags remain denied.
+
+This is an invocation restriction, **not an OS sandbox**: it does not sandbox
+repository code or eliminate TOCTOU races, and `dev` can execute project code.
+Shell operators, redirects, substitutions, arbitrary options, arbitrary
+interpreters, and paths outside the workspace are denied. A configured
+`shellCommandPrefix` is incompatible with TUI `/bash` and is rejected rather
+than run. Existing model `bash`, interactive `/bash`, and RPC bash behavior are
+unchanged.
+
+Manual TUI `/bash` commands and their output stay in local session history and
+are never sent to the model, including during compaction. They may persist
+sensitive output on disk, so avoid printing secrets. This does not apply to the
+model `bash` tool: its bounded results remain model context as usual.
+
 ### One-shot text and JSON
 
 ```bash

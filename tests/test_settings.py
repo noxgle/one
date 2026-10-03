@@ -154,6 +154,11 @@ def test_tui_info_panel_is_validated(value: object, expected: str) -> None:
     assert settings.get_tui_info_panel() == expected
 
 
+@pytest.mark.parametrize("value", [None, 1, True, [], {}])
+def test_tui_manual_bash_mode_malformed_values_fail_closed(value: object) -> None:
+    assert SettingsManager.in_memory({"tui": {"manualBashMode": value}}).get_tui_manual_bash_mode() == "strict"
+
+
 def test_default_quiet_startup_is_false() -> None:
     """quietStartup defaults to False."""
     from one.core.settings_manager import DEFAULT_SETTINGS

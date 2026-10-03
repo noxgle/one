@@ -10,6 +10,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Restricted TUI manual commands** — `/bash` now uses a fail-closed,
+  shell-free strict/dev command profile. It is separate from model bash and
+  RPC/interactive commands, which retain their existing behavior. Manual TUI
+  commands and output remain local session history (and may persist sensitive
+  output on disk); they are never sent to the model. Strict/dev is not an OS
+  sandbox, while model bash results still enter model context.
+
 - **Lifecycle elapsed timing** — durable, monotonic `timing` entries record whole
   turns, attempts, provider requests, and tool handling without entering the
   provider conversation context. `/stats` and RPC summarize current-branch

@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -256,6 +257,122 @@ async def test_execute_bash_default_timeout(tmp_path: Path):
     )
     out, _ = await proc.communicate()
     assert out.decode(errors="ignore").strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_execute_tui_command_validates_before_spawn_and_uses_argv_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _mk_agent(tmp_path)
+    monkeypatch.setattr("one.core.manual_command_policy._resolve_system_executable", lambda name: f"/usr/bin/{name}")
+    calls: list[tuple[Any, Any]] = []
+
+    async def fake_manual(plan, timeout=None):
+        calls.append((plan, timeout))
+        return {"ok": True, "output": "pwd", "exitCode": 0, "content": [{"type": "text", "text": "pwd"}]}
+
+    monkeypatch.setattr("one.tools.bash.manual_command_tool", fake_manual)
+    result = await agent.execute_tui_command("pwd")
+    assert result["ok"] is True
+    assert calls and calls[0][0].argv == ("/usr/bin/pwd",)
+    before = len(agent.messages)
+    with pytest.raises(ValueError, match="denied"):
+        await agent.execute_tui_command("rm -rf .")
+    assert len(agent.messages) == before
+
+
+@pytest.mark.asyncio
+async def test_execute_tui_command_rejects_shell_prefix(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path, settings_override={"shellCommandPrefix": "source unsafe"})
+    with pytest.raises(ValueError, match="shellCommandPrefix"):
+        await agent.execute_tui_command("pwd")
+
+
+@pytest.mark.asyncio
+async def test_manual_command_tool_uses_exec_with_sanitized_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from one.core.manual_command_policy import ManualCommandPlan
+    from one.tools.bash import manual_command_tool
+
+    class _Process:
+        pid = 123
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok\n", None
+
+    create_exec = AsyncMock(return_value=_Process())
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_exec)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", AsyncMock(side_effect=AssertionError("shell must not run")))
+    monkeypatch.setenv("LD_PRELOAD", "bad")
+    plan = ManualCommandPlan("/usr/bin/pwd", ("/usr/bin/pwd",), str(tmp_path), {"PATH": "/usr/bin:/bin"})
+    result = await manual_command_tool(plan, timeout=3)
+    assert result["ok"] is True
+    assert create_exec.await_args is not None
+    args, kwargs = create_exec.await_args
+    assert args == ("/usr/bin/pwd",)
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["stdin"] is asyncio.subprocess.DEVNULL
+    assert kwargs["stdout"] is asyncio.subprocess.PIPE
+    assert kwargs["start_new_session"] is True
+    assert kwargs["env"]["PATH"] == "/usr/bin:/bin"
+    assert "LD_PRELOAD" not in kwargs["env"]
+
+
+@pytest.mark.asyncio
+async def test_manual_command_tool_preserves_positive_exit_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from one.core.manual_command_policy import ManualCommandPlan
+    from one.tools.bash import manual_command_tool
+
+    class _Process:
+        pid = 123
+        returncode = 2
+
+        async def communicate(self):
+            return b"failed", None
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=_Process()))
+    plan = ManualCommandPlan("/usr/bin/pwd", ("/usr/bin/pwd",), str(tmp_path), {"PATH": "/usr/bin:/bin"})
+    with pytest.raises(RuntimeError, match="code 2"):
+        await manual_command_tool(plan)
+
+
+@pytest.mark.asyncio
+async def test_manual_command_tool_timeout_and_cancellation_kill_and_reap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from one.core.manual_command_policy import ManualCommandPlan
+    from one.tools.bash import manual_command_tool
+
+    class _TimeoutProcess:
+        pid = 123
+        returncode = None
+
+        def __init__(self) -> None:
+            self.killed = False
+            self.waited = False
+
+        async def communicate(self):
+            raise TimeoutError
+
+        def kill(self):
+            self.killed = True
+
+        async def wait(self):
+            self.waited = True
+
+    proc = _TimeoutProcess()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+    monkeypatch.setattr("one.tools.bash._kill_process_group", lambda pid: None)
+    plan = ManualCommandPlan("/usr/bin/pwd", ("/usr/bin/pwd",), str(tmp_path), {"PATH": "/usr/bin:/bin"})
+    result = await manual_command_tool(plan, timeout=1)
+    assert result["timedOut"] is True
+    assert proc.killed is True
+
+    class _CancelledProcess(_TimeoutProcess):
+        async def communicate(self):
+            raise asyncio.CancelledError
+
+    cancelled = _CancelledProcess()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=cancelled))
+    result = await manual_command_tool(plan, timeout=1)
+    assert result["cancelled"] is True
+    assert cancelled.killed is True and cancelled.waited is True
 
 
 @pytest.mark.asyncio

@@ -1220,6 +1220,22 @@ if TEXTUAL_AVAILABLE:
                     self._write_result_block(str(content))
                 elif role == "custom":
                     self._write_chat_block("custom", str(content))
+                elif role == "bashExecution":
+                    # Local-only history: rebuilding never executes a command
+                    # or reads a referenced raw-output file.
+                    self._write_manual_command_block(str(message.get("command", "")))
+                    output = str(message.get("output", ""))
+                    if not getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)():
+                        output = ""
+                    self._write_manual_result(
+                        output,
+                        exit_code=message.get("exitCode"),
+                        timed_out=bool(message.get("timedOut", False)),
+                        cancelled=bool(message.get("cancelled", False)),
+                        truncated=bool(message.get("truncated", False)),
+                        full_output_path=message.get("fullOutputPath"),
+                        stored=True,
+                    )
             self._render_stream()
 
         def _session_infos(self) -> list[SessionInfo]:
@@ -1837,6 +1853,60 @@ if TEXTUAL_AVAILABLE:
 
         def _write_result_block(self, text: str) -> tuple[int, int]:
             return self._write_bounded_panel("Result:", text)
+
+        def _write_manual_command_block(self, command: str) -> tuple[int, int]:
+            display_lines = self._format_chat_panel("tool", f"/bash {command}", pad_y=0)
+            if len(display_lines) > 40:
+                display_lines = ["Command display truncated", *display_lines[:40]]
+            self._remove_thinking_line()
+            self._stream_lines.extend(("", "Command:"))
+            start = len(self._stream_lines)
+            self._stream_lines.extend(display_lines)
+            end = len(self._stream_lines)
+            self._stream_lines.append("")
+            dropped = self._trim_stream()
+            return start - dropped, end - dropped
+
+        def _bounded_manual_panel(
+            self, text: str, *, stored: bool, truncated: bool, full_output_path: object
+        ) -> list[str]:
+            panel_lines = self._format_chat_panel("tool", text, pad_y=0)
+            if len(panel_lines) <= 40:
+                return panel_lines
+            notice = "Output display truncated"
+            if stored:
+                notice += "; full output remains in current session history"
+            if truncated and isinstance(full_output_path, str) and full_output_path:
+                safe_path = " ".join(sanitize_display_text(full_output_path).split())
+                if len(safe_path) > 200:
+                    safe_path = safe_path[:199] + "…"
+                if safe_path:
+                    notice += f"; recorded raw output log: {safe_path}"
+            return [f"[{notice}]", *panel_lines[:40]]
+
+        def _write_manual_result(
+            self,
+            output: str,
+            *,
+            exit_code: object,
+            timed_out: bool,
+            cancelled: bool,
+            truncated: bool,
+            full_output_path: object,
+            stored: bool,
+        ) -> None:
+            status = "cancelled" if cancelled else "timed out" if timed_out else f"exitCode={exit_code}"
+            self._remove_thinking_line()
+            self._stream_lines.extend(("", "Result:"))
+            if output.rstrip():
+                self._stream_lines.extend(
+                    self._bounded_manual_panel(
+                        output.rstrip(), stored=stored, truncated=truncated, full_output_path=full_output_path
+                    )
+                )
+            self._stream_lines.extend(self._format_chat_panel("tool", f"[{status}]", pad_y=0))
+            self._stream_lines.append("")
+            self._trim_stream()
 
         def _write_plan_block(self, text: str | None) -> None:
             """Render a standalone plan update without claiming a tool block."""
@@ -3049,12 +3119,15 @@ if TEXTUAL_AVAILABLE:
                 parts = rest.split(maxsplit=1)
                 if len(parts) == 1:
                     key = parts[0]
-                    cur = session.settings_manager.merged()
-                    for p in key.split("."):
-                        if isinstance(cur, dict):
-                            cur = cur.get(p)
-                        else:
-                            cur = None
+                    if key == "tui.manualBashMode":
+                        cur = getattr(session.settings_manager, "get_tui_manual_bash_mode", lambda: "strict")()
+                    else:
+                        cur = session.settings_manager.merged()
+                        for p in key.split("."):
+                            if isinstance(cur, dict):
+                                cur = cur.get(p)
+                            else:
+                                cur = None
                     self._write(json.dumps({"key": key, "value": cur}, ensure_ascii=False), "info")
                     return
                 key, raw = parts
@@ -3157,29 +3230,35 @@ if TEXTUAL_AVAILABLE:
                 if not command:
                     self._write("Usage: /bash <command>", "error")
                     return
+                # Unlike other slash commands, /bash is an explicit local
+                # action and is visible before validation or execution.
+                self._write_manual_command_block(command)
+                command_session = session
+                command_generation = self._session_listener_generation
                 try:
-                    result = await session.execute_bash(command)
-                    output = (result.get("output") or "").rstrip()
-                    if result.get("timedOut") or result.get("cancelled"):
-                        # Avoid duplicating "Command timed out" if output already ends with it.
-                        error_msg = result.get("error", "(timeout)")
-                        if result.get("timedOut") and output.lower().endswith("command timed out"):
-                            self._write(f"[bash] {error_msg}", "warn")
-                            stripped = output[: -len("Command timed out")].rstrip()
-                            if stripped:
-                                self._write_result_block(stripped)
-                        else:
-                            self._write(f"[bash] {error_msg}", "warn")
-                            if output:
-                                self._write_result_block(output)
-                    elif getattr(session.settings_manager, "get_bash_show_output", lambda: True)() and output:
-                        self._write_result_block(output)
-                    else:
-                        self._write(f"[bash] exitCode={result.get('exitCode')}", "info")
+                    result = await session.execute_tui_command(command)
+                    # Results that finish after /sessions or /fork remain in
+                    # the old local history; never attach them to this view.
+                    if command_session is not self.session or command_generation != self._session_listener_generation:
+                        return
+                    output = str(result.get("output") or "")
+                    if not getattr(session.settings_manager, "get_bash_show_output", lambda: True)():
+                        output = ""
+                    self._write_manual_result(
+                        output,
+                        exit_code=result.get("exitCode"),
+                        timed_out=bool(result.get("timedOut", False)),
+                        cancelled=bool(result.get("cancelled", False)),
+                        truncated=bool(result.get("truncated", False)),
+                        full_output_path=result.get("fullOutputPath"),
+                        stored=True,
+                    )
                 except asyncio.CancelledError:
-                    self._write("[bash] przerwano", "warn")
+                    if command_session is self.session and command_generation == self._session_listener_generation:
+                        self._write("[bash] przerwano", "warn")
                 except Exception as e:
-                    self._write(str(e), "error")
+                    if command_session is self.session and command_generation == self._session_listener_generation:
+                        self._write(str(e), "error")
                 return
 
             self._write(f"Unknown command: {cmd}. Use /help.", "error")

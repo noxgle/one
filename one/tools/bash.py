@@ -5,8 +5,13 @@ import os
 import re
 import signal
 import tempfile
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from .common import strip_ansi, truncate_tail
+
+if TYPE_CHECKING:
+    from one.core.manual_command_policy import ManualCommandPlan
 
 # Alternate-screen (full-screen/raw TUI) markers emitted by curses apps
 # (top, htop, less, vim, ...). Some programs emit only the entry marker.
@@ -49,6 +54,48 @@ async def bash_tool(cwd: str, command: str, timeout: int | None = None, command_
         start_new_session=True,
     )
 
+    return await _communicate_process(proc, timeout)
+
+
+def _manual_environment(tweaks: Mapping[str, str | None]) -> dict[str, str]:
+    """Remove loader/config injection variables before a manual argv command."""
+    env = dict(os.environ)
+    for key in list(env):
+        if (
+            key in {"PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "BASH_ENV", "ENV"}
+            or key.startswith("LD_")
+            or key.startswith("DYLD")
+            or key.startswith("GIT_CONFIG_KEY_")
+            or key.startswith("GIT_CONFIG_VALUE_")
+            or key in {
+                "GIT_CONFIG_PARAMETERS", "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF", "GIT_PAGER",
+                "GIT_SSH_COMMAND", "GIT_SSH", "GIT_ASKPASS", "SSH_ASKPASS",
+            }
+        ):
+            env.pop(key, None)
+    for key, value in dict(tweaks).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return env
+
+
+async def manual_command_tool(plan: ManualCommandPlan, timeout: int | None = None) -> dict:
+    """Execute an already validated plan without invoking a shell."""
+    proc = await asyncio.create_subprocess_exec(
+        *plan.argv,
+        cwd=plan.cwd,
+        env=_manual_environment(plan.env_tweaks),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return await _communicate_process(proc, timeout)
+
+
+async def _communicate_process(proc: asyncio.subprocess.Process, timeout: int | None) -> dict:
     output = b""
     full_path = None
     try:

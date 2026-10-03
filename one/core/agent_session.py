@@ -2453,8 +2453,13 @@ class AgentSession:
         out: list[dict[str, Any]] = []
         for m in messages:
             role = m.get("role")
+            # Manual TUI /bash records are local-only session history. Do this
+            # before reading any other field: legacy records may carry content
+            # or provider-native metadata, neither may enter provider context.
+            if role == "bashExecution":
+                continue
             is_tool_result = role == "toolResult"
-            if role in {"custom", "toolResult", "bashExecution"}:
+            if role in {"custom", "toolResult"}:
                 role = "user"
             if role not in {"system", "user", "assistant"}:
                 role = "user"
@@ -3596,6 +3601,48 @@ class AgentSession:
                 "cancelled": result.get("cancelled", False),
                 "truncated": result.get("truncated", False),
                 "fullOutputPath": result.get("fullOutputPath"),
+                "timestamp": int(time.time() * 1000),
+            }
+            self.messages.append(msg)
+            self.session_manager.append_message(msg)
+            return result
+
+        task = asyncio.create_task(_run())
+        self._active_bash_tasks.add(task)
+        try:
+            return await task
+        finally:
+            self._active_bash_tasks.discard(task)
+
+    async def execute_tui_command(self, command: str) -> dict[str, Any]:
+        """Run the TUI-only restricted manual command profile without a shell."""
+        from one.core.manual_command_policy import ManualCommandDenied, validate_manual_command
+        from one.tools.bash import manual_command_tool
+
+        prefix = self.settings_manager.get_shell_command_prefix()
+        if isinstance(prefix, str) and prefix.strip():
+            raise ManualCommandDenied(
+                "Manual command denied: shellCommandPrefix is incompatible with /bash; remove it before using manual commands"
+            )
+        mode = getattr(self.settings_manager, "get_tui_manual_bash_mode", lambda: "strict")()
+        # Validation happens before task tracking, persistence, or process creation.
+        plan = validate_manual_command(command, self.session_manager.cwd, mode)
+
+        async def _run() -> dict[str, Any]:
+            result = await manual_command_tool(plan, timeout=self.settings_manager.get_tool_timeout_sec())
+            msg = {
+                "role": "bashExecution",
+                "contextVisibility": "userOnly",
+                "userOnly": True,
+                "command": command,
+                "output": result.get("output", ""),
+                "exitCode": result.get("exitCode"),
+                "ok": result.get("ok", False),
+                "timedOut": result.get("timedOut", False),
+                "cancelled": result.get("cancelled", False),
+                "truncated": result.get("truncated", False),
+                "fullOutputPath": result.get("fullOutputPath"),
+                "error": result.get("error"),
                 "timestamp": int(time.time() * 1000),
             }
             self.messages.append(msg)

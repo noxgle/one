@@ -1558,26 +1558,96 @@ async def test_tui_tool_lifecycle_and_result_panels_have_distinct_headings(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_tui_persisted_tool_result_and_bash_output_use_result_panel(tmp_path: Path):
+async def test_tui_persisted_tool_result_and_manual_bash_output_use_local_panels(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
-    session.messages.append({"role": "toolResult", "content": "saved output"})
+    session.messages.extend([
+        {"role": "toolResult", "content": "saved output"},
+        {"role": "bashExecution", "command": "cat legacy.txt", "output": "\x1b[31mlegacy [b] output\x1b[0m", "exitCode": 0},
+    ])
     app = _OneTextualApp(session)
     async with app.run_test() as pilot:
         await pilot.pause()
         app._rebuild_session_transcript()
-        assert "Result:" in "\n".join(app._stream_lines)
+        rebuilt = "\n".join(app._stream_lines)
+        assert "Result:" in rebuilt
+        assert "Command:" in rebuilt
+        assert "/bash cat legacy.txt" in rebuilt
+        assert "legacy [b] output" in rebuilt
+        assert "\x1b" not in rebuilt
 
-        async def execute_bash(command: str) -> dict[str, object]:
+        async def execute_tui_command(command: str) -> dict[str, object]:
             assert command == "echo result"
-            return {"output": "bash output", "exitCode": 0}
+            return {"output": "bash output", "content": [{"type": "text", "text": "bash output"}], "exitCode": 0}
 
-        session.execute_bash = execute_bash  # type: ignore[method-assign]
+        session.execute_tui_command = execute_tui_command  # type: ignore[method-assign]
         await app._handle_command("/bash echo result")
         stream = "\n".join(app._stream_lines)
-        assert stream.count("Result:") == 2
+        assert stream.count("Result:") == 3
         assert "bash output" in stream
+        app._write_manual_result(
+            "\n".join("[b]" for _ in range(45)),
+            exit_code=0,
+            timed_out=False,
+            cancelled=False,
+            truncated=False,
+            full_output_path=None,
+            stored=True,
+        )
+        stream = "\n".join(app._stream_lines)
+        assert "Output display truncated; full output remains in current session history" in stream
+        assert "evidence" not in stream.lower()
+        session.settings_manager.set_bash_show_output(False)
+        app._rebuild_session_transcript()
+        hidden = "\n".join(app._stream_lines)
+        assert "Command:" in hidden and "/bash cat legacy.txt" in hidden
+        assert "exitCode=0" in hidden
+        assert "legacy [b] output" not in hidden
+
+        app._stream_lines = []
+        app._write_manual_result(
+            "\n".join("[b]" for _ in range(45)),
+            exit_code=0,
+            timed_out=False,
+            cancelled=False,
+            truncated=False,
+            full_output_path=None,
+            stored=False,
+        )
+        unstored = "\n".join(app._stream_lines)
+        assert "Output display truncated" in unstored
+        assert "session history" not in unstored and "evidence" not in unstored
+        app._stream_lines = []
+        app._write_manual_result(
+            "\n".join("[b]" for _ in range(45)),
+            exit_code=7,
+            timed_out=False,
+            cancelled=False,
+            truncated=True,
+            full_output_path="/missing/manual.log",
+            stored=True,
+        )
+        replay = "\n".join(app._stream_lines)
+        assert "recorded raw output log: /missing/manual.log" in replay
+        assert "exitCode=7" in replay
+        app._stream_lines = []
+        crafted_path = "\x1b[31m/missing/[b]\nlog\x1b[0m" + "x" * 300
+        app._write_manual_result(
+            "\n".join("line" for _ in range(45)),
+            exit_code=0,
+            timed_out=False,
+            cancelled=False,
+            truncated=True,
+            full_output_path=crafted_path,
+            stored=True,
+        )
+        crafted = "\n".join(app._stream_lines)
+        log_notice = next(line for line in app._stream_lines if "recorded raw output log:" in line)
+        assert "\x1b" not in crafted
+        assert "\n" not in log_notice
+        assert "[b] log" in log_notice
+        assert len(log_notice.split("recorded raw output log: ", 1)[1].rstrip("]")) <= 200
 
 
 @pytest.mark.asyncio
