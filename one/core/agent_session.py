@@ -317,15 +317,42 @@ class AgentSession:
         self._emit(event)
 
     def _build_runtime_system_prompt(self) -> str:
+        visible_tools = self._model_visible_tools()
         getter = getattr(self.resource_loader, "get_system_prompt", None)
         if not callable(getter):
             prompt = "You are an expert coding assistant."
         else:
             try:
-                prompt = getter(selected_tools=self._model_visible_tools())
+                prompt = getter(selected_tools=visible_tools)
             except TypeError:
                 # Backward compatibility with older loaders/mocks.
                 prompt = getter()
+
+        if self.cooperation_enabled and "ask_user" in visible_tools:
+            prompt += (
+                "\n\n# Runtime Cooperation\n"
+                "Cooperation is ON. The ask_user tool is active. Use it only after useful, non-blocking "
+                "inspection when you need necessary preferences or requirements, materially ambiguous instructions, "
+                "or an implementation choice after reading available context; also use it for a destructive, "
+                "irreversible, security, account, or authorization decision that lacks user authorization. Do not ask "
+                "for routine obvious details or approvals already handled by the approval callback. Honor an explicit "
+                "user request not to ask questions. Ask one targeted question with a recommended default, then pause "
+                "for the reply and continue the same task. Do not force a question when the task can proceed safely.\n"
+                "ask_user pauses for a human reply and then continues this task. finish is terminal: use it only for "
+                "the final answer, task success, or an actual failure. Never put a request for missing information in "
+                "finish.summary and then terminate.\n"
+                "Example: {\"tool\":\"ask_user\",\"args\":{\"question\":\"Which directory should I use? I recommend the current workspace.\"}}"
+            )
+        elif self.cooperation_enabled:
+            prompt += (
+                "\n\n# Runtime Cooperation\n"
+                "Cooperation is ON, but ask_user is unavailable because it is not configured in the active tools. Do not call a nonexistent human-question tool. Existing approval handling remains in effect. Proceed with safe, reasonable defaults; if genuinely blocked, finish with goal_success false and a truthful explanation."
+            )
+        else:
+            prompt += (
+                "\n\n# Runtime Cooperation\n"
+                "Cooperation is OFF. ask_user is unavailable. Operate autonomously and do not ask a human question. Continue with reasonable safe defaults, but never guess credentials or authorization. If an actual blocker remains, finish with goal_success false and a truthful explanation."
+            )
 
         mcp_tools: list[Any] = []
         if self._mcp_manager is not None:

@@ -15,6 +15,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.resources.resource_loader import DefaultResourceLoader
 
 
 class _Loader:
@@ -30,6 +31,7 @@ class _Provider:
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
         self.calls = 0
+        self.requests: list[list[dict[str, Any]]] = []
 
     async def chat(
         self,
@@ -41,6 +43,7 @@ class _Provider:
     ) -> Any:
         from one.providers.base import ChatResult
 
+        self.requests.append(messages)
         idx = min(self.calls, len(self.responses) - 1)
         self.calls += 1
         return ChatResult(text=self.responses[idx], raw={}, usage={}, stop_reason="stop")
@@ -112,6 +115,54 @@ async def test_ask_user_returns_answer(tmp_path: Path):
     answered_events = [e for e in events if e.get("type") == "ask_user_answered"]
     assert len(answered_events) == 1
     assert answered_events[0]["answer"] == "the answer"
+
+
+@pytest.mark.asyncio
+async def test_cooperative_text_prompt_resumes_with_safe_read_after_answer(tmp_path: Path) -> None:
+    """Text-only calls receive the dynamic guidance and resume the same task."""
+    (tmp_path / "chosen.txt").write_text("confirmed\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path), agent_dir=str(tmp_path / "agent"), settings_manager=SettingsManager.in_memory()
+    )
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, loader, model, "medium",
+        tools=["read", "ask_user", "finish"],
+    )
+
+    async def approve(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+        return True, ""
+
+    agent.approval_callback = approve
+    provider = _Provider([
+        json.dumps({"tool": "ask_user", "args": {"question": "Which file? I recommend chosen.txt."}}),
+        json.dumps({"tool": "read", "args": {"path": "chosen.txt"}}),
+        json.dumps({"tool": "finish", "args": {"summary": "read it", "goal_success": True}}),
+    ])
+    agent.providers = {"openai": provider}  # type: ignore[assignment]
+    question = asyncio.Event()
+    question_id: str | None = None
+
+    def answer(event: dict[str, Any]) -> None:
+        nonlocal question_id
+        if event.get("type") == "ask_user":
+            question_id = str(event["id"])
+            question.set()
+
+    agent.subscribe(answer)
+    task = asyncio.create_task(agent.prompt("inspect the chosen file"))
+    await question.wait()
+    assert question_id is not None
+    agent.answer_question(question_id, "chosen.txt")
+    await task
+
+    assert "Cooperation is ON. The ask_user tool is active." in provider.requests[0][0]["content"]
+    assert any("confirmed" in message.get("content", "") for message in agent.messages if message["role"] == "toolResult")
+    assert agent.get_last_finish_result()["goalSuccess"] is True
 
 
 @pytest.mark.asyncio
@@ -200,6 +251,70 @@ def test_ask_user_is_hidden_from_prompt_when_cooperation_is_off(tmp_path: Path):
     agent.approval_callback = approve
     agent._build_runtime_system_prompt()
     assert loader.selected_tools == ["read", "ask_user", "finish"]
+
+
+def test_default_prompt_has_mode_aware_cooperation_guidance(tmp_path: Path) -> None:
+    """The default prompt never contradicts the current ask_user capability."""
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    loader = DefaultResourceLoader(
+        cwd=str(tmp_path), agent_dir=str(tmp_path / "agent"), settings_manager=SettingsManager.in_memory()
+    )
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, loader, model, "medium",
+        tools=["read", "ask_user", "finish"],
+    )
+
+    off_prompt = agent._build_runtime_system_prompt()
+    assert "Autonomous mode: do not ask the user." not in off_prompt
+    assert "Cooperation is OFF. ask_user is unavailable" in off_prompt
+    assert "- ask_user " not in off_prompt
+
+    async def approve(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+        return True, ""
+
+    agent.approval_callback = approve
+    on_prompt = agent._build_runtime_system_prompt()
+    assert "Cooperation is ON. The ask_user tool is active." in on_prompt
+    assert "- ask_user {question, timeoutSec?}" in on_prompt
+    assert '"tool":"ask_user"' in on_prompt
+    assert "Never put a request for missing information in finish.summary" in on_prompt
+
+
+def test_cooperation_prompt_handles_tools_excluding_ask_user_and_custom_loader(tmp_path: Path) -> None:
+    auth = AuthStorage.in_memory()
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+
+    class _CustomLoader:
+        def get_system_prompt(self, selected_tools: list[str] | None = None) -> str:  # noqa: ARG002
+            return "CUSTOM SYSTEM PROMPT"
+
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _CustomLoader(), model, "medium",
+        tools=["read", "finish"],
+    )
+
+    async def approve(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+        return True, ""
+
+    agent.approval_callback = approve
+    prompt = agent._build_runtime_system_prompt()
+    assert "CUSTOM SYSTEM PROMPT" in prompt
+    assert "Cooperation is ON, but ask_user is unavailable" in prompt
+    assert "Do not call a nonexistent human-question tool." in prompt
+
+    active_agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _CustomLoader(), model, "medium",
+        tools=["read", "ask_user", "finish"],
+    )
+    active_agent.approval_callback = approve
+    active_prompt = active_agent._build_runtime_system_prompt()
+    assert "CUSTOM SYSTEM PROMPT" in active_prompt
+    assert "Cooperation is ON. The ask_user tool is active." in active_prompt
 
 
 @pytest.mark.asyncio

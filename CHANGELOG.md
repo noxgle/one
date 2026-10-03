@@ -79,6 +79,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Cooperative questions** — runtime prompts now accurately advertise `ask_user`
+  only when cooperation and the tool are active, and distinguish a resumable
+  question from terminal `finish` results.
 - **Plan completion guard** — status-only plan updates no longer re-arm the
   post-plan finish guard after a tool step has executed.
 - **Write argument safety** — write calls now require explicit string content,

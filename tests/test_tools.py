@@ -682,3 +682,8 @@ def test_every_builtin_native_tool_has_a_meaningful_json_schema() -> None:
         "additionalProperties": False,
     }
     assert "content:'' deliberately empties" in write["description"]
+    ask_user = next(definition for definition in definitions if definition["name"] == "ask_user")
+    finish = next(definition for definition in definitions if definition["name"] == "finish")
+    assert "continue the same task" in ask_user["description"]
+    assert "materially ambiguous requirements" in ask_user["description"]
+    assert "do not use finish to ask for missing information" in finish["description"]

@@ -59,11 +59,11 @@ all_tools: dict[str, ToolDef] = {
     "ls": ToolDef("ls", "List directory contents", ls_tool, {"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":False}),
     # Dispatched by AgentSession because evidence is scoped to the active session.
     "evidence_read": ToolDef("evidence_read", "Read a bounded chunk of durable tool evidence by evidenceId; never re-runs the original tool", lambda: {}, {"type":"object","properties":{"evidenceId":{"type":"string"},"offset":{"type":"integer"},"maxChars":{"type":"integer"}},"required":["evidenceId"],"additionalProperties":False}),
-    "finish": ToolDef("finish", "End the task with a summary and success flag", finish_tool, {"type":"object","properties":{"summary":{"type":"string"},"goal_success":{"type":"boolean"}},"required":["summary","goal_success"],"additionalProperties":False}),
+    "finish": ToolDef("finish", "End the task with a terminal summary and success flag. When cooperation has an active ask_user tool, do not use finish to ask for missing information or escalate a question.", finish_tool, {"type":"object","properties":{"summary":{"type":"string"},"goal_success":{"type":"boolean"}},"required":["summary","goal_success"],"additionalProperties":False}),
     "plan": ToolDef("plan", "Store an execution plan for the current task; visible on every step", plan_tool, {"type":"object","properties":{"plan":{"type":"array","items":{"type":"object"}}},"required":["plan"],"additionalProperties":False}),
     "ask_user": ToolDef(
         "ask_user",
-        "Ask the human a question and wait for their answer. Args: 'question' (str, required); optional 'timeoutSec' (int). Use only when you genuinely need human input (ambiguity, missing access, policy decision).",
+        "Ask the human one necessary question and wait for their answer, then continue the same task. Use for preferences, materially ambiguous requirements after available context is read, or unapproved destructive, security, account, or authorization decisions; not routine details or approvals handled elsewhere. Args: 'question' (str, required); optional 'timeoutSec' (int).",
         ask_user_tool, {"type":"object","properties":{"question":{"type":"string"},"timeoutSec":{"type":"integer"}},"required":["question"],"additionalProperties":False},
     ),
     "spawn_subagent": ToolDef(

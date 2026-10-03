@@ -487,6 +487,11 @@ for `--mode text` or `one run`. Steering and follow-up messages are text-only.
 the agent. Interactive modes provide `/steer`, `/follow`, and abort controls;
 RPC and `one run` provide the channels described above.
 
+When cooperation and `ask_user` are both enabled, the model is instructed to
+ask one focused question for necessary preferences or genuinely blocking
+ambiguity, then resume the same task rather than putting a question in its final
+summary.
+
 `apply_patch` validates collisions and symlink paths and uses staging/rollback,
 but it cannot guarantee recovery from power loss, hostile concurrent filesystem
 changes, or rollback I/O failure. Review changes and retained backups when an

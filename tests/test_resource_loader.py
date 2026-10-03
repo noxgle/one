@@ -126,6 +126,15 @@ def test_prompt_includes_all_schemas_regression():
     assert "- plan {plan: [{step, status}]}" in prompt
 
 
+def test_prompt_with_explicit_empty_tool_list_does_not_restore_default_tools() -> None:
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+
+    prompt = loader.get_system_prompt(selected_tools=[])
+
+    assert "TOOLS (JSON only, double quotes):\n(none)" in prompt
+    assert "- read {path" not in prompt
+
+
 def test_prompt_with_custom_system_prompt_skips_builtins():
     settings = _make_settings()
     loader = _make_loader(

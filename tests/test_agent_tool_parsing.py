@@ -21,6 +21,7 @@ from one.core.types import ModelInfo
 from one.providers.base import ChatResult
 from one.providers.codex_responses import CodexResponsesAdapter
 from one.providers.gemini import GeminiAdapter
+from one.resources.resource_loader import DefaultResourceLoader
 from tests.support.agents import _FakeProvider, _Loader
 
 
@@ -558,6 +559,81 @@ async def test_codex_native_ask_user_is_executed_and_replayed(tmp_path: Path):
         ("function_call", "ask-1"), ("function_call_output", "ask-1"),
     ]
     assert "yes" in replay[-1]["output"]
+
+
+@pytest.mark.asyncio
+async def test_native_cooperation_prompt_and_schemas_follow_runtime_toggle(tmp_path: Path) -> None:
+    """Native requests rebuild prompt and schemas after cooperation changes."""
+    (tmp_path / "safe.txt").write_text("safe read\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"tools": {"maxSteps": 4}})
+    loader = DefaultResourceLoader(cwd=str(tmp_path), agent_dir=str(tmp_path / "agent"), settings_manager=settings)
+
+    async def approve(_: str, __: dict[str, Any]) -> tuple[bool, str]:
+        return True, ""
+
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), settings, registry, loader, model, "medium",
+        tools=["read", "ask_user", "finish"], approval_callback=approve,
+    )
+
+    class _NativeProvider:
+        supports_native_tools = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.requests: list[list[dict[str, Any]]] = []
+            self.tool_schemas: list[list[dict[str, Any]]] = []
+
+        async def chat(
+            self, api_key: str, model: str, messages: list[dict[str, Any]], thinking_level: str,
+            tools: list[dict[str, Any]], **_: Any,
+        ) -> ChatResult:
+            self.requests.append(messages)
+            self.tool_schemas.append(tools)
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(text="", raw={}, usage={}, native_tool_calls=[{
+                    "id": "ask-guidance", "name": "ask_user", "arguments": {"question": "Read safe.txt?"},
+                }])
+            if self.calls == 2:
+                agent.approval_callback = None
+                return ChatResult(text="", raw={}, usage={}, native_tool_calls=[{
+                    "id": "read-guidance", "name": "read", "arguments": {"path": "safe.txt"},
+                }])
+            return ChatResult(text='{"tool":"finish","args":{"summary":"done","goal_success":true}}', raw={}, usage={})
+
+    provider = _NativeProvider()
+    agent.providers = {"openai": provider}  # type: ignore[assignment]
+    asked = asyncio.Event()
+    question_id: str | None = None
+
+    def answer(event: dict[str, Any]) -> None:
+        nonlocal question_id
+        if event.get("type") == "ask_user":
+            question_id = str(event["id"])
+            asked.set()
+
+    agent.subscribe(answer)
+    task = asyncio.create_task(agent.prompt("inspect safe.txt"))
+    await asked.wait()
+    assert question_id is not None
+    agent.answer_question(question_id, "yes")
+    await task
+
+    assert "Cooperation is ON. The ask_user tool is active." in provider.requests[0][0]["content"]
+    assert "ask_user" in {schema["name"] for schema in provider.tool_schemas[0]}
+    native_question = next(message for message in provider.requests[1] if message.get("_nativeToolCalls"))
+    assert native_question["_nativeToolCalls"][0]["id"] == "ask-guidance"
+    question_result = next(message for message in provider.requests[1] if message.get("_nativeToolCallId") == "ask-guidance")
+    assert "yes" in question_result["content"]
+    assert "Cooperation is OFF. ask_user is unavailable" in provider.requests[2][0]["content"]
+    assert "ask_user" not in {schema["name"] for schema in provider.tool_schemas[2]}
+    assert agent.get_last_finish_result()["goalSuccess"] is True
 
 
 @pytest.mark.asyncio

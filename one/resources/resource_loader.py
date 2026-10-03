@@ -224,10 +224,10 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "find": "{pattern?, path?}",
     "ls": "{path?}",
     "evidence_read": "{evidenceId, offset?, maxChars?}  # retrieve a bounded chunk of prior durable tool evidence; use nextOffset to continue",
-    "finish": "{summary, goal_success}  # end the task; summary is shown to the user",
+    "finish": "{summary, goal_success}  # terminal task result; do not use summary to ask for missing information when ask_user is available",
     "plan": "{plan: [{step, status}]}  # status is pending|in_progress|completed|blocked; send the complete plan on every update",
     "spawn_subagent": "{task, tasks?, model?, tools?, temperature?, temperatureMode?}  # delegate a subtask; numeric temperature overrides temperatureMode, otherwise inherits parent",
-    "ask_user": "{question, timeoutSec?}  # ask the human a question and wait for their answer",
+    "ask_user": "{question, timeoutSec?}  # for necessary preferences, materially ambiguous requirements, or unapproved destructive/security/account decisions; waits for one human answer, then continue the same task",
     "apply_patch": "{patchText}  # non-empty string in OpenCode patch format, NOT ---/+++ unified diff. Exact Update example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch. Supports Add/Update/Delete/Move; Add/Move targets must be absent; conflicts and symlinks rejected; staged backup/rollback-protected",
     "read_image": "{path}  # read an image file and return its content as a base64-encoded blob with metadata",
 }
@@ -299,7 +299,7 @@ RESOURCE CONTROL
 CONSTRAINTS
 - Each command runs in an isolated shell (no persistent cd).
 - No interactive tools (nano, vim, top, etc.).
-- Autonomous mode: do not ask the user.
+- Follow the current runtime cooperation instructions for whether human questions are available.
 
 CONTEXT OPTIMIZATION
 - If input data is large, use read/grep to distill it BEFORE further steps.
@@ -580,7 +580,7 @@ class DefaultResourceLoader:
         return {"agentsFiles": self._agents_files}
 
     def get_system_prompt(self, selected_tools: list[str] | None = None) -> str:
-        tools = selected_tools or ["read", "bash", "edit", "write"]
+        tools = selected_tools if selected_tools is not None else ["read", "bash", "edit", "write"]
 
         if self.system_prompt:
             prompt = f"{_build_header(self.cwd)}\n\n{self.system_prompt}"
