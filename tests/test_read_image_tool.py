@@ -1,4 +1,7 @@
 """Tests for the explicit read_image tool and tool-image session flow."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

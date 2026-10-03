@@ -12,6 +12,9 @@ Platform note:
   interactive bash_tool smoke tests (tests 3-5).  Tests 1-2 and 6 are fully
   portable.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

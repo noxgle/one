@@ -1,4 +1,7 @@
 """Pure provider-context pruning for stale tool-result messages."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

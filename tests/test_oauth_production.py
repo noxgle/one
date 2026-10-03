@@ -4,6 +4,9 @@ Verifies that subscription OAuth and the Codex provider are enabled by
 default, have no "experimental" labels in user-facing text, and that
 all messages are in English.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

@@ -13,6 +13,9 @@ Run regression::
 
     .venv/bin/python -m pytest -q tests/test_tui_snapshots.py
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

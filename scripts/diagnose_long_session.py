@@ -4,6 +4,9 @@
 Exit codes: 0 completed (including heuristic-only analysis), 2 bad arguments,
 3 Docker/output preflight failure, 4 workload failure, 5 unexpected runner error.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import argparse

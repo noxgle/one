@@ -1,4 +1,7 @@
 """Minimal regression tests for steeringMode/followUpMode queue handling."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

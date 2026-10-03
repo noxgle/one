@@ -1,4 +1,7 @@
 """Tests for the skills system — loader, validation, prompt, invocation."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import asyncio

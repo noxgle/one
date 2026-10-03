@@ -2,6 +2,9 @@
 
 All HTTP is faked (no network).
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

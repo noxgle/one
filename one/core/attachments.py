@@ -11,6 +11,9 @@ orphaned files left from crashed turns) are retained on disk until
 ``orphan_cleanup(refs)`` is explicitly called — there is no automatic
 garbage collection from current-turn refs.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

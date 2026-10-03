@@ -1,3 +1,6 @@
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from scripts.diagnostic_findings import SCHEMA_VERSION, detect, redact, validate_report
 
 

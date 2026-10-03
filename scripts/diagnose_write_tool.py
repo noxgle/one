@@ -4,6 +4,9 @@
 Exit codes: 0 pass, 2 invalid arguments, 3 Docker unavailable/build failure,
 4 workload assertion failure, 5 malformed report/internal failure.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import argparse

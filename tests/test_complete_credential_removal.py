@@ -13,6 +13,9 @@ Tests cover:
 - Interactive, TUI, and RPC logout use the central operation and updated wording
 - RPC logout returns no secrets and stable schema
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

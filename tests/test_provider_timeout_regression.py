@@ -5,6 +5,9 @@ These tests verify that:
 2. The fail-closed wrapper in `prompt()` resets state on unexpected exceptions
 3. Idle watchdogs in providers abort streams on SSE idle
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

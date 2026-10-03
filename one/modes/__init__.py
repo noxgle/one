@@ -1,3 +1,6 @@
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from .interactive_mode import InteractiveMode
 from .print_mode import run_print_mode
 from .rpc_mode import run_rpc_mode

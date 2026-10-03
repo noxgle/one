@@ -4,6 +4,9 @@ Verifies that spawn_subagent calls reach _spawn_subagent, disabled
 subagents produce structured errors (not bash fallback), and tool
 error results are valid JSON without sensitive traces.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

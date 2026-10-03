@@ -1,4 +1,7 @@
 """A tiny deterministic loopback-only OpenAI chat-completions fake."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import json

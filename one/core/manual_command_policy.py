@@ -4,6 +4,9 @@ This is an invocation restriction, not an operating-system sandbox.  Development
 commands can execute code checked out in the workspace, and filesystem state can
 change after validation (TOCTOU). The module deliberately does not spawn a process.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

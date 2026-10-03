@@ -11,6 +11,9 @@ Covers:
 - append existing broad file mode tightening
 - CLI stderr malformed-config warning
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import json

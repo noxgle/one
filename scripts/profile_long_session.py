@@ -15,6 +15,9 @@ Examples:
     .venv/bin/python scripts/profile_long_session.py --prompt-file task.txt
     .venv/bin/python scripts/profile_long_session.py --model llama.cpp/model-id
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

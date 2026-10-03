@@ -11,6 +11,9 @@ Distinct from tests/test_auth_and_cli.py:
          here we use an env key (not set_runtime_api_key) for a distinct angle.
   7. test_get_api_key_and_headers_ok_for_configured_provider  — NOT covered (only ok=False path tested)
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

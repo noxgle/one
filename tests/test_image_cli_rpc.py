@@ -1,4 +1,7 @@
 """Tests for CLI/RPC image path integration — end-to-end import + prompt wiring."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

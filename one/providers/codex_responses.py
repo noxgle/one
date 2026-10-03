@@ -18,6 +18,9 @@ mandatory quirks:
 - headers: Bearer access token + ``ChatGPT-Account-Id`` (injected by the
   model registry from the stored OAuth record), ``originator``, ``session_id``
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

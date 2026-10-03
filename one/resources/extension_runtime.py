@@ -29,6 +29,9 @@ Unknown hook names are silently ignored (opencode parity). Load and runtime
 errors are reported through the ``extension_load_error`` event and never crash
 the session.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

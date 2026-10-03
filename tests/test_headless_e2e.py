@@ -1,4 +1,7 @@
 """E2E subprocess tests: CLI → OpenAI-compatible HTTP → agent finish tool → exit code + report."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

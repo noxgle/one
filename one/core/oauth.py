@@ -16,6 +16,9 @@ Two flow styles:
 Token records are persisted per provider via :class:`~one.core.auth_storage.AuthStorage`
 as ``{"type": "oauth", "access", "refresh", "expires" (ms epoch), "accountId"?}``.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

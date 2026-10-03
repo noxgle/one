@@ -1,3 +1,6 @@
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 from one.resources.resource_loader import _find_closing_dash_dash_dash, _parse_frontmatter

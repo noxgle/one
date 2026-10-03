@@ -5,6 +5,9 @@ Ollama's native API accepts ``think`` and returns trace text separately in
 OpenAI-compatible adapter so llama.cpp and local Ollama wire behavior do not
 change.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

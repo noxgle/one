@@ -1,4 +1,7 @@
 """Small, dependency-free schemas and deterministic checks for diagnostic runs."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

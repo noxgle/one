@@ -4,6 +4,9 @@ In autonomous mode the session emits a controlled assistant response.
 In cooperation mode (approval_callback is not None) the session raises
 _CapabilityErrorCooperative so the caller knows no provider call was made.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

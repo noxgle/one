@@ -1,3 +1,6 @@
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from .config import APP_NAME, VERSION, get_agent_dir
 from .core.agent_session import AgentSession
 from .core.agent_session_runtime import AgentSessionRuntimeHost, create_agent_session_runtime

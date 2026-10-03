@@ -12,6 +12,9 @@ prose apart from tool JSON.  This test file verifies that:
   leaks as assistant text — only tool_call events.
 * Existing suppression behavior is preserved.
 """
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 
 from __future__ import annotations
 

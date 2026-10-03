@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Run special-character write cases through the installed ``one`` CLI."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import hashlib

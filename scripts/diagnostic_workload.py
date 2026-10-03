@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Drive a disposable, real ``one`` RPC session through a fixed workload."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import argparse
