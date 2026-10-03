@@ -205,6 +205,78 @@ def test_llama_cpp_disables_thinking_only_when_requested(
     assert "temperature" not in payload
 
 
+@pytest.mark.asyncio
+async def test_llama_cpp_native_token_count_uses_rendered_request_and_falls_back(monkeypatch) -> None:
+    from one.providers import openai_compatible as module
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class Response:
+        is_error = False
+
+        def __init__(self, data: dict[str, Any]) -> None:
+            self.data = data
+
+        def json(self) -> dict[str, Any]:
+            return self.data
+
+    class Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None: pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args: Any): return False
+        async def post(self, url: str, **kwargs: Any) -> Response:
+            calls.append((url, kwargs["json"]))
+            return Response({"prompt": "rendered"} if url.endswith("apply-template") else {"tokens": [1, 2, 3]})
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", Client)
+    adapter = OpenAICompatibleAdapter("llama.cpp", "http://local/v1", supports_reasoning_effort=False)
+    count = await adapter.count_request_tokens("", "local", [{"role": "user", "content": "hi"}], "off")
+    assert count == 3
+    assert calls[0][0] == "http://local/apply-template"
+    assert calls[0][1]["messages"] == [{"role": "user", "content": "hi"}]
+    assert calls[1][1] == {"content": "rendered"}
+
+    class MissingEndpoint(Client):
+        async def post(self, url: str, **kwargs: Any) -> Response:
+            response = Response({})
+            response.is_error = True
+            return response
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", MissingEndpoint)
+    assert await adapter.count_request_tokens("", "local", [{"role": "user", "content": "hi"}], "off") is None
+
+
+@pytest.mark.asyncio
+async def test_llama_stream_requests_and_returns_final_usage(monkeypatch) -> None:
+    from one.providers import openai_compatible as module
+
+    captured: dict[str, Any] = {}
+
+    class Response:
+        is_error = False
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args: Any): return False
+
+        async def aiter_lines(self):
+            yield 'data: {"usage":{"prompt_tokens":12,"completion_tokens":3}}'
+            yield 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}'
+
+    class Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None: pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args: Any): return False
+        def stream(self, method: str, url: str, **kwargs: Any) -> Response:
+            captured["payload"] = kwargs["json"]
+            return Response()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", Client)
+    adapter = OpenAICompatibleAdapter("llama.cpp", "http://local", supports_reasoning_effort=False)
+    result = await adapter.chat("", "local", [{"role": "user", "content": "hi"}], "off", on_delta=lambda _: None)
+    assert captured["payload"]["stream_options"] == {"include_usage": True}
+    assert result.usage == {"prompt_tokens": 12, "completion_tokens": 3}
+
+
 def test_provider_registry_includes_llama_cpp() -> None:
     registry = build_provider_registry()
     assert "llama.cpp" in registry

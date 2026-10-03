@@ -210,6 +210,12 @@ class AgentSession:
         self._last_subagent_timeout: dict[str, Any] | None = None
         # Provider-only context diagnostics; durable session messages stay raw.
         self._last_tool_output_pruning: dict[str, int] = {"count": 0, "tokensReclaimed": 0}
+        # Native tokenizer counts and reported usage are runtime measurements;
+        # keep durable transcript compatibility while making later estimates
+        # conservative when a provider has demonstrated under-counting.
+        self._context_calibration = 1.0
+        self._exact_context_tokens: int | None = None
+        self._exact_context_signature: str | None = None
         # Children share this state so a parent toggle applies to already
         # running child sessions as well.
         self._cooperation_state = cooperation_state or {"enabled": approval_callback is not None}
@@ -2447,6 +2453,7 @@ class AgentSession:
             "_streamedSuppressed": streamed_suppressed,
             "_providerToolCallId": self._provider_tool_call_id(res.raw),
         }
+        self._record_context_usage(res.usage, messages)
         if count_output_generation and generation_started_at is not None:
             output_usage = res.usage.get("completion_tokens")
             if output_usage is None:
@@ -2477,7 +2484,19 @@ class AgentSession:
             text = "".join(x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") == "text")
         else:
             text = str(content)
-        return max(1, len(text) // 4)
+        # Natural-language character/4 is optimistic for source, JSON, and
+        # serialized tool output where punctuation and short identifiers split
+        # heavily.  Keep the inexpensive fallback, but use a safer density for
+        # those request shapes until native/provider measurements are available.
+        compact = text.lstrip()
+        code_or_json = (
+            "```" in text
+            or compact.startswith(("{", "["))
+            or "<untrusted-tool-output>" in text
+            or sum(text.count(ch) for ch in "{}[],:;()") >= max(8, len(text) // 12)
+        )
+        divisor = 3 if code_or_json else 4
+        return max(1, len(text) // divisor + 4)
 
     def _flatten_conversation(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -2686,6 +2705,10 @@ class AgentSession:
             estimate_tokens=self._approx_message_tokens,
         )
 
+    def _request_signature(self, request: list[dict[str, Any]]) -> str:
+        """Stable runtime identity for an exact count of a provider request."""
+        return json.dumps(request, ensure_ascii=False, sort_keys=True, default=str)
+
     def _estimate_request_tokens(self, messages: list[dict[str, Any]] | None = None) -> int:
         """Estimate the complete provider request, including fixed prompt overhead.
 
@@ -2702,13 +2725,58 @@ class AgentSession:
             *self._flatten_conversation(conversation),
         ]
         raw_tokens = sum(self._approx_message_tokens(message) for message in request)
-        return max(1, int(raw_tokens * 1.15) + 256)
+        estimated = max(1, int(raw_tokens * 1.15) + 256)
+        return max(estimated, int(estimated * self._context_calibration))
+
+    async def _exact_request_tokens(self) -> int | None:
+        """Use llama.cpp's optional native endpoints without making them required."""
+        if not self.model:
+            return None
+        provider = self.providers.get(self.model.provider)
+        if self.model.base_url and isinstance(provider, OpenAICompatibleAdapter):
+            provider = provider.with_base_url(self.model.base_url)
+        count = getattr(provider, "count_request_tokens", None)
+        if not callable(count):
+            return None
+        request = self._flatten_messages_for_provider()
+        auth = self.model_registry.get_api_key_and_headers(self.model)
+        if not auth.get("ok"):
+            return None
+        kwargs: dict[str, Any] = {
+            "api_key": auth.get("apiKey", ""),
+            "model": self.model.id,
+            "messages": request,
+            "thinking_level": self.thinking_level,
+            "headers": auth.get("headers"),
+            "temperature": self.temperature,
+        }
+        images = self._all_images()
+        if images:
+            kwargs["images"] = images
+        if self._storage_dir:
+            kwargs["storage_dir"] = self._storage_dir
+        if getattr(provider, "supports_native_tools", False):
+            kwargs["tools"] = native_tool_definitions(self._model_visible_tools())
+        try:
+            tokens = await count(**kwargs)
+        except Exception:
+            return None
+        if isinstance(tokens, int) and tokens > 0:
+            self._exact_context_tokens = tokens
+            self._exact_context_signature = self._request_signature(request)
+            return tokens
+        return None
 
     async def _preflight_compact(self) -> None:
         """Compact before a provider call when the full request nears its limit."""
         if not self.auto_compaction_enabled or self._is_compacting:
             return
+        exact_tokens = await self._exact_request_tokens()
         usage = self.get_context_usage()
+        if usage and exact_tokens is not None:
+            usage = dict(usage)
+            usage["tokens"] = exact_tokens
+            usage["percent"] = (exact_tokens / self.model.context_window) * 100
         if usage and usage["percent"] >= self.settings_manager.get_compaction_threshold_percent():
             await self.compact(reason="auto_preflight", allow_during_prompt=True)
 
@@ -2796,6 +2864,7 @@ class AgentSession:
         # provider call hangs or SSE keep-alives reset httpx timers.
         finished_with_tool = False
         terminal_error = False
+        context_recovery_attempted = False
         try:
             retry_cfg = self.settings_manager.get_retry_settings()
             attempt = 0
@@ -3198,7 +3267,20 @@ class AgentSession:
                         max_retries = int(retry_cfg.get("maxRetries", 3))
                         error_text = str(e).strip() or e.__class__.__name__
                         is_ctx_limit = self._is_context_limit_error(error_text)
-                        will_retry = retries_enabled and attempt < max_retries
+                        if is_ctx_limit:
+                            self._record_context_limit_details(error_text)
+                        # A real context overflow gets one independent recovery
+                        # attempt. Repeated overflows do not consume generic
+                        # retries while automatic compaction is enabled.
+                        recovery_retry = (
+                            is_ctx_limit
+                            and self.auto_compaction_enabled
+                            and not context_recovery_attempted
+                        )
+                        generic_retry = retries_enabled and attempt < max_retries
+                        will_retry = recovery_retry or (
+                            generic_retry and not (is_ctx_limit and self.auto_compaction_enabled)
+                        )
                         self._emit(
                             {
                                 "type": "turn_end",
@@ -3235,7 +3317,8 @@ class AgentSession:
                         # Context-limit error: compact *before* retrying so the same
                         # logical turn/retry uses a smaller context without duplicating
                         # the user message (user_msg was already added at prompt start).
-                        if is_ctx_limit:
+                        if recovery_retry:
+                            context_recovery_attempted = True
                             try:
                                 await self.compact(reason="context_limit_retry", allow_during_prompt=True)
                             except Exception:
@@ -3805,9 +3888,33 @@ class AgentSession:
     def get_context_usage(self) -> dict[str, Any] | None:
         if not self.model or not self.model.context_window:
             return None
-        approx_tokens = self._estimate_request_tokens()
-        percent = (approx_tokens / self.model.context_window) * 100
-        return {"tokens": approx_tokens, "contextWindow": self.model.context_window, "percent": percent}
+        request = self._flatten_messages_for_provider()
+        if self._exact_context_signature == self._request_signature(request) and self._exact_context_tokens:
+            tokens = self._exact_context_tokens
+        else:
+            tokens = self._estimate_request_tokens()
+        percent = (tokens / self.model.context_window) * 100
+        return {"tokens": tokens, "contextWindow": self.model.context_window, "percent": percent}
+
+    def _record_context_usage(self, usage: dict[str, Any], request: list[dict[str, Any]]) -> None:
+        """Calibrate future fallback estimates from a completed provider request."""
+        reported = usage.get("prompt_tokens", usage.get("input_tokens", usage.get("promptTokens")))
+        if isinstance(reported, bool):
+            return
+        try:
+            prompt_tokens = int(reported)
+        except (TypeError, ValueError):
+            return
+        if prompt_tokens <= 0:
+            return
+        # `_estimate_request_tokens` takes durable history, while this is the
+        # exact wire-shaped flattened request that just completed.
+        raw = sum(self._approx_message_tokens(message) for message in request)
+        estimated = max(1, int(raw * 1.15) + 256)
+        self._context_calibration = max(
+            self._context_calibration,
+            min(4.0, prompt_tokens / estimated),
+        )
 
     def _budget_exceeded(self) -> tuple[str, str] | None:
         """Return (kind, message) when a configured budget limit is exceeded."""
@@ -3835,10 +3942,36 @@ class AgentSession:
         """
         lower = error_text.lower()
         return (
-            "context" in lower and ("length" in lower or "limit" in lower or "window" in lower)
+            "exceed_context_size_error" in lower
+            or "context" in lower and ("length" in lower or "limit" in lower or "window" in lower)
             or "maximum" in lower and "context" in lower
             or "too many" in lower and "token" in lower
         )
+
+    @staticmethod
+    def _context_limit_details(error_text: str) -> dict[str, int]:
+        """Extract llama.cpp's optional prompt/context sizes from an error."""
+        details: dict[str, int] = {}
+        for key in ("n_prompt_tokens", "n_ctx"):
+            match = re.search(rf'["\']?{key}["\']?\s*[:=]\s*(\d+)', error_text, re.IGNORECASE)
+            if match:
+                details[key] = int(match.group(1))
+        return details
+
+    def _record_context_limit_details(self, error_text: str) -> None:
+        """Use llama.cpp overflow diagnostics as a safe estimate calibration."""
+        prompt_tokens = self._context_limit_details(error_text).get("n_prompt_tokens")
+        if not prompt_tokens or not self.model:
+            return
+        request = self._flatten_messages_for_provider()
+        raw = sum(self._approx_message_tokens(message) for message in request)
+        estimated = max(1, int(raw * 1.15) + 256)
+        self._context_calibration = max(
+            self._context_calibration,
+            min(4.0, prompt_tokens / estimated),
+        )
+        self._exact_context_tokens = prompt_tokens
+        self._exact_context_signature = self._request_signature(request)
 
     def get_session_stats(self) -> dict[str, Any]:
         user_messages = sum(1 for m in self.messages if m.get("role") == "user")

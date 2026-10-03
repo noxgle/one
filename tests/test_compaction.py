@@ -93,6 +93,29 @@ class _CallbackProvider:
         return ChatResult(text="MODEL SUMMARY", raw={}, usage={}, stop_reason="completed")
 
 
+class _OverflowThenSuccessProvider:
+    def __init__(self, failures: int = 1) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def chat(self, **kwargs: Any) -> Any:
+        from one.providers.base import ChatResult
+
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise RuntimeError(
+                "llama.cpp API error 400: exceed_context_size_error "
+                "n_prompt_tokens=1200 n_ctx=1024"
+            )
+        callback = kwargs.get("on_delta")
+        if callback:
+            callback("done")
+        return ChatResult(
+            text="done " * 60, raw={},
+            usage={"prompt_tokens": 900, "completion_tokens": 4}, stop_reason="stop",
+        )
+
+
 def _mk_agent(
     tmp_path,
     settings_override: dict[str, Any] | None = None,
@@ -149,6 +172,59 @@ async def test_preflight_compacts_before_oversized_provider_request(tmp_path):
 
     assert provider.calls >= 1
     assert any(e["type"] == "compaction_start" and e["reason"] == "auto_preflight" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_real_context_overflow_compacts_and_retries_once_without_generic_retries(tmp_path):
+    provider = _OverflowThenSuccessProvider()
+    model = ModelInfo(provider="openai", id="test-model", context_window=100_000)
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": False, "recentTokens": 4, "minKeptMessages": 1}},
+        provider=provider,
+        model=model,
+    )
+    _seed(agent)
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("continue")
+
+    assert provider.calls == 2
+    assert len([e for e in events if e["type"] == "compaction_start" and e["reason"] == "context_limit_retry"]) == 1
+    final = [m for m in agent.messages if m.get("role") == "assistant"][-1]
+    assert final["usage"]["input"] == 900
+    assert final["usage"]["output"] == 4
+
+
+@pytest.mark.asyncio
+async def test_repeated_context_overflow_has_only_one_compaction_recovery_attempt(tmp_path):
+    provider = _OverflowThenSuccessProvider(failures=2)
+    model = ModelInfo(provider="openai", id="test-model", context_window=100_000)
+    agent = _mk_agent(
+        tmp_path,
+        {"compaction": {"summarizeWithModel": False, "recentTokens": 4, "minKeptMessages": 1}},
+        provider=provider,
+        model=model,
+    )
+    _seed(agent)
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("continue")
+
+    assert provider.calls == 2
+    assert len([e for e in events if e["type"] == "compaction_start" and e["reason"] == "context_limit_retry"]) == 1
+    assert any("exceed_context_size_error" in str(m.get("content")) for m in agent.messages)
+
+
+def test_context_overflow_recognition_parses_llama_cpp_sizes_and_code_fallback_is_conservative(tmp_path):
+    error = "error: exceed_context_size_error {n_prompt_tokens: 1200, n_ctx: 1024}"
+    assert AgentSession._is_context_limit_error(error)
+    assert AgentSession._context_limit_details(error) == {"n_prompt_tokens": 1200, "n_ctx": 1024}
+    assert AgentSession._approx_message_tokens({"content": '{"tool":"read","args":{"path":"a.py"}}'}) > (
+        len('{"tool":"read","args":{"path":"a.py"}}') // 4
+    )
 
 
 @pytest.mark.asyncio

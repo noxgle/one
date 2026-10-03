@@ -245,6 +245,64 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             req_headers.update(headers)
         return req_headers
 
+    async def count_request_tokens(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        images: list[dict[str, Any]] | None = None,
+        storage_dir: str = "",
+        temperature: float | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> int | None:
+        """Count a llama.cpp chat request with its native template/tokenizer.
+
+        These endpoints are optional in llama.cpp builds and are not part of the
+        OpenAI-compatible API.  A failure is intentionally indistinguishable
+        from an unavailable endpoint so callers retain their local estimate.
+        """
+        if self.name != "llama.cpp":
+            return None
+        try:
+            payload = self._build_payload(
+                model, messages, thinking_level, images=images,
+                storage_dir=storage_dir, temperature=temperature, tools=tools,
+            )
+            template_payload: dict[str, Any] = {
+                "messages": payload["messages"],
+                "add_generation_prompt": True,
+            }
+            for key in ("tools", "chat_template_kwargs"):
+                if key in payload:
+                    template_payload[key] = payload[key]
+            # llama.cpp normally serves these endpoints at the server root even
+            # when a compatible base URL was configured with a /v1 suffix.
+            base = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+            async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
+                rendered = await client.post(
+                    f"{base}/apply-template", json=template_payload,
+                    headers=self._build_headers(api_key, headers),
+                )
+                if rendered.is_error:
+                    return None
+                prompt = rendered.json().get("prompt")
+                if not isinstance(prompt, str):
+                    return None
+                tokenized = await client.post(
+                    f"{base}/tokenize", json={"content": prompt},
+                    headers=self._build_headers(api_key, headers),
+                )
+                if tokenized.is_error:
+                    return None
+                tokens = tokenized.json().get("tokens")
+                if not isinstance(tokens, list):
+                    return None
+                return len(tokens)
+        except Exception:
+            return None
+
     def _models_url(self) -> str:
         """OpenAI-compatible models endpoint.
 
@@ -309,6 +367,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         use_stream = callable(on_delta)
         if use_stream:
             payload["stream"] = True
+            # OpenAI and current llama.cpp servers emit a final usage-only SSE
+            # chunk when requested. Other compatible servers can reject unknown
+            # fields, so preserve their established wire format.
+            if self.name in {"openai", "azure-openai", "llama.cpp"}:
+                payload["stream_options"] = {"include_usage": True}
         transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
         req_headers = self._build_headers(api_key, headers)
         if not use_stream:
