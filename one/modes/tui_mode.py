@@ -146,7 +146,9 @@ def build_sidebar_snapshot(
         "tokenCacheWrite": int(tokens.get("cacheWrite") or 0),
         "tokenTotal": int(tokens.get("total") or 0),
         "cost": float(stats.get("cost") or 0.0),
-        "subagents": bool(getattr(getattr(session, "settings_manager", None), "get_subagents_enabled", lambda: True)()),
+        "subagents": not bool(getattr(session, "subagents_hard_disabled", False)) and bool(
+            getattr(getattr(session, "settings_manager", None), "get_subagents_enabled", lambda: True)()
+        ),
         "bashOutput": bool(getattr(getattr(session, "settings_manager", None), "get_bash_show_output", lambda: True)()),
         "mcpEnabled": mcp_manager is not None,
         "mcpServers": mcp_servers,
@@ -2978,14 +2980,20 @@ if TEXTUAL_AVAILABLE:
                 self._refresh_sidebar()
                 return
             if cmd == "/subagents":
-                state = session.settings_manager.get_subagents_enabled()
-                self._write(f"Subagents: {'on' if state else 'off'}", "info")
+                if getattr(session, "subagents_hard_disabled", False):
+                    self._write("Subagents: unavailable (--no-subagents for this session).", "info")
+                else:
+                    state = session.settings_manager.get_subagents_enabled()
+                    self._write(f"Subagents: {'on' if state else 'off'}", "info")
                 self._write("Usage: /subagents <on|off>", "info")
                 return
             if cmd.startswith("/subagents "):
                 mode = cmd[len("/subagents ") :].strip().lower()
                 if mode not in {"on", "off"}:
                     self._write("Usage: /subagents <on|off>", "error")
+                    return
+                if getattr(session, "subagents_hard_disabled", False):
+                    self._write("Subagents are unavailable for this session because it was started with --no-subagents.", "info")
                     return
                 session.settings_manager.set_subagents_enabled(mode == "on")
                 self._write(f"Subagents set to {mode}.", "info")
@@ -3812,6 +3820,10 @@ if TEXTUAL_AVAILABLE:
                 pass
 
         def action_toggle_subagents(self) -> None:
+            if getattr(self.session, "subagents_hard_disabled", False):
+                self._write("Subagents are unavailable for this session because it was started with --no-subagents.", "info")
+                self._refresh_sidebar()
+                return
             enabled = getattr(getattr(self.session, "settings_manager", None), "get_subagents_enabled", lambda: True)()
             self.session.settings_manager.set_subagents_enabled(not enabled)
             self._write(f"Subagents {'enabled' if not enabled else 'disabled'}.", "info")

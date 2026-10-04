@@ -558,6 +558,9 @@ class InteractiveMode:
                             "pendingMessageCount": session.pending_message_count,
                             "pendingQueues": session.get_pending_queues(),
                             "activeTools": session.active_tools,
+                            "subagentsAvailable": bool(
+                                getattr(session, "subagents_available", session.settings_manager.get_subagents_enabled())
+                            ),
                             "sessionId": session.session_id,
                             "sessionFile": session.session_file,
                         },
@@ -1017,14 +1020,20 @@ class InteractiveMode:
                 print(f"Updated {key}.")
                 continue
             if line.strip() == "/subagents":
-                state = session.settings_manager.get_subagents_enabled()
-                print(f"Subagents: {'on' if state else 'off'}")
+                if getattr(session, "subagents_hard_disabled", False):
+                    print("Subagents: unavailable (--no-subagents for this session).")
+                else:
+                    state = session.settings_manager.get_subagents_enabled()
+                    print(f"Subagents: {'on' if state else 'off'}")
                 print("Usage: /subagents <on|off>")
                 continue
             if line.startswith("/subagents "):
                 mode = line[len("/subagents ") :].strip().lower()
                 if mode not in {"on", "off"}:
                     print("Usage: /subagents <on|off>")
+                    continue
+                if getattr(session, "subagents_hard_disabled", False):
+                    print("Subagents are unavailable for this session because it was started with --no-subagents.")
                     continue
                 session.settings_manager.set_subagents_enabled(mode == "on")
                 print(f"Subagents set to {mode}.")

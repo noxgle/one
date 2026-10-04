@@ -132,6 +132,7 @@ class AgentSession:
         register_mcp_tools_callback: bool = True,
         activity_callback: Callable[[str], None] | None = None,
         cooperation_state: dict[str, bool] | None = None,
+        subagents_hard_disabled: bool = False,
     ) -> None:
         self.session_manager = session_manager
         self.settings_manager = settings_manager
@@ -143,6 +144,7 @@ class AgentSession:
         self.thinking_level = "off" if self.model and not self.model.reasoning else thinking_level
         self.temperature = normalize_temperature(settings_manager.get_default_temperature() if temperature is None else temperature)
         self.scoped_models = scoped_models or []
+        self._subagents_hard_disabled = subagents_hard_disabled
         self.providers = build_provider_registry()
         self.messages: list[dict[str, Any]] = self.session_manager.build_session_context()["messages"]
         self._plan: list[dict[str, str]] | str | None = None
@@ -397,9 +399,22 @@ class AgentSession:
 
     def _model_visible_tools(self) -> list[str]:
         """Return tools advertised to the model in the current mode."""
-        if self.cooperation_enabled:
-            return list(self._active_tools)
-        return [tool for tool in self._active_tools if tool != "ask_user"]
+        visible = list(self._active_tools)
+        if self._subagents_hard_disabled or not self.settings_manager.get_subagents_enabled():
+            visible = [tool for tool in visible if tool != "spawn_subagent"]
+        if not self.cooperation_enabled:
+            visible = [tool for tool in visible if tool != "ask_user"]
+        return visible
+
+    @property
+    def subagents_hard_disabled(self) -> bool:
+        """Whether this session was started with ``--no-subagents``."""
+        return self._subagents_hard_disabled
+
+    @property
+    def subagents_available(self) -> bool:
+        """Whether subagents are effectively available in this session."""
+        return not self._subagents_hard_disabled and self.settings_manager.get_subagents_enabled()
 
     @property
     def cooperation_enabled(self) -> bool:
@@ -1518,6 +1533,8 @@ class AgentSession:
             return 0
 
     async def _spawn_subagent(self, args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:
+        if self._subagents_hard_disabled:
+            raise RuntimeError("Subagents are unavailable for this session because it was started with --no-subagents")
         if not self.settings_manager.get_subagents_enabled():
             raise RuntimeError("Subagents disabled (enable with /subagents on or 'one config subagents.enabled true')")
         task = str(args.get("task") or "").strip()
@@ -3111,7 +3128,10 @@ class AgentSession:
                                             self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
                                             final_assistant = self._budget_exceeded_assistant_message(message)
                                         break
-                                    sub_timeout = None if tool_call["tool"] == "ask_user" else tool_timeout_sec
+                                    # spawn_subagent owns its child watchdog timeout.  Do not
+                                    # pass the normal tools.timeoutSec into it: direct callers
+                                    # may still pass timeout_sec as an intentional child override.
+                                    sub_timeout = None if tool_call["tool"] in {"ask_user", "spawn_subagent"} else tool_timeout_sec
                                     tool_payload = await self._run_tool_call(
                                         tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout,
                                         tool_call_id=tool_call.get("toolCallId"),

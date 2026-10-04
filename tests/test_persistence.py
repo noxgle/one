@@ -349,6 +349,7 @@ def test_settings_project_malformed_does_not_chmod_project_file(tmp_path: Path):
     if os.name == "posix":
         # Project file mode must remain unchanged (0644), not tightened to 0600.
         assert project_file.stat().st_mode & 0o777 == original_mode
+    assert any(error["scope"] == "project" for error in sm.drain_errors())
 
 
 def test_settings_refuses_save_global_when_malformed(tmp_path: Path):

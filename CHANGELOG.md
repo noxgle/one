@@ -16,6 +16,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Live subagent controls** — `/subagents on|off` now updates tool visibility
+  in the active session. `--no-subagents` remains a hard disable that cannot be
+  overridden by the runtime toggle.
 - **Restricted TUI manual commands** — `/bash` now uses a fail-closed,
   shell-free strict/dev command profile. It is separate from model bash and
   RPC/interactive commands, which retain their existing behavior. Manual TUI
@@ -85,6 +88,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Subagent timeout isolation** — the parent's `tools.timeoutSec` no longer
+  shortens a spawned child's idle timeout. Subagents use their own configured
+  idle timeout, with an optional per-call `timeout` override.
 - **Cooperative questions** — runtime prompts now accurately advertise `ask_user`
   only when cooperation and the tool are active, and distinguish a resumable
   question from terminal `finish` results.

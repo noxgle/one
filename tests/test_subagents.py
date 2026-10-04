@@ -25,6 +25,11 @@ class _Loader:
         return "You are a coding agent."
 
 
+class _ToolListingLoader:
+    def get_system_prompt(self, selected_tools: list[str] | None = None) -> str:
+        return ",".join(selected_tools or [])
+
+
 class _Provider:
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
@@ -48,6 +53,27 @@ class _Provider:
         idx = min(self.calls, len(self.responses) - 1)
         self.calls += 1
         return ChatResult(text=self.responses[idx], raw={}, usage={}, stop_reason="stop")
+
+
+class _NativeToolProvider:
+    supports_native_tools = True
+
+    def __init__(self) -> None:
+        self.tool_names: list[list[str]] = []
+
+    async def chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        thinking_level: str,
+        headers: dict[str, str] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Any:  # noqa: ARG002
+        from one.providers.base import ChatResult
+
+        self.tool_names.append([tool["name"] for tool in tools or []])
+        return ChatResult(text="done", raw={}, usage={}, stop_reason="stop")
 
 
 class _StubMcpManager:
@@ -341,6 +367,50 @@ async def test_spawn_subagent_disabled_raises(tmp_path: Path):
         settings_override={"tools": {"maxSteps": 4, "timeoutSec": 5}, "subagents": {"enabled": False}},
     )
     with pytest.raises(RuntimeError, match="Subagents disabled"):
+        await agent._spawn_subagent({"task": "sub task"})
+
+
+@pytest.mark.asyncio
+async def test_subagent_visibility_updates_prompt_and_native_tools_live(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path, tools=["read", "spawn_subagent"], settings_override={"subagents": {"enabled": False}})
+    agent.resource_loader = _ToolListingLoader()
+    provider = _NativeToolProvider()
+    agent.providers = {"openai": provider}
+
+    assert "spawn_subagent" not in agent._model_visible_tools()
+    assert "spawn_subagent" not in agent._build_runtime_system_prompt()
+    await agent._invoke_provider([{"role": "user", "content": "first"}])
+
+    agent.settings_manager.set_subagents_enabled(True)
+    assert "spawn_subagent" in agent._model_visible_tools()
+    assert "spawn_subagent" in agent._build_runtime_system_prompt()
+    await agent._invoke_provider([{"role": "user", "content": "second"}])
+
+    agent.settings_manager.set_subagents_enabled(False)
+    assert "spawn_subagent" not in agent._model_visible_tools()
+    assert "spawn_subagent" not in agent._build_runtime_system_prompt()
+    await agent._invoke_provider([{"role": "user", "content": "third"}])
+
+    assert provider.tool_names == [["read"], ["read", "spawn_subagent"], ["read"]]
+
+
+@pytest.mark.asyncio
+async def test_hard_disabled_subagents_remain_unavailable_after_live_enable(tmp_path: Path) -> None:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    settings = SettingsManager.in_memory({"subagents": {"enabled": False}})
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), settings, registry, _Loader(), model, "medium",
+        tools=["spawn_subagent"], subagents_hard_disabled=True,
+    )
+
+    settings.set_subagents_enabled(True)
+
+    assert "spawn_subagent" not in agent._model_visible_tools()
+    with pytest.raises(RuntimeError, match="--no-subagents"):
         await agent._spawn_subagent({"task": "sub task"})
 
 
@@ -691,13 +761,8 @@ class _StreamingSubagentProvider:
 
 
 @pytest.mark.asyncio
-async def test_spawn_subagent_timeout_terminates_parent_turn(tmp_path: Path):
-    """spawn_subagent must respect the externally-controlled timeout.
-
-    Verifies that _run_tool_call wraps spawn_subagent with the tool timeout
-    (timeout_sec param > per-call args.timeout > subagents setting default).
-    A never-finishing subagent must be killed within the timeout window.
-    """
+async def test_spawn_subagent_direct_timeout_sec_overrides_child_idle_timeout(tmp_path: Path):
+    """A direct timeout_sec remains an intentional child idle-timeout override."""
     session_dir = str(tmp_path / "sessions")
     manager = SessionManager.create(str(tmp_path), session_dir)
     auth = AuthStorage.in_memory()
@@ -706,26 +771,22 @@ async def test_spawn_subagent_timeout_terminates_parent_turn(tmp_path: Path):
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
     settings = SettingsManager.in_memory(
-        {"tools": {"maxSteps": 4, "timeoutSec": 2}, "providers": {"timeoutSec": 3}}
+        {"tools": {"maxSteps": 4, "timeoutSec": 10}, "subagents": {"idleTimeoutSec": 2}, "providers": {"timeoutSec": 3}}
     )
 
     parent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "finish"])
     parent.providers = {"openai": _SlowSubagentProvider(delay=999.0)}
-
     events: list[dict[str, Any]] = []
     parent.subscribe(events.append)
 
-    # Time the spawn_subagent tool call directly via _run_tool_call.
-    # The tool timeout (2 s) must kill the subagent await.
+    # Direct callers can intentionally select a child watchdog timeout.
     import time
 
     start = time.monotonic()
-    tool_timeout = settings.get_tool_timeout_sec()
-    result = await parent._run_tool_call("spawn_subagent", {"task": "work forever"}, timeout_sec=tool_timeout)
+    result = await parent._run_tool_call("spawn_subagent", {"task": "work forever"}, timeout_sec=1)
     elapsed = time.monotonic() - start
 
-    # Should timeout within ~2s (plus small overhead), not hang.
-    assert elapsed < 6, f"spawn_subagent took {elapsed:.1f}s — should have timed out ~2s"
+    assert elapsed < 5, f"spawn_subagent took {elapsed:.1f}s — should have timed out ~1s"
     assert result["ok"] is False
     # Error message should mention timeout.
     error_msg = str(result.get("error", ""))
@@ -736,11 +797,7 @@ async def test_spawn_subagent_timeout_terminates_parent_turn(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_spawn_subagent_per_call_timeout_override(tmp_path: Path):
-    """Per-call args.timeout must override the tool timeout setting.
-
-    When spawn_subagent is called with an explicit ``timeout`` key in args,
-    that value must take precedence over tools.timeoutSec.
-    """
+    """Per-call args.timeout overrides both direct and configured timeouts."""
     session_dir = str(tmp_path / "sessions")
     manager = SessionManager.create(str(tmp_path), session_dir)
     auth = AuthStorage.in_memory()
@@ -748,9 +805,9 @@ async def test_spawn_subagent_per_call_timeout_override(tmp_path: Path):
     registry = ModelRegistry.create(auth)
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
-    # tools.timeoutSec = 10, but per-call override = 1 s
+    # The direct override is 2s, but the per-call override is 1s.
     settings = SettingsManager.in_memory(
-        {"tools": {"maxSteps": 4, "timeoutSec": 10}, "providers": {"timeoutSec": 3}}
+        {"tools": {"maxSteps": 4, "timeoutSec": 10}, "subagents": {"idleTimeoutSec": 2}, "providers": {"timeoutSec": 3}}
     )
 
     parent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "finish"])
@@ -762,8 +819,7 @@ async def test_spawn_subagent_per_call_timeout_override(tmp_path: Path):
     import time
 
     start = time.monotonic()
-    # Pass timeout via args, not timeout_sec — per-call override.
-    result = await parent._run_tool_call("spawn_subagent", {"task": "work forever", "timeout": 1})
+    result = await parent._run_tool_call("spawn_subagent", {"task": "work forever", "timeout": 1}, timeout_sec=2)
     elapsed = time.monotonic() - start
 
     assert elapsed < 5, f"spawn_subagent took {elapsed:.1f}s — should have timed out ~1s"
@@ -772,8 +828,8 @@ async def test_spawn_subagent_per_call_timeout_override(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_spawn_subagent_falls_back_to_subagents_setting(tmp_path: Path):
-    """When no per-call timeout is given, falls back to subagents.timeoutSec."""
+async def test_spawn_subagent_ignores_normal_tool_timeout_for_child_watchdog(tmp_path: Path):
+    """Without an override, the child uses subagents idle timeout, not tools timeout."""
     session_dir = str(tmp_path / "sessions")
     manager = SessionManager.create(str(tmp_path), session_dir)
     auth = AuthStorage.in_memory()
@@ -781,23 +837,56 @@ async def test_spawn_subagent_falls_back_to_subagents_setting(tmp_path: Path):
     registry = ModelRegistry.create(auth)
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
-    # tools.timeoutSec = 30, but subagents.timeoutSec = 2
+    # tools.timeoutSec = 1, but subagents idle timeout = 2.
     settings = SettingsManager.in_memory(
-        {"tools": {"maxSteps": 4, "timeoutSec": 30}, "subagents": {"timeoutSec": 2}}
+        {"tools": {"maxSteps": 4, "timeoutSec": 1}, "subagents": {"idleTimeoutSec": 2}}
     )
 
     parent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "finish"])
     parent.providers = {"openai": _SlowSubagentProvider(delay=999.0)}
+    events: list[dict[str, Any]] = []
+    parent.subscribe(events.append)
 
     import time
 
     start = time.monotonic()
-    # No timeout in args, no timeout_sec — should use subagents.timeoutSec=2
+    # This is the normal spawn dispatch value: no inherited tool timeout.
     result = await parent._run_tool_call("spawn_subagent", {"task": "work forever"})
     elapsed = time.monotonic() - start
 
-    assert elapsed < 6, f"spawn_subagent took {elapsed:.1f}s — should have timed out ~2s"
+    assert 1.5 <= elapsed < 6, f"spawn_subagent took {elapsed:.1f}s — should have timed out ~2s, not 1s"
     assert result["ok"] is False
+    starts = [event for event in events if event.get("type") == "tool_call_start"]
+    assert starts[-1]["effectiveTimeout"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_turn_uses_child_timeout_for_spawn_subagent(tmp_path: Path) -> None:
+    """Normal tool-loop dispatch uses the child timeout, not tools.timeoutSec."""
+    parent = _mk_agent(
+        tmp_path,
+        tools=["spawn_subagent"],
+        settings_override={"tools": {"maxSteps": 2, "timeoutSec": 1}, "subagents": {"idleTimeoutSec": 2}},
+    )
+    parent.providers = {"openai": _Provider([
+        json.dumps({"tool": "spawn_subagent", "args": {"task": "delegate"}}),
+        "done",
+    ])}  # type: ignore[assignment]
+    observed: list[int | None] = []
+
+    async def fake_spawn(args: dict[str, Any], timeout_sec: int | None = None) -> dict[str, Any]:  # noqa: ARG001
+        observed.append(timeout_sec)
+        return {"ok": True, "output": "delegated"}
+
+    parent._spawn_subagent = fake_spawn  # type: ignore[method-assign]
+    events: list[dict[str, Any]] = []
+    parent.subscribe(events.append)
+
+    await parent.prompt("go")
+
+    assert observed == [2]
+    starts = [event for event in events if event.get("type") == "tool_call_start"]
+    assert starts[-1]["effectiveTimeout"] == 2
 
 
 @pytest.mark.asyncio

@@ -68,8 +68,8 @@ all_tools: dict[str, ToolDef] = {
     ),
     "spawn_subagent": ToolDef(
         "spawn_subagent",
-        "Delegate a subtask to an isolated subagent. Args: 'task' (str) for one subtask, or 'tasks' (list[str]) for parallel subtasks; optional 'model' ('provider/model'); optional 'tools' (non-empty list of tool names; 'finish' is added automatically if omitted). Returns the subagent summary, success flag and session id.",
-        spawn_subagent_tool, {"type":"object","properties":{"task":{"type":"string","minLength":1},"tasks":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"model":{"type":"string","minLength":1},"tools":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}}},"additionalProperties":False,"oneOf":[{"required":["task"]},{"required":["tasks"]}]},
+        "Delegate a subtask to an isolated subagent. Args: 'task' (str) for one subtask, or 'tasks' (list[str]) for parallel subtasks; optional 'model' ('provider/model'); optional 'tools' (non-empty list of tool names; 'finish' is added automatically if omitted); optional 'timeout' (seconds, overrides the child idle timeout). Returns the subagent summary, success flag and session id.",
+        spawn_subagent_tool, {"type":"object","properties":{"task":{"type":"string","minLength":1},"tasks":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"model":{"type":"string","minLength":1},"tools":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"timeout":{"type":"integer","minimum":0}},"additionalProperties":False,"oneOf":[{"required":["task"]},{"required":["tasks"]}]},
     ),
     "apply_patch": ToolDef("apply_patch", "Apply an OpenCode patch-format patch, NOT a standard ---/+++ unified diff. patchText must be a non-empty string, for example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch. Supports Add/Update/Delete/Move; staged, backup/rollback-protected; Add/Move targets must be absent; conflicts and symlinks rejected.", apply_patch_tool, {"type":"object","properties":{"patchText":{"type":"string","minLength":1}},"required":["patchText"],"additionalProperties":False}),
 }

@@ -188,6 +188,13 @@ def test_build_sidebar_snapshot_contains_runtime_details() -> None:
     assert snapshot["retry"] == "on"
 
 
+def test_build_sidebar_snapshot_marks_hard_disabled_subagents_off() -> None:
+    session = _DummySession()
+    setattr(session, "subagents_hard_disabled", True)
+
+    assert build_sidebar_snapshot(session)["subagents"] is False
+
+
 def test_get_git_branch_handles_nested_repositories_and_fallbacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", "-b", "sidebar-test", str(repo)], check=True)

@@ -145,8 +145,6 @@ async def _run(argv: list[str]) -> int:
 
     if parsed.mode is None:
         parsed.mode = settings.get_default_mode()
-    if parsed.no_subagents:
-        settings.set_subagents_enabled(False, persist=False)
     if parsed.no_bash_output:
         settings.set_bash_show_output(False, persist=False)
 
@@ -386,7 +384,7 @@ async def _run(argv: list[str]) -> int:
     elif parsed.tools:
         tool_names = parsed.tools
 
-    if not settings.get_subagents_enabled():
+    if parsed.no_subagents:
         tool_names = [t for t in tool_names if t != "spawn_subagent"]
 
     bad_tools = [t for t in tool_names if t not in all_tools]
@@ -421,6 +419,7 @@ async def _run(argv: list[str]) -> int:
         ),
         "scopedModels": scoped_models,
         "tools": [all_tools[t] for t in tool_names],
+        "subagentsHardDisabled": parsed.no_subagents,
         "mcpManager": mcp_manager,
     }
 

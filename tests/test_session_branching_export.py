@@ -102,13 +102,15 @@ async def test_navigate_tree_unknown_entry_raises(tmp_path):
         await agent.navigate_tree("does-not-exist")
 
 
-async def _make_host(tmp_path) -> tuple[AgentSessionRuntimeHost, SessionManager]:
+async def _make_host(
+    tmp_path, *, subagents_enabled: bool = True, subagents_hard_disabled: bool = False, tools: list[str] | None = None
+) -> tuple[AgentSessionRuntimeHost, SessionManager]:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
     registry = ModelRegistry.create(auth)
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
-    settings = SettingsManager.in_memory()
+    settings = SettingsManager.in_memory({"subagents": {"enabled": subagents_enabled}})
     loader = _Loader()
     bootstrap = {
         "agentDir": str(tmp_path / "agent"),
@@ -119,7 +121,8 @@ async def _make_host(tmp_path) -> tuple[AgentSessionRuntimeHost, SessionManager]
         "model": model,
         "thinkingLevel": "medium",
         "scopedModels": [],
-        "tools": [all_tools[t] for t in ["read"]],
+        "tools": [all_tools[t] for t in (tools or ["read"])],
+        "subagentsHardDisabled": subagents_hard_disabled,
     }
     sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
     runtime = await create_agent_session_runtime(
@@ -165,6 +168,32 @@ async def test_runtime_host_new_session_uses_model_changed_during_session(tmp_pa
     model = host.session.model
     assert model is not None
     assert (model.provider, model.id) == ("openai", "gpt-4o")
+
+
+@pytest.mark.asyncio
+async def test_runtime_subagent_availability_updates_live_and_hard_disable_survives_new_session(tmp_path):
+    host, _sm = await _make_host(tmp_path, subagents_enabled=False, tools=["read", "spawn_subagent"])
+    assert host.session.subagents_available is False
+    host.session.settings_manager.set_subagents_enabled(True)
+    assert host.session.subagents_available is True
+    assert "spawn_subagent" in host.session._model_visible_tools()
+
+    hard_host, _sm = await _make_host(
+        tmp_path / "hard", subagents_enabled=True, subagents_hard_disabled=True, tools=["read", "spawn_subagent"]
+    )
+    assert hard_host.session.subagents_available is False
+    await hard_host.new_session()
+    assert hard_host.session.subagents_hard_disabled is True
+    assert hard_host.session.subagents_available is False
+    assert "spawn_subagent" not in hard_host.session._model_visible_tools()
+
+
+@pytest.mark.asyncio
+async def test_runtime_respects_explicit_subagent_tool_omission(tmp_path):
+    host, _sm = await _make_host(tmp_path, subagents_enabled=True, tools=["read"])
+
+    assert "spawn_subagent" not in host.session.active_tools
+    assert "spawn_subagent" not in host.session._model_visible_tools()
 
 
 @pytest.mark.asyncio

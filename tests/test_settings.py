@@ -3,6 +3,8 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from one.core.settings_manager import SettingsManager
@@ -269,6 +271,52 @@ def test_tool_approval_persists_and_preserves_approval_tools(tmp_path) -> None:
 
     reloaded.set_tool_approval(False)
     assert SettingsManager(str(project_dir), str(agent_dir)).get_tool_approval() is False
+
+
+def test_set_subagents_enabled_persists_to_explicit_project_scope(tmp_path) -> None:
+    agent_dir = tmp_path / "agent"
+    project_dir = tmp_path / "project"
+    agent_dir.mkdir()
+    project_dir.mkdir()
+    global_settings = agent_dir / "settings.json"
+    global_settings.write_text('{"subagents": {"enabled": true, "maxDepth": 2}}', encoding="utf-8")
+    project_settings_dir = project_dir / ".one"
+    project_settings_dir.mkdir()
+    project_settings = project_settings_dir / "settings.json"
+    project_settings.write_text('{"subagents": {"enabled": false, "maxConcurrent": 1}}', encoding="utf-8")
+
+    settings = SettingsManager(str(project_dir), str(agent_dir))
+    settings.set_subagents_enabled(True)
+
+    assert settings.get_subagents_enabled() is True
+    assert json.loads(project_settings.read_text(encoding="utf-8")) == {
+        "subagents": {"enabled": True, "maxConcurrent": 1}
+    }
+    assert json.loads(global_settings.read_text(encoding="utf-8")) == {
+        "subagents": {"enabled": True, "maxDepth": 2}
+    }
+    assert SettingsManager(str(project_dir), str(agent_dir)).get_subagents_enabled() is True
+
+
+def test_set_subagents_enabled_does_not_overwrite_malformed_project_settings(tmp_path) -> None:
+    agent_dir = tmp_path / "agent"
+    project_dir = tmp_path / "project"
+    agent_dir.mkdir()
+    project_settings_dir = project_dir / ".one"
+    project_settings_dir.mkdir(parents=True)
+    project_settings = project_settings_dir / "settings.json"
+    project_settings.write_text("{not json", encoding="utf-8")
+    settings = SettingsManager(str(project_dir), str(agent_dir))
+
+    # A malformed project does not explicitly select project scope, so this
+    # persists globally and leaves the broken project file untouched.
+    settings.set_subagents_enabled(False)
+
+    assert project_settings.read_text(encoding="utf-8") == "{not json"
+    assert json.loads((agent_dir / "settings.json").read_text(encoding="utf-8")) == {
+        "subagents": {"enabled": False}
+    }
+    assert settings.drain_errors()[0]["scope"] == "project"
 
 
 def test_set_tool_approval_refuses_malformed_global_settings(tmp_path) -> None:

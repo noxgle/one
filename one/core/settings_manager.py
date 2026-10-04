@@ -90,25 +90,15 @@ class SettingsManager:
         self._initial = deepcopy(initial or {}) if in_memory else None
         # Guard: refuse to overwrite a known-malformed global settings file.
         self._global_is_locked: bool = False
+        # Project settings use the same protection when they are the selected
+        # persistence scope.
+        self._project_is_locked: bool = False
         if in_memory:
             self._global = _deep_merge(DEFAULT_SETTINGS, initial or {})
             self._project = {}
         else:
             self._global, self._global_is_locked = self._load_global(self._global_path)
-            self._project = self._load(self._project_path, "project")
-
-    def _load(self, path: Path | None, scope: str) -> dict[str, Any]:
-        if not path or not path.exists():
-            return {}
-        data, err = load_json_text_safe(path)
-        if err is not None:
-            self._errors.append({"scope": scope, "error": err})
-            return {}
-        if isinstance(data, dict):
-            return data
-        # Valid JSON but not a dict — record as error, return defaults.
-        self._errors.append({"scope": scope, "error": ValueError(f"{scope} settings is not a JSON object")})
-        return {}
+            self._project, self._project_is_locked = self._load_project(self._project_path)
 
     def _load_global(self, path: Path | None) -> tuple[dict[str, Any], bool]:
         """Load global settings and return (parsed, is_locked).
@@ -137,6 +127,23 @@ class SettingsManager:
         )
         return {}, True
 
+    def _load_project(self, path: Path | None) -> tuple[dict[str, Any], bool]:
+        """Load project settings and retain malformed-file protection.
+
+        Project settings are repository content, so their permissions are not
+        changed while loading.
+        """
+        if not path or not path.exists():
+            return {}, False
+        data, err = load_json_text_safe(path)
+        if err is not None:
+            self._errors.append({"scope": "project", "error": err})
+            return {}, True
+        if isinstance(data, dict):
+            return data, False
+        self._errors.append({"scope": "project", "error": ValueError("project settings is not a JSON object")})
+        return {}, True
+
     def _save_global(self) -> None:
         if self._in_memory or not self._global_path:
             return
@@ -147,6 +154,16 @@ class SettingsManager:
                 "repair it before the agent can persist config"
             )
         atomic_write_text(self._global_path, json.dumps(self._global, indent=2) + "\n")
+
+    def _save_project(self) -> None:
+        if self._in_memory or not self._project_path:
+            return
+        if self._project_is_locked:
+            raise RuntimeError(
+                "project settings file is malformed or not a JSON object; "
+                "repair it before the agent can persist config"
+            )
+        atomic_write_text(self._project_path, json.dumps(self._project, indent=2) + "\n")
 
     # --- Writability guard ---
 
@@ -391,13 +408,23 @@ class SettingsManager:
         return bool(self.merged().get("subagents", {}).get("enabled", True))
 
     def set_subagents_enabled(self, enabled: bool, persist: bool = True) -> None:
-        if persist:
+        project_subagents = self._project.get("subagents")
+        target = self._project if isinstance(project_subagents, dict) and "enabled" in project_subagents else self._global
+        if persist and target is self._global:
             self._require_writable_global()
-        subagents = dict(self._global.get("subagents", {}))
+        if persist and target is self._project and self._project_is_locked:
+            raise RuntimeError(
+                "project settings file is malformed or not a JSON object; "
+                "repair it before the agent can persist config"
+            )
+        subagents = dict(target.get("subagents", {}))
         subagents["enabled"] = bool(enabled)
-        self._global["subagents"] = subagents
+        target["subagents"] = subagents
         if persist:
-            self._save_global()
+            if target is self._project:
+                self._save_project()
+            else:
+                self._save_global()
 
     def get_ask_user_timeout_sec(self) -> int:
         try:

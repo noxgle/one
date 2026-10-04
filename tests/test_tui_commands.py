@@ -13,8 +13,26 @@ import pytest
 
 from one.modes.tui_mode import (
     BUILTIN_TUI_THEMES,
+    _OneTextualApp,
 )
 from tests.support.tui import _mk_app_session, _submit
+
+
+@pytest.mark.asyncio
+async def test_tui_hard_disabled_subagent_controls_do_not_persist(tmp_path: Path) -> None:
+    session = _mk_app_session(tmp_path)
+    session._subagents_hard_disabled = True  # noqa: SLF001
+    app = _OneTextualApp(session)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/subagents on")
+        app.action_toggle_subagents()
+        await pilot.pause()
+
+    assert session.settings_manager.get_subagents_enabled() is True
+    stream = "\n".join(app._stream_lines)
+    assert stream.count("Subagents are unavailable for this session because it was started with --no-subagents.") == 2
 
 
 class _LoginStub:

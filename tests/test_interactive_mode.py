@@ -206,7 +206,7 @@ class _DummyModelRegistry:
 
 
 class _DummySession:
-    def __init__(self) -> None:
+    def __init__(self, *, subagents_hard_disabled: bool = False) -> None:
         self.model = ModelInfo(provider="openai", id="gpt-4.1")
         self.thinking_level = "medium"
         self.is_streaming = False
@@ -226,6 +226,7 @@ class _DummySession:
         self._extui_pending: dict[str, dict[str, Any]] = {}
         self._extui_history: list[dict[str, Any]] = []
         self.approval_callback: Any = None
+        self.subagents_hard_disabled = subagents_hard_disabled
 
     def subscribe(self, listener: Any) -> None:
         self._listeners.append(listener)
@@ -435,6 +436,20 @@ async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     assert session.get_pending_queues()["followUp"] == ["def"]
     assert session.aborted is True
     assert session.prompt_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_subagents_command_does_not_persist_when_hard_disabled(monkeypatch, capsys):
+    session = _DummySession(subagents_hard_disabled=True)
+    mode = InteractiveMode(_DummyHost(session))
+    monkeypatch.setattr("builtins.input", _mk_input(["/subagents", "/subagents on", "/subagents off", "/exit"]))
+
+    await mode.run()
+
+    out = capsys.readouterr().out
+    assert "Subagents: unavailable (--no-subagents for this session)." in out
+    assert out.count("Subagents are unavailable for this session because it was started with --no-subagents.") == 2
+    assert session.settings_manager.get_subagents_enabled() is True
 
 
 @pytest.mark.asyncio
