@@ -20,6 +20,7 @@ from one.core.settings_manager import SettingsManager
 from one.core.temperature import temperature_for_mode
 from one.mcp import McpManager
 from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode, run_run_mode
+from one.resources.default_skill_installer import install_default_skills
 from one.resources.resource_loader import DefaultResourceLoader
 from one.tools.index import DEFAULT_TOOL_NAMES, all_tools
 
@@ -128,13 +129,17 @@ async def _run(argv: list[str]) -> int:
     os.environ[ENV_AGENT_DIR] = str(agent_dir_path)
     agent_dir = str(agent_dir_path)
 
+    # Best effort only: a failed default-skill copy must not block startup.
+    import sys as _sys
+
+    for diagnostic in install_default_skills(agent_dir_path, cwd):
+        print(f"[warn] {diagnostic}", file=_sys.stderr)
+
     settings = SettingsManager.create(cwd, agent_dir)
     auth = AuthStorage.create()
     registry = ModelRegistry.create(auth, get_models_path())
 
     # Emit safe startup warnings for collected load errors to stderr.
-    import sys as _sys
-
     for source in (settings, auth, registry):
         for err in source.drain_errors():
             scope = err.get("scope", "unknown")

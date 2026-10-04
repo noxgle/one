@@ -376,12 +376,20 @@ class DefaultResourceLoader:
 
     def _collect_files(self, roots: list[Path], suffix: str) -> list[str]:
         out: list[str] = []
+        seen: set[str] = set()
         for root in roots:
             if root.is_file() and root.name.endswith(suffix):
-                out.append(str(root.resolve()))
+                candidates = [root]
             elif root.is_dir():
-                out.extend(str(p.resolve()) for p in root.rglob(f"*{suffix}") if p.is_file())
-        return sorted(set(out))
+                candidates = sorted(p for p in root.rglob(f"*{suffix}") if p.is_file())
+            else:
+                candidates = []
+            for candidate in candidates:
+                resolved = str(candidate.resolve())
+                if resolved not in seen:
+                    seen.add(resolved)
+                    out.append(resolved)
+        return out
 
     def _discover_extensions(self) -> list[dict[str, Any]]:
         roots = [

@@ -16,6 +16,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **First-run default skills** — fresh installations copy the packaged `explore`
+  and `one` skills into the active user agent directory without overwriting user
+  files or lower-precedence existing skills.
+
 - **Live subagent controls** — `/subagents on|off` now updates tool visibility
   in the active session. `--no-subagents` remains a hard disable that cannot be
   overridden by the runtime toggle.

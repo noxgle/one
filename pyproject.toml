@@ -76,7 +76,7 @@ where = ["."]
 include = ["one*"]
 
 [tool.setuptools.package-data]
-one = ["assets/logo.txt"]
+one = ["assets/logo.txt", "resources/default_skills/*/SKILL.md"]
 
 # Dynamic version read from one/config.py at build time.
 [tool.setuptools.dynamic]

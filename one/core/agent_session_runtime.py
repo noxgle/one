@@ -14,6 +14,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
 from one.core.temperature import normalize_temperature
+from one.resources.default_skill_installer import install_default_skills
 from one.resources.resource_loader import DefaultResourceLoader
 from one.tools.index import DEFAULT_TOOL_NAMES
 
@@ -36,8 +37,9 @@ def _resolve_runtime_agent_dir(bootstrap: dict[str, Any]) -> str:
 
 
 async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[str, Any]) -> AgentSessionRuntime:
-    cwd = options.get("cwd")
+    cwd = str(options.get("cwd") or Path.cwd())
     agent_dir = _resolve_runtime_agent_dir(bootstrap)
+    install_default_skills(agent_dir, cwd)
     # ── Auth storage (explicit > default under agentDir > global helper) ──
     auth_storage = bootstrap.get("authStorage")
     if auth_storage is None:

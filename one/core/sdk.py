@@ -12,6 +12,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
+from one.resources.default_skill_installer import install_default_skills
 from one.resources.resource_loader import DefaultResourceLoader
 
 
@@ -27,6 +28,7 @@ async def create_agent_session(options: dict[str, Any] | None = None) -> dict[st
     options = options or {}
     cwd = options.get("cwd") or __import__("os").getcwd()
     agent_dir = _resolve_agent_dir(options)
+    install_default_skills(agent_dir, cwd)
 
     # ── Auth storage ────────────────────────────────────────────────────
     explicit_auth = options.get("authStorage")

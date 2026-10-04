@@ -22,6 +22,13 @@ Skills are discovered from:
 3. `.one/skills/` — per-project skills
 4. Explicit paths via `--skill <path>` CLI flag
 
+On the first normal startup, `one` installs its packaged `explore` and `one`
+skills as ordinary user files at `~/.config/one/skills/<name>/SKILL.md` (or
+`$ONE_CODING_AGENT_DIR/skills/<name>/SKILL.md`). They remain yours to edit and
+are never overwritten. If a same-named skill is already available from
+`~/.agents/skills/` or `.one/skills/`, installation is skipped so first startup
+does not change that skill's discovery precedence.
+
 The resource loader scans for files named `SKILL.md` (case-sensitive). Each skill's **name** is the parent directory name.
 
 ## Frontmatter
