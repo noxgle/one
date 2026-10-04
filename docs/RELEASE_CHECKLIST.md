@@ -84,8 +84,9 @@ unzip -l dist/one-agent-*.whl
 tar tzf dist/one-agent-*.tar.gz
 ```
 
-Verify archives exclude: `tests/`, `.one/`, `*.egg-info/`, `__pycache__/`,
-`.git/`, credentials, and any private blobs.
+Verify archives exclude: `tests/`, `.one/`, `__pycache__/`, `.git/`, credentials,
+and any private blobs. Wheels must not contain `*.egg-info/`; setuptools may
+include only its generated `one_agent.egg-info/SOURCES.txt` manifest in the sdist.
 
 ## 8. Gitleaks — full-history scan
 

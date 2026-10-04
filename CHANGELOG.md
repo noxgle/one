@@ -8,6 +8,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+## [0.1.64] - 2026-10-04
+
 ### Changed
 
 - **Project roadmap** — `TODO.md` now lists only current, verified work;
