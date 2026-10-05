@@ -416,7 +416,21 @@ class InteractiveMode:
                 except ValueError:
                     pass
             if et == "tool_call_parse_failed":
-                print("[Tool] Parse failed for tool-call candidate, continuing with assistant output.", flush=True)
+                if event.get("source") is None and event.get("category") is None:
+                    reason = {
+                        "malformed_native_tool_call": "malformed native tool call",
+                        "conflicting_native_tool_call_id": "conflicting native tool-call ID",
+                        "control_tool_in_native_batch": "control tool in native batch",
+                    }.get(event.get("reason"), "parse failed")
+                    print(f"[Tool] {reason}; no tool was executed.", flush=True)
+                else:
+                    source = {"response": "response", "nudge": "nudge", "format_repair": "format repair"}.get(
+                        event.get("source"), "tool-call candidate"
+                    )
+                    category = {"malformed_json": "malformed JSON", "invalid_tool_call_shape": "invalid tool-call shape"}.get(
+                        event.get("category"), "parse failed"
+                    )
+                    print(f"[Tool] {source}: {category}; no tool was executed.", flush=True)
             if et == "tool_call_nudge_start":
                 print("[Tool] Requesting tool-call nudge...", flush=True)
             if et == "tool_call_nudge_end":

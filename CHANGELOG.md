@@ -15,6 +15,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Rejected tool-call diagnostics** — invalid text tool candidates now identify
+  their response stage and safe parse category without exposing model content;
+  the TUI explicitly confirms that no tool was executed.
 - **Default skill startup** — silently preserve existing lower-precedence skills
   instead of warning on every startup.
 

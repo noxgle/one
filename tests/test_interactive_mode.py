@@ -362,6 +362,26 @@ def _mk_input(commands: list[str]):
 
 
 @pytest.mark.asyncio
+async def test_interactive_native_tool_parse_failure_shows_safe_reason(monkeypatch, capsys) -> None:
+    session = _DummySession()
+    mode = InteractiveMode(_DummyHost(session))
+    emitted = False
+
+    def _input(_prompt: str = "") -> str:
+        nonlocal emitted
+        if not emitted:
+            emitted = True
+            for listener in session._listeners:
+                listener({"type": "tool_call_parse_failed", "reason": "malformed_native_tool_call"})
+        return "/exit"
+
+    monkeypatch.setattr("builtins.input", _input)
+    await mode.run()
+
+    assert "[Tool] malformed native tool call; no tool was executed." in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
 async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     session = _DummySession()
     mode = InteractiveMode(_DummyHost(session))

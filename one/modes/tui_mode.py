@@ -4077,8 +4077,24 @@ if TEXTUAL_AVAILABLE:
                 # Do not show model-supplied arguments or raw fragments here:
                 # they can be malformed/untrusted.  The session will make its
                 # single bounded repair attempt when applicable.
-                reason = str(event.get("reason") or "invalid tool-call candidate")
-                self._write(f"[Tool] {reason}; model output was not executed.", "warn")
+                if event.get("source") is None and event.get("category") is None:
+                    reason = {
+                        "malformed_native_tool_call": "malformed native tool call",
+                        "conflicting_native_tool_call_id": "conflicting native tool-call ID",
+                        "control_tool_in_native_batch": "control tool in native batch",
+                    }.get(event.get("reason"), "invalid tool-call candidate")
+                    self._write(f"[Tool] {reason}; no tool was executed.", "warn")
+                else:
+                    source = {
+                        "response": "Response",
+                        "nudge": "Nudge",
+                        "format_repair": "Format repair",
+                    }.get(event.get("source"), "Tool call")
+                    category = {
+                        "malformed_json": "malformed JSON",
+                        "invalid_tool_call_shape": "invalid tool-call shape",
+                    }.get(event.get("category"), "invalid tool-call candidate")
+                    self._write(f"[Tool] {source}: {category}; no tool was executed.", "warn")
             elif et == "tool_approval_rejected":
                 self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
             elif et == "ask_user":

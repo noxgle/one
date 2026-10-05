@@ -761,6 +761,49 @@ class AgentSession:
             return fallback
         return None
 
+    def _tool_call_parse_failure_category(self, text: str) -> str:
+        """Classify a rejected text tool candidate without retaining its content."""
+        candidates: list[str] = []
+        stripped = text.strip()
+        if stripped:
+            candidates.append(stripped)
+        candidates.extend(match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text))
+        if "TOOL_CALL:" in text:
+            candidates.append(text.split("TOOL_CALL:", 1)[1].strip())
+
+        depth = 0
+        start = -1
+        in_string = False
+        escaped = False
+        for index, char in enumerate(text):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                if depth == 0:
+                    start = index
+                depth += 1
+            elif char == "}" and depth:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    candidates.append(text[start : index + 1])
+                    start = -1
+
+        for candidate in candidates:
+            try:
+                json.loads(candidate)
+                return "invalid_tool_call_shape"
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return "malformed_json"
+
     def _should_tool_nudge(
         self,
         assistant_text: str,
@@ -2947,6 +2990,7 @@ class AgentSession:
                             provider_tool_call_id = assistant.pop("_providerToolCallId", None)
                             self.messages.append(assistant)
                             assistant_text = self._assistant_text(assistant)
+                            tool_call_source = "response"
                             # Consume tool-loaded images after the first provider call
                             # in the tool loop — they were attached to the prompt and
                             # should not be re-sent on subsequent provider calls.
@@ -3022,6 +3066,7 @@ class AgentSession:
                                     nudged["content"] = [{"type": "text", "text": nudged_text}]
                                     assistant = nudged
                                     assistant_text = nudged_text
+                                    tool_call_source = "nudge"
                                     self._nudge_conversions["false"] += 1
                                     self._emit(
                                         {"type": "tool_call_nudge_end", "used": False, "fireCount": self._nudge_fires}
@@ -3074,6 +3119,7 @@ class AgentSession:
                                     repaired["content"] = [{"type": "text", "text": repaired_text}]
                                     assistant = repaired
                                     assistant_text = repaired_text
+                                    tool_call_source = "format_repair"
                                     self._emit({"type": "tool_response_repair_end", "used": False})
                             if not tool_calls:
                                 toolish = (
@@ -3089,7 +3135,8 @@ class AgentSession:
                                     self._emit(
                                         {
                                             "type": "tool_call_parse_failed",
-                                            "sample": assistant_text[:500],
+                                            "source": tool_call_source,
+                                            "category": self._tool_call_parse_failure_category(assistant_text),
                                         }
                                     )
 

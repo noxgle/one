@@ -67,6 +67,40 @@ async def test_tui_tool_elapsed_headings_and_turn_summary_are_safe(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        (
+            {"type": "tool_call_parse_failed", "source": "format_repair", "category": "invalid_tool_call_shape"},
+            "[Tool] Format repair: invalid tool-call shape; no tool was executed.",
+        ),
+        (
+            {"type": "tool_call_parse_failed", "reason": "malformed_native_tool_call"},
+            "[Tool] malformed native tool call; no tool was executed.",
+        ),
+        (
+            {"type": "tool_call_parse_failed", "reason": "conflicting_native_tool_call_id"},
+            "[Tool] conflicting native tool-call ID; no tool was executed.",
+        ),
+        (
+            {"type": "tool_call_parse_failed", "reason": "control_tool_in_native_batch"},
+            "[Tool] control tool in native batch; no tool was executed.",
+        ),
+    ],
+)
+async def test_tui_rejected_tool_call_identifies_safe_failure(
+    tmp_path: Path, event: dict[str, str], expected: str,
+) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        app._handle_session_event(event)
+        await pilot.pause()
+        assert expected in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
 async def test_tui_timing_clear_and_legacy_agent_end_reset_state(tmp_path: Path) -> None:
     from one.modes.tui_mode import _OneTextualApp
 

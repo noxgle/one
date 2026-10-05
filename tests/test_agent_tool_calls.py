@@ -46,6 +46,21 @@ class _ThinkingFakeProvider:
         return ChatResult(text=text, raw={}, usage={}, stop_reason="stop", had_thinking=bool(thinking.strip()))
 
 
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        ('{"tool": 42, "args": []}', "invalid_tool_call_shape"),
+        ('["tool", "args"]', "invalid_tool_call_shape"),
+        ('```json\n"not a tool call"\n```', "invalid_tool_call_shape"),
+        ('{"tool":', "malformed_json"),
+    ],
+)
+def test_tool_call_parse_failure_category_distinguishes_valid_json_shapes(
+    tmp_path: Path, candidate: str, expected: str,
+) -> None:
+    assert _reasoning_agent(tmp_path)._tool_call_parse_failure_category(candidate) == expected
+
+
 def _reasoning_agent(tmp_path: Path) -> AgentSession:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
@@ -281,6 +296,56 @@ async def test_tool_output_format_repair_failure_terminates_without_looping(tmp_
     assert agent.get_last_assistant_text() == "I cannot provide a tool call."
     assert [event for event in events if event["type"] == "tool_response_repair_end"] == [
         {"type": "tool_response_repair_end", "used": False}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_invalid_format_repair_call_reports_safe_source_and_category(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"tools": {"maxSteps": 5, "timeoutSec": 5}}),
+        registry, _Loader(), model, "medium", tools=["read", "finish"],
+    )
+    provider = _FakeProvider([
+        '{"tool":"read","args":{"path":"a.txt"}}',
+        "The tool completed successfully.",
+        '{"tool":42,"args":{}}',
+    ])
+    agent.providers = {"openai": provider}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Read the file.")
+
+    rejected = [event for event in events if event["type"] == "tool_call_parse_failed"]
+    assert rejected == [{"type": "tool_call_parse_failed", "source": "format_repair", "category": "invalid_tool_call_shape"}]
+    assert all("sample" not in event and "args" not in event for event in rejected)
+
+
+@pytest.mark.asyncio
+async def test_invalid_initial_tool_call_reports_malformed_json(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=["read"]
+    )
+    agent.providers = {"openai": _FakeProvider(['{"tool":"read","args":{' + "x" * 300])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Read the file.")
+
+    assert [event for event in events if event["type"] == "tool_call_parse_failed"] == [
+        {"type": "tool_call_parse_failed", "source": "response", "category": "malformed_json"}
     ]
 
 
