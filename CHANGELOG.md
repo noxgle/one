@@ -8,6 +8,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Fixed
+
+- **Default skill startup** — silently preserve existing lower-precedence skills
+  instead of warning on every startup.
+
 ## [0.1.64] - 2026-10-04
 
 ### Changed

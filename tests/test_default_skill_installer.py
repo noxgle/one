@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 
 import pytest
 
@@ -39,7 +40,7 @@ def test_packaged_default_skill_resources_have_expected_contents() -> None:
     )
 
 
-def test_existing_file_or_unsafe_destination_is_never_overwritten(tmp_path) -> None:
+def test_existing_file_or_unsafe_destination_is_never_overwritten(tmp_path, caplog) -> None:
     agent_dir = tmp_path / "agent"
     existing = agent_dir / "skills" / "one" / "SKILL.md"
     existing.parent.mkdir(parents=True)
@@ -47,24 +48,30 @@ def test_existing_file_or_unsafe_destination_is_never_overwritten(tmp_path) -> N
     unsafe = agent_dir / "skills" / "explore"
     unsafe.write_text("not a directory", encoding="utf-8")
 
-    diagnostics = install_default_skills(agent_dir, tmp_path, external_skill_roots=[])
+    with caplog.at_level(logging.WARNING, logger="one.resources.default_skill_installer"):
+        diagnostics = install_default_skills(agent_dir, tmp_path, external_skill_roots=[])
 
     assert existing.read_text(encoding="utf-8") == "custom"
     assert unsafe.read_text(encoding="utf-8") == "not a directory"
     assert any("explore" in diagnostic for diagnostic in diagnostics)
+    assert any("explore" in record.message for record in caplog.records)
 
 
-def test_skips_default_when_lower_precedence_skill_already_available(tmp_path) -> None:
+def test_skips_default_when_lower_precedence_skill_already_available_silently(tmp_path, caplog) -> None:
     agent_dir = tmp_path / "agent"
     platform_skills = tmp_path / "platform"
     skill = platform_skills / "custom-location" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: explore\ndescription: Existing\n---\n", encoding="utf-8")
 
-    diagnostics = install_default_skills(agent_dir, tmp_path, external_skill_roots=[platform_skills])
+    with caplog.at_level(logging.WARNING, logger="one.resources.default_skill_installer"):
+        diagnostics = install_default_skills(agent_dir, tmp_path, external_skill_roots=[platform_skills])
+        repeated_diagnostics = install_default_skills(agent_dir, tmp_path, external_skill_roots=[platform_skills])
 
     assert not (agent_dir / "skills" / "explore" / "SKILL.md").exists()
-    assert any("explore" in diagnostic and "lower-precedence" in diagnostic for diagnostic in diagnostics)
+    assert diagnostics == []
+    assert repeated_diagnostics == []
+    assert caplog.records == []
 
 
 def test_installed_skills_are_discovered_as_user_files(tmp_path) -> None:

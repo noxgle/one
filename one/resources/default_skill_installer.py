@@ -68,7 +68,6 @@ def install_default_skills(
         if target.exists() or target.is_symlink():
             continue
         if any(_root_has_skill_named(root, name) for root in roots):
-            diagnostics.append(f"default skill '{name}' not installed: a lower-precedence skill already provides that name")
             continue
         try:
             if target_dir.exists() and (not target_dir.is_dir() or target_dir.is_symlink()):
