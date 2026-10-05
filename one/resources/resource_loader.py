@@ -216,7 +216,7 @@ def _build_header(cwd: str) -> str:
 
 
 TOOL_ARG_SCHEMAS: dict[str, str] = {
-    "read": "{path, offset?, limit?} # Read text; offset=1-based line. May truncate. Images: read_image."
+    "read": "{path, offset?, limit?} # Read text; offset=1-based line. May truncate. Images: read_image.",
     "bash": "{command, timeout?}  # timeout in seconds; default if omitted",
     "edit": "{path, edits: [{oldString, newString}]}  # path is TOP-LEVEL (never inside edits); oldString must be unique in the file",
     "write": "{path, content}  # content must be an explicit string; overwrites the entire file and content:'' deliberately empties it. Never use writeContentOmitted or '[omitted from model context]' history metadata as arguments. Prefer write for complete files; use edit/apply_patch for localized changes when available. If bash is available and JSON serialization is difficult, use <<'ONE_EOF' with a delimiter absent as a standalone body line, quote the destination, preserve literal $/backticks/backslashes, and verify the resulting file (the JSON command string must still be valid).",

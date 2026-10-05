@@ -49,11 +49,10 @@ def test_prompt_describes_read_arguments_and_image_handling() -> None:
 
     prompt = loader.get_system_prompt(selected_tools=["read"])
 
-    assert "path is absolute or workspace-relative" in prompt
-    assert "offset is a 1-based starting line" in prompt
-    assert "limit is the maximum lines" in prompt
-    assert "output may be bounded or truncated" in prompt
-    assert "use the separate read_image tool instead for images" in prompt
+    assert "Read text" in prompt
+    assert "offset=1-based line" in prompt
+    assert "May truncate" in prompt
+    assert "Images: read_image" in prompt
 
 
 def test_prompt_describes_explicit_write_content_safety() -> None:
