@@ -682,6 +682,12 @@ def test_every_builtin_native_tool_has_a_meaningful_json_schema() -> None:
         "additionalProperties": False,
     }
     assert "content:'' deliberately empties" in write["description"]
+    read = next(definition for definition in definitions if definition["name"] == "read")
+    assert "absolute or workspace-relative" in read["description"]
+    assert "1-based starting line" in read["description"]
+    assert "maximum lines" in read["description"]
+    assert "Output may be bounded or truncated" in read["description"]
+    assert "separate read_image tool instead for image files" in read["description"]
     ask_user = next(definition for definition in definitions if definition["name"] == "ask_user")
     finish = next(definition for definition in definitions if definition["name"] == "finish")
     assert "continue the same task" in ask_user["description"]

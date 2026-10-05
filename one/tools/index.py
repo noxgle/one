@@ -44,7 +44,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
 ]
 
 all_tools: dict[str, ToolDef] = {
-    "read": ToolDef("read", "Read file contents", read_tool, {"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"],"additionalProperties":False}),
+    "read": ToolDef("read", "Read a text file. Args: 'path' (absolute or workspace-relative); optional 'offset' (1-based starting line) and 'limit' (maximum lines). Output may be bounded or truncated. Use the separate read_image tool instead for image files.", read_tool, {"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"],"additionalProperties":False}),
     "read_image": ToolDef(
         "read_image",
         "Load a local PNG/JPEG/WebP image for vision inspection. Args: 'path' (absolute or workspace-relative). Returns metadata; the image is sent to the vision model on the next step.",

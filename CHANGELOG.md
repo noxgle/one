@@ -8,6 +8,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Changed
+
+- **Read tool guidance** — prompts and native tool metadata now explain its path,
+  line-offset, and line-limit arguments, bounded output, and image handling.
+
 ### Fixed
 
 - **Default skill startup** — silently preserve existing lower-precedence skills

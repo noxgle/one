@@ -44,6 +44,18 @@ def test_prompt_includes_plan_schema():
     assert "Use the plan tool to store the plan." in prompt
 
 
+def test_prompt_describes_read_arguments_and_image_handling() -> None:
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+
+    prompt = loader.get_system_prompt(selected_tools=["read"])
+
+    assert "path is absolute or workspace-relative" in prompt
+    assert "offset is a 1-based starting line" in prompt
+    assert "limit is the maximum lines" in prompt
+    assert "output may be bounded or truncated" in prompt
+    assert "use the separate read_image tool instead for images" in prompt
+
+
 def test_prompt_describes_explicit_write_content_safety() -> None:
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
     prompt = loader.get_system_prompt(selected_tools=["write"])
