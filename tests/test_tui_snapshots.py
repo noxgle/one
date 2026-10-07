@@ -80,6 +80,7 @@ class _DummySession:
         self._subscribers: list[Any] = []
         self._unsubscribe: Any = None
         self.auto_retry_enabled: bool = True
+        self.subagent_monitor: Any = None
 
     def subscribe(self, fn: Any) -> Any:
         """Register a listener; return a callable that unsubscribes."""
@@ -122,6 +123,45 @@ class _DummySession:
         return "/tmp/project/snap-test-001.jsonl"
 
 
+class _DummyMonitor:
+    """Static monitor fixture for the deterministic agents-panel snapshot."""
+
+    def subscribe(self, _listener: Any) -> Any:
+        return lambda: None
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "revision": 1,
+            "children": [
+                {
+                    "sessionId": "snap-child-001",
+                    "task": "Inspect the deterministic preview",
+                    "model": "openai/gpt-4.1",
+                    "status": "completed",
+                    "startedMonotonic": 10.0,
+                    "completedAt": 12.5,
+                    "activity": "completed",
+                    "currentTool": None,
+                    "outputTruncated": False,
+                    "timeline": [
+                        {"kind": "response", "text": "A bounded child response preview."},
+                        {
+                            "kind": "tool",
+                            "tool": "read",
+                            "toolCallId": "snap-read-1",
+                            "args": "path=preview.txt, offset=1, limit=20",
+                            "effectiveTimeout": 120,
+                            "state": "completed",
+                            "ok": True,
+                            "elapsedMs": 125,
+                            "output": "deterministic safe result text",
+                        },
+                    ],
+                }
+            ],
+        }
+
+
 # ---------------------------------------------------------------------------
 # Golden-file snapshot helper
 # ---------------------------------------------------------------------------
@@ -141,6 +181,13 @@ def _normalize_svg_terminal_ids(content: str) -> str:
     if not content.lstrip().startswith("<svg"):
         return content
     return _SVG_TERMINAL_ID.sub(rf"\g<prefix>{_STABLE_TERMINAL_ID_SUFFIX}", content)
+
+
+def _normalize_svg_whitespace_only_lines(content: str) -> str:
+    """Remove indentation from otherwise empty SVG lines."""
+    if not content.lstrip().startswith("<svg"):
+        return content
+    return re.sub(r"(?m)^[ \t]+$", "", content)
 
 
 def _check_snapshot(
@@ -270,6 +317,28 @@ async def test_tui_snapshot_widget_panel() -> None:
 
         content = _capture_content(app)
         _check_snapshot("widget_panel", content, update=UPDATE)
+
+
+@pytest.mark.asyncio
+async def test_tui_snapshot_agents() -> None:
+    """Current-session direct-child monitor with a selected preview."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _DummySession()
+    session.subagent_monitor = _DummyMonitor()
+    app = _OneTextualApp(session)
+
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        app._open_agents_panel()
+        await pilot.pause()
+        app.query_one("#agents_timeline").scroll_end(animate=False)
+        await pilot.pause()
+
+        content = _normalize_svg_whitespace_only_lines(_capture_content(app))
+        assert "Result:" in content
+        assert "deterministic" in content
+        _check_snapshot("agents", content, update=UPDATE)
 
 
 @pytest.mark.asyncio

@@ -861,6 +861,7 @@ def test_slash_commands_include_providers():
     assert "/providers" in _SLASH_COMMANDS
     assert "/skill" in _SLASH_COMMANDS
     assert "/skill list" in _SLASH_COMMANDS
+    assert "/agents" in _SLASH_COMMANDS
 
 
 @pytest.mark.asyncio
@@ -876,6 +877,7 @@ async def test_tui_action_help_lists_providers(tmp_path: Path):
         stream = "\n".join(app._stream_lines)
         assert "/providers" in stream
         assert "/login [status|refresh <provider>|provider [apiKey] [model] [subscription]]" in stream
+        assert "/agents" in stream
 
 
 @pytest.mark.asyncio
@@ -930,6 +932,47 @@ async def test_tui_shortcuts_panel_and_palette_theme_use_one_state(tmp_path: Pat
         await pilot.pause()
         assert app._theme.name == "fallout"
         assert session.settings_manager.get_theme() == "fallout"
+
+
+@pytest.mark.asyncio
+async def test_tui_agents_and_approval_overlay_colors_follow_every_builtin_theme(tmp_path: Path):
+    from one.modes.tui_mode import BUILTIN_TUI_THEMES, _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pending = asyncio.create_task(app._approval_prompt("bash", {"command": "pwd"}))
+        await pilot.pause()
+        for name, theme in BUILTIN_TUI_THEMES.items():
+            assert app._apply_theme(name)
+            agents = app.query_one("#agents_overlay")
+            approval = app.query_one("#approval_overlay")
+            summary = app.query_one("#approval_summary")
+            actions = app.query_one("#approval_actions")
+            approve = app.query_one("#approval-approve")
+            reject = app.query_one("#approval-reject")
+            assert agents.styles.background.hex.lower() == theme.panel_bg
+            assert approval.styles.background.hex.lower() == theme.panel_bg
+            assert approval.styles.color.hex.lower() == theme.screen_fg
+            assert all(border[1].hex.lower() == theme.panel_border for border in approval.styles.border)
+            assert summary.styles.background.hex.lower() == theme.panel_bg
+            assert summary.styles.color.hex.lower() == theme.screen_fg
+            assert actions.styles.background.hex.lower() == theme.panel_bg
+            assert actions.styles.color.hex.lower() == theme.screen_fg
+            assert approve.styles.background.hex.lower() == theme.user_bg
+            assert approve.styles.color.hex.lower() == theme.user
+            assert all(border[1].hex.lower() == theme.user for border in approve.styles.border)
+            assert reject.styles.background.hex.lower() == theme.panel_bg
+            assert reject.styles.color.hex.lower() == theme.error
+            assert all(border[1].hex.lower() == theme.error for border in reject.styles.border)
+            content = summary.content
+            assert str(content).startswith("PENDING TOOL APPROVAL\nTool: bash")
+            assert content.style == f"bold {theme.warn}"
+            assert content.spans[0].style == theme.screen_fg
+
+        app.action_reject_tool()
+        assert await pending == (False, "Rejected by user")
 
 
 @pytest.mark.asyncio

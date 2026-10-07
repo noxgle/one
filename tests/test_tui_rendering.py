@@ -1367,7 +1367,6 @@ async def test_tui_tool_call_start_with_effective_timeout(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_tui_tool_status_uses_literal_segmented_bold_styles(tmp_path: Path):
     """Tool headings/statuses are bold while JSON remains literal and plain."""
-    from rich.console import Console
     from textual.widgets import Static
 
     from one.modes.tui_mode import _OneTextualApp
@@ -1396,12 +1395,11 @@ async def test_tui_tool_status_uses_literal_segmented_bold_styles(tmp_path: Path
         status_start = content.plain.index(status_line) + status_line.rindex(" [ok]")
         error_start = content.plain.index(error_line) + error_line.rindex("[err]")
 
-        console = Console()
-        assert content.get_style_at_offset(console, heading_start).bold is True
-        assert not content.get_style_at_offset(console, args_start).bold
-        assert not content.get_style_at_offset(console, args_start + args_line.index("[b]")).bold
-        assert content.get_style_at_offset(console, status_start + 1).bold is True
-        assert content.get_style_at_offset(console, error_start + 1).bold is True
+        assert content.get_style_at_offset(heading_start).bold is True
+        assert not content.get_style_at_offset(args_start).bold
+        assert not content.get_style_at_offset(args_start + args_line.index("[b]")).bold
+        assert content.get_style_at_offset(status_start + 1).bold is True
+        assert content.get_style_at_offset(error_start + 1).bold is True
 
 
 @pytest.mark.asyncio

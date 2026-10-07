@@ -26,6 +26,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import THINKING_LEVELS, SettingsManager
+from one.core.subagent_monitor import SubagentMonitor
 from one.core.temperature import nearest_temperature_mode, normalize_temperature, temperature_for_mode
 from one.core.tool_output_pruning import prune_stale_tool_outputs
 from one.core.types import ModelInfo
@@ -151,6 +152,7 @@ class AgentSession:
         self._plan_just_created = False
         self._restore_plan_from_messages(self.messages)
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
+        self.subagent_monitor = SubagentMonitor()
         self._activity_callback = activity_callback
         self._is_streaming = False
         self._is_compacting = False
@@ -1759,6 +1761,46 @@ class AgentSession:
             last_event = str(event.get("type") or "unknown")
             if event.get("type") in {"tool_call_start", "tool_call_end", "tool_call_error"}:
                 last_tool_name = str(event.get("tool") or "unknown")
+            # Monitor only visible prose, tool labels, and an allowlisted tool
+            # result projection. It never receives reasoning, arguments, raw
+            # results, or arbitrary events.
+            try:
+                event_type = event.get("type")
+                if event_type == "message_update":
+                    message_event = event.get("assistantMessageEvent")
+                    if isinstance(message_event, dict) and message_event.get("type") == "text_delta":
+                        delta = message_event.get("delta")
+                        if isinstance(delta, str):
+                            self.subagent_monitor.update(sub_id, text=delta, activity="responding")
+                elif event_type == "tool_call_start":
+                    if event.get("tool") != "finish":
+                        # Convert transient raw event arguments immediately to a
+                        # display-only projection; monitor state never receives
+                        # the original mapping.
+                        self.subagent_monitor.tool_started(
+                            sub_id, event.get("tool"), tool_call_id=event.get("toolCallId"),
+                            args=SubagentMonitor.display_tool_args(event.get("args")),
+                            effective_timeout=event.get("effectiveTimeout"),
+                        )
+                elif event_type == "tool_call_end":
+                    # Keep only the same detail-gated projection that the main
+                    # TUI displays.  The monitor never receives the raw event
+                    # result, arguments, evidence, paths, or image payloads.
+                    if event.get("tool") != "finish":
+                        output = ""
+                        if getattr(self.settings_manager, "get_bash_show_output", lambda: True)():
+                            output = SubagentMonitor.visible_tool_result(event)
+                        self.subagent_monitor.tool_finished(
+                            sub_id, event.get("tool"), event.get("ok"), event.get("elapsedMs"), output,
+                            tool_call_id=event.get("toolCallId"),
+                        )
+                    else:
+                        self.subagent_monitor.tool_finished(
+                            sub_id, event.get("tool"), event.get("ok"), event.get("elapsedMs"), retain=False,
+                            tool_call_id=event.get("toolCallId"),
+                        )
+            except Exception:
+                pass
             if event.get("type") == "ask_user":
                 # Receiving the question is activity even if delivery to the
                 # child fails because the pending question has already changed.
@@ -1771,7 +1813,13 @@ class AgentSession:
 
         sub_id = sub.session_id
         task_id = task
+        model_id = f"{sub_model.provider}/{sub_model.id}" if sub_model is not None else "unknown"
+        try:
+            self.subagent_monitor.register(sub_id, task_id, model_id)
+        except Exception:
+            pass
         ok = False
+        cancelled = False
         error_text: str | None = None
         error_type: str | None = None
         child_task: asyncio.Task[Any] | None = None
@@ -1887,6 +1935,11 @@ class AgentSession:
             await child_task
             result = sub.get_last_finish_result()
             assistant_text = sub.get_last_assistant_text() or ""
+            if result.get("finished") and isinstance(result.get("summary"), str):
+                try:
+                    self.subagent_monitor.observe_final(sub_id, result["summary"])
+                except Exception:
+                    pass
             summary = result.get("summary") or assistant_text or "(no output)"
             ok = bool(result.get("finished") and result.get("goalSuccess"))
             # When ok is False the subagent didn't complete successfully.
@@ -1923,6 +1976,11 @@ class AgentSession:
                 "errorType": error_type,
                 "externalState": "unknown",
             }
+        except asyncio.CancelledError:
+            # Preserve the existing lifecycle event payload while recording the
+            # distinct monitor outcome and propagating cancellation unchanged.
+            cancelled = True
+            raise
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
             error_type = e.__class__.__name__
@@ -1954,6 +2012,21 @@ class AgentSession:
                     pass
             try:
                 await sub.dispose()
+            except Exception:
+                pass
+            try:
+                if error_type in {"SubagentIdleTimeout", "SubagentMaxDuration"}:
+                    monitor_status, outcome = "timed_out", "timeout"
+                elif cancelled:
+                    monitor_status, outcome = "cancelled", "cancelled"
+                elif ok:
+                    monitor_status, outcome = "completed", "success"
+                else:
+                    monitor_status, outcome = "failed", "error"
+                self.subagent_monitor.complete(
+                    sub_id, monitor_status, outcome=outcome, error=error_text,
+                    error_type=error_type, external_state="unknown" if not ok else None,
+                )
             except Exception:
                 pass
             self._emit({"type": "subagent_end", "sessionId": sub_id, "ok": ok, "error": error_text, "errorType": error_type})

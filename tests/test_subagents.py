@@ -141,6 +141,69 @@ async def test_spawn_subagent_single_delegates(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_subagent_monitor_records_finished_summary_once(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path, tools=["finish"])
+    agent.providers = {
+        "openai": _Provider([json.dumps({"tool": "finish", "args": {"summary": "sub done", "goal_success": True}})])
+    }
+
+    result = await agent._run_subagent("sub task", agent.model, ["finish"], 0)
+
+    assert result["finished"] is True
+    child = agent.subagent_monitor.snapshot()["children"][0]
+    assert child["outputTail"] == "sub done"
+    assert child["outputTail"].count("sub done") == 1
+
+
+@pytest.mark.asyncio
+async def test_subagent_monitor_does_not_copy_incomplete_tool_call_text(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path, tools=["finish"], settings_override={"tools": {"maxSteps": 1, "timeoutSec": 5}})
+    tool_call = json.dumps({"tool": "unavailable_tool", "args": {"summary": "not actually finished"}})
+    agent.providers = {"openai": _Provider([tool_call])}
+
+    result = await agent._run_subagent("sub task", agent.model, ["finish"], 0)
+
+    assert result["finished"] is False
+    child = agent.subagent_monitor.snapshot()["children"][0]
+    assert tool_call not in child["outputTail"]
+    assert "not actually finished" not in child["outputTail"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_monitor_captures_only_detail_gated_tool_projection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _mk_agent(tmp_path, tools=["read"])
+    agent.settings_manager.set_bash_show_output(True)
+
+    async def emit_tool_events(self: AgentSession, task: str) -> None:  # noqa: ARG001
+        self._emit({"type": "tool_call_start", "tool": "read", "args": {"secret": "nope"}})
+        self._emit({
+            "type": "tool_call_end", "tool": "read", "ok": True, "elapsedMs": 12,
+            "result": {"outputText": "safe Bearer secret-token", "rawResult": {"secret": "nope"}, "content": [{"image": "nope"}], "details": "nope", "path": "/nope"},
+        })
+        self._emit({"type": "tool_call_end", "tool": "bad", "ok": False, "elapsedMs": 4,
+                    "result": {"error": "failed safely", "args": {"secret": "nope"}}})
+        self._emit({"type": "tool_call_end", "tool": "finish", "ok": True,
+                    "result": {"outputText": "finish must not appear"}})
+
+    monkeypatch.setattr(AgentSession, "prompt", emit_tool_events)
+    await agent._run_subagent("sub task", agent.model, ["read"], 0)
+    child = agent.subagent_monitor.snapshot()["children"][0]
+    timeline = child["timeline"]
+    rendered = str(timeline)
+    assert len(timeline) == 2
+    assert [item["state"] for item in timeline] == ["completed", "completed"]
+    assert timeline[0]["tool"] == "read" and timeline[1]["tool"] == "bad"
+    assert "safe" in rendered and "failed safely" in rendered
+    assert "secret-token" not in rendered and "nope" not in rendered and "finish" not in rendered
+    assert child["currentTool"] is None and child["activity"] == "completed"
+
+    agent.settings_manager.set_bash_show_output(False)
+    await agent._run_subagent("hidden", agent.model, ["read"], 0)
+    hidden = agent.subagent_monitor.snapshot()["children"][1]
+    assert all(not item.get("output") for item in hidden["timeline"])
+
+
+@pytest.mark.asyncio
 async def test_spawn_subagent_sets_parent_session_header(tmp_path: Path):
     """Subagent session header must contain parentSession and subagentDepth."""
     spawn_json = json.dumps({"tool": "spawn_subagent", "args": {"task": "sub task"}})

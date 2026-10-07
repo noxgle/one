@@ -363,11 +363,17 @@ The TUI is built on Textual `>=0.74.0` and provides:
 - Streaming response rendering.
 - Tool lifecycle status display.
 - Session history and navigation.
-- Slash commands: `/help`, `/steer`, `/follow`, `/abort`, `/login`, `/mcp`, `/skill`, `/compact`, `/reload`.
+- Slash commands: `/help`, `/agents`, `/steer`, `/follow`, `/abort`, `/login`, `/mcp`, `/skill`, `/compact`, `/reload`.
 - Keyboard shortcuts (Ctrl+P, Ctrl+C, Ctrl+L, Ctrl+Q, Ctrl+Z, Ctrl+R, etc.).
 - Image input via `--image`, paste, or `read_image` tool.
 - Cooperation approval prompts (Ctrl+Z to toggle).
-- Subagent management (Ctrl+S to toggle).
+- `/agents` is a read-only monitor for direct children of the current session.
+   It provides a bounded response and tool lifecycle/result preview for the
+   selected child, subject to the existing details toggle; generated **Inspect
+   agent** stream entries open the same view with that child selected. It never
+   switches to a child session or controls child execution.
+- Subagent enablement (Ctrl+S or `/subagents on|off`) only controls whether
+  subagent tools are available.
 - Version display in sidebar.
 
 The stream buffer is capped at 500 entries; absolute indexes are rebased after

@@ -21,6 +21,253 @@ from one.modes.tui_mode import (
 from tests.support.tui import _mk_app_session, _submit
 
 
+@pytest.mark.asyncio
+async def test_tui_agents_panel_live_snapshot_and_trusted_stream_click(tmp_path: Path) -> None:
+    """A real Textual click on the generated label selects its exact child."""
+    from textual.containers import Vertical
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.subagent_monitor.register("child-a", "[b] untrusted [/b]", "openai/a", started_at=1.0)
+    session.subagent_monitor.register("child-b", "second", "openai/b", started_at=1.0)
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/agents")
+        panel = app.query_one("#agents_overlay", Vertical)
+        preview = app.query_one("#agents_content", Static)
+        assert panel.has_class("visible")
+        assert "untrusted" in str(preview.content)
+        assert "Agent 1/2" in str(preview.content)
+        assert not app.query("#agents_list")
+        assert not app.query("#agents_preview")
+        session.subagent_monitor.update("child-b", text="only child b", tool="read", activity="responding")
+        await pilot.pause(0.2)
+        assert "only child b" not in str(preview.content)
+        # The main-stream target is an application-generated Content action.
+        # The task text is not parsed to discover actions.
+        app._close_agents_panel()
+        malicious_task = "[ @click=app.abort ] " + ("long task data " * 30)
+        session._emit({
+            "type": "tool_call_start",
+            "tool": "spawn_subagent",
+            "args": {"task": malicious_task, "tools": ["read", "grep"], "model": "openai/a"},
+            "effectiveTimeout": 120,
+        })
+        session._emit({"type": "subagent_start", "sessionId": "child-a", "task": malicious_task})
+        session._emit({"type": "subagent_start", "sessionId": "child-b", "task": "normal"})
+        await pilot.pause(0.1)
+        assert len(app._agent_link_tokens) == 2
+        stream = "\n".join(app._stream_lines)
+        assert "spawn_subagent" in stream
+        assert "[ @click=app.abort ]" in stream
+        assert "[view 1] [view 2]" not in stream
+        assert "Inspect agent" not in stream
+        assert not app.query(".agent-link")
+        heading_line = next(iter(app._agent_link_tokens.values()))[2]
+        assert app._stream_lines[heading_line] == "Tool: ○ spawn_subagent"
+        assert all(target[2] == heading_line for target in app._agent_link_tokens.values())
+        assert app._active_tool_block is not None
+        assert app._active_tool_block[2] - app._active_tool_block[1] > 1
+        rendered = app.query_one("#stream", Static).content.plain.splitlines()
+        assert rendered[heading_line].endswith("[view 1] [view 2]")
+        assert "[ @click=app.abort ]" in app.query_one("#stream", Static).content.plain
+        # This is a real pilot click on the inline span, not a direct action call.
+        assert await pilot.click("#stream", offset=(26, 1))
+        await pilot.pause()
+        assert panel.has_class("visible"), repr((app.query_one("#stream", Static).content._spans, app.query_one("#stream", Static).region))
+        assert app._selected_agent_id == "child-a"
+        assert session._abort_requested is False  # noqa: SLF001
+        app._close_agents_panel()
+        assert await pilot.click("#stream", offset=(36, 1))
+        await pilot.pause()
+        assert app._selected_agent_id == "child-b"
+        assert "only child b" in str(preview.content)
+        app._close_agents_panel()
+        session._emit({"type": "tool_call_end", "tool": "spawn_subagent", "ok": True})
+        await pilot.pause()
+        assert app._stream_lines[heading_line].startswith("Tool: ✓ spawn_subagent")
+        assert "[ok]" in "\n".join(app._stream_lines)
+        assert app.query_one("#stream", Static).content.plain.splitlines()[heading_line].endswith("[view 1] [view 2]")
+        assert await pilot.click("#stream", offset=(26, 1))
+        await pilot.pause()
+        assert app._selected_agent_id == "child-a"
+
+
+@pytest.mark.asyncio
+async def test_tui_agents_preview_renders_mixed_timeline_in_chronological_order(tmp_path: Path) -> None:
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    monitor = session.subagent_monitor
+    monitor.register("child", "task", "model")
+    monitor.update("child", text="Before read")
+    monitor.tool_started("child", "read", tool_call_id="read-1", args={"path": "file.txt", "offset": 1}, effective_timeout=120)
+    monitor.tool_finished("child", "read", True, 12, "file result", tool_call_id="read-1")
+    monitor.update("child", text="After read")
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _submit(app, pilot, "/agents")
+        preview = str(app.query_one("#agents_content", Static).content)
+        assert preview.index("Before read") < preview.index("Tool: ✓ read · 12 ms")
+        assert "Arguments: path=file.txt, offset=1" in preview
+        assert preview.index("Tool: ✓ read · 12 ms") < preview.index("Result:\nfile result")
+        assert preview.index("Result:\nfile result") < preview.index("After read")
+        assert "[no visible response yet]" not in preview
+
+
+@pytest.mark.asyncio
+async def test_tui_agent_link_refreshes_new_child_before_coalesced_monitor_tick(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        session.subagent_monitor.register("fresh-child", "task", "model")
+        session._emit({"type": "tool_call_start", "tool": "spawn_subagent", "args": {"task": "task"}})
+        session._emit({"type": "subagent_start", "sessionId": "fresh-child", "task": "task"})
+        await pilot.pause()
+        # Model a main-stream lifecycle event arriving before the next 0.1s
+        # coalesced refresh updates the cached snapshot.
+        app._monitor_snapshot = {"revision": 0, "children": []}
+        assert await pilot.click("#stream", offset=(26, 1))
+        await pilot.pause()
+        assert app._agents_panel_open
+        assert app._selected_agent_id == "fresh-child"
+
+
+@pytest.mark.asyncio
+async def test_tui_agent_link_metadata_is_removed_on_trim_and_transcript_rebuild(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.subagent_monitor.register("child", "task", "model")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        session._emit({"type": "tool_call_start", "tool": "spawn_subagent", "args": {"task": "task"}})
+        session._emit({"type": "subagent_start", "sessionId": "child", "task": "task"})
+        await pilot.pause()
+        assert len(app._agent_link_tokens) == 1
+        assert not app.query(".agent-link")
+        app._stream_lines.extend(["old"] * MAX_RENDERED_LINES)
+        app._trim_stream()
+        await pilot.pause()
+        assert not app._agent_link_tokens
+        assert not app.query(".agent-link")
+        app.action_open_agent_link(1)
+        assert not app._agents_panel_open
+
+        session._emit({"type": "tool_call_start", "tool": "spawn_subagent", "args": {"task": "task"}})
+        session._emit({"type": "subagent_start", "sessionId": "child", "task": "task"})
+        await pilot.pause()
+        assert len(app._agent_link_tokens) == 1
+        app._rebuild_session_transcript()
+        await pilot.pause()
+        assert not app._agent_link_tokens
+        assert not app.query(".agent-link")
+
+
+@pytest.mark.asyncio
+async def test_tui_agents_panel_narrow_navigation_selects_and_scrolls_preview(tmp_path: Path) -> None:
+    from textual.containers import VerticalScroll
+    from textual.widgets import TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.subagent_monitor.register("child-a", "first", "model")
+    session.subagent_monitor.register("child-b", "second", "model")
+    session.subagent_monitor.update("child-b", text="\n".join(f"line {i}" for i in range(80)))
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(40, 14)) as pilot:
+        await _submit(app, pilot, "/agents")
+        input_widget = app.query_one("#input", TextArea)
+        input_widget.text = "draft\ntext"
+        input_widget.move_cursor((1, 2))
+        input_text = input_widget.text
+        input_cursor = input_widget.cursor_location
+
+        await pilot.press("right")
+        await pilot.pause()
+        assert app._selected_agent_id == "child-b"
+        assert input_widget.text == input_text
+        assert input_widget.cursor_location == input_cursor
+
+        await pilot.press("left")
+        await pilot.pause()
+        assert app._selected_agent_id == "child-a"
+        assert input_widget.text == input_text
+        assert input_widget.cursor_location == input_cursor
+
+        await pilot.press("right")
+        await pilot.pause()
+        preview = app.query_one("#agents_timeline", VerticalScroll)
+        assert preview.max_scroll_y > 0
+        await pilot.press("down")
+        await pilot.pause()
+        down_scroll_y = preview.scroll_y
+        assert down_scroll_y > 0
+        assert input_widget.text == input_text
+        assert input_widget.cursor_location == input_cursor
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert preview.scroll_y < down_scroll_y
+        assert input_widget.text == input_text
+        assert input_widget.cursor_location == input_cursor
+
+        # The app-level route remains available when a panel scroll widget has
+        # focus, while the command input remains untouched.
+        preview.focus()
+        await pilot.press("left")
+        await pilot.pause()
+        assert app._selected_agent_id == "child-a"
+        assert input_widget.text == input_text
+        assert input_widget.cursor_location == input_cursor
+
+        preview.focus()
+        await pilot.press("right")
+        await pilot.pause()
+        assert app._selected_agent_id == "child-b"
+        assert input_widget.text == input_text
+        assert input_widget.cursor_location == input_cursor
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app._agents_panel_open
+        assert app.focused is input_widget
+        assert input_widget.text == input_text
+        assert input_widget.cursor_location == input_cursor
+
+
+@pytest.mark.asyncio
+async def test_tui_agents_rebind_and_stale_link_are_ignored(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    old = _mk_app_session(tmp_path)
+    new = _mk_app_session(tmp_path)
+    old.subagent_monitor.register("old-child", "old", "model")
+    app = _OneTextualApp(old)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        old._emit({"type": "tool_call_start", "tool": "spawn_subagent", "args": {"task": "old"}})
+        old._emit({"type": "subagent_start", "sessionId": "old-child", "task": "old"})
+        await pilot.pause()
+        token = next(iter(app._agent_link_tokens))
+        app.session = new
+        app._bind_session()
+        await pilot.pause()
+        assert not app.query(".agent-link")
+        app.action_open_agent_link(token)
+        await pilot.pause()
+        assert app._selected_agent_id is None
+        assert not app._agents_panel_open
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [(0, "0 ms"), (125, "125 ms"), (1000, "1.00 s"), (1250, "1.25 s"),
@@ -63,7 +310,7 @@ async def test_tui_tool_elapsed_headings_and_turn_summary_are_safe(tmp_path: Pat
         assert "Tool: ✓ bad ·" not in stream
         assert stream.count("Result:") == 0
         assert stream.count("Time: turn 3.42 s · provider 150 ms / 2 requests") == 1
-        assert "[b]" in app.query_one("#stream", Static).content
+        assert "[b]" in app.query_one("#stream", Static).content.plain
 
 
 @pytest.mark.asyncio
@@ -415,7 +662,7 @@ async def test_tui_plan_update_with_markup_chars_in_stream(tmp_path: Path):
         assert "Plan:" in stream
         # Stream data is literal text — brackets appear as-is (not escaped).
         widget = app.query_one("#stream", Static)
-        assert "[b]bold[/]" in widget.content
+        assert "[b]bold[/]" in widget.content.plain
 
 
 @pytest.mark.asyncio
@@ -442,7 +689,7 @@ async def test_tui_stream_markup_chars_dns_type(tmp_path: Path):
         assert "DNS entry:" in stream
         assert "[type='CNAME']" in stream
         widget = app.query_one("#stream", Static)
-        assert "[type='CNAME']" in widget.content
+        assert "[type='CNAME']" in widget.content.plain
 
 
 @pytest.mark.asyncio
@@ -469,7 +716,7 @@ async def test_tui_stream_markup_chars_bracket_list(tmp_path: Path):
         assert "tags:" in stream
         assert "[1,2,3]" in stream
         widget = app.query_one("#stream", Static)
-        assert "[1,2,3]" in widget.content
+        assert "[1,2,3]" in widget.content.plain
 
 
 @pytest.mark.asyncio
@@ -496,7 +743,7 @@ async def test_tui_stream_markup_chars_uppercase_brackets(tmp_path: Path):
         assert "section" in stream
         assert "[ABC]" in stream
         widget = app.query_one("#stream", Static)
-        assert "[ABC]" in widget.content
+        assert "[ABC]" in widget.content.plain
 
 
 @pytest.mark.asyncio
@@ -523,7 +770,7 @@ async def test_tui_stream_markup_chars_json_with_gt(tmp_path: Path):
         assert '"plan": ">' in stream
         assert '"x": 1' in stream
         widget = app.query_one("#stream", Static)
-        assert '"plan": ">' in widget.content
+        assert '"plan": ">' in widget.content.plain
 
 
 @pytest.mark.asyncio
@@ -545,9 +792,9 @@ async def test_tui_stream_spinner_markup_still_rendered(tmp_path: Path):
         await pilot.pause()
         widget = app.query_one("#stream", Static)
         # The spinner text (without __MK__ prefix) must be present.
-        assert "Ctrl+C abort" in widget.content
+        assert "Ctrl+C abort" in widget.content.plain
         # The raw thinking mark must NOT appear in rendered content.
-        assert _THINKING_MARK not in widget.content
+        assert _THINKING_MARK not in widget.content.plain
 
 
 @pytest.mark.asyncio
@@ -572,10 +819,10 @@ async def test_tui_stream_complex_markup_content_no_crash(tmp_path: Path):
         await pilot.pause()
         widget = app.query_one("#stream", Static)
         # All bracket content must be present as literal text.
-        assert "[b]c[/d]" in widget.content
-        assert "[1,2,3]" in widget.content
-        assert "[XYZ]" in widget.content
-        assert "[type='CNAME']" in widget.content
+        assert "[b]c[/d]" in widget.content.plain
+        assert "[1,2,3]" in widget.content.plain
+        assert "[XYZ]" in widget.content.plain
+        assert "[type='CNAME']" in widget.content.plain
 
 
 @pytest.mark.asyncio

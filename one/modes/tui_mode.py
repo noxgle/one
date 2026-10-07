@@ -13,6 +13,7 @@ import subprocess
 import textwrap
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from importlib.resources import files
 from importlib.resources.abc import Traversable
@@ -28,6 +29,7 @@ from one.core.oauth import OAuthError
 from one.core.provider_login import entry_id as fetched_entry_id
 from one.core.provider_login import run_oauth_login, validate_and_fetch
 from one.core.session_manager import SessionInfo, SessionManager, normalize_session_name
+from one.core.subagent_monitor import SubagentMonitor
 from one.core.types import ModelInfo
 from one.tools.common import sanitize_display_text
 
@@ -49,8 +51,10 @@ try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.content import Content
     from textual.message import Message
-    from textual.widgets import Static, TextArea
+    from textual.style import Style as TextualStyle
+    from textual.widgets import Button, Static, TextArea
     from textual.widgets.text_area import Edit
 
     TEXTUAL_AVAILABLE = True
@@ -530,6 +534,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/extui",
     "/cooperation",
     "/subagents",
+    "/agents",
     "/details-show",
     "/mcp",
     "/history",
@@ -727,6 +732,11 @@ if TEXTUAL_AVAILABLE:
                 getattr(self.app, action)()
                 event.stop()
                 event.prevent_default()
+                return
+            # TextArea moves its cursor in its own key handler before the event
+            # reaches the app. Route agents-panel navigation first so opening
+            # the panel does not alter the command being composed.
+            if self.app._handle_agents_panel_key(event):
                 return
             await super()._on_key(event)
 
@@ -987,6 +997,46 @@ if TEXTUAL_AVAILABLE:
         #ext_panel.visible, #ext_overlay.visible, #shortcuts_overlay.visible, #model_overlay.visible {
             display: block;
         }
+
+        #agents_overlay {
+            display: none;
+            position: absolute;
+            offset: 8% 8%;
+            width: 84%;
+            height: 78%;
+            padding: 1 2;
+            layer: above;
+            layout: vertical;
+        }
+
+        #agents_overlay.visible { display: block; }
+
+        #agents_help { height: auto; }
+
+        #agents_timeline {
+            height: 1fr;
+            min-height: 3;
+            overflow-y: auto;
+        }
+
+        #agents_content { height: auto; padding: 0 1; }
+
+        #approval_overlay {
+            display: none;
+            position: absolute;
+            offset: 18% 25%;
+            width: 50%;
+            height: auto;
+            max-height: 55%;
+            padding: 1 2;
+            layer: above;
+        }
+
+        #approval_overlay.visible { display: block; }
+        #approval_summary { height: auto; }
+        #approval_actions { height: auto; margin: 1 0 0 0; }
+        #approval_actions Button { margin: 0 1 0 0; }
+
         """
 
         BINDINGS = [
@@ -994,6 +1044,8 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+l", "clear_stream", "Clear"),
             ("ctrl+q", "quit", "Quit"),
             Binding("ctrl+z", "toggle_cooperation", "Toggle approval", priority=True),
+            Binding("alt+a", "approve_tool", "Approve pending tool", priority=True),
+            Binding("alt+r", "reject_tool", "Reject pending tool", priority=True),
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle details output", priority=True),
             Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
@@ -1046,12 +1098,18 @@ if TEXTUAL_AVAILABLE:
             # interval remains a safety net if no wakeup can be posted.
             self._ui_flush_wakeup_pending = False
             self._session_listener_generation = 0
+            self._bound_session: Any | None = None
             # Compatibility observability for the existing direct TUI tests.
             # The ordered event list above remains the sole rendering source.
             self._pending_assistant_deltas = ""
             self._pending_assistant_deltas_lock = self._pending_ui_events_lock
             self._assistant_stream_open = False
             self._active_tool_block: tuple[str, int, int, str] | None = None
+            # The current parent tool call is the sole association point for
+            # subagent_start.  Tokens never contain child IDs or task text.
+            self._active_tool_call_id: int | None = None
+            self._next_tool_call_id = 0
+            self._active_subagent_link_tokens: list[int] = []
             self._turn_active = False
             self._last_delta_ts = 0.0
             self._thinking_frame = 0
@@ -1061,8 +1119,10 @@ if TEXTUAL_AVAILABLE:
             self._thinking_line_idx: int | None = None
             self._thinking_label_idx: int | None = None
             self._command_history: list[str] = []
-            self._approval_queue: asyncio.Queue | None = None
             self._approval_pending: dict[str, Any] | None = None
+            self._approval_waiters: deque[dict[str, Any]] = deque()
+            self._cooperation_disabled = False
+            self._approval_rebinding = False
             self._extension_ui_pending_request: dict[str, Any] | None = None
             self._login_pending: dict[str, Any] | None = None
             self._ask_user_pending: dict[str, Any] | None = None
@@ -1076,6 +1136,22 @@ if TEXTUAL_AVAILABLE:
             # Numbered /sessions targets must keep referring to the list the
             # user saw, rather than to a newly mtime-sorted filesystem scan.
             self._session_list_snapshot: list[SessionInfo] | None = None
+            # Monitor notifications are deliberately only invalidations.  The UI
+            # reads one copied snapshot at most ten times a second rather than
+            # accepting one queued message per child token.
+            self._off_monitor_listener: Any = None
+            self._monitor_generation = 0
+            self._monitor_revision = -1
+            self._monitor_snapshot: dict[str, Any] = {"revision": 0, "children": []}
+            self._monitor_dirty = False
+            self._monitor_dirty_lock = threading.Lock()
+            self._selected_agent_id: str | None = None
+            self._agents_panel_open = False
+            # A link token is generated only for an application-created stream
+            # label. It is never inferred from transcript text.
+            self._agent_link_tokens: dict[int, tuple[int, str, int, int]] = {}
+            self._agent_link_labels: dict[int, str] = {}
+            self._next_agent_link_token = 0
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
@@ -1088,6 +1164,15 @@ if TEXTUAL_AVAILABLE:
                     yield Static("", id="ext_overlay")
                     yield Static("", id="shortcuts_overlay")
                     yield Static("", id="model_overlay")
+                    with Vertical(id="agents_overlay"):
+                        yield Static("", id="agents_help")
+                        with VerticalScroll(id="agents_timeline"):
+                            yield Static("", id="agents_content")
+                    with Vertical(id="approval_overlay"):
+                        yield Static("", id="approval_summary")
+                        with Horizontal(id="approval_actions"):
+                            yield Button("Approve (Alt+A)", id="approval-approve", variant="success")
+                            yield Button("Reject (Alt+R)", id="approval-reject", variant="error")
                     yield _CommandTextArea(placeholder="Type a command or /help", id="input", soft_wrap=True)
                 yield Static(id="sidebar")
 
@@ -1103,6 +1188,7 @@ if TEXTUAL_AVAILABLE:
                 ("Clear conversation stream", "Clear the visible conversation stream", self.action_clear_stream, True),
                 ("Toggle cooperation", "Require approval for mutating tools", self.action_toggle_cooperation, True),
                 ("Toggle subagents", "Enable or disable subagent tools", self.action_toggle_subagents, True),
+                ("Show current-session agents", "Inspect direct child agents", self.action_show_agents, True),
                 ("Toggle details output", "Show or hide detailed tool output", self.action_toggle_bash_show, True),
                 ("Quit one", "Quit the application", self.exit, True),
             ]
@@ -1124,6 +1210,7 @@ if TEXTUAL_AVAILABLE:
             # flight but no assistant text is currently streaming.
             self.set_interval(0.15, self._tick_waiting)
             self.set_interval(1 / 30, self._flush_pending_ui_events)
+            self.set_interval(0.1, self._flush_monitor_refresh)
             self._bind_session()
             self._refresh_sidebar()
             self._apply_information_layout()
@@ -1135,6 +1222,10 @@ if TEXTUAL_AVAILABLE:
             Used on mount and after /fork, which swaps the underlying session
             for a fresh one — the old listener must be detached first.
             """
+            # Initial and same-session binds preserve any active approval. A
+            # changed session must fail closed before listener detachment.
+            if self._bound_session is not None and self._bound_session is not self.session:
+                self._reject_all_approvals("Session changed")
             # Invalidate before detaching and discard the old transcript's
             # accepted events. A callback already in flight from the old
             # session must not append after this boundary.
@@ -1151,6 +1242,7 @@ if TEXTUAL_AVAILABLE:
                 except Exception:
                     pass
                 self._off_listener = None
+            self._bind_subagent_monitor()
             def _listener(event: dict[str, Any]) -> None:
                 # Preserve the session's event order, including the ordering
                 # between thinking and ordinary output. Lifecycle events are
@@ -1188,10 +1280,94 @@ if TEXTUAL_AVAILABLE:
                                 self._ui_flush_wakeup_pending = False
 
             self._off_listener = self.session.subscribe(_listener)
+            self._bound_session = self.session
+            self._approval_rebinding = False
+
+        def _prepare_session_change(self) -> None:
+            """Fail closed while a runtime host replaces the bound session."""
+            self._approval_rebinding = True
+            self._reject_all_approvals("Session changed")
+
+        def _bind_subagent_monitor(self) -> None:
+            """Bind the current parent's monitor before taking its snapshot."""
+            self._monitor_generation += 1
+            generation = self._monitor_generation
+            if callable(self._off_monitor_listener):
+                try:
+                    self._off_monitor_listener()
+                except Exception:
+                    pass
+            self._off_monitor_listener = None
+            self._monitor_revision = -1
+            self._monitor_snapshot = {"revision": 0, "children": []}
+            self._selected_agent_id = None
+            self._agents_panel_open = False
+            self._clear_agent_link_metadata()
+            with self._monitor_dirty_lock:
+                self._monitor_dirty = False
+            monitor = getattr(self.session, "subagent_monitor", None)
+            if monitor is None:
+                return
+
+            def invalidated(_notice: dict[str, Any]) -> None:
+                # This may run in a provider thread. Do not touch widgets or
+                # carry preview text across this boundary.
+                if generation != self._monitor_generation:
+                    return
+                with self._monitor_dirty_lock:
+                    self._monitor_dirty = True
+
+            try:
+                # Subscribe first: a change between this call and snapshot()
+                # leaves the dirty flag set and is recovered on the next tick.
+                self._off_monitor_listener = monitor.subscribe(invalidated)
+                self._accept_monitor_snapshot(monitor.snapshot(), generation)
+            except Exception:
+                self._off_monitor_listener = None
+
+        def _accept_monitor_snapshot(self, snapshot: dict[str, Any], generation: int) -> bool:
+            if generation != self._monitor_generation:
+                return False
+            revision = snapshot.get("revision")
+            if not isinstance(revision, int) or revision < self._monitor_revision:
+                return False
+            children = snapshot.get("children")
+            if not isinstance(children, list):
+                return False
+            self._monitor_revision = revision
+            self._monitor_snapshot = {"revision": revision, "children": children}
+            return True
+
+        def _flush_monitor_refresh(self) -> None:
+            with self._monitor_dirty_lock:
+                dirty, self._monitor_dirty = self._monitor_dirty, False
+            if not dirty:
+                return
+            monitor = getattr(self.session, "subagent_monitor", None)
+            if monitor is None:
+                return
+            try:
+                changed = self._accept_monitor_snapshot(monitor.snapshot(), self._monitor_generation)
+            except Exception:
+                return
+            if changed:
+                self._refresh_sidebar()
+                self._render_agents_panel()
+
+        def _refresh_monitor_snapshot(self) -> bool:
+            """Synchronously obtain the current bound monitor snapshot."""
+            monitor = getattr(self.session, "subagent_monitor", None)
+            if monitor is None:
+                return False
+            try:
+                return self._accept_monitor_snapshot(monitor.snapshot(), self._monitor_generation)
+            except Exception:
+                return False
 
         def _rebuild_session_transcript(self) -> None:
             """Replace the viewport cache with the loaded durable transcript."""
             self._stream_lines = []
+            self._clear_agent_link_metadata()
             self._reset_turn_timing()
             self._rendered_stream_lines = ()
             self._assistant_stream = ""
@@ -1312,6 +1488,7 @@ if TEXTUAL_AVAILABLE:
             if self.runtime_host is None:
                 self._write("Runtime host unavailable: session loading is not supported in this context.", "error")
                 return
+            self._prepare_session_change()
             await self.runtime_host.switch_session(info.path)
             self.session = self.runtime_host.session
             self._bind_session()
@@ -1322,12 +1499,20 @@ if TEXTUAL_AVAILABLE:
             self._refresh_sidebar()
 
         def on_unmount(self) -> None:
+            self._approval_rebinding = True
+            self._reject_all_approvals("TUI closed")
             if callable(self._off_listener):
                 try:
                     self._off_listener()
                 except Exception:
                     pass
                 self._off_listener = None
+            if callable(self._off_monitor_listener):
+                try:
+                    self._off_monitor_listener()
+                except Exception:
+                    pass
+                self._off_monitor_listener = None
 
         def _render_stream(self) -> None:
             rendered_lines = tuple(self._stream_lines)
@@ -1340,24 +1525,27 @@ if TEXTUAL_AVAILABLE:
                 stream_widget = self.query_one("#stream")
             except Exception:
                 return
-            text = Text()
+            # Content, unlike Rich Text passed through Static, preserves native
+            # Textual actions. Every transcript value is a markup variable, so
+            # only the fixed app-generated view suffix is ever parsed as markup.
+            content = Content()
             in_tool_block = False
-            for line in self._stream_lines:
+            for line_index, line in enumerate(self._stream_lines):
                 if line.startswith(_THINKING_MARK):
-                    # Intentional markup (colour + spinner frame).
-                    text.append_text(Text.from_markup(line[len(_THINKING_MARK) :]))
+                    content = content.append(Content.from_markup(line[len(_THINKING_MARK) :]))
+                    content = content.append("\n")
                 elif line.startswith(_THINKING_TEXT_MARK):
-                    # Thinking text with intentional markup (theme colour).
-                    text.append_text(Text.from_markup(line[len(_THINKING_TEXT_MARK) :]))
+                    content = content.append(Content.from_markup(line[len(_THINKING_TEXT_MARK) :]))
+                    content = content.append("\n")
                 elif line in {"Thinking:", "Thought:"}:
-                    text.append(line + "\n", style="italic")
+                    content = content.append(Content.from_markup("[i]$line[/]\n", line=line))
                 else:
                     is_tool_line = line.startswith(("tool: ", "tool (", "tool start ", "tool ok: ", "tool err: "))
                     in_tool_block = is_tool_line or (in_tool_block and bool(line))
-                    self._append_stream_line(text, line, in_tool_block=in_tool_block)
+                    content = content.append(self._stream_content_line(line_index, line))
                     if not line:
                         in_tool_block = False
-            stream_widget.update(text)
+            stream_widget.update(content)
             self._rendered_stream_lines = rendered_lines
             try:
                 self.query_one("#stream_container", VerticalScroll).scroll_end(animate=False)
@@ -1408,6 +1596,47 @@ if TEXTUAL_AVAILABLE:
             if status_start < len(line):
                 text.append(line[status_start:], style="bold")
             text.append("\n")
+
+        def _stream_content_line(self, line_index: int, line: str) -> Content:
+            """Return one literal line plus any trusted generated view actions."""
+            links = [
+                (token, self._agent_link_labels[token])
+                for token, (generation, _child_id, target_line, _call_id) in self._agent_link_tokens.items()
+                if generation == self._monitor_generation and target_line == line_index and token in self._agent_link_labels
+            ]
+            if not links:
+                return self._literal_stream_content(line)
+            links.sort()
+            # The link location and label come solely from trusted metadata.
+            # In particular, never parse the wrapped task/argument body to
+            # rediscover a suffix: all child links belong on the short Tool:
+            # status row recorded by _write_subagent_entry.
+            content = self._literal_stream_content(line, newline=False)
+            for token, label in links:
+                content = content.append(" ")
+                content = content.append(Content.from_markup(f"[@click=app.open_agent_link({token})]$label[/]", label=label))
+            return content.append("\n")
+
+        @staticmethod
+        def _literal_stream_content(line: str, *, newline: bool = True) -> Content:
+            """Literal line retaining the old tool/status emphasis without markup."""
+            content = Content.from_markup("$line" + ("\n" if newline else ""), line=line)
+            is_tool_line = line.startswith(("tool: ", "tool (", "tool start ", "tool ok: ", "tool err: "))
+            if not is_tool_line:
+                return content
+            status_start = len(line)
+            for suffix in (" [ok]", " [err]", "[ok]", "[err]"):
+                if line.endswith(suffix):
+                    status_start = len(line) - len(suffix)
+                    break
+            args_start = line.find("{")
+            if args_start < 0 or args_start > status_start:
+                return content.stylize(TextualStyle(bold=True), 0, status_start).stylize(
+                    TextualStyle(bold=True), status_start, len(line)
+                )
+            return content.stylize(TextualStyle(bold=True), 0, args_start).stylize(
+                TextualStyle(bold=True), status_start, len(line)
+            )
 
         def _flush_pending_ui_events(self) -> None:
             """Drain ordered session events without creating a token-rate UI backlog."""
@@ -1629,6 +1858,34 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.extend(sanitize_display_text(text).splitlines() or [""])
             self._trim_stream(render=render)
 
+        def _write_subagent_entry(self, session_id: str, task: Any) -> None:  # noqa: ARG002
+            """Attach a child to its active spawn status heading, never task text."""
+            active = self._active_tool_block
+            call_id = self._active_tool_call_id
+            if not session_id or active is None or active[0] != "spawn_subagent" or call_id is None:
+                return
+            _name, start, end, _text = active
+            if not (0 <= start <= end <= len(self._stream_lines)):
+                return
+            # _write_bounded_panel returns the body start. The dedicated Tool:
+            # heading directly precedes it and remains short even when args wrap.
+            heading_line = start - 1
+            if heading_line < 0 or not self._stream_lines[heading_line].startswith("Tool:"):
+                return
+            self._next_agent_link_token += 1
+            token = self._next_agent_link_token
+            self._active_subagent_link_tokens.append(token)
+            # A second child turns the first fixed label into its ordinal form.
+            for ordinal, existing in enumerate(self._active_subagent_link_tokens, 1):
+                self._agent_link_labels[existing] = (
+                    "[view]" if len(self._active_subagent_link_tokens) == 1 else f"[view {ordinal}]"
+                )
+            self._agent_link_tokens[token] = (self._monitor_generation, session_id, heading_line, call_id)
+            # Inline actions are generated from metadata rather than stored in
+            # _stream_lines, so invalidate the otherwise pure line cache.
+            self._rendered_stream_lines = ()
+            self._render_stream()
+
         def _write_compaction_result(self, result: dict[str, Any]) -> None:
             """Render a compact human-readable result for the TUI."""
             if result.get("aborted"):
@@ -1680,6 +1937,14 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines = self._stream_lines[-MAX_RENDERED_LINES:]
             else:
                 dropped = 0
+
+            if dropped:
+                self._agent_link_tokens = {
+                    token: (generation, session_id, line_index - dropped, call_id)
+                    for token, (generation, session_id, line_index, call_id) in self._agent_link_tokens.items()
+                    if line_index >= dropped
+                }
+                self._prune_agent_link_metadata()
 
             # --- rebase assistant live bookkeeping ------------------------
             if dropped and self._assistant_live_start_idx >= 0:
@@ -1853,8 +2118,9 @@ if TEXTUAL_AVAILABLE:
             # valid against the current (trimmed) _stream_lines list.
             return start - dropped, end - dropped
 
-        def _write_tool_block(self, text: str) -> tuple[int, int]:
-            return self._write_bounded_panel("Tool: ○", text)
+        def _write_tool_block(self, text: str, *, tool_name: str | None = None) -> tuple[int, int]:
+            heading = "Tool: ○" + (f" {tool_name}" if tool_name else "")
+            return self._write_bounded_panel(heading, text)
 
         def _write_result_block(self, text: str) -> tuple[int, int]:
             return self._write_bounded_panel("Result:", text)
@@ -1943,6 +2209,8 @@ if TEXTUAL_AVAILABLE:
                 elapsed = _format_elapsed_ms(elapsed_ms)
                 self._stream_lines[start - 1] = f"Tool: {badge} {tool_name}" + (f" · {elapsed}" if elapsed else "")
             self._active_tool_block = None
+            self._active_tool_call_id = None
+            self._active_subagent_link_tokens = []
             self._trim_stream(render=False)
             self._render_stream()
             return True
@@ -2041,6 +2309,38 @@ if TEXTUAL_AVAILABLE:
                 shortcuts_overlay.styles.background = theme.panel_bg
                 shortcuts_overlay.styles.border = ("heavy", theme.input_border)
                 shortcuts_overlay.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
+                agents_overlay = self.query_one("#agents_overlay", Vertical)
+                agents_overlay.styles.background = theme.panel_bg
+                agents_overlay.styles.border = ("heavy", theme.panel_border)
+                agents_overlay.styles.color = theme.screen_fg
+                self.query_one("#agents_help", Static).styles.color = theme.screen_fg
+                self.query_one("#agents_content", Static).styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
+                approval_overlay = self.query_one("#approval_overlay", Vertical)
+                approval_overlay.styles.background = theme.panel_bg
+                approval_overlay.styles.border = ("heavy", theme.panel_border)
+                approval_overlay.styles.color = theme.screen_fg
+                approval_summary = self.query_one("#approval_summary", Static)
+                approval_summary.styles.background = theme.panel_bg
+                approval_summary.styles.color = theme.screen_fg
+                approval_actions = self.query_one("#approval_actions", Horizontal)
+                approval_actions.styles.background = theme.panel_bg
+                approval_actions.styles.color = theme.screen_fg
+                approve = self.query_one("#approval-approve", Button)
+                approve.styles.background = theme.user_bg
+                approve.styles.color = theme.user
+                approve.styles.border = ("round", theme.user)
+                reject = self.query_one("#approval-reject", Button)
+                reject.styles.background = theme.panel_bg
+                reject.styles.color = theme.error
+                reject.styles.border = ("round", theme.error)
+                if self._approval_pending is not None:
+                    approval_summary.update(self._approval_summary(self._approval_pending))
             except Exception:
                 pass
             return True
@@ -2215,6 +2515,10 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Delivery: {sanitize_display_text(s['deliveryMode'])}\n")
             info_block.append(f"COOP: {'ON' if s['coop'] == 'on' or self._approval_pending is not None else 'OFF'}\n")
             info_block.append(f"Subagents: {'on' if s['subagents'] else 'off'}\n")
+            running_agents = sum(
+                1 for child in self._monitor_snapshot.get("children", []) if child.get("status") == "running"
+            )
+            info_block.append(f"Agents: {running_agents} running (/agents)\n")
             info_block.append(f"Details: {'on' if s['bashOutput'] else 'off'}\n")
             cwd = sanitize_display_text(s["cwd"])
             branch = get_git_branch(s["cwd"])
@@ -2260,6 +2564,166 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 pass
             self._apply_information_layout()
+
+        def _monitor_child(self, session_id: str) -> dict[str, Any] | None:
+            return next(
+                (child for child in self._monitor_snapshot.get("children", []) if child.get("sessionId") == session_id),
+                None,
+            )
+
+        def _clear_agent_link_metadata(self) -> None:
+            """Discard trusted inline links with their transcript references."""
+            self._agent_link_tokens.clear()
+            self._agent_link_labels.clear()
+            self._active_subagent_link_tokens = []
+
+        def _prune_agent_link_metadata(self) -> None:
+            """Keep inline actions exactly in sync with retained transcript lines."""
+            valid_tokens = {
+                token
+                for token, (generation, _session_id, line_index, _call_id) in self._agent_link_tokens.items()
+                if generation == self._monitor_generation and 0 <= line_index < len(self._stream_lines)
+            }
+            self._agent_link_tokens = {
+                token: target for token, target in self._agent_link_tokens.items() if token in valid_tokens
+            }
+            self._agent_link_labels = {
+                token: label for token, label in self._agent_link_labels.items() if token in valid_tokens
+            }
+
+        def _open_agents_panel(self, session_id: str | None = None) -> None:
+            # A lifecycle event can reach the main stream before the coalesced
+            # monitor refresh tick. Exact child links therefore check a fresh
+            # authoritative snapshot rather than the cached one.
+            if session_id is not None:
+                self._refresh_monitor_snapshot()
+            if session_id is not None and self._monitor_child(session_id) is None:
+                self._write("Agent preview is no longer available.", "info")
+                return
+            children = self._monitor_snapshot.get("children", [])
+            if session_id is not None:
+                self._selected_agent_id = session_id
+            elif self._selected_agent_id is None and children:
+                self._selected_agent_id = str(children[0].get("sessionId") or "")
+            self._agents_panel_open = True
+            self._render_agents_panel()
+            try:
+                self.query_one("#agents_overlay", Vertical).add_class("visible")
+            except Exception:
+                pass
+
+        def _close_agents_panel(self) -> None:
+            self._agents_panel_open = False
+            try:
+                self.query_one("#agents_overlay", Vertical).remove_class("visible")
+                self.query_one("#input", TextArea).focus()
+            except Exception:
+                pass
+
+        def _handle_agents_panel_key(self, event: events.Key) -> bool:
+            """Handle panel navigation from either the input or the app."""
+            if not self._agents_panel_open or event.key not in {"left", "right", "up", "down", "escape"}:
+                return False
+            if event.key == "escape":
+                self._close_agents_panel()
+            elif event.key in {"left", "right"}:
+                self._select_agent_offset(-1 if event.key == "left" else 1)
+            else:
+                try:
+                    timeline = self.query_one("#agents_timeline", VerticalScroll)
+                    timeline.scroll_to(y=timeline.scroll_y + (-3 if event.key == "up" else 3), animate=False)
+                except Exception:
+                    pass
+            event.stop()
+            event.prevent_default()
+            return True
+
+        def _select_agent_offset(self, offset: int) -> None:
+            children = self._monitor_snapshot.get("children", [])
+            if not children:
+                return
+            ids = [str(child.get("sessionId") or "") for child in children]
+            try:
+                index = ids.index(self._selected_agent_id or "")
+            except ValueError:
+                index = 0
+            self._selected_agent_id = ids[(index + offset) % len(ids)]
+            self._render_agents_panel()
+
+        def _render_agents_panel(self) -> None:
+            if not self._agents_panel_open:
+                return
+            children = self._monitor_snapshot.get("children", [])
+            if self._selected_agent_id and self._monitor_child(self._selected_agent_id) is None:
+                self._selected_agent_id = None
+            if self._selected_agent_id is None and children:
+                self._selected_agent_id = str(children[0].get("sessionId") or "")
+            help_text = Text("Agents — current session only (read-only)\n", style="bold")
+            help_text.append("Left/Right select · Up/Down scroll timeline · Esc close")
+            if not children:
+                content = Text("No direct child agents in this session.\n")
+            else:
+                selected = self._monitor_child(self._selected_agent_id or "")
+                content = Text()
+                if selected is not None:
+                    position = next(
+                        (index for index, child in enumerate(children, 1)
+                         if child.get("sessionId") == self._selected_agent_id),
+                        1,
+                    )
+                    task = sanitize_display_text(str(selected.get("task") or ""))[:120]
+                    model = sanitize_display_text(str(selected.get("model") or ""))[:80]
+                    elapsed = max(0.0, (selected.get("completedAt") or time.monotonic()) - float(selected.get("startedMonotonic") or time.monotonic()))
+                    content.append(f"Agent {position}/{len(children)} · {task}\n", style="bold")
+                    content.append(f"Model: {model} · {elapsed:.1f}s\n")
+                    tool = selected.get("currentTool")
+                    activity = sanitize_display_text(str(selected.get("activity") or ""))
+                    content.append(f"Status: {sanitize_display_text(str(selected.get('status') or 'unknown'))}")
+                    if tool:
+                        content.append(f" · Tool: {sanitize_display_text(str(tool))}")
+                    if activity:
+                        content.append(f" · {activity}")
+                    content.append("\n\nTimeline\n", style="bold")
+                    if selected.get("timelineTruncated") or selected.get("previewTruncated"):
+                        content.append("[earlier preview text truncated]\n")
+                    timeline = [item for item in selected.get("timeline", []) if isinstance(item, dict)]
+                    has_response = any(
+                        item.get("kind") == "response" and item.get("text") for item in timeline
+                    )
+                    if not has_response:
+                        # Tool blocks below still make current activity clear;
+                        # avoid implying the child has done nothing.
+                        content.append("[no visible response text]\n")
+                    for item in timeline:
+                        if item.get("kind") == "response":
+                            text = sanitize_display_text(str(item.get("text") or ""))
+                            if text:
+                                content.append(text)
+                                if not text.endswith("\n"):
+                                    content.append("\n")
+                            continue
+                        if item.get("kind") != "tool":
+                            continue
+                        name = sanitize_display_text(str(item.get("tool") or "tool"))
+                        running = item.get("state") == "running"
+                        badge = "○" if running else ("✓" if item.get("ok") else "×")
+                        elapsed = _format_elapsed_ms(item.get("elapsedMs"))
+                        timeout = item.get("effectiveTimeout")
+                        timeout_text = f" (timeout {int(timeout)}s)" if isinstance(timeout, (int, float)) and timeout > 0 else ""
+                        content.append(f"Tool: {badge} {name}" + (timeout_text if running else "") + (f" · {elapsed}" if elapsed else "") + "\n")
+                        args = sanitize_display_text(str(item.get("args") or ""))
+                        if args:
+                            content.append(f"Arguments: {args}\n")
+                        result = sanitize_display_text(str(item.get("output") or ""))
+                        if result:
+                            content.append("Result:\n" if item.get("ok") else "Error:\n")
+                            content.append(result)
+                            content.append("\n")
+            try:
+                self.query_one("#agents_help", Static).update(help_text)
+                self.query_one("#agents_content", Static).update(content)
+            except Exception:
+                pass
 
         def _copy_selected_stream_text(self, text: str) -> bool:
             """Copy an already-snapshotted selection exactly once."""
@@ -2378,9 +2842,13 @@ if TEXTUAL_AVAILABLE:
                 self._write("  focus: header and sidebar hidden", "info")
                 self._write("/sidebar <hide|show>", "info")
                 self._write("  hide: hide the sidebar; show: switch to wide", "info")
+                self._write("/agents (current-session direct children; read-only)", "info")
                 return
             if cmd == "/clear":
                 self.action_clear_stream()
+                return
+            if cmd == "/agents":
+                self._open_agents_panel()
                 return
             if cmd == "/paste-image":
                 self.action_paste_image()
@@ -2816,6 +3284,7 @@ if TEXTUAL_AVAILABLE:
                     self._write("Runtime host unavailable: /fork is not supported in this context.", "error")
                     return
                 try:
+                    self._prepare_session_change()
                     result = await self.runtime_host.fork(entry_id)
                     self.session = self.runtime_host.session
                     self._bind_session()
@@ -2830,6 +3299,7 @@ if TEXTUAL_AVAILABLE:
                 if self.runtime_host is None:
                     self._write("Runtime host unavailable: /new is not supported in this context.", "error")
                     return
+                self._prepare_session_change()
                 result = await self.runtime_host.new_session({})
                 self.session = self.runtime_host.session
                 self._bind_session()
@@ -3229,10 +3699,13 @@ if TEXTUAL_AVAILABLE:
                     self._write(f"Unable to persist cooperation setting: {e}", "error")
                     return
                 if enabled:
-                    session.approval_callback = self._approval_prompt
+                    self._install_approval_callback(session)
+                    self._cooperation_disabled = False
                     self._write("[Cooperation] enabled: mutating tools (bash/write/edit) ask first", "info")
                 else:
                     session.approval_callback = None
+                    self._cooperation_disabled = True
+                    self._reject_all_approvals("Cooperation disabled")
                     self._write("[Cooperation] disabled: all tools run freely", "info")
                 self._refresh_sidebar()
                 return
@@ -3293,9 +3766,6 @@ if TEXTUAL_AVAILABLE:
                 else:
                     await self._select_picker_model(text)
                     return
-            if self._approval_pending is not None:
-                await self._handle_approval_answer(text)
-                return
             if self._session_delete_pending is not None:
                 target = self._session_delete_pending
                 self._session_delete_pending = None
@@ -3544,38 +4014,6 @@ if TEXTUAL_AVAILABLE:
             self._pending_clipboard_image_bytes = raw
             self._toast("Image queued — submit to attach", severity="info")
 
-        async def _handle_approval_answer(self, text: str) -> None:
-            """Route the input widget answer back to the pending approval prompt."""
-            queue = self._approval_queue
-            if queue is None:
-                self._approval_pending = None
-                return
-            pending = self._approval_pending or {}
-            low = text.lower()
-            if pending.get("stage") == "reason":
-                if not text:
-                    self._write("[Approve] reason is required — enter a reason or 'y' to approve", "warn")
-                    return
-                queue.put_nowait(("no", text))
-                return
-            if not text or low in {"y", "yes"}:
-                queue.put_nowait(("yes", ""))
-                return
-            if low.startswith("n"):
-                reason = text[1:].strip()
-                if reason:
-                    queue.put_nowait(("no", reason))
-                    return
-                pending["stage"] = "reason"
-                try:
-                    self.query_one("#input", TextArea).placeholder = "Rejection reason:"
-                except Exception:
-                    pass
-                self._write("[Approve] provide a rejection reason", "warn")
-                return
-            # Any other non-empty text is treated as the rejection reason.
-            queue.put_nowait(("no", text))
-
         async def _handle_extension_ui_answer(self, text: str) -> None:
             """Route the input widget answer back to the pending extension UI request."""
             req = self._extension_ui_pending_request
@@ -3683,49 +4121,107 @@ if TEXTUAL_AVAILABLE:
             )
             self._refresh_sidebar()
 
-        async def _approval_prompt(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
-            """Cooperation mode callback: ask the user via the input widget."""
-            self._approval_pending = {"tool": tool_name, "args": args, "stage": "answer"}
-            self._approval_queue = asyncio.Queue()
-            self._write(f"[Approve] {tool_name} {json.dumps(args, ensure_ascii=False)}", "warn")
-            self._toast(f"Approve: {tool_name}", severity="warning", timeout=8.0)
+        def _approval_summary(self, pending: dict[str, Any]) -> Text:
+            """Build the pending-approval summary using the active palette."""
+            sensitive = {"password", "passwd", "secret", "token", "apikey", "api_key", "authorization", "access_token"}
+            parts: list[str] = []
+            for key, value in pending["args"].items():
+                label = sanitize_display_text(str(key))[:80]
+                if label.lower().replace("-", "_") in sensitive:
+                    display = "[REDACTED]"
+                elif label in {"content", "text"} and isinstance(value, str):
+                    display = f"<{len(value)} chars>"
+                else:
+                    display = sanitize_display_text(json.dumps(value, ensure_ascii=False, default=str))[:160]
+                parts.append(f"{label}={display}")
+            args = ", ".join(parts)[:600]
+            queued = len(self._approval_waiters) - 1
+            summary = Text("PENDING TOOL APPROVAL\n", style=f"bold {self._theme.warn}")
+            body_style = self._theme.screen_fg
+            summary.append(f"Tool: {sanitize_display_text(str(pending['tool']))}\n", style=body_style)
+            summary.append(f"Arguments: {args or '{}'}\n", style=body_style)
+            if queued:
+                summary.append(f"{queued} additional approval request(s) waiting\n", style=body_style)
+            summary.append("Approve runs this tool. Reject keeps it blocked.", style=body_style)
+            return summary
+
+        def _install_approval_callback(self, session: Any) -> None:
+            """Bind an approval callback to exactly one session lifetime."""
+            async def callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+                if self._approval_rebinding or session is not self.session:
+                    return False, "Session changed"
+                return await self._approval_prompt(tool_name, args)
+
+            session.approval_callback = callback
+
+        def _show_next_approval(self) -> None:
+            """Display exactly one FIFO approval request without taking input focus."""
+            self._approval_pending = self._approval_waiters[0] if self._approval_waiters else None
             try:
-                input_widget = self.query_one("#input", TextArea)
-                input_widget.placeholder = "Accept (Enter) / n + reason"
-                input_widget.focus()
+                overlay = self.query_one("#approval_overlay", Vertical)
+                if self._approval_pending is None:
+                    overlay.remove_class("visible")
+                else:
+                    self.query_one("#approval_summary", Static).update(self._approval_summary(self._approval_pending))
+                    overlay.add_class("visible")
             except Exception:
                 pass
             self._refresh_sidebar()
+
+        def _resolve_approval(self, approved: bool, reason: str = "Rejected by user") -> None:
+            pending = self._approval_pending
+            if pending is None:
+                return
+            future = pending["future"]
+            if not future.done():
+                future.set_result((approved, "" if approved else reason))
+
+        def _reject_all_approvals(self, reason: str) -> None:
+            for pending in tuple(self._approval_waiters):
+                future = pending["future"]
+                if not future.done():
+                    future.set_result((False, reason))
+            self._approval_waiters.clear()
+            self._show_next_approval()
+
+        async def _approval_prompt(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+            """Queue fail-closed approvals behind a dedicated overlay control."""
+            # Children inherit this callback at spawn time. Once cooperation is
+            # disabled on the parent, inherited callbacks must reject rather
+            # than opening a fresh approval surface.
+            if self._cooperation_disabled:
+                return False, "Cooperation disabled"
+            future: asyncio.Future[tuple[bool, str]] = asyncio.get_running_loop().create_future()
+            pending = {"tool": tool_name, "args": args, "future": future}
+            self._approval_waiters.append(pending)
+            if self._approval_pending is None:
+                self._show_next_approval()
+            self._toast(f"Approve: {tool_name}", severity="warning", timeout=8.0)
             try:
-                verdict, reason = await self._approval_queue.get()
+                return await future
             except asyncio.CancelledError:
-                verdict, reason = "no", "aborted by user"
+                # A lifecycle transition may resolve the fail-closed decision
+                # while Textual is also cancelling its callback task. Keep the
+                # explicit lifecycle reason rather than losing it to that race.
+                if future.done() and not future.cancelled():
+                    return future.result()
+                return False, "Approval cancelled"
             finally:
-                self._approval_pending = None
-                self._approval_queue = None
                 try:
-                    self.query_one("#input", TextArea).placeholder = "Type a command or /help"
-                except Exception:
+                    self._approval_waiters.remove(pending)
+                except ValueError:
                     pass
-                self._refresh_sidebar()
-            if verdict == "yes":
-                return True, ""
-            return False, reason
+                if self._approval_pending is pending:
+                    self._show_next_approval()
 
         async def _on_key(self, event: events.Key) -> None:
-            """Catch Ctrl-C when an approval prompt is open so it rejects
-            the pending approval instead of aborting the entire session.
-
-            The ctrl-c interception path is synchronous-safe: put_nowait +
-            event.stop() + prevent_default + return — no ``await`` needed
-            because we never reach ``super()`` on that branch.
-            """
+            """Keep overlay navigation ahead of normal app key dispatch."""
             if event.key == "ctrl+c" and self._approval_pending is not None:
-                queue = self._approval_queue
-                if queue is not None:
-                    queue.put_nowait(("no", "aborted by user"))
+                self._resolve_approval(False, "aborted by user")
                 event.stop()
                 event.prevent_default()
+                return
+            if self._handle_agents_panel_key(event):
                 return
             await super()._on_key(event)
             # Prevent MRO double-dispatch: MessagePump invokes App._on_key
@@ -3761,6 +4257,35 @@ if TEXTUAL_AVAILABLE:
             self._write("[abort requested]", "warn")
             self._refresh_sidebar()
 
+        def action_show_agents(self) -> None:
+            self._open_agents_panel()
+
+        def action_open_agent_link(self, token: int) -> None:
+            """Open a trusted generated inline action target."""
+            target = self._agent_link_tokens.get(token)
+            if target is None:
+                return
+            generation, session_id, line_index, _call_id = target
+            if (
+                generation != self._monitor_generation
+                or not (0 <= line_index < len(self._stream_lines))
+            ):
+                return
+            self._refresh_monitor_snapshot()
+            if not any(child.get("sessionId") == session_id for child in self._monitor_snapshot.get("children", [])):
+                return
+            self._open_agents_panel(session_id)
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            """Route fixed app-created controls without interpreting user text."""
+            button_id = str(event.button.id or "")
+            if button_id == "approval-approve":
+                self._resolve_approval(True)
+                return
+            if button_id == "approval-reject":
+                self._resolve_approval(False)
+                return
+
         def action_toggle_cooperation(self) -> None:
             """Ctrl+Z: toggle ask-before-running (cooperation) mode.
 
@@ -3774,12 +4299,21 @@ if TEXTUAL_AVAILABLE:
                 self._write(f"Unable to persist cooperation setting: {e}", "error")
                 return
             if enabled:
-                self.session.approval_callback = self._approval_prompt
+                self._install_approval_callback(self.session)
+                self._cooperation_disabled = False
                 self._write("[Cooperation] enabled: mutating tools (bash/write/edit/plan/apply_patch) ask first", "info")
             else:
                 self.session.approval_callback = None
+                self._cooperation_disabled = True
+                self._reject_all_approvals("Cooperation disabled")
                 self._write("[Cooperation] disabled: all tools run freely", "info")
             self._refresh_sidebar()
+
+        def action_approve_tool(self) -> None:
+            self._resolve_approval(True)
+
+        def action_reject_tool(self) -> None:
+            self._resolve_approval(False)
 
         def action_show_model_picker(self) -> None:
             """Open a small, authenticated-model-only picker using existing selection semantics."""
@@ -3868,6 +4402,7 @@ if TEXTUAL_AVAILABLE:
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
             self._stream_lines = []
+            self._clear_agent_link_metadata()
             self._rendered_stream_lines = ()
             with self._pending_ui_events_lock:
                 self._pending_ui_events = []
@@ -3903,6 +4438,9 @@ if TEXTUAL_AVAILABLE:
                 pass
 
         def action_close_shortcuts(self) -> None:
+            if self._agents_panel_open:
+                self._close_agents_panel()
+                return
             try:
                 self.query_one("#shortcuts_overlay", Static).remove_class("visible")
             except Exception:
@@ -3910,7 +4448,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /agents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 
@@ -3963,7 +4501,9 @@ if TEXTUAL_AVAILABLE:
 
         def _handle_session_event(self, event: dict[str, Any]) -> None:
             et = event.get("type")
-            if et == "message_start":
+            if et == "subagent_start":
+                self._write_subagent_entry(str(event.get("sessionId") or ""), event.get("task"))
+            elif et == "message_start":
                 msg = event.get("message", {})
                 if msg.get("role") == "assistant":
                     # Discard any partial block left from a failed stream
@@ -4071,8 +4611,11 @@ if TEXTUAL_AVAILABLE:
                     text = f"tool: {tool_name} {args_text}"
                 if tool_name == "finish":
                     self._write_lifecycle_separator()
-                start, end = self._write_tool_block(text)
+                start, end = self._write_tool_block(text, tool_name=tool_name)
                 self._active_tool_block = (tool_name, start, end, text)
+                self._next_tool_call_id += 1
+                self._active_tool_call_id = self._next_tool_call_id
+                self._active_subagent_link_tokens = []
             elif et == "tool_call_parse_failed":
                 # Do not show model-supplied arguments or raw fragments here:
                 # they can be malformed/untrusted.  The session will make its
@@ -4118,17 +4661,8 @@ if TEXTUAL_AVAILABLE:
                 self._render_stream()
                 self._refresh_sidebar()
             elif et == "cooperation_changed" and not event.get("enabled"):
-                # Release the UI-owned approval callback as well. The callback
-                # then returns an ordinary rejection to the existing tool flow.
-                queue = self._approval_queue
-                if queue is not None:
-                    queue.put_nowait(("no", "cooperation disabled"))
-                self._approval_pending = None
-                try:
-                    self.query_one("#input", TextArea).placeholder = "Type a command or /help"
-                except Exception:
-                    pass
-                self._refresh_sidebar()
+                self._cooperation_disabled = True
+                self._reject_all_approvals("Cooperation disabled")
             elif et == "ask_user_answered":
                 self._write(f"[AskUser] answer: {event.get('answer')}", "info")
             elif et == "extension_ui_request":
@@ -4175,11 +4709,7 @@ if TEXTUAL_AVAILABLE:
                     tool_name != "finish"
                     and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)()
                 ):
-                    payload = event.get("result") or {}
-                    if event.get("ok"):
-                        out = str(payload.get("outputText") or payload.get("result") or "").rstrip()
-                    else:
-                        out = str(payload.get("error") or "").rstrip()
+                    out = SubagentMonitor.visible_tool_result(event)
                     if out:
                         self._write_result_block(out)
             elif et == "tool_call_nudge_start":
@@ -4249,7 +4779,7 @@ class TuiMode:
             bool(self.options.get("cooperation"))
             or getattr(session.settings_manager, "get_tool_approval", lambda: False)()
         ):
-            session.approval_callback = app._approval_prompt
+            app._install_approval_callback(session)
         try:
             await app.run_async()
         finally:

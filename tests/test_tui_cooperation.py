@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.tui import _mk_app_session
+from tests.support.tui import _mk_app_session, _submit
 
 
 @pytest.mark.asyncio
@@ -172,11 +172,160 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
         assert len(approve_call) >= 1
         assert approve_call[0].get("timeout") == 8.0
 
-        # Answer the prompt to unblock.
-        assert app._approval_queue is not None
-        app._approval_queue.put_nowait(("yes", ""))
+        # Approval is resolved only by its dedicated control.
+        app.action_approve_tool()
         await task
         assert app._approval_pending is None
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_c_rejects_pending_approval_without_aborting_session(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    abort_calls = 0
+
+    async def abort() -> None:
+        nonlocal abort_calls
+        abort_calls += 1
+
+    session.abort = abort  # type: ignore[method-assign]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        approval = asyncio.create_task(app._approval_prompt("write", {"path": "secret.txt"}))
+        await pilot.pause()
+        assert app._approval_pending is not None
+
+        await pilot.press("ctrl+c")
+
+        assert await approval == (False, "aborted by user")
+        assert abort_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_c_without_pending_approval_aborts_session(tmp_path: Path) -> None:
+    """The normal Ctrl+C binding remains active when no approval owns it."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    abort_calls = 0
+
+    async def abort() -> None:
+        nonlocal abort_calls
+        abort_calls += 1
+
+    session.abort = abort  # type: ignore[method-assign]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert abort_calls == 1
+        assert app._approval_pending is None
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_controls_do_not_steal_normal_prompt_input(tmp_path: Path) -> None:
+    from textual.containers import Vertical
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    prompts: list[str] = []
+
+    async def prompt(text: str, **_kwargs: object) -> None:
+        prompts.append(text)
+
+    session.prompt = prompt  # type: ignore[method-assign]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        approval = asyncio.create_task(app._approval_prompt("write", {"path": "x.txt", "content": "x"}))
+        await pilot.pause()
+        assert app.query_one("#approval_overlay", Vertical).has_class("visible")
+        await _submit(app, pilot, "ordinary prompt")
+        await pilot.pause()
+        assert prompts == ["ordinary prompt"]
+        assert not approval.done()
+        await pilot.click("#approval-approve")
+        assert await approval == (True, "")
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_queue_serializes_and_cooperation_off_rejects_all(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        session.approval_callback = app._approval_prompt
+        first = asyncio.create_task(app._approval_prompt("write", {"path": "one"}))
+        second = asyncio.create_task(app._approval_prompt("bash", {"command": "two"}))
+        await pilot.pause()
+        assert app._approval_pending is not None
+        assert app._approval_pending["tool"] == "write"
+        assert len(app._approval_waiters) == 2
+        await pilot.press("alt+a")
+        assert await first == (True, "")
+        await pilot.pause()
+        assert app._approval_pending is not None
+        assert app._approval_pending["tool"] == "bash"
+        app.action_toggle_cooperation()
+        assert await second == (False, "Cooperation disabled")
+        assert app._approval_pending is None
+
+
+@pytest.mark.asyncio
+async def test_tui_rebind_rejects_queued_approvals_and_old_callback(tmp_path: Path) -> None:
+    from textual.containers import Vertical
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    replacement = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        app.action_toggle_cooperation()
+        old_callback = session.approval_callback
+        assert old_callback is not None
+        approval = asyncio.ensure_future(old_callback("write", {"path": "one"}))
+        queued = asyncio.ensure_future(old_callback("bash", {"command": "two"}))
+        await pilot.pause()
+        assert app.query_one("#approval_overlay", Vertical).has_class("visible")
+        futures = [pending["future"] for pending in app._approval_waiters]
+        assert app._bound_session is session
+        assert len(futures) == 2
+
+        app.session = replacement
+        app._bind_session()
+        assert [future.result() for future in futures] == [(False, "Session changed")] * 2
+        assert await approval == (False, "Session changed")
+        assert await queued == (False, "Session changed")
+        assert app._approval_pending is None
+        assert not app.query_one("#approval_overlay", Vertical).has_class("visible")
+        assert await asyncio.wait_for(old_callback("write", {"path": "late"}), timeout=1) == (False, "Session changed")
+
+
+@pytest.mark.asyncio
+async def test_tui_unmount_rejects_queued_approvals_and_hides_overlay(tmp_path: Path) -> None:
+    from textual.containers import Vertical
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        first = asyncio.create_task(app._approval_prompt("write", {"path": "one"}))
+        second = asyncio.create_task(app._approval_prompt("bash", {"command": "two"}))
+        await pilot.pause()
+        assert app.query_one("#approval_overlay", Vertical).has_class("visible")
+        futures = [pending["future"] for pending in app._approval_waiters]
+        assert len(futures) == 2
+
+        app.on_unmount()
+        assert [future.result() for future in futures] == [(False, "TUI closed")] * 2
+        assert await first == (False, "TUI closed")
+        assert await second == (False, "TUI closed")
+        assert app._approval_pending is None
+        assert not app.query_one("#approval_overlay", Vertical).has_class("visible")
 
 
 @pytest.mark.asyncio

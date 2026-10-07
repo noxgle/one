@@ -8,6 +8,16 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Added
+
+- **Live subagent monitor** — the TUI now provides `/agents`, a read-only view
+  of the current session's direct child agents with a selected bounded live
+   response and single-row tool lifecycle preview, with safe redacted operation summaries
+   and safe result/error text only while
+   the existing details toggle is enabled. Generated inline **[view]** links on
+   `spawn_subagent` tool calls open the corresponding preview; `/subagents on|off` remains the enable/disable control
+  for subagent tools.
+
 ### Changed
 
 - **Read tool guidance** — prompts and native tool metadata now explain its path,
@@ -15,6 +25,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI cooperation approvals** — pending tool approvals now use explicit
+  approve/reject controls without consuming ordinary prompt input; concurrent
+  subagent approvals queue fail-closed.
+- **Live subagent monitor layout** — `/agents` now renders the selected child
+   header and chronological activity timeline inside one frame.
+- **TUI overlays** — `/agents` and cooperation approval surfaces, including their
+  action buttons, now follow the selected TUI theme.
 - **Rejected tool-call diagnostics** — invalid text tool candidates now identify
   their response stage and safe parse category without exposing model content;
   the TUI explicitly confirms that no tool was executed.

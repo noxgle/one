@@ -152,8 +152,18 @@ one --mode tui --image screenshot.png
 
 The Textual TUI is the human-facing interface. It streams responses, displays
 tool lifecycle status, retains sessions, and accepts slash commands such as
-`/help`, `/steer`, `/follow`, `/abort`, `/login`, and `/mcp list`. It displays a
+`/help`, `/agents`, `/steer`, `/follow`, `/abort`, `/login`, and `/mcp list`. It displays a
 startup banner and status information.
+
+`/agents` opens a read-only monitor for direct child agents of the current
+session only. One frame shows the selected child's header and bounded live response/tool
+timeline. Each tool call is one row that changes from running to completed and includes a
+safe, redacted operation summary (for example a bash command or read options), plus safe
+result/error text only while the existing details
+toggle is enabled; it does not switch sessions or provide execution controls. Click an
+application-generated inline **[view]** link beside a `spawn_subagent` tool call to open the
+same monitor with that child selected. `/subagents on|off` remains only the
+enable/disable control for subagent tools.
 
 Configure the startup information panel in `settings.json`:
 
@@ -181,10 +191,11 @@ Current application shortcuts are:
 | --- | --- |
 | `Ctrl+P` | Command palette |
 | `Ctrl+K` | Provider/model picker |
-| `Ctrl+C` | Abort turn; reject a pending approval |
+| `Ctrl+C` | Abort turn |
 | `Ctrl+L` | Clear stream |
 | `Ctrl+Q` | Quit |
 | `Ctrl+Z` | Toggle cooperation |
+| `Alt+A` / `Alt+R` | Approve / reject the pending tool approval |
 | `Ctrl+S` | Toggle subagents |
 | `Ctrl+O` | Toggle bash output |
 | `Ctrl+V` | Paste host/system clipboard text |
@@ -482,9 +493,10 @@ for `--mode text` or `one run`. Steering and follow-up messages are text-only.
 > boundary.
 
 `--cooperation` requests approval before mutating tools (`bash`, `write`,
-`edit`, `plan`, and `apply_patch`). In the TUI, toggle it with `Ctrl+Z`; use
-`Ctrl+A` in the interactive fallback. Rejections include a reason returned to
-the agent. Interactive modes provide `/steer`, `/follow`, and abort controls;
+`edit`, `plan`, and `apply_patch`). In the TUI, toggle it with `Ctrl+Z` and use
+the visible Approve/Reject controls (or `Alt+A`/`Alt+R`); normal prompt input
+remains available while an approval is pending. Use `Ctrl+A` in the interactive
+fallback. Rejections include a reason returned to the agent. Interactive modes provide `/steer`, `/follow`, and abort controls;
 RPC and `one run` provide the channels described above.
 
 When cooperation and `ask_user` are both enabled, the model is instructed to
