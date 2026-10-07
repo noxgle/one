@@ -25,6 +25,7 @@ from rich.markup import escape as rich_escape
 from rich.text import Text
 
 from one.config import VERSION
+from one.core.agent_session import approval_callback_origin
 from one.core.oauth import OAuthError
 from one.core.provider_login import entry_id as fetched_entry_id
 from one.core.provider_login import run_oauth_login, validate_and_fetch
@@ -54,7 +55,7 @@ try:
     from textual.content import Content
     from textual.message import Message
     from textual.style import Style as TextualStyle
-    from textual.widgets import Button, Static, TextArea
+    from textual.widgets import Button, Input, Static, TextArea
     from textual.widgets.text_area import Edit
 
     TEXTUAL_AVAILABLE = True
@@ -209,6 +210,12 @@ _TUI_LOGO_LINES = _load_tui_logo_lines()
 # the complete conversation; this list is deliberately bounded so rebuilding
 # the Static widget remains predictable during long-running sessions.
 MAX_RENDERED_LINES = 500
+# Keep following when the user is effectively at the tail, without treating a
+# reader who has deliberately moved up as an auto-follow target.
+_STREAM_FOLLOW_TOLERANCE = 1
+# A post-layout callback runs on Textual's UI thread. Keep retained-history
+# anchor lookup bounded even when one logical line wraps to many physical rows.
+_STREAM_ANCHOR_SEARCH_ROWS = 256
 _TRUNCATED_ASSISTANT_MARKER = "[earlier assistant output truncated in viewport]"
 
 # The sidebar shows a focused plan window rather than a character slice of the
@@ -868,6 +875,12 @@ if TEXTUAL_AVAILABLE:
             event.stop()
             event.prevent_default()
 
+    class _ApprovalReasonInput(Input):
+        """A bounded approval-reason field whose Enter key is intentionally inert."""
+
+        async def action_submit(self) -> None:
+            return
+
     class _OneTextualApp(App[None]):
         CSS = """
         Screen {
@@ -1034,6 +1047,7 @@ if TEXTUAL_AVAILABLE:
 
         #approval_overlay.visible { display: block; }
         #approval_summary { height: auto; }
+        #approval-reason { height: 3; margin: 1 0 0 0; }
         #approval_actions { height: auto; margin: 1 0 0 0; }
         #approval_actions Button { margin: 0 1 0 0; }
 
@@ -1075,6 +1089,18 @@ if TEXTUAL_AVAILABLE:
             self._assistant_stream = ""
             self._stream_lines: list[str] = []
             self._rendered_stream_lines: tuple[str, ...] = ()
+            # Stream updates may arrive faster than Textual completes a layout
+            # pass. Keep one deferred viewport reconciliation, rather than one
+            # scroll_end callback per update.
+            self._stream_render_generation = 0
+            self._deferred_stream_viewport: dict[str, Any] | None = None
+            self._stream_viewport_callback_pending = False
+            self._stream_viewport_callback_token = 0
+            # Number of logical front entries removed since the last rendered
+            # stream. This is written only by _trim_stream; never infer it by
+            # comparing transcript text (which may legitimately repeat).
+            self._stream_front_trim_pending = 0
+            self._stream_user_scroll_generation = 0
             self._retry_state = "idle"
             self._turn_timing_id: str | None = None
             self._turn_provider_ids: set[str] = set()
@@ -1170,6 +1196,9 @@ if TEXTUAL_AVAILABLE:
                             yield Static("", id="agents_content")
                     with Vertical(id="approval_overlay"):
                         yield Static("", id="approval_summary")
+                        yield _ApprovalReasonInput(
+                            placeholder="Optional rejection reason", max_length=1024, id="approval-reason"
+                        )
                         with Horizontal(id="approval_actions"):
                             yield Button("Approve (Alt+A)", id="approval-approve", variant="success")
                             yield Button("Reject (Alt+R)", id="approval-reject", variant="error")
@@ -1224,6 +1253,8 @@ if TEXTUAL_AVAILABLE:
             """
             # Initial and same-session binds preserve any active approval. A
             # changed session must fail closed before listener detachment.
+            self._invalidate_deferred_stream_viewport()
+            self._stream_front_trim_pending = 0
             if self._bound_session is not None and self._bound_session is not self.session:
                 self._reject_all_approvals("Session changed")
             # Invalidate before detaching and discard the old transcript's
@@ -1282,6 +1313,11 @@ if TEXTUAL_AVAILABLE:
             self._off_listener = self.session.subscribe(_listener)
             self._bound_session = self.session
             self._approval_rebinding = False
+            if (
+                self.session.approval_callback is None
+                and getattr(self.session.settings_manager, "get_tool_approval", lambda: False)()
+            ):
+                self._install_approval_callback(self.session)
 
         def _prepare_session_change(self) -> None:
             """Fail closed while a runtime host replaces the bound session."""
@@ -1367,6 +1403,7 @@ if TEXTUAL_AVAILABLE:
         def _rebuild_session_transcript(self) -> None:
             """Replace the viewport cache with the loaded durable transcript."""
             self._stream_lines = []
+            self._stream_front_trim_pending = 0
             self._clear_agent_link_metadata()
             self._reset_turn_timing()
             self._rendered_stream_lines = ()
@@ -1418,6 +1455,9 @@ if TEXTUAL_AVAILABLE:
                         stored=True,
                     )
             self._render_stream()
+            # Rebuild is a new transcript boundary, not an incremental trim
+            # relative to the previously mounted session.
+            self._stream_front_trim_pending = 0
 
         def _session_infos(self) -> list[SessionInfo]:
             manager = self.session.session_manager
@@ -1523,8 +1563,41 @@ if TEXTUAL_AVAILABLE:
                 return
             try:
                 stream_widget = self.query_one("#stream")
+                stream_container = self.query_one("#stream_container", VerticalScroll)
             except Exception:
                 return
+            # Sample this before replacing the content.  Updating a Static can
+            # change its wrapped height (and therefore max_scroll_y), so the
+            # post-update position alone cannot tell whether a reader had
+            # intentionally scrolled away from the tail.  A zero maximum is
+            # the initial-layout/single-viewport case and should follow once
+            # there is enough content to scroll.
+            previous_scroll_y = stream_container.scroll_y
+            previous_max_scroll_y = stream_container.max_scroll_y
+            previous_scroll_target_y = stream_container.scroll_target_y
+            sampled_follow_stream = (
+                not self._rendered_stream_lines
+                or
+                previous_max_scroll_y <= 0
+                or previous_scroll_y >= previous_max_scroll_y - _STREAM_FOLLOW_TOLERANCE
+            )
+            # A tail update already awaiting layout remains tail intent through
+            # additional output. Its old max_scroll_y is no longer the tail
+            # once content grows, so sampling only the current position would
+            # accidentally lose follow before the one deferred callback runs.
+            follow_stream = sampled_follow_stream or bool(
+                self._deferred_stream_viewport and self._deferred_stream_viewport.get("follow")
+            )
+            # Numeric scroll position remains correct for ordinary appends. A
+            # visual anchor is needed only when retained history was dropped
+            # from the front (where that numeric row now names different text).
+            front_trim_count = self._stream_front_trim_pending
+            front_trimmed = front_trim_count > 0
+            anchor = (
+                self._capture_stream_anchor(stream_widget, stream_container)
+                if not follow_stream and front_trimmed
+                else None
+            )
             # Content, unlike Rich Text passed through Static, preserves native
             # Textual actions. Every transcript value is a markup variable, so
             # only the fixed app-generated view suffix is ever parsed as markup.
@@ -1548,9 +1621,185 @@ if TEXTUAL_AVAILABLE:
             stream_widget.update(content)
             self._rendered_stream_lines = rendered_lines
             try:
-                self.query_one("#stream_container", VerticalScroll).scroll_end(animate=False)
+                self._queue_stream_viewport_reconcile(
+                    stream_container,
+                    follow=follow_stream,
+                    previous_scroll_y=previous_scroll_y,
+                    previous_max_scroll_y=previous_max_scroll_y,
+                    previous_scroll_target_y=previous_scroll_target_y,
+                    anchor=anchor,
+                    front_trim_count=front_trim_count,
+                )
+                self._stream_front_trim_pending = 0
             except Exception:
                 pass
+
+        def _invalidate_deferred_stream_viewport(self) -> None:
+            """Make an already queued layout callback harmless."""
+            self._stream_render_generation += 1
+            self._deferred_stream_viewport = None
+            # Textual does not expose cancellation for call_after_refresh.
+            # A token makes a callback queued for the old session/stream inert.
+            self._stream_viewport_callback_token += 1
+            self._stream_viewport_callback_pending = False
+
+        def _capture_stream_anchor(self, stream_widget: Static, container: VerticalScroll) -> tuple[str, int] | None:
+            """Capture a retained visual row and its offset in the viewport.
+
+            The widget's screen region plus the container's scroll offset gives
+            its stable content origin, including the logo before the transcript.
+            Using rendered rows (rather than logical list indexes) also accounts
+            for wrapping.
+            """
+            try:
+                content_origin = stream_widget.region.y - container.region.y + container.scroll_y
+                local_top = max(0, int(container.scroll_y - content_origin))
+                visible_rows = max(1, int(container.scrollable_content_region.height))
+                for offset in range(visible_rows):
+                    row = stream_widget.render_line(local_top + offset).text.rstrip()
+                    if row.strip():
+                        return row, local_top + offset
+            except Exception:
+                pass
+            return None
+
+        def _queue_stream_viewport_reconcile(
+            self,
+            container: VerticalScroll,
+            *,
+            follow: bool,
+            previous_scroll_y: float,
+            previous_max_scroll_y: float,
+            previous_scroll_target_y: float,
+            anchor: tuple[str, int] | None,
+            front_trim_count: int,
+        ) -> None:
+            """Coalesce post-layout tail follow and retained-history anchoring."""
+            self._stream_render_generation += 1
+            generation = self._stream_render_generation
+            existing = self._deferred_stream_viewport
+            # A deliberate scroll between renders overrides an older queued
+            # follow. Compare target as well as current y: an animated user
+            # scrollbar drag may still be visually near the old tail.
+            if existing and existing.get("follow") and not follow:
+                existing = None
+            if existing:
+                previous_scroll_y = existing["scroll_y"]
+                previous_max_scroll_y = existing["max_scroll_y"]
+                previous_scroll_target_y = existing["target_y"]
+                # Keep the original retained row while a burst of front trims
+                # waits for one layout pass; intermediate updates can otherwise
+                # move Textual's numeric scroll before we reconcile it.
+                if not existing.get("follow"):
+                    anchor = existing.get("anchor")
+                    front_trim_count += existing.get("front_trim_count", 0)
+            self._deferred_stream_viewport = {
+                "session_generation": self._session_listener_generation,
+                "render_generation": generation,
+                "container": container,
+                "follow": follow,
+                "scroll_y": previous_scroll_y,
+                "max_scroll_y": previous_max_scroll_y,
+                "target_y": previous_scroll_target_y,
+                "anchor": anchor,
+                "front_trim_count": front_trim_count,
+                "user_scroll_generation": self._stream_user_scroll_generation,
+            }
+            if not self._stream_viewport_callback_pending:
+                self._stream_viewport_callback_pending = True
+                self._stream_viewport_callback_token += 1
+                callback_token = self._stream_viewport_callback_token
+                self.call_after_refresh(lambda: self._reconcile_stream_viewport(callback_token))
+
+        def _reconcile_stream_viewport(self, callback_token: int) -> None:
+            """Apply the latest viewport intent only after its layout is current."""
+            if callback_token != self._stream_viewport_callback_token:
+                return
+            self._stream_viewport_callback_pending = False
+            pending = self._deferred_stream_viewport
+            self._deferred_stream_viewport = None
+            if pending is None:
+                return
+            if (
+                pending["session_generation"] != self._session_listener_generation
+                or pending["render_generation"] != self._stream_render_generation
+            ):
+                return
+            container = pending["container"]
+            try:
+                # Both tail follow and retained-history anchoring are merely
+                # stale snapshots of viewer intent. A later wheel event must
+                # always win. The position/target guard also covers scrollbar
+                # drags and keyboard scrolling, which don't produce a wheel
+                # event on the app.
+                if pending["user_scroll_generation"] != self._stream_user_scroll_generation:
+                    return
+                if (
+                    abs(container.scroll_y - pending["scroll_y"]) > _STREAM_FOLLOW_TOLERANCE
+                    or abs(container.scroll_target_y - pending["target_y"]) > _STREAM_FOLLOW_TOLERANCE
+                ):
+                    return
+                if pending["follow"]:
+                    # Do not snap back when wheel/scrollbar input moved upward
+                    # after scheduling. target_y catches an in-flight animated
+                    # user scroll before scroll_y has reached that target.
+                    if (
+                        container.scroll_y < pending["scroll_y"] - _STREAM_FOLLOW_TOLERANCE
+                        or container.scroll_target_y < pending["target_y"] - _STREAM_FOLLOW_TOLERANCE
+                    ):
+                        return
+                    container.scroll_end(animate=False, immediate=True)
+                    return
+                anchor = pending["anchor"]
+                if anchor is not None:
+                    stream_widget = self.query_one("#stream", Static)
+                    anchor_text, previous_row = anchor
+                    row_index = self._find_stream_anchor_row(
+                        stream_widget,
+                        anchor_text,
+                        max(0, previous_row - pending["front_trim_count"]),
+                    )
+                    if row_index is not None:
+                        container.scroll_to(
+                            y=max(0, pending["scroll_y"] + row_index - previous_row),
+                            animate=False,
+                            immediate=True,
+                        )
+                        return
+                # The anchor was trimmed or is no longer rendered. Preserve
+                # the prior numeric position and let Textual safely clamp it.
+                container.scroll_to(y=pending["scroll_y"], animate=False, immediate=True)
+            except Exception:
+                return
+
+        @staticmethod
+        def _find_stream_anchor_row(stream_widget: Static, anchor_text: str, expected_row: int) -> int | None:
+            """Find one unambiguous retained row near its expected position.
+
+            Do not search a whole wrapped transcript here: this runs in
+            ``call_after_refresh`` on the UI thread. Duplicate text is not a
+            stable anchor, so fall back to Textual's safely clamped numeric
+            position rather than selecting an arbitrary matching row.
+            """
+            height = int(stream_widget.virtual_size.height)
+            start = max(0, expected_row - _STREAM_ANCHOR_SEARCH_ROWS)
+            stop = min(height, expected_row + _STREAM_ANCHOR_SEARCH_ROWS + 1)
+            matches = [
+                row_index
+                for row_index in range(start, stop)
+                if stream_widget.render_line(row_index).text.rstrip() == anchor_text
+            ]
+            return matches[0] if len(matches) == 1 else None
+
+        def on_mouse_scroll_up(self, event: Any) -> None:
+            """Invalidate a queued viewport restore after reader wheel input."""
+            if getattr(event, "control", None) is self.query_one("#stream_container", VerticalScroll):
+                self._stream_user_scroll_generation += 1
+
+        def on_mouse_scroll_down(self, event: Any) -> None:
+            """Invalidate a queued viewport restore after reader wheel input."""
+            if getattr(event, "control", None) is self.query_one("#stream_container", VerticalScroll):
+                self._stream_user_scroll_generation += 1
 
         def _refresh_logo(self) -> None:
             """Render startup artwork separately from the selectable transcript."""
@@ -1935,6 +2184,7 @@ if TEXTUAL_AVAILABLE:
             if before > MAX_RENDERED_LINES:
                 dropped = before - MAX_RENDERED_LINES
                 self._stream_lines = self._stream_lines[-MAX_RENDERED_LINES:]
+                self._stream_front_trim_pending += dropped
             else:
                 dropped = 0
 
@@ -2328,6 +2578,10 @@ if TEXTUAL_AVAILABLE:
                 approval_summary = self.query_one("#approval_summary", Static)
                 approval_summary.styles.background = theme.panel_bg
                 approval_summary.styles.color = theme.screen_fg
+                reason = self.query_one("#approval-reason", Input)
+                reason.styles.background = theme.panel_bg
+                reason.styles.color = theme.screen_fg
+                reason.styles.border = ("round", theme.input_border)
                 approval_actions = self.query_one("#approval_actions", Horizontal)
                 approval_actions.styles.background = theme.panel_bg
                 approval_actions.styles.color = theme.screen_fg
@@ -3308,6 +3562,7 @@ if TEXTUAL_AVAILABLE:
                 stream_widget = self.query_one("#stream")
                 stream_widget.update("")
                 self._stream_lines = []
+                self._stream_front_trim_pending = 0
                 self._reset_turn_timing()
                 self._assistant_has_live_delta = False
                 self._assistant_live_start_idx = -1
@@ -4123,45 +4378,50 @@ if TEXTUAL_AVAILABLE:
 
         def _approval_summary(self, pending: dict[str, Any]) -> Text:
             """Build the pending-approval summary using the active palette."""
-            sensitive = {"password", "passwd", "secret", "token", "apikey", "api_key", "authorization", "access_token"}
-            parts: list[str] = []
-            for key, value in pending["args"].items():
-                label = sanitize_display_text(str(key))[:80]
-                if label.lower().replace("-", "_") in sensitive:
-                    display = "[REDACTED]"
-                elif label in {"content", "text"} and isinstance(value, str):
-                    display = f"<{len(value)} chars>"
-                else:
-                    display = sanitize_display_text(json.dumps(value, ensure_ascii=False, default=str))[:160]
-                parts.append(f"{label}={display}")
-            args = ", ".join(parts)[:600]
+            args = SubagentMonitor.display_tool_args(pending["args"])[:600]
             queued = len(self._approval_waiters) - 1
             summary = Text("PENDING TOOL APPROVAL\n", style=f"bold {self._theme.warn}")
             body_style = self._theme.screen_fg
+            summary.append(f"Agent: {self._approval_origin_label(pending.get('origin'))}\n", style=body_style)
             summary.append(f"Tool: {sanitize_display_text(str(pending['tool']))}\n", style=body_style)
             summary.append(f"Arguments: {args or '{}'}\n", style=body_style)
             if queued:
                 summary.append(f"{queued} additional approval request(s) waiting\n", style=body_style)
-            summary.append("Approve runs this tool. Reject keeps it blocked.", style=body_style)
+            summary.append("Approve runs this tool. Reject sends the reason below.", style=body_style)
             return summary
+
+        def _approval_origin_label(self, origin: Any) -> str:
+            """Return a safe, bounded identity for the requesting session."""
+            if origin is None or origin is self.session:
+                return "Main agent"
+            session_id = sanitize_display_text(str(getattr(origin, "session_id", "unknown")))[:12]
+            task = ""
+            for child in self._monitor_snapshot.get("children", []):
+                if str(child.get("sessionId")) == str(getattr(origin, "session_id", "")):
+                    task = sanitize_display_text(str(child.get("task") or ""))[:80]
+                    break
+            return f"Child {session_id}" + (f": {task}" if task else "")
 
         def _install_approval_callback(self, session: Any) -> None:
             """Bind an approval callback to exactly one session lifetime."""
             async def callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
                 if self._approval_rebinding or session is not self.session:
                     return False, "Session changed"
-                return await self._approval_prompt(tool_name, args)
+                return await self._approval_prompt(tool_name, args, approval_callback_origin.get())
 
             session.approval_callback = callback
 
         def _show_next_approval(self) -> None:
             """Display exactly one FIFO approval request without taking input focus."""
+            previous = self._approval_pending
             self._approval_pending = self._approval_waiters[0] if self._approval_waiters else None
             try:
                 overlay = self.query_one("#approval_overlay", Vertical)
                 if self._approval_pending is None:
                     overlay.remove_class("visible")
                 else:
+                    if self._approval_pending is not previous:
+                        self.query_one("#approval-reason", Input).value = ""
                     self.query_one("#approval_summary", Static).update(self._approval_summary(self._approval_pending))
                     overlay.add_class("visible")
             except Exception:
@@ -4174,7 +4434,7 @@ if TEXTUAL_AVAILABLE:
                 return
             future = pending["future"]
             if not future.done():
-                future.set_result((approved, "" if approved else reason))
+                future.set_result((approved, "" if approved else reason.strip() or "Rejected by user"))
 
         def _reject_all_approvals(self, reason: str) -> None:
             for pending in tuple(self._approval_waiters):
@@ -4184,7 +4444,15 @@ if TEXTUAL_AVAILABLE:
             self._approval_waiters.clear()
             self._show_next_approval()
 
-        async def _approval_prompt(self, tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        def _approval_reason(self) -> str:
+            try:
+                return self.query_one("#approval-reason", Input).value.strip()
+            except Exception:
+                return ""
+
+        async def _approval_prompt(
+            self, tool_name: str, args: dict[str, Any], origin: Any = None
+        ) -> tuple[bool, str]:
             """Queue fail-closed approvals behind a dedicated overlay control."""
             # Children inherit this callback at spawn time. Once cooperation is
             # disabled on the parent, inherited callbacks must reject rather
@@ -4192,7 +4460,7 @@ if TEXTUAL_AVAILABLE:
             if self._cooperation_disabled:
                 return False, "Cooperation disabled"
             future: asyncio.Future[tuple[bool, str]] = asyncio.get_running_loop().create_future()
-            pending = {"tool": tool_name, "args": args, "future": future}
+            pending = {"tool": tool_name, "args": args, "origin": origin, "future": future}
             self._approval_waiters.append(pending)
             if self._approval_pending is None:
                 self._show_next_approval()
@@ -4283,7 +4551,7 @@ if TEXTUAL_AVAILABLE:
                 self._resolve_approval(True)
                 return
             if button_id == "approval-reject":
-                self._resolve_approval(False)
+                self._resolve_approval(False, self._approval_reason())
                 return
 
         def action_toggle_cooperation(self) -> None:
@@ -4313,7 +4581,7 @@ if TEXTUAL_AVAILABLE:
             self._resolve_approval(True)
 
         def action_reject_tool(self) -> None:
-            self._resolve_approval(False)
+            self._resolve_approval(False, self._approval_reason())
 
         def action_show_model_picker(self) -> None:
             """Open a small, authenticated-model-only picker using existing selection semantics."""
@@ -4399,9 +4667,11 @@ if TEXTUAL_AVAILABLE:
             # Clear is a lifecycle barrier: apply pending state transitions
             # first, then intentionally discard the visible transcript.
             self._flush_pending_ui_events()
+            self._invalidate_deferred_stream_viewport()
             stream_widget = self.query_one("#stream")
             stream_widget.update("")
             self._stream_lines = []
+            self._stream_front_trim_pending = 0
             self._clear_agent_link_metadata()
             self._rendered_stream_lines = ()
             with self._pending_ui_events_lock:

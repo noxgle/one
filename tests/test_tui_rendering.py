@@ -1117,12 +1117,188 @@ async def test_tui_welcome_logo_is_a_dedicated_non_transcript_widget(tmp_path: P
         assert "COOP: OFF" in header
         assert "STATUS: ready" in header
 
-        # Normal conversation rendering scrolls the shared stream container;
+        # Initial conversation rendering follows the shared stream container;
         # startup art is not a permanently fixed header.
         app._stream_lines.extend(f"conversation line {index}" for index in range(60))
         app._render_stream()
         await pilot.pause()
-        assert app.query_one("#stream_container").scroll_y > 0
+        stream = app.query_one("#stream_container")
+        assert stream.scroll_y == stream.max_scroll_y
+
+        # A normal update continues following only while already at the tail.
+        app._write("conversation delta")
+        await pilot.pause()
+        assert stream.scroll_y == stream.max_scroll_y
+
+
+@pytest.mark.asyncio
+async def test_tui_main_stream_preserves_scrolled_history_during_agent_activity(tmp_path: Path):
+    """Incoming assistant, tool, and child activity must not steal the viewport."""
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._stream_lines.extend(f"history-{index}" for index in range(120))
+        app._render_stream()
+        await pilot.pause()
+        container = app.query_one("#stream_container", VerticalScroll)
+        transcript = app.query_one("#stream", Static)
+        assert container.max_scroll_y > 10
+        container.scroll_to(y=5, animate=False)
+        await pilot.pause()
+        preserved_y = container.scroll_y
+        visible_before = transcript.render_line(int(preserved_y)).text
+        assert "history-" in visible_before
+
+        # Use the normal event path for live assistant/tool activity and keep
+        # the session marked active while a child-status line arrives.
+        app._turn_active = True
+        session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
+        session._emit(
+            {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "delta"}}
+        )
+        session._emit({"type": "tool_call_start", "tool": "read", "args": {"path": "notes.txt"}})
+        app._flush_pending_ui_events()
+        app._write("Subagent: child still working")
+        await pilot.pause()
+
+        assert container.scroll_y == preserved_y
+        assert container.scroll_y < container.max_scroll_y
+        assert transcript.render_line(int(container.scroll_y)).text == visible_before
+
+        # Returning to the tail explicitly re-enables follow for the next delta.
+        container.scroll_end(animate=False, immediate=True)
+        await pilot.pause()
+        session._emit(
+            {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": " again"}}
+        )
+        app._flush_pending_ui_events()
+        await pilot.pause()
+        assert container.scroll_y == container.max_scroll_y
+
+
+@pytest.mark.asyncio
+async def test_tui_main_stream_trimming_preserves_scrolled_viewport(tmp_path: Path):
+    """Front trimming retains the reader's visible history anchor when possible."""
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import MAX_RENDERED_LINES, _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._stream_lines.extend(f"history-{index}" for index in range(MAX_RENDERED_LINES))
+        app._render_stream()
+        await pilot.pause()
+        container = app.query_one("#stream_container", VerticalScroll)
+        container.scroll_to(y=50, animate=False)
+        await pilot.pause()
+        transcript = app.query_one("#stream", Static)
+        content_origin = transcript.region.y - container.region.y + container.scroll_y
+        visible_before = transcript.render_line(int(container.scroll_y - content_origin)).text
+        assert "history-" in visible_before
+
+        for index in range(12):
+            app._write(f"new-{index}")
+        await pilot.pause()
+
+        assert 0 <= container.scroll_y <= container.max_scroll_y
+        assert container.scroll_y < container.max_scroll_y
+        content_origin = transcript.region.y - container.region.y + container.scroll_y
+        assert transcript.render_line(int(container.scroll_y - content_origin)).text == visible_before
+
+
+@pytest.mark.asyncio
+async def test_tui_deferred_tail_follow_coalesces_and_respects_user_scroll(tmp_path: Path):
+    """A queued tail callback must not override a later wheel/scrollbar intent."""
+    from textual import events
+    from textual.containers import VerticalScroll
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._stream_lines.extend(f"history-{index}" for index in range(120))
+        app._render_stream()
+        await pilot.pause()
+        container = app.query_one("#stream_container", VerticalScroll)
+        container.scroll_end(animate=False, immediate=True)
+        await pilot.pause()
+
+        # Render schedules tail follow, then a real wheel event changes the
+        # user's target before Textual's deferred layout callback can run.
+        app._write("queued delta")
+        container.post_message(events.MouseScrollUp(container, 1, 1, 0, -1, 0, False, False, False))
+        await pilot.pause()
+        assert container.scroll_y < container.max_scroll_y
+
+        # Several renders before one layout pass still produce one final tail
+        # follow when the reader has deliberately returned to the tail.
+        container.scroll_end(animate=False, immediate=True)
+        app._write("first coalesced delta")
+        app._write("second coalesced delta")
+        await pilot.pause()
+        # The first barrier applies Static's layout; the deferred callback is
+        # observed at the following deterministic idle barrier.
+        await pilot.pause()
+        assert container.scroll_y == container.max_scroll_y
+
+
+@pytest.mark.asyncio
+async def test_tui_deferred_history_restore_respects_later_user_scroll(tmp_path: Path):
+    """A queued trim anchor must not restore an older reading position."""
+    from textual import events
+    from textual.containers import VerticalScroll
+
+    from one.modes.tui_mode import MAX_RENDERED_LINES, _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._stream_lines.extend(f"history-{index}" for index in range(MAX_RENDERED_LINES))
+        app._render_stream()
+        await pilot.pause()
+        container = app.query_one("#stream_container", VerticalScroll)
+        container.scroll_to(y=80, animate=False, immediate=True)
+        await pilot.pause()
+
+        # This update trims the front and queues a non-follow anchor restore.
+        app._write("trimmed update")
+        # A later reader movement must invalidate that stale restore.
+        container.post_message(events.MouseScrollUp(container, 1, 1, 0, -1, 0, False, False, False))
+        await pilot.pause()
+        assert container.scroll_y < 80
+
+
+def test_tui_stream_anchor_search_is_bounded_and_rejects_duplicates() -> None:
+    """Long wrapped output cannot turn one refresh callback into a full scan."""
+    from one.modes.tui_mode import _STREAM_ANCHOR_SEARCH_ROWS, _OneTextualApp
+
+    class _Line:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class _Stream:
+        class virtual_size:  # noqa: N801 - mirrors Textual's public attribute
+            height = 100_000
+
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        def render_line(self, row: int) -> _Line:
+            self.calls.append(row)
+            return _Line("duplicate" if row in {49_999, 50_001} else "other")
+
+    stream = _Stream()
+    assert _OneTextualApp._find_stream_anchor_row(stream, "duplicate", 50_000) is None  # type: ignore[arg-type]
+    assert len(stream.calls) <= 2 * _STREAM_ANCHOR_SEARCH_ROWS + 1
 
 
 @pytest.mark.asyncio

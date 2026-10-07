@@ -3,13 +3,14 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from one.core.agent_session import AgentSession
+from one.core.agent_session import AgentSession, approval_callback_origin
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
@@ -187,6 +188,34 @@ async def test_approval_finish_never_gated(tmp_path: Path):
     )
     await _prompt(agent, "just finish")
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_origin_is_per_call_and_resets_for_sync_and_async(tmp_path: Path):
+    """Shared callbacks can identify the requesting session without leaking context."""
+    sync_origins: list[AgentSession | None] = []
+
+    def sync_callback(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+        sync_origins.append(approval_callback_origin.get())
+        return True, ""
+
+    agent = _make_agent(tmp_path, [], approval_callback=sync_callback)
+    agent._approval_tools = {"plan"}
+    await agent._run_tool_call("plan", {"plan": [{"step": "one", "status": "pending"}]})
+    assert sync_origins == [agent]
+    assert approval_callback_origin.get() is None
+
+    async_origins: list[AgentSession | None] = []
+
+    async def async_callback(_tool: str, _args: dict[str, Any]) -> tuple[bool, str]:
+        await asyncio.sleep(0)
+        async_origins.append(approval_callback_origin.get())
+        return True, ""
+
+    agent.approval_callback = async_callback
+    await agent._run_tool_call("plan", {"plan": [{"step": "two", "status": "pending"}]})
+    assert async_origins == [agent]
+    assert approval_callback_origin.get() is None
 
 
 def test_settings_approval_defaults():

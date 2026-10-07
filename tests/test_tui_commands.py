@@ -949,6 +949,7 @@ async def test_tui_agents_and_approval_overlay_colors_follow_every_builtin_theme
             agents = app.query_one("#agents_overlay")
             approval = app.query_one("#approval_overlay")
             summary = app.query_one("#approval_summary")
+            reason = app.query_one("#approval-reason")
             actions = app.query_one("#approval_actions")
             approve = app.query_one("#approval-approve")
             reject = app.query_one("#approval-reject")
@@ -958,6 +959,9 @@ async def test_tui_agents_and_approval_overlay_colors_follow_every_builtin_theme
             assert all(border[1].hex.lower() == theme.panel_border for border in approval.styles.border)
             assert summary.styles.background.hex.lower() == theme.panel_bg
             assert summary.styles.color.hex.lower() == theme.screen_fg
+            assert reason.styles.background.hex.lower() == theme.panel_bg
+            assert reason.styles.color.hex.lower() == theme.screen_fg
+            assert all(border[1].hex.lower() == theme.input_border for border in reason.styles.border)
             assert actions.styles.background.hex.lower() == theme.panel_bg
             assert actions.styles.color.hex.lower() == theme.screen_fg
             assert approve.styles.background.hex.lower() == theme.user_bg
@@ -967,7 +971,7 @@ async def test_tui_agents_and_approval_overlay_colors_follow_every_builtin_theme
             assert reject.styles.color.hex.lower() == theme.error
             assert all(border[1].hex.lower() == theme.error for border in reject.styles.border)
             content = summary.content
-            assert str(content).startswith("PENDING TOOL APPROVAL\nTool: bash")
+            assert str(content).startswith("PENDING TOOL APPROVAL\nAgent: Main agent\nTool: bash")
             assert content.style == f"bold {theme.warn}"
             assert content.spans[0].style == theme.screen_fg
 

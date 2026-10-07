@@ -25,9 +25,17 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
-- **TUI cooperation approvals** — pending tool approvals now use explicit
-  approve/reject controls without consuming ordinary prompt input; concurrent
-  subagent approvals queue fail-closed.
+- **TUI main transcript scrolling** — incoming assistant, tool, and subagent
+  activity now follows output only when the viewer is already at the tail. Tail
+  follow is coalesced and respects later wheel/scrollbar input; retained history
+  stays anchored across viewport trimming where possible.
+- **TUI responsiveness during filesystem inspection** — synchronous built-in
+  `read`, `grep`, `find`, and `ls` bodies now run in a worker thread while the
+  shared asyncio loop continues to process UI input, approvals, and events.
+- **TUI cooperation approvals** — main and child tool approvals now share one
+  fail-closed FIFO overlay with a labeled origin, safe operation summary, and
+  dedicated rejection-reason field. Explicit buttons or Alt+A/Alt+R resolve
+  approvals; ordinary prompt input never does.
 - **Live subagent monitor layout** — `/agents` now renders the selected child
    header and chronological activity timeline inside one frame.
 - **TUI overlays** — `/agents` and cooperation approval surfaces, including their

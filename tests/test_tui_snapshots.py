@@ -268,14 +268,14 @@ async def test_tui_snapshot_base() -> None:
     app = _OneTextualApp(session)
 
     async with app.run_test(size=(120, 48)) as pilot:
-        await pilot.pause()
+        await _settle_snapshot(pilot, app)
 
         # Deterministic assistant + tool stream content.
         for line in _STREAM_LINES:
             app._stream_lines.append(line)
         app._render_stream()
         app._refresh_sidebar()
-        await pilot.pause()
+        await _settle_snapshot(pilot, app)
 
         # This snapshot covers the full visual-only logo rather than its
         # short-screen fallback.
@@ -297,7 +297,7 @@ async def test_tui_snapshot_widget_panel() -> None:
     app = _OneTextualApp(session)
 
     async with app.run_test(size=(100, 28)) as pilot:
-        await pilot.pause()
+        await _settle_snapshot(pilot, app)
 
         for line in _STREAM_LINES:
             app._stream_lines.append(line)
@@ -313,7 +313,7 @@ async def test_tui_snapshot_widget_panel() -> None:
                 "payload": {"mode": "quick"},
             }
         )
-        await pilot.pause()
+        await _settle_snapshot(pilot, app)
 
         content = _capture_content(app)
         _check_snapshot("widget_panel", content, update=UPDATE)
@@ -333,7 +333,7 @@ async def test_tui_snapshot_agents() -> None:
         app._open_agents_panel()
         await pilot.pause()
         app.query_one("#agents_timeline").scroll_end(animate=False)
-        await pilot.pause()
+        await _settle_snapshot(pilot, app)
 
         content = _normalize_svg_whitespace_only_lines(_capture_content(app))
         assert "Result:" in content
@@ -366,7 +366,7 @@ async def test_tui_snapshot_overlay() -> None:
                 "payload": {"step": 2},
             }
         )
-        await pilot.pause()
+        await _settle_snapshot(pilot, app)
 
         content = _capture_content(app)
         _check_snapshot("overlay", content, update=UPDATE)
@@ -375,6 +375,15 @@ async def test_tui_snapshot_overlay() -> None:
 # ---------------------------------------------------------------------------
 # Capture helper — tries export_screenshot(), falls back to text snapshot
 # ---------------------------------------------------------------------------
+
+
+async def _settle_snapshot(pilot: Any, app: Any) -> None:
+    """Wait through deferred stream layout before exporting a screenshot."""
+    await pilot.pause()
+    await pilot.wait_for_scheduled_animations()
+    await pilot.pause()
+    assert not app._stream_viewport_callback_pending
+    assert app._deferred_stream_viewport is None
 
 
 def _capture_content(app: Any) -> str:

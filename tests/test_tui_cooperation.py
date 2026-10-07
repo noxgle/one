@@ -224,6 +224,55 @@ async def test_tui_ctrl_c_without_pending_approval_aborts_session(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_tui_main_and_child_approvals_share_fifo_overlay(tmp_path: Path) -> None:
+    """Main and child requests share one labeled fail-closed FIFO overlay."""
+    from one.core.agent_session import AgentSession
+    from one.core.session_manager import SessionManager
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        app.action_toggle_cooperation()
+        callback = session.approval_callback
+        assert callback is not None
+        child = AgentSession(
+            SessionManager.in_memory(str(tmp_path)),
+            session.settings_manager,
+            session.model_registry,
+            session.resource_loader,
+            session.model,
+            session.thinking_level,
+            tools=["write"],
+            approval_callback=callback,
+            cooperation_state=session._cooperation_state,
+        )
+        main_task = asyncio.create_task(session._run_tool_call("write", {"path": "main.txt", "content": "main"}))
+        child_task = asyncio.create_task(child._run_tool_call("write", {"path": "child.txt", "content": "child"}))
+        await pilot.pause()
+        assert app._approval_pending is not None
+        assert len(app._approval_waiters) == 2
+        assert "Main agent" in str(app.query_one("#approval_summary").content)
+
+        # Main prompt remains a normal prompt and cannot resolve either request.
+        prompts: list[str] = []
+
+        async def prompt(text: str, **_kwargs: object) -> None:
+            prompts.append(text)
+
+        session.prompt = prompt  # type: ignore[method-assign]
+        await _submit(app, pilot, "ordinary prompt")
+        assert prompts == ["ordinary prompt"]
+        assert not child_task.done()
+        await pilot.press("alt+a")
+        assert (await asyncio.wait_for(main_task, timeout=2))["ok"] is True
+        await pilot.pause()
+        assert "Child " in str(app.query_one("#approval_summary").content)
+        await pilot.press("alt+a")
+        assert (await asyncio.wait_for(child_task, timeout=2))["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_tui_approval_controls_do_not_steal_normal_prompt_input(tmp_path: Path) -> None:
     from textual.containers import Vertical
 
@@ -245,8 +294,57 @@ async def test_tui_approval_controls_do_not_steal_normal_prompt_input(tmp_path: 
         await pilot.pause()
         assert prompts == ["ordinary prompt"]
         assert not approval.done()
-        await pilot.click("#approval-approve")
-        assert await approval == (True, "")
+        await pilot.press("alt+a")
+        assert await asyncio.wait_for(approval, timeout=2) == (True, "")
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_reason_uses_its_own_field_and_enter_is_inert(tmp_path: Path) -> None:
+    """Typing a reason, including Enter, cannot submit a prompt or approve."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    prompts: list[str] = []
+
+    async def prompt(text: str, **_kwargs: object) -> None:
+        prompts.append(text)
+
+    session.prompt = prompt  # type: ignore[method-assign]
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        approval = asyncio.create_task(app._approval_prompt("write", {"path": "x.txt"}))
+        await pilot.pause()
+        await pilot.click("#approval-reason")
+        await pilot.press(*"keep it")
+        await pilot.press("enter")
+        await pilot.press(*"unchanged")
+        assert not approval.done()
+        assert prompts == []
+        await pilot.press("alt+r")
+        assert await approval == (False, "keep itunchanged")
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_reason_resets_for_next_request_but_not_theme_refresh(tmp_path: Path) -> None:
+    """A theme refresh preserves a current draft; FIFO promotion starts blank."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        first = asyncio.create_task(app._approval_prompt("write", {"path": "one"}))
+        second = asyncio.create_task(app._approval_prompt("bash", {"command": "two"}))
+        await pilot.pause()
+        await pilot.click("#approval-reason")
+        await pilot.press(*"first reason")
+        assert app.query_one("#approval-reason").value == "first reason"
+        assert app._apply_theme("fallout")
+        assert app.query_one("#approval-reason").value == "first reason"
+        await pilot.press("alt+r")
+        assert await first == (False, "first reason")
+        await pilot.pause()
+        assert app.query_one("#approval-reason").value == ""
+        await pilot.press("alt+r")
+        assert await second == (False, "Rejected by user")
 
 
 @pytest.mark.asyncio
@@ -275,8 +373,6 @@ async def test_tui_approval_queue_serializes_and_cooperation_off_rejects_all(tmp
 
 @pytest.mark.asyncio
 async def test_tui_rebind_rejects_queued_approvals_and_old_callback(tmp_path: Path) -> None:
-    from textual.containers import Vertical
-
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -289,7 +385,6 @@ async def test_tui_rebind_rejects_queued_approvals_and_old_callback(tmp_path: Pa
         approval = asyncio.ensure_future(old_callback("write", {"path": "one"}))
         queued = asyncio.ensure_future(old_callback("bash", {"command": "two"}))
         await pilot.pause()
-        assert app.query_one("#approval_overlay", Vertical).has_class("visible")
         futures = [pending["future"] for pending in app._approval_waiters]
         assert app._bound_session is session
         assert len(futures) == 2
@@ -300,7 +395,6 @@ async def test_tui_rebind_rejects_queued_approvals_and_old_callback(tmp_path: Pa
         assert await approval == (False, "Session changed")
         assert await queued == (False, "Session changed")
         assert app._approval_pending is None
-        assert not app.query_one("#approval_overlay", Vertical).has_class("visible")
         assert await asyncio.wait_for(old_callback("write", {"path": "late"}), timeout=1) == (False, "Session changed")
 
 

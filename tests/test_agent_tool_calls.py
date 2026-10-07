@@ -3,7 +3,9 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,82 @@ class _ThinkingFakeProvider:
         if thinking and on_thinking_delta:
             on_thinking_delta(thinking)
         return ChatResult(text=text, raw={}, usage={}, stop_reason="stop", had_thinking=bool(thinking.strip()))
+
+
+def _read_only_agent(tmp_path: Path, tools: list[str]) -> AgentSession:
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    return AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=tools
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("read", {"path": "item"}),
+        ("grep", {"pattern": "item"}),
+        ("find", {"pattern": "item"}),
+        ("ls", {}),
+    ],
+)
+async def test_read_only_builtin_tools_run_in_a_worker_and_keep_lifecycle_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_name: str, args: dict[str, str]
+) -> None:
+    """Only synchronous read-only built-ins leave the event-loop thread."""
+    loop_thread = threading.get_ident()
+    called_threads: list[int] = []
+
+    def stub(*_args: object) -> dict[str, object]:
+        called_threads.append(threading.get_ident())
+        return {"ok": True, "output": f"{tool_name} result"}
+
+    monkeypatch.setattr(all_tools[tool_name], "fn", stub)
+    agent = _read_only_agent(tmp_path, [tool_name])
+    events: list[dict[str, object]] = []
+    agent.subscribe(events.append)
+
+    result = await agent._run_tool_call(tool_name, args)
+
+    assert result["result"] == f"{tool_name} result"
+    assert called_threads and called_threads == [called_threads[0]]
+    assert called_threads[0] != loop_thread
+    assert [event["type"] for event in events if event["type"] in {"tool_call_start", "tool_call_end"}] == [
+        "tool_call_start",
+        "tool_call_end",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_slow_read_only_tool_does_not_block_the_asyncio_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blocked filesystem read leaves UI/provider-loop heartbeats runnable."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_read(*_args: object) -> dict[str, object]:
+        started.set()
+        assert release.wait(timeout=2)
+        return {"ok": True, "output": "done"}
+
+    monkeypatch.setattr(all_tools["read"], "fn", slow_read)
+    agent = _read_only_agent(tmp_path, ["read"])
+    task = asyncio.create_task(agent._execute_tool_by_name("read", {"path": "slow.txt"}))
+    await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1)
+
+    heartbeat = asyncio.Event()
+
+    async def tick() -> None:
+        await asyncio.sleep(0)
+        heartbeat.set()
+
+    asyncio.create_task(tick())
+    await asyncio.wait_for(heartbeat.wait(), timeout=0.1)
+    release.set()
+    assert await task == {"ok": True, "output": "done"}
 
 
 @pytest.mark.parametrize(

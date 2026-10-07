@@ -155,6 +155,12 @@ tool lifecycle status, retains sessions, and accepts slash commands such as
 `/help`, `/agents`, `/steer`, `/follow`, `/abort`, `/login`, and `/mcp list`. It displays a
 startup banner and status information.
 
+The TUI and agent share one asyncio loop; they are not separate agent threads.
+Blocking built-in read-only filesystem operations (`read`, `grep`, `find`, and
+`ls`) run in a worker thread so streaming, input, and approvals remain
+responsive. Mutating tools and provider/MCP operations retain their existing
+dispatch behavior.
+
 `/agents` opens a read-only monitor for direct child agents of the current
 session only. One frame shows the selected child's header and bounded live response/tool
 timeline. Each tool call is one row that changes from running to completed and includes a

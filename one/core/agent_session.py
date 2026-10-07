@@ -16,6 +16,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,11 @@ from one.providers.registry import build_provider_registry
 from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, find_worktree
 from one.tools.index import all_tools, native_tool_definitions
 from one.tools.plan import plan_tool, render_plan
+
+# Set only while an approval callback is being invoked.  Callbacks are shared
+# with children, so this identifies the session that actually requested the
+# decision rather than the session that originally installed the callback.
+approval_callback_origin: ContextVar[AgentSession | None] = ContextVar("approval_callback_origin", default=None)
 
 # Grace period added to the effective tool timeout for the outer asyncio.wait_for backstop.
 _TOOL_TIMEOUT_GRACE_SEC = 5
@@ -1167,7 +1173,12 @@ class AgentSession:
                 }
 
         if tool_name == "read":
-            result = fn(cwd, path_arg or "", args.get("offset"), args.get("limit"))
+            # Filesystem reads can block on slow mounts. Keep lifecycle events,
+            # approvals, and result handling on this loop; only these pure
+            # built-in read-only bodies run in the worker thread. Cancelling
+            # this await cannot stop an already-running read, but it has no
+            # mutation effects.
+            result = await asyncio.to_thread(fn, cwd, path_arg or "", args.get("offset"), args.get("limit"))
         elif tool_name == "read_image":
             result = fn(cwd, path_arg or "", self._storage_dir or "")
         elif tool_name == "write":
@@ -1180,11 +1191,11 @@ class AgentSession:
             assert isinstance(patch_text, str)
             result = fn(cwd, patch_text)
         elif tool_name == "grep":
-            result = fn(cwd, args.get("pattern", ""), args.get("path", "."))
+            result = await asyncio.to_thread(fn, cwd, args.get("pattern", ""), args.get("path", "."))
         elif tool_name == "find":
-            result = fn(cwd, args.get("pattern", "*"), args.get("path", "."))
+            result = await asyncio.to_thread(fn, cwd, args.get("pattern", "*"), args.get("path", "."))
         elif tool_name == "ls":
-            result = fn(cwd, args.get("path", "."))
+            result = await asyncio.to_thread(fn, cwd, args.get("path", "."))
         elif tool_name == "bash":
             result = fn(cwd, args.get("command", ""), effective_timeout, self.settings_manager.get_shell_command_prefix())
         elif tool_name == "finish":
@@ -1309,9 +1320,13 @@ class AgentSession:
         )
         if requires_approval:
             # Cooperation mode: ask the user before executing a mutating tool.
-            decision = self.approval_callback(tool_name, args)
-            if inspect.isawaitable(decision):
-                decision = await decision
+            origin_token = approval_callback_origin.set(self)
+            try:
+                decision = self.approval_callback(tool_name, args)
+                if inspect.isawaitable(decision):
+                    decision = await decision
+            finally:
+                approval_callback_origin.reset(origin_token)
             approved, reason = decision
             if not approved:
                 reason = (reason or "").strip() or "No reason given"

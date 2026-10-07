@@ -75,8 +75,11 @@ Inspect this repository and explain its structure. Do not edit files or run
 commands that change anything. Point me to the three most important files.
 ```
 
-When the agent proposes a tool action, read the approval request before
-accepting it. Use `Ctrl+C` to reject a pending approval or abort the current turn.
+When an agent proposes a tool action, read the shared approval request before
+accepting it. It identifies the main or child agent and has explicit
+Approve/Reject controls (or `Alt+A`/`Alt+R`); enter an optional rejection reason
+in its own field. Normal prompt input is never treated as an approval. Use
+`Ctrl+C` to reject a pending approval or abort the current turn.
 
 More copy-and-paste prompts are in [EXAMPLES.md](EXAMPLES.md).
 
