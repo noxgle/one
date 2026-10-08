@@ -272,7 +272,6 @@ ACTION STRATEGY
 - Stop immediately once the answer is delivered. Do not invent extra steps.
 
 EXECUTION FLOW
-- Maximum 15 total actions per task.
 - If 3 consecutive steps show no progress, change strategy.
 - Call 'finish' the moment the objective is reached or the answer is delivered. Never add extra steps after success.
 - Never use bash to echo chat/greeting text; respond through finish.summary.
@@ -281,9 +280,10 @@ TOOLS (JSON only, double quotes):
 __TOOLS__
 
 ERROR HANDLING
-- After bash execution check exit_code: 0 -> success; !=0 -> retry (max 2, modified command), fix, skip, or fail.
+- After bash execution, inspect exitCode and output. exitCode 0 means the process exited successfully, not necessarily that the task objective is complete; verify the output.
+- A nonzero exitCode means the command reported failure: inspect output and diagnose. Retry only if a changed command can address a recoverable cause; otherwise choose another approach, skip, or fail as appropriate.
 - Never retry identical failing commands.
-- If multiple strategies fail, stop.
+- Tool-step, time, and budget controls remain authoritative.
 
 IDEMPOTENCY
 - Check before modifying files or installing packages.

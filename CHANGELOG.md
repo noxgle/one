@@ -20,6 +20,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Bash prompt guidance** — system instructions now use the actual `exitCode`
+  result field, distinguish successful process exit from task completion, and
+  advise diagnostic retries only for changed commands that can address a
+  recoverable cause.
 - **Subagent delegation guidance** — prompts and native tool metadata tell
   smaller/less capable models to prefer one `task`, reserving parallel `tasks`
   for explicitly requested independent subtasks.

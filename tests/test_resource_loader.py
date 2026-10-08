@@ -87,6 +87,23 @@ def test_prompt_includes_plan_completion_and_reporting_integrity_rules():
     assert "Do not claim changes or verification without a successful, observed tool result." in prompt
 
 
+def test_prompt_has_accurate_bash_exit_and_retry_guidance() -> None:
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+
+    prompt = loader.get_system_prompt(selected_tools=["bash"])
+
+    assert "Maximum 15 total actions per task." not in prompt
+    assert "exit_code" not in prompt
+    assert "exitCode" in prompt
+    assert "exitCode 0 means the process exited successfully, not necessarily that the task objective is complete" in prompt
+    assert "verify the output" in prompt
+    assert "A nonzero exitCode means the command reported failure" in prompt
+    assert "Retry only if a changed command can address a recoverable cause" in prompt
+    assert "Never retry identical failing commands." in prompt
+    assert "max 2" not in prompt
+    assert "Tool-step, time, and budget controls remain authoritative." in prompt
+
+
 def test_prompt_includes_complexity_aware_planning_policy():
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
     prompt = loader.get_system_prompt(selected_tools=["read", "plan", "finish"])
