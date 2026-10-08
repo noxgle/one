@@ -690,6 +690,13 @@ def test_every_builtin_native_tool_has_a_meaningful_json_schema() -> None:
     assert "separate read_image tool instead for image files" in read["description"]
     ask_user = next(definition for definition in definitions if definition["name"] == "ask_user")
     finish = next(definition for definition in definitions if definition["name"] == "finish")
+    spawn_subagent = next(definition for definition in definitions if definition["name"] == "spawn_subagent")
     assert "continue the same task" in ask_user["description"]
     assert "materially ambiguous requirements" in ask_user["description"]
     assert "do not use finish to ask for missing information" in finish["description"]
+    assert "For smaller/less capable models, prefer one child with exactly one non-empty 'task' string." in spawn_subagent["description"]
+    assert "Use non-empty 'tasks' (list[str]) only when multiple independent parallel subtasks are explicitly requested." in spawn_subagent["description"]
+    assert "Provide exactly one of 'task' or 'tasks'; never both." in spawn_subagent["description"]
+    assert '{"task":"inspect X"}' in spawn_subagent["description"]
+    assert '{"tasks":["inspect X","inspect Y"]}' in spawn_subagent["description"]
+    assert spawn_subagent["parameters"]["oneOf"] == [{"required": ["task"]}, {"required": ["tasks"]}]

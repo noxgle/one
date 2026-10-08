@@ -20,6 +20,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Subagent delegation guidance** — prompts and native tool metadata tell
+  smaller/less capable models to prefer one `task`, reserving parallel `tasks`
+  for explicitly requested independent subtasks.
 - **Read tool guidance** — prompts and native tool metadata now explain its path,
   line-offset, and line-limit arguments, bounded output, and image handling.
 
