@@ -338,6 +338,29 @@ class TuiRuntimeHost:
             return await self.ui_operation(payload["operation"], payload["payload"])
         raise ValueError(f"invalid TUI runtime command payload: {command}")
 
+    def _mcp_snapshot(self) -> list[dict[str, Any]]:
+        """Return the sole compact, schema-free MCP display DTO."""
+        mcp = getattr(self, "_mcp", None)
+        mcp_servers = []
+        for item in (mcp.server_status() if mcp is not None else []):
+            if not isinstance(item, dict):
+                continue
+            runtime_state = str(item.get("runtimeState") or "configured").lower()
+            enabled = bool(item.get("enabled"))
+            running = bool(item.get("running"))
+            error = item.get("error")
+            mcp_servers.append({
+                "name": _bounded_snapshot_text(item.get("name"))[:256],
+                "enabled": enabled,
+                "running": running,
+                "transport": _bounded_snapshot_text(item.get("transport"))[:64],
+                "runtimeState": runtime_state,
+                "available": enabled and running and not error and runtime_state not in {"failed", "retrying", "disabled"},
+                "toolCount": len(item.get("tools") or []),
+                "error": _bounded_snapshot_text(error)[:512] if isinstance(error, str) else "",
+            })
+        return mcp_servers
+
     def _sidebar(self) -> dict[str, Any]:
         session = self._session()
         model = session.model
@@ -381,8 +404,7 @@ class TuiRuntimeHost:
                 "followUp" if getattr(session, "follow_up_mode", "queue") == "follow_up" else "steer"
             ) if session.is_streaming else "idle",
             "mcpEnabled": self._mcp is not None,
-            # Compact MCP status is published separately; never duplicate
-            # potentially schema-bearing records inside the sidebar DTO.
+            "toolResultPreviewLines": session.settings_manager.get_tui_tool_result_preview_lines(),
         }
 
     def _snapshot(self) -> dict[str, Any]:
@@ -474,15 +496,6 @@ class TuiRuntimeHost:
                 if isinstance(child, dict)
             ],
         }
-        mcp = getattr(self, "_mcp", None)
-        # MCP status contains implementation details (and sometimes schemas).
-        # Snapshot only display-safe operational state.
-        mcp_status = [
-            {key: _bounded_snapshot_text(item.get(key))[:512] if isinstance(item.get(key), str) else item.get(key)
-             for key in ("name", "status", "enabled", "error", "retrying") if key in item}
-            for item in (mcp.server_status() if mcp is not None else [])[:32]
-            if isinstance(item, dict)
-        ]
         questions = [
             {"id": str(item.get("id", ""))[:256], "question": _bounded_snapshot_text(item.get("question"))[:1024], "epoch": self._epoch}
             for item in getattr(self._session(), "get_pending_questions", lambda: [])()[:16]
@@ -495,9 +508,11 @@ class TuiRuntimeHost:
         } if getattr(self, "_approval_active", None) else None
         if approval is not None:
             approval["epoch"] = self._epoch
+        sidebar = self._sidebar()
+        mcp_status = self._mcp_snapshot()
         snapshot = {
             "epoch": self._epoch,
-            "sidebar": self._sidebar(),
+            "sidebar": sidebar,
             "messages": messages,
             "models": {"count": model_count, "paged": True},
             "monitor": monitor_snapshot,
@@ -773,7 +788,11 @@ class TuiRuntimeHost:
             return self._json({"key": key, "value": current})
         if operation == "config_set":
             session.settings_manager.set_config_value(str(payload["key"]), payload["value"])
-            return {"updated": str(payload["key"])}
+            # Return the authoritative detached sidebar so TUI-only settings
+            # take effect immediately without holding a UI-side settings copy.
+            result = self._snapshot()
+            result["updated"] = str(payload["key"])
+            return result
         if operation == "cooperation_status":
             return {
                 "enabled": session.approval_callback is not None,

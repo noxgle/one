@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import threading
 import time
@@ -1999,7 +2000,7 @@ async def test_tui_persisted_tool_result_and_manual_bash_output_use_local_panels
 
     session = _mk_app_session(tmp_path)
     session.messages.extend([
-        {"role": "toolResult", "content": "saved output"},
+        {"role": "toolResult", "content": json.dumps({"outputText": "saved output", "args": {"secret": "hidden"}})},
         {"role": "bashExecution", "command": "cat legacy.txt", "output": "\x1b[31mlegacy [b] output\x1b[0m", "exitCode": 0},
     ])
     app = _OneTextualApp(session)
@@ -2008,6 +2009,7 @@ async def test_tui_persisted_tool_result_and_manual_bash_output_use_local_panels
         app._rebuild_session_transcript()
         rebuilt = "\n".join(app._stream_lines)
         assert "Result:" in rebuilt
+        assert "saved output" in rebuilt and '"args"' not in rebuilt and "hidden" not in rebuilt
         assert "Command:" in rebuilt
         assert "/bash cat legacy.txt" in rebuilt
         assert "legacy [b] output" in rebuilt

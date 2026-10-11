@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import math
 import os
@@ -345,7 +346,7 @@ def build_sidebar_snapshot(
                 {
                     "name": str(status.get("name") or ""),
                     "transport": str(status.get("transport") or ""),
-                    "toolCount": len(status.get("tools") or []),
+                    "toolCount": int(status.get("toolCount", len(status.get("tools") or [])) or 0),
                     "running": bool(status.get("running")),
                     "error": status.get("error"),
                     "available": (
@@ -373,7 +374,9 @@ def build_sidebar_snapshot(
             "mcpEnabled": False, "mcpServers": [],
         }
         defaults.update(sidebar)
-        defaults["mcpServers"] = normalize_mcp_servers(defaults.get("mcpServers"))
+        # Snapshot.mcp is retained as a compatibility alias; the sidebar DTO is
+        # authoritative and already contains no schemas or raw status records.
+        defaults["mcpServers"] = normalize_mcp_servers(defaults.get("mcpServers") or session.snapshot.get("mcp"))
         return defaults
     usage = session.get_context_usage() or {}
     queues = session.get_pending_queues() or {"steering": [], "followUp": []}
@@ -1435,6 +1438,7 @@ if TEXTUAL_AVAILABLE:
             # cache independent of list position.  _trim_stream repairs this
             # parallel projection for a few legacy test/direct append paths.
             self._stream_line_ids: list[int] = []
+            self._stream_line_values: list[str] = []
             self._next_stream_line_id = 0
             self._stream_content_cache: dict[tuple[int, str, int, str, tuple[tuple[int, str], ...]], Content] = {}
             self._stream_cache_width = -1
@@ -1582,6 +1586,10 @@ if TEXTUAL_AVAILABLE:
             self._next_agent_link_token = 0
             self._evidence_link_tokens: dict[int, tuple[int, str, int, int]] = {}
             self._evidence_links_by_line: dict[int, tuple[int, ...]] = {}
+            # Evidence actions are attached to immutable retained line IDs, not
+            # mutable list offsets.  Tool completion and front trimming can
+            # splice the display list after a link was created.
+            self._evidence_link_line_ids: dict[int, int] = {}
             self._next_evidence_link_token = 0
             self._evidence_panel: dict[str, Any] | None = None
             # Increment before scheduling so stale coroutines cannot reopen a
@@ -1792,6 +1800,9 @@ if TEXTUAL_AVAILABLE:
             self._selected_agent_id = None
             self._agents_panel_open = False
             self._clear_agent_link_metadata()
+            self._evidence_link_tokens.clear()
+            self._evidence_links_by_line.clear()
+            self._evidence_link_line_ids.clear()
             with self._monitor_dirty_lock:
                 self._monitor_dirty = False
             if isinstance(self.session, TuiSessionView):
@@ -1885,6 +1896,7 @@ if TEXTUAL_AVAILABLE:
             """Replace the viewport cache with the loaded durable transcript."""
             self._stream_lines = []
             self._stream_line_ids = []
+            self._stream_line_values = []
             self._stream_content_cache.clear()
             self._stream_front_trim_pending = 0
             self._clear_agent_link_metadata()
@@ -1916,7 +1928,18 @@ if TEXTUAL_AVAILABLE:
                     if not historical_abort:
                         self._write_chat_block(role, str(content))
                 elif role == "toolResult":
-                    self._write_result_block(str(content))
+                    # Durable tool-result content is a JSON envelope. Render
+                    # its visible projection, not the envelope's raw fields.
+                    display_content = str(content)
+                    try:
+                        payload = json.loads(display_content)
+                    except (TypeError, ValueError):
+                        payload = None
+                    if isinstance(payload, dict):
+                        value = payload.get("outputText", payload.get("error", payload.get("result", display_content)))
+                        if isinstance(value, str):
+                            display_content = value
+                    self._write_result_block(display_content)
                     evidence_id = message.get("evidenceId")
                     if isinstance(evidence_id, str):
                         self._write_evidence_link(evidence_id, unavailable=bool(message.get("evidenceUnavailable")))
@@ -2257,21 +2280,45 @@ if TEXTUAL_AVAILABLE:
                 self.call_after_refresh(self._render_stream)
 
         def _sync_stream_line_ids(self) -> None:
-            """Keep stable IDs aligned even for legacy direct list mutations."""
+            """Keep IDs stable across append, trim, and arbitrary list splices."""
             if not self._stream_lines:
                 self._stream_line_ids = []
+                self._stream_line_values = []
                 return
-            if len(self._stream_line_ids) > len(self._stream_lines):
-                self._stream_line_ids = self._stream_line_ids[-len(self._stream_lines) :]
+            if len(self._stream_line_values) == len(self._stream_line_ids) and self._stream_line_values:
+                ids: list[int | None] = [None] * len(self._stream_lines)
+                # Matching blocks preserve identity even when completion
+                # replaces a tool body or a caller inserts/deletes before it.
+                matcher = difflib.SequenceMatcher(a=self._stream_line_values, b=self._stream_lines, autojunk=False)
+                for old_start, new_start, size in matcher.get_matching_blocks():
+                    for offset in range(size):
+                        ids[new_start + offset] = self._stream_line_ids[old_start + offset]
+                self._stream_line_ids = [item for item in ids if item is not None]
+                # Fill below in exact current-list order, rather than retaining
+                # an index-based suffix from the old presentation.
+                if len(self._stream_line_ids) != len(self._stream_lines):
+                    rebuilt: list[int] = []
+                    for item in ids:
+                        if item is None:
+                            self._next_stream_line_id += 1
+                            rebuilt.append(self._next_stream_line_id)
+                        else:
+                            rebuilt.append(item)
+                    self._stream_line_ids = rebuilt
             while len(self._stream_line_ids) < len(self._stream_lines):
                 self._next_stream_line_id += 1
                 self._stream_line_ids.append(self._next_stream_line_id)
+            self._stream_line_values = list(self._stream_lines)
 
         def _cached_stream_content_line(self, line_index: int, line: str, width: int) -> Content:
             line_id = self._stream_line_ids[line_index]
             tokens = self._agent_links_by_line.get(line_index, ())
             links = tuple((token, self._agent_link_labels[token]) for token in tokens if token in self._agent_link_labels)
-            key = (line_id, line, width, self._theme.name, links)
+            evidence_links = tuple(
+                token for token, linked_line_id in self._evidence_link_line_ids.items()
+                if linked_line_id == line_id and token in self._evidence_link_tokens
+            )
+            key = (line_id, line, width, self._theme.name, links, evidence_links)
             cached = self._stream_content_cache.get(key)
             if cached is not None:
                 self._stream_cache_hits += 1
@@ -2521,9 +2568,11 @@ if TEXTUAL_AVAILABLE:
                 if token in self._agent_link_labels
                 and self._agent_link_tokens.get(token, (None,))[0] == self._monitor_generation
             ]
+            line_id = self._stream_line_ids[line_index]
             evidence_links = [
                 (token, "[view]")
-                for token in self._evidence_links_by_line.get(line_index, ())
+                for token, linked_line_id in self._evidence_link_line_ids.items()
+                if linked_line_id == line_id
                 if token in self._evidence_link_tokens
                 and self._evidence_link_tokens[token][0] == self._monitor_generation
                 and (
@@ -2990,6 +3039,8 @@ if TEXTUAL_AVAILABLE:
                 self.session.epoch if isinstance(self.session, TuiSessionView) else 0,
             )
             self._evidence_links_by_line[line] = (*self._evidence_links_by_line.get(line, ()), token)
+            self._sync_stream_line_ids()
+            self._evidence_link_line_ids[token] = self._stream_line_ids[line]
             self._rendered_stream_lines = ()
             self._schedule_stream_render()
 
@@ -3101,6 +3152,7 @@ if TEXTUAL_AVAILABLE:
                 )
                 self._stream_lines = self._stream_lines[desired_start:]
                 self._stream_line_ids = self._stream_line_ids[desired_start:]
+                self._stream_line_values = self._stream_line_values[desired_start:]
                 # Reconciliation works in rendered rows, not logical entries:
                 # one removed long line can otherwise move a retained anchor
                 # beyond the bounded lookup window.
@@ -3128,6 +3180,11 @@ if TEXTUAL_AVAILABLE:
                 self._evidence_links_by_line = {
                     line - dropped: tuple(token for token in tokens if token in self._evidence_link_tokens)
                     for line, tokens in self._evidence_links_by_line.items() if line >= dropped
+                }
+                retained_line_ids = set(self._stream_line_ids)
+                self._evidence_link_line_ids = {
+                    token: line_id for token, line_id in self._evidence_link_line_ids.items()
+                    if token in self._evidence_link_tokens and line_id in retained_line_ids
                 }
 
             # --- rebase assistant live bookkeeping ------------------------
@@ -3345,7 +3402,7 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.append("")
             self._stream_lines.append(heading)
             start = len(self._stream_lines)
-            panel_lines = self._bounded_tool_panel(text)
+            panel_lines = self._bounded_tool_panel(text, result=heading == "Result:")
             self._stream_lines.extend(panel_lines)
             end = len(self._stream_lines)
             self._stream_lines.append("")
@@ -3424,11 +3481,33 @@ if TEXTUAL_AVAILABLE:
             self._stream_lines.extend(("", "Plan: cleared", ""))
             self._trim_stream()
 
-        def _bounded_tool_panel(self, text: str) -> list[str]:
-            panel_lines = self._format_chat_panel("tool", text, pad_y=0)
-            display_limit = 40
-            if len(panel_lines) > display_limit:
-                return ["[tool output preview; full result remains in evidence]", *panel_lines[:display_limit]]
+        def _tool_result_preview_lines(self) -> int:
+            if isinstance(self.session, TuiSessionView):
+                value = self.session.snapshot["sidebar"].get("toolResultPreviewLines", 100)
+            else:
+                value = getattr(self.session.settings_manager, "get_tui_tool_result_preview_lines", lambda: 100)()
+            return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 1000 else 100
+
+        def _bounded_tool_panel(self, text: str, *, result: bool = False) -> list[str]:
+            """Bound result previews by source lines before terminal wrapping.
+
+            Tool headings and plans use their normal presentation bounds; only
+            result payloads use the configurable logical-line preview setting.
+            """
+            if not result:
+                return self._format_chat_panel("tool", text, pad_y=0)
+            logical_lines = text.splitlines() or [text]
+            limit = self._tool_result_preview_lines()
+            truncated = len(logical_lines) > limit
+            visible = "\n".join(logical_lines[:limit])
+            # The transport/display byte cap remains authoritative. State that
+            # fact rather than implying that a short rendered preview is full.
+            byte_cutoff = len(visible.encode("utf-8")) > MAX_SOURCE_DISPLAY_BYTES
+            panel_lines = self._format_chat_panel("tool", visible, pad_y=0)
+            if truncated:
+                panel_lines.append(f"[preview limited to {limit} logical lines]")
+            elif byte_cutoff:
+                panel_lines.append("[preview stopped at display byte limit]")
             return panel_lines
 
         def _finish_tool_block(self, tool_name: str, status: str, elapsed_ms: Any = None) -> bool:
@@ -3900,6 +3979,7 @@ if TEXTUAL_AVAILABLE:
             self._active_subagent_link_tokens = []
             self._evidence_link_tokens.clear()
             self._evidence_links_by_line.clear()
+            self._evidence_link_line_ids.clear()
 
         def _prune_agent_link_metadata(self) -> None:
             """Keep inline actions exactly in sync with retained transcript lines."""
@@ -6101,15 +6181,15 @@ if TEXTUAL_AVAILABLE:
             """Fetch one bounded, session/epoch-bound safe evidence page."""
             target = self._evidence_link_tokens.get(token)
             if target is None:
+                self._write("Full result unavailable.", "warn")
                 return
             generation, evidence_id, offset, epoch = target
             if (
                 generation != self._monitor_generation
                 or (isinstance(self.session, TuiSessionView) and epoch != self.session.epoch)
-                or token not in self._evidence_links_by_line.get(
-                next((line for line, tokens in self._evidence_links_by_line.items() if token in tokens), -1), ()
-                )
+                or self._evidence_link_line_ids.get(token) not in set(self._stream_line_ids)
             ):
+                self._write("Full result unavailable.", "warn")
                 return
             self._schedule_evidence_page(generation, evidence_id, offset, ())
 
@@ -6647,7 +6727,9 @@ if TEXTUAL_AVAILABLE:
                 self._write_lifecycle_separator()
             elif et == "tool_call_start":
                 tool_name = str(event.get("tool") or "tool")
-                args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
+                # The detached facade never sends raw argument dictionaries.
+                # It supplies a redacted literal operation summary instead.
+                args_text = str(event.get("displayArgs") or json.dumps(event.get("args", {}), ensure_ascii=False))
                 # A tool block must follow visible assistant prose. This is a
                 # genuine ordering barrier, unlike ordinary token updates.
                 self._materialize_assistant_live_lines()
@@ -6795,6 +6877,8 @@ if TEXTUAL_AVAILABLE:
                     out = event.get(key) if isinstance(event.get(key), str) else SubagentMonitor.visible_tool_result(event)
                     if out:
                         self._write_result_block(out)
+                        if out.endswith("<truncated>"):
+                            self._write("[preview stopped at transport byte limit]", "warn")
                     evidence_id = event.get("evidenceId")
                     if isinstance(evidence_id, str):
                         self._write_evidence_link(evidence_id, unavailable=bool(event.get("evidenceUnavailable")))

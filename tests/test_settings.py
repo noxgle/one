@@ -164,6 +164,15 @@ def test_tui_manual_bash_mode_malformed_values_fail_closed(value: object) -> Non
     assert SettingsManager.in_memory({"tui": {"manualBashMode": value}}).get_tui_manual_bash_mode() == "strict"
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(1, 1), (99, 99), (100, 100), (101, 101), (1000, 1000), (True, 100), ("100", 100), (-1, 100), (1001, 100)],
+)
+def test_tui_tool_result_preview_lines_is_positive_bounded_integer(value: object, expected: int) -> None:
+    settings = SettingsManager.in_memory({"tui": {"toolResultPreviewLines": value}})
+    assert settings.get_tui_tool_result_preview_lines() == expected
+
+
 def test_default_quiet_startup_is_false() -> None:
     """quietStartup defaults to False."""
     from one.core.settings_manager import DEFAULT_SETTINGS

@@ -37,7 +37,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
     "theme": "hacker",
-    "tui": {"infoPanel": "top", "manualBashMode": "strict"},
+    "tui": {"infoPanel": "top", "manualBashMode": "strict", "toolResultPreviewLines": 100},
     "defaultMode": "tui",
     "quietStartup": False,
     "steeringMode": "interrupt",
@@ -230,6 +230,13 @@ class SettingsManager:
         tui = self.get_global_settings().get("tui", {})
         value = tui.get("manualBashMode", "strict") if isinstance(tui, dict) else "strict"
         return value if isinstance(value, str) and value in {"strict", "dev"} else "strict"
+
+    def get_tui_tool_result_preview_lines(self) -> int:
+        """Return the bounded logical-line preview limit for TUI tool results."""
+        tui = self.merged().get("tui", {})
+        value = tui.get("toolResultPreviewLines", 100) if isinstance(tui, dict) else 100
+        # bool is an int subclass but is never a valid configuration value.
+        return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 1000 else 100
 
     def get_default_mode(self) -> str:
         mode = str(self.merged().get("defaultMode") or "tui").lower()

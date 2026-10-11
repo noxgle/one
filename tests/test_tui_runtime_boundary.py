@@ -808,6 +808,22 @@ def test_tui_snapshot_projection_stays_below_command_result_cap() -> None:
     assert len(json.dumps(snapshot, ensure_ascii=False).encode("utf-8")) < 64 * 1024
 
 
+def test_tui_snapshot_normalizes_mcp_state_without_schemas() -> None:
+    """The detached snapshot exposes one display DTO for every transition."""
+    host = object.__new__(TuiRuntimeHost)
+    host._mcp = SimpleNamespace(server_status=lambda: [
+        {"name": "run", "enabled": True, "running": True, "transport": "stdio", "runtimeState": "running", "tools": ["x"], "schema": {"secret": "no"}},
+        {"name": "retry", "enabled": True, "running": False, "transport": "http", "runtimeState": "retrying", "error": "retrying", "tools": [], "schema": {"secret": "no"}},
+        {"name": "off", "enabled": False, "running": False, "runtimeState": "disabled", "tools": []},
+    ])
+    statuses = host._mcp_snapshot()
+    assert statuses == [
+        {"name": "run", "enabled": True, "running": True, "transport": "stdio", "runtimeState": "running", "available": True, "toolCount": 1, "error": ""},
+        {"name": "retry", "enabled": True, "running": False, "transport": "http", "runtimeState": "retrying", "available": False, "toolCount": 0, "error": "retrying"},
+        {"name": "off", "enabled": False, "running": False, "transport": "", "runtimeState": "disabled", "available": False, "toolCount": 0, "error": ""},
+    ]
+
+
 def test_tui_snapshot_whole_document_is_bounded_and_keeps_latest_control_state() -> None:
     """Combined registry/MCP/monitor/history pressure cannot evict controls."""
     class Registry:

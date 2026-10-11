@@ -221,6 +221,59 @@ async def test_tui_evidence_overlay_pilot_click_pages_unicode_and_invalidates_st
         await pilot.pause(0.1)
         assert app._evidence_panel["nextOffset"] is None
         assert "TAIL-MARKER" in str(body.content)
+        app._close_evidence_panel(focus_input=False)
+        # Exercise a completed long result through the subscribed detached
+        # facade after prior transcript history has been front-trimmed.  The
+        # assistant and next turn mutate/splice the stream before the actual
+        # native Textual click; action lookup must remain line-ID based.
+        for index in range(MAX_RENDERED_LINES + 30):
+            app._write(f"old-{index}", render=False)
+        lifecycle_id, lifecycle_error = manager.append_evidence({
+            "id": "lifecycle", "rawResult": {"outputText": "LIFECYCLE-EVIDENCE\n" + "line\n" * 180},
+        })
+        assert lifecycle_error is None and lifecycle_id == "lifecycle"
+        facade.emit({
+            "type": "tool_call_end", "tool": "read", "ok": True,
+            "outputText": "\n".join(f"preview-{number}" for number in range(101)), "evidenceId": lifecycle_id,
+        })
+        facade.emit({"type": "message_start", "message": {"role": "assistant"}})
+        facade.emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "final after tool"}})
+        facade.emit({"type": "message_end", "message": {"role": "assistant"}})
+        facade.emit({"type": "turn_end", "ok": True})
+        facade.emit({"type": "turn_start", "turnId": "next"})
+        facade.emit({"type": "turn_end", "ok": True})
+        await pilot.pause(0.1)
+        assert "[preview limited to 100 logical lines]" in "\n".join(app._stream_lines)
+        # Reflow and a second render intentionally exercise the completed-line
+        # Content cache before locating the generated action span.
+        await pilot.resize_terminal(70, 24)
+        await pilot.pause()
+        app._rendered_stream_lines = ()
+        app._render_stream()
+        hits = app._stream_cache_hits
+        app._rendered_stream_lines = ()
+        app._render_stream()
+        assert app._stream_cache_hits > hits
+        stream = app.query_one("#stream", Static)
+        assert any("open_evidence_link" in str(item.style) for item in stream.content._spans)
+        # The link is after the 100-line visible preview, so scroll it into the
+        # actual viewport and click the rendered final status row (not action()).
+        container = app.query_one("#stream_container", VerticalScroll)
+        container.scroll_end(animate=False, immediate=True)
+        await pilot.pause()
+        clicked = False
+        for row in range(1, max(2, container.region.height - 1)):
+            for column in range(20, 36):
+                await pilot.click(None, offset=(container.region.x + column, container.region.y + row))
+                await pilot.pause()
+                if app._evidence_panel is not None:
+                    clicked = True
+                    break
+            if clicked:
+                break
+        assert clicked
+        await pilot.pause(0.1)
+        assert "LIFECYCLE-EVIDENCE" in str(body.content)
         # A response that was already in flight must not paint after its view
         # changes epochs (independent of rejecting an old stream link).
         app._close_evidence_panel()
@@ -234,6 +287,58 @@ async def test_tui_evidence_overlay_pilot_click_pages_unicode_and_invalidates_st
         app.action_open_evidence_link(next(iter(app._evidence_link_tokens)))
         await pilot.pause()
         assert app._evidence_panel is None
+
+
+@pytest.mark.asyncio
+async def test_tui_result_preview_uses_logical_lines_before_narrow_wrapping(tmp_path: Path) -> None:
+    """99/100 fit, 101 is marked, independent of physical wrapped rows."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(30, 20)) as pilot:
+        await pilot.pause()
+        for count, marked in ((99, False), (100, False), (101, True)):
+            app._stream_lines.clear()
+            app._stream_line_ids.clear()
+            app._stream_line_values.clear()
+            app._write_result_block("\n".join(f"{index:03d}-" + "wide " * 12 for index in range(count)))
+            joined = "\n".join(app._stream_lines)
+            assert ("[preview limited to 100 logical lines]" in joined) is marked
+            assert "000-" in joined and f"{min(count - 1, 99):03d}-" in joined
+            assert (f"{count - 1:03d}-" in joined) is not marked
+        session.settings_manager.set_config_value("tui.toolResultPreviewLines", 3)
+        app._stream_lines.clear()
+        app._stream_line_ids.clear()
+        app._stream_line_values.clear()
+        app._write_result_block("\n".join(str(index) for index in range(4)))
+        assert "[preview limited to 3 logical lines]" in "\n".join(app._stream_lines)
+        # Force a render/cache pass at the narrow size; wrapping cannot change
+        # the source-line decision above.
+        await pilot.pause()
+        assert app.query_one("#stream", Static).content
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_start_uses_safe_display_args_not_empty_mapping(tmp_path: Path) -> None:
+    from one.core.agent_runtime_facade import _event_projection
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        for tool, args, wanted in (
+            ("bash", {"command": "printf safe", "token": "secret-value"}, "command=printf safe"),
+            ("spawn_subagent", {"task": "inspect tests", "token": "secret-value"}, "task=inspect tests"),
+        ):
+            event = _event_projection({"type": "tool_call_start", "tool": tool, "args": args})
+            assert "args" not in event and "secret-value" not in event["displayArgs"]
+            app._handle_session_event(event)
+            rendered = "\n".join(app._stream_lines)
+            assert wanted in rendered and "{}" not in rendered
+            app._handle_session_event({"type": "tool_call_end", "tool": tool, "ok": True})
+        await pilot.pause()
 
 
 @pytest.mark.asyncio

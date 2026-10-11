@@ -47,6 +47,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI tool results and evidence actions** — result previews now default to 100
+  logical lines, preserve safe command/task summaries, and generated full-result
+  links remain valid across completion, later turns, reflow, and transcript trim.
+- **TUI MCP sidebar** — detached runtime snapshots now carry normalized MCP
+  connection state so configured, failed, retrying, and running servers render
+  correctly.
+
 - **TUI assistant response retained** — when the next message starts before a
   scheduled final paint, the assistant response is preserved and runtime events
   are bridged so no output is dropped.

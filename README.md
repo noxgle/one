@@ -179,11 +179,14 @@ and links become unavailable after a session change or unavailable evidence.
 Configure the startup information panel in `settings.json`:
 
 ```json
-{"tui": {"infoPanel": "top"}}
+{"tui": {"infoPanel": "top", "toolResultPreviewLines": 100}}
 ```
 
 `top` is the default minimal layout with no right sidebar; `sidebar` enables the
 detailed right sidebar. These startup settings retain their existing semantics.
+`toolResultPreviewLines` controls the positive 1–1000 logical-line limit for
+tool-result previews (default `100`); larger results retain a safe `[view]`
+action when durable evidence is available.
 At runtime, the information layouts are mutually exclusive:
 
 - `/layout compact` shows the top status panel and hides the detailed sidebar.
