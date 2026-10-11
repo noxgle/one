@@ -15,9 +15,11 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from rich.cells import cell_len, set_cell_size
@@ -25,6 +27,7 @@ from rich.markup import escape as rich_escape
 from rich.text import Text
 
 from one.config import VERSION
+from one.core.agent_runtime_facade import _fit_event_snapshot
 from one.core.agent_session import approval_callback_origin
 from one.core.oauth import OAuthError
 from one.core.provider_login import entry_id as fetched_entry_id
@@ -33,6 +36,267 @@ from one.core.session_manager import SessionInfo, SessionManager, normalize_sess
 from one.core.subagent_monitor import SubagentMonitor
 from one.core.types import ModelInfo
 from one.tools.common import sanitize_display_text
+
+_UI_EVENT_CAPACITY = 256
+_UI_EVENT_MAX_BYTES = 64 * 1024
+_UI_EVENT_QUEUE_MAX_BYTES = 512 * 1024
+# Direct ``AgentSession`` subscriptions predate the facade readiness protocol.
+# They are retained only for compatibility/tests, so give them an independently
+# bounded holding lane and fail the emitting caller explicitly on overflow.
+# This must not become an unbounded escape hatch around facade backpressure.
+_UI_LEGACY_DEFERRED_CAPACITY = 256
+_UI_LEGACY_DEFERRED_MAX_BYTES = 512 * 1024
+# Keep a reduction turn comfortably below the 8 ms responsiveness gate.  A
+# completed event is never split (lifecycle barriers must remain atomic), so
+# handlers also defer their transcript paint while a drain is active.
+_UI_DRAIN_MAX_ITEMS = 8
+_UI_DRAIN_MAX_SECONDS = 0.004
+_UI_FRAME_SECONDS = 1 / 30
+_UI_MAX_COALESCED_DELTA_BYTES = 512
+# A Static update can take more than one refresh turn to settle its wrapped
+# height. Tail follow is therefore rechecked after two subsequent layout turns;
+# this is viewport-only work and does not relax the transcript paint cap.
+_STREAM_FOLLOW_LAYOUT_RECONCILES = 2
+
+
+class TuiSessionView:
+    """Detached, UI-loop-only projection of a runtime facade.
+
+    This is deliberately not a compatibility wrapper around ``AgentSession``:
+    its state is copied from bounded snapshots and its operations are facade
+    commands.  A few attribute-shaped projections remain for the mature TUI
+    renderer, but none contains a runtime-owned object.
+    """
+
+    def __init__(self, facade: Any) -> None:
+        self._facade = facade
+        self._snapshot: dict[str, Any] = {"epoch": 0, "sidebar": {}, "messages": []}
+        self._models: list[dict[str, Any]] = []
+        self._models_epoch = -1
+        self._listeners: list[Any] = []
+        self._off: Any = None
+
+    async def refresh(self) -> dict[str, Any]:
+        reply = await self._facade.command("snapshot")
+        result = reply.get("result", reply)
+        self._replace_snapshot(result)
+        return self.snapshot
+
+    @property
+    def snapshot(self) -> dict[str, Any]:
+        # JSON round-trip prevents a caller retaining our mutable projection.
+        return json.loads(json.dumps(self._snapshot, ensure_ascii=False))
+
+    def _replace_snapshot(self, snapshot: Any) -> None:
+        if not isinstance(snapshot, dict):
+            return
+        sidebar = snapshot.get("sidebar") if isinstance(snapshot.get("sidebar"), dict) else {}
+        approval = snapshot.get("approval")
+        messages = snapshot.get("messages") if isinstance(snapshot.get("messages"), list) else []
+        copied_messages = [dict(m) for m in messages if isinstance(m, dict)]
+        self._snapshot = {
+            "epoch": int(snapshot.get("epoch", 0)),
+            "sidebar": dict(sidebar),
+            "messages": copied_messages[-500:],
+            "models": dict(snapshot.get("models")) if isinstance(snapshot.get("models"), dict) else {},
+            "monitor": dict(snapshot.get("monitor", {}))
+            if isinstance(snapshot.get("monitor"), dict)
+            else {"revision": 0, "children": []},
+            "mcp": [dict(item) for item in snapshot.get("mcp", []) if isinstance(item, dict)],
+            "questions": [dict(item) for item in snapshot.get("questions", []) if isinstance(item, dict)],
+            "approval": dict(approval) if isinstance(approval, dict) else None,
+        }
+
+    async def models(self) -> list[SimpleNamespace]:
+        """Fetch the complete catalog through bounded worker-owned pages."""
+        if self._models_epoch != self.epoch:
+            models: list[dict[str, Any]] = []
+            offset = 0
+            while True:
+                page = await self.command("models_page", offset=offset, limit=100)
+                if page.get("epoch") != self.epoch:
+                    return []
+                entries = page.get("models")
+                if not isinstance(entries, list):
+                    break
+                models.extend(dict(item) for item in entries if isinstance(item, dict))
+                next_offset = page.get("nextOffset")
+                if not isinstance(next_offset, int) or next_offset <= offset:
+                    break
+                offset = next_offset
+            self._models = models
+            self._models_epoch = self.epoch
+        return [SimpleNamespace(provider=str(item.get("provider", "")), id=str(item.get("id", ""))) for item in self._models]
+
+    def subscribe(self, listener: Any) -> Any:
+        self._listeners.append(listener)
+        if self._off is None:
+            # Older test/detached facades support only the callback argument.
+            # The runtime facade additionally asks before it removes an event.
+            try:
+                self._off = self._facade.subscribe(self._on_event, can_accept_event=self.can_accept_event)
+            except TypeError:
+                self._off = self._facade.subscribe(self._on_event)
+
+        def off() -> None:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
+
+        return off
+
+    def _on_event(self, event: dict[str, Any]) -> None:
+        for listener in tuple(self._listeners):
+            listener(event)
+
+    def can_accept_event(self, event: dict[str, Any]) -> bool:
+        """Return whether every UI subscriber can accept this event now."""
+        for listener in tuple(self._listeners):
+            predicate = getattr(listener, "can_accept_event", None)
+            if callable(predicate) and not predicate(event):
+                return False
+        return True
+
+    def resume_events(self) -> None:
+        """Tell the facade that a UI drain made ingress space available."""
+        resume = getattr(self._facade, "resume_events", None)
+        if callable(resume):
+            resume()
+
+    async def command(self, name: str, **payload: Any) -> dict[str, Any]:
+        reply = await self._facade.command(name, payload)
+        result = reply.get("result", reply)
+        if isinstance(result, dict) and "sidebar" in result:
+            self._replace_snapshot(result)
+        return result if isinstance(result, dict) else {}
+
+    # Detached renderer projections.  SimpleNamespace instances are newly
+    # allocated for every access and contain scalar values only.
+    @property
+    def messages(self) -> list[dict[str, Any]]:
+        return self.snapshot["messages"]
+
+    @property
+    def epoch(self) -> int:
+        """Current runtime session epoch for detached UI rebinding guards."""
+        return int(self._snapshot["epoch"])
+
+    @property
+    def monitor_snapshot(self) -> dict[str, Any]:
+        """Copied monitor projection; the live monitor remains runtime-owned."""
+        monitor = self._snapshot.get("monitor", {"revision": 0, "children": []})
+        return json.loads(json.dumps(monitor, ensure_ascii=False))
+
+    @property
+    def session_id(self) -> str:
+        return str(self._snapshot["sidebar"].get("sessionId", "-"))
+
+    @property
+    def is_streaming(self) -> bool:
+        return bool(self._snapshot["sidebar"].get("streaming", False))
+
+    @property
+    def thinking_level(self) -> str:
+        return str(self._snapshot["sidebar"].get("thinking", "medium"))
+
+    @property
+    def temperature(self) -> float:
+        return float(self._snapshot["sidebar"].get("temperature", 0.5))
+
+    @property
+    def model(self) -> Any:
+        value = str(self._snapshot["sidebar"].get("model", "none"))
+        provider, _, model = value.partition("/")
+        return None if value == "none" else SimpleNamespace(provider=provider, id=model)
+
+    @property
+    def temperature_mode(self) -> str:
+        return str(self._snapshot["sidebar"].get("temperatureMode", "balanced"))
+
+    @property
+    def pending_message_count(self) -> int:
+        return int(self._snapshot["sidebar"].get("pendingMessageCount", 0))
+
+    @property
+    def active_tools(self) -> list[str]:
+        return list(self._snapshot["sidebar"].get("activeTools", []))
+
+    @property
+    def session_file(self) -> str:
+        return str(self._snapshot["sidebar"].get("sessionFile", ""))
+
+    @property
+    def _storage_dir(self) -> str:
+        return str(self._snapshot["sidebar"].get("storageDir", ""))
+
+    @property
+    def steering_mode(self) -> str:
+        return str(self._snapshot["sidebar"].get("steeringMode", "queue"))
+
+    @property
+    def follow_up_mode(self) -> str:
+        return str(self._snapshot["sidebar"].get("followUpMode", "queue"))
+
+    @property
+    def subagents_hard_disabled(self) -> bool:
+        return not bool(self._snapshot["sidebar"].get("subagents", True))
+
+    def get_context_usage(self) -> dict[str, Any]:
+        return {"percent": self._snapshot["sidebar"].get("contextPercent", 0.0)}
+
+    def get_pending_queues(self) -> dict[str, list[Any]]:
+        s = self._snapshot["sidebar"]
+        return {"steering": [None] * int(s.get("queueSteer", 0)), "followUp": [None] * int(s.get("queueFollow", 0))}
+
+    def get_session_stats(self) -> dict[str, Any]:
+        s = self._snapshot["sidebar"]
+        return {
+            "tokens": {
+                "input": s.get("tokenInput", 0),
+                "output": s.get("tokenOutput", 0),
+                "total": s.get("tokenTotal", 0),
+            },
+            "cost": s.get("cost", 0.0),
+        }
+
+    # These methods are intentionally asynchronous command entry points; they
+    # are used by the migrated input/abort path and are safe while the worker is
+    # blocked in provider I/O.
+    async def prompt(self, text: str, **_ignored: Any) -> dict[str, Any]:
+        return await self.command("prompt", text=text)
+
+    async def abort(self) -> dict[str, Any]:
+        return await self.command("abort")
+
+    async def steer(self, text: str) -> dict[str, Any]:
+        return await self.command("ui", operation="steer", payload={"text": text})
+
+    async def follow_up(self, text: str) -> dict[str, Any]:
+        return await self.command("ui", operation="follow", payload={"text": text})
+
+    async def compact(self, instructions: str | None = None) -> dict[str, Any]:
+        return await self.command("ui", operation="compact", payload={"instructions": instructions})
+
+    async def reload(self) -> dict[str, Any]:
+        return await self.command("ui", operation="reload", payload={})
+
+    async def invoke_skill(self, name: str, args: str) -> dict[str, Any]:
+        return await self.command("ui", operation="invoke_skill", payload={"name": name, "args": args})
+
+    async def ui(self, operation: str, **payload: Any) -> dict[str, Any]:
+        return await self.command("ui", operation=operation, payload=payload)
+
+    async def execute_tui_command(self, command: str) -> dict[str, Any]:
+        return await self.ui("execute_bash", command=command)
+
+    async def extension_response(
+        self, request_id: str, payload: dict[str, Any] | None = None, cancelled: bool = False
+    ) -> dict[str, Any]:
+        return await self.ui("answer_extension", id=request_id, payload=payload, cancelled=cancelled)
+
+    async def answer_question(self, question_id: str, answer: str, epoch: int) -> dict[str, Any]:
+        return await self.command(
+            "answer_question", question_id=question_id, answer=answer, epoch=epoch
+        )
 
 
 def _format_elapsed_ms(value: Any) -> str | None:
@@ -46,6 +310,7 @@ def _format_elapsed_ms(value: Any) -> str | None:
     if value < 1000:
         return f"{int(value)} ms"
     return f"{value / 1000:.2f} s"
+
 
 try:
     from textual import events
@@ -67,6 +332,49 @@ def build_sidebar_snapshot(
     session: Any,
     retry_state: str = "idle",
 ) -> dict[str, Any]:
+    def normalize_mcp_servers(statuses: Any) -> list[dict[str, Any]]:
+        """Project MCP status records into the sidebar's small display DTO."""
+        if not isinstance(statuses, list):
+            return []
+        servers: list[dict[str, Any]] = []
+        for status in statuses:
+            if not isinstance(status, dict) or not status.get("enabled"):
+                continue
+            runtime_state = str(status.get("runtimeState") or "").lower()
+            servers.append(
+                {
+                    "name": str(status.get("name") or ""),
+                    "transport": str(status.get("transport") or ""),
+                    "toolCount": len(status.get("tools") or []),
+                    "running": bool(status.get("running")),
+                    "error": status.get("error"),
+                    "available": (
+                        bool(status.get("running"))
+                        and not status.get("error")
+                        and runtime_state not in {"failed", "retrying", "disabled"}
+                    ),
+                }
+            )
+        return servers
+
+    if isinstance(session, TuiSessionView):
+        # The detached snapshot is authoritative.  Do not reconstruct it from
+        # compatibility-shaped attributes, which would silently consult a live
+        # host if one were ever attached to the view.
+        sidebar = session.snapshot["sidebar"]
+        defaults = {
+            "model": "none", "thinking": "medium", "temperature": 0.5,
+            "temperatureMode": "balanced", "cwd": ".", "sessionId": "-",
+            "streaming": False, "compacting": False, "retry": "on", "coop": "off",
+            "contextPercent": 0.0, "contextKnown": False, "deliveryMode": "idle",
+            "queueSteer": 0, "queueFollow": 0, "queueTotal": 0, "tokenInput": 0,
+            "tokenOutput": 0, "tokenCacheRead": 0, "tokenCacheWrite": 0,
+            "tokenTotal": 0, "cost": 0.0, "subagents": True, "bashOutput": True,
+            "mcpEnabled": False, "mcpServers": [],
+        }
+        defaults.update(sidebar)
+        defaults["mcpServers"] = normalize_mcp_servers(defaults.get("mcpServers"))
+        return defaults
     usage = session.get_context_usage() or {}
     queues = session.get_pending_queues() or {"steering": [], "followUp": []}
     stats = session.get_session_stats() or {}
@@ -90,25 +398,7 @@ def build_sidebar_snapshot(
             statuses = mcp_manager.server_status()
         except Exception:
             statuses = []
-        for s in statuses:
-            if not s.get("enabled"):
-                continue
-            runtime_state = str(s.get("runtimeState") or "").lower()
-            available = (
-                bool(s.get("running"))
-                and not s.get("error")
-                and runtime_state not in {"failed", "retrying", "disabled"}
-            )
-            mcp_servers.append(
-                {
-                    "name": str(s.get("name") or ""),
-                    "transport": str(s.get("transport") or ""),
-                    "toolCount": len(s.get("tools") or []),
-                    "running": bool(s.get("running")),
-                    "error": s.get("error"),
-                    "available": available,
-                }
-            )
+        mcp_servers = normalize_mcp_servers(statuses)
 
     # Retry: show the actual retry mode string (off/on/unlimited) read from
     # settings when available, falling back to the current on/off logic.
@@ -151,9 +441,8 @@ def build_sidebar_snapshot(
         "tokenCacheWrite": int(tokens.get("cacheWrite") or 0),
         "tokenTotal": int(tokens.get("total") or 0),
         "cost": float(stats.get("cost") or 0.0),
-        "subagents": not bool(getattr(session, "subagents_hard_disabled", False)) and bool(
-            getattr(getattr(session, "settings_manager", None), "get_subagents_enabled", lambda: True)()
-        ),
+        "subagents": not bool(getattr(session, "subagents_hard_disabled", False))
+        and bool(getattr(getattr(session, "settings_manager", None), "get_subagents_enabled", lambda: True)()),
         "bashOutput": bool(getattr(getattr(session, "settings_manager", None), "get_bash_show_output", lambda: True)()),
         "mcpEnabled": mcp_manager is not None,
         "mcpServers": mcp_servers,
@@ -186,6 +475,8 @@ _THINKING_FRAMES = "░▒▓█▓▒"
 # __MK__: prefix is stripped at render time, so it never shows in the UI.
 _THINKING_MARK = "__MK__:"
 _THINKING_TEXT_MARK = "__MK_THINK__: "
+_GIT_BRANCH_CACHE_TTL_SECONDS = 5.0
+
 
 def _read_logo_lines(path: Traversable) -> tuple[str, ...]:
     """Read logo lines, preserving blank separators; return empty only if entirely blank."""
@@ -210,6 +501,19 @@ _TUI_LOGO_LINES = _load_tui_logo_lines()
 # the complete conversation; this list is deliberately bounded so rebuilding
 # the Static widget remains predictable during long-running sessions.
 MAX_RENDERED_LINES = 500
+# These are presentation limits, not history limits.  Keep them below the
+# point where Rich/Textual has to allocate a huge single widget (a single
+# newline-free tool result used to bypass MAX_RENDERED_LINES completely).
+MAX_RENDERED_BYTES = 256 * 1024
+MAX_RENDERED_ROWS = 1_000
+MAX_SOURCE_DISPLAY_BYTES = 64 * 1024
+# A normal multi-kilobyte streamed answer must remain readable.  Eight KiB
+# retains the ordinary 4 KiB response case while preventing one active block
+# from making Rich/Textual format tens of thousands of bytes on the UI loop.
+# The complete response remains in session history/evidence; this is only the
+# live transcript presentation cap.
+_MAX_LIVE_ASSISTANT_RENDER_BYTES = 8 * 1024
+_DISPLAY_TRUNCATED_MARKER = "[display truncated; full text remains in session history]"
 # Keep following when the user is effectively at the tail, without treating a
 # reader who has deliberately moved up as an auto-follow target.
 _STREAM_FOLLOW_TOLERANCE = 1
@@ -217,6 +521,22 @@ _STREAM_FOLLOW_TOLERANCE = 1
 # anchor lookup bounded even when one logical line wraps to many physical rows.
 _STREAM_ANCHOR_SEARCH_ROWS = 256
 _TRUNCATED_ASSISTANT_MARKER = "[earlier assistant output truncated in viewport]"
+
+
+def _truncate_display_bytes(value: object, limit: int = MAX_SOURCE_DISPLAY_BYTES) -> str:
+    """Return safe text within a UTF-8 byte budget, with an explicit marker.
+
+    Do this before splitting/wrapping, rather than after Rich has processed a
+    giant logical line.  Slicing encoded bytes avoids splitting a Unicode code
+    point and works for every untrusted transcript source.
+    """
+    text = sanitize_display_text(str(value))
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    marker = "\n" + _DISPLAY_TRUNCATED_MARKER
+    room = max(0, limit - len(marker.encode("utf-8")))
+    return encoded[:room].decode("utf-8", "ignore") + marker
 
 # The sidebar shows a focused plan window rather than a character slice of the
 # entire plan. This is display-only; session and provider plan state is intact.
@@ -287,6 +607,7 @@ def _sidebar_plan_window(
             statuses.append(None)
     start = window_start(statuses)
     return "\n".join(" ".join(line.split()) for line in lines[start : start + _PLAN_SIDEBAR_ITEMS])
+
 
 # One source of truth for user-visible keyboard shortcuts. Textual itself
 # provides many widget/editor bindings, but these are the application-level
@@ -576,7 +897,7 @@ def _extract_image_paths(text: str) -> tuple[list[Path], str]:
 
     # Pattern 1-3: quoted / bracketed paths.
     for pattern in [
-        r'''(?<![\\])"([^"]*\.(?:png|jpg|jpeg|webp))"(?![^<]*>)''',
+        r"""(?<![\\])"([^"]*\.(?:png|jpg|jpeg|webp))"(?![^<]*>)""",
         r"(?<![\\])'([^']*\.(?:png|jpg|jpeg|webp))'(?![^<]*>)",
         r"(?<![\\])`([^`]*\.(?:png|jpg|jpeg|webp))`(?!`)",
         r"<([^>]*\.(?:png|jpg|jpeg|webp))>",
@@ -1051,6 +1372,25 @@ if TEXTUAL_AVAILABLE:
         #approval_actions { height: auto; margin: 1 0 0 0; }
         #approval_actions Button { margin: 0 1 0 0; }
 
+        #evidence_overlay {
+            display: none;
+            position: absolute;
+            offset: 8% 8%;
+            width: 84%;
+            height: 78%;
+            padding: 1 2;
+            layer: above;
+            layout: vertical;
+            border: heavy #456ca8;
+            background: #0d1424;
+        }
+        #evidence_overlay.visible { display: block; }
+        #evidence_header { height: auto; }
+        #evidence_body { height: 1fr; min-height: 3; overflow-y: auto; }
+        #evidence_content { height: auto; padding: 0 1; }
+        #evidence_actions { height: auto; margin: 1 0 0 0; }
+        #evidence_actions Button { margin: 0 1 0 0; }
+
         """
 
         BINDINGS = [
@@ -1083,11 +1423,24 @@ if TEXTUAL_AVAILABLE:
             self.options = options or {}
             self.runtime_host = runtime_host
             self._theme = resolve_tui_theme(
-                self.options.get("theme") or getattr(session.settings_manager, "get_theme", lambda: "default")()
+                self.options.get("theme") or (
+                    str(session.snapshot["sidebar"].get("theme", "default"))
+                    if isinstance(session, TuiSessionView) else getattr(session.settings_manager, "get_theme", lambda: "default")()
+                )
             )
             self._off_listener = None
             self._assistant_stream = ""
             self._stream_lines: list[str] = []
+            # Logical IDs survive identical/repeated text and make the render
+            # cache independent of list position.  _trim_stream repairs this
+            # parallel projection for a few legacy test/direct append paths.
+            self._stream_line_ids: list[int] = []
+            self._next_stream_line_id = 0
+            self._stream_content_cache: dict[tuple[int, str, int, str, tuple[tuple[int, str], ...]], Content] = {}
+            self._stream_cache_width = -1
+            self._stream_cache_theme = self._theme.name
+            self._stream_cache_hits = 0
+            self._stream_cache_misses = 0
             self._rendered_stream_lines: tuple[str, ...] = ()
             # Stream updates may arrive faster than Textual completes a layout
             # pass. Keep one deferred viewport reconciliation, rather than one
@@ -1111,7 +1464,10 @@ if TEXTUAL_AVAILABLE:
             self._assistant_has_live_delta = False
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
+            self._assistant_live_buffer_bytes = 0
             self._assistant_live_line_count = 0
+            self._assistant_live_lines_dirty = False
+            self._assistant_live_finalize_pending = False
             # Providers can produce both text and thinking deltas much faster
             # than Textual can paint. Keep *all* session events in one ordered
             # accumulator: delta runs are painted at a bounded cadence and a
@@ -1119,12 +1475,40 @@ if TEXTUAL_AVAILABLE:
             # The listener may be called from a provider thread, so it must not
             # touch Textual widgets or post one message per token.
             self._pending_ui_events: list[dict[str, Any]] = []
-            self._pending_ui_events_lock = threading.Lock()
+            # Legacy direct sessions cannot participate in the facade readiness
+            # protocol. Keep their overflow off the emitting callback and move
+            # it into the bounded accumulator from a later UI drain. This is a
+            # compatibility/test-only lane: it is hard-capped and raises rather
+            # than silently losing lifecycle, approval, or error events.
+            self._legacy_deferred_ui_events: deque[dict[str, Any]] = deque()
+            self._legacy_deferred_ui_event_bytes = 0
+            # This lock protects the final bounded ingress after the facade; it
+            # is never waited on from a Textual callback.
+            self._pending_ui_events_lock = threading.Condition()
+            self._pending_ui_event_bytes = 0
             # One coalesced flush wakeup may be queued at a time; the 30 Hz
             # interval remains a safety net if no wakeup can be posted.
             self._ui_flush_wakeup_pending = False
+            # Event reduction owns model updates; rendering is deferred to the
+            # frame scheduler so one lifecycle event cannot rebuild a large
+            # transcript inside a bounded reduction slice.
+            self._ui_drain_active = False
             self._session_listener_generation = 0
             self._bound_session: Any | None = None
+            # Git is strictly a presentation adornment.  Its subprocess probe
+            # must never run on Textual's loop, and its result is useful only
+            # for the cwd/session generation that requested it.
+            self._git_branch_cache: dict[str, tuple[float, str | None]] = {}
+            self._git_branch_inflight: set[str] = set()
+            self._sidebar_generation = 0
+            self._sidebar_cwd = ""
+            # Lifecycle reductions can arrive in a tight ordered batch. The
+            # sidebar builds several Rich Text blocks and triggers layout, so
+            # keep that noncritical work out of the bounded reduction slice.
+            self._sidebar_refresh_dirty = False
+            self._sidebar_refresh_timer: Any = None
+            self._sidebar_next_paint = 0.0
+            self._is_unmounting = False
             # Compatibility observability for the existing direct TUI tests.
             # The ordered event list above remains the sole rendering source.
             self._pending_assistant_deltas = ""
@@ -1138,6 +1522,20 @@ if TEXTUAL_AVAILABLE:
             self._active_subagent_link_tokens: list[int] = []
             self._turn_active = False
             self._last_delta_ts = 0.0
+            self._stream_render_dirty = False
+            self._stream_render_timer: Any = None
+            # The token is set before registering the callback. Textual may run
+            # a very-short timer before ``set_timer`` returns; without it, the
+            # returned, already-fired Timer can overwrite the callback's
+            # ``None`` and permanently suppress subsequent dirty frames.
+            self._stream_render_timer_token: object | None = None
+            self._stream_next_paint = 0.0
+            # Distinguish a newly requested frame from an identical transcript.
+            # In particular, a spinner can return to the same glyph while a
+            # timer is pending; tuple equality alone must not make that frame
+            # consume the dirty state without updating the widget.
+            self._stream_render_revision = 0
+            self._rendered_stream_revision = -1
             self._thinking_frame = 0
             self._thinking_active = False
             self._thinking_label_shown = False
@@ -1154,7 +1552,10 @@ if TEXTUAL_AVAILABLE:
             self._ask_user_pending: dict[str, Any] | None = None
             self._pending_clipboard_image_bytes: bytes | None = None
             self._session_delete_pending: SessionInfo | None = None
-            self._info_layout = getattr(session.settings_manager, "get_tui_info_panel", lambda: "top")()
+            self._info_layout = (
+                str(session.snapshot["sidebar"].get("infoPanel", "top"))
+                if isinstance(session, TuiSessionView) else getattr(session.settings_manager, "get_tui_info_panel", lambda: "top")()
+            )
             # The layout mode owns information-panel visibility. The persisted
             # setting only selects its initial mode.
             self._layout_mode = "wide" if self._info_layout == "sidebar" else "compact"
@@ -1177,7 +1578,15 @@ if TEXTUAL_AVAILABLE:
             # label. It is never inferred from transcript text.
             self._agent_link_tokens: dict[int, tuple[int, str, int, int]] = {}
             self._agent_link_labels: dict[int, str] = {}
+            self._agent_links_by_line: dict[int, tuple[int, ...]] = {}
             self._next_agent_link_token = 0
+            self._evidence_link_tokens: dict[int, tuple[int, str, int, int]] = {}
+            self._evidence_links_by_line: dict[int, tuple[int, ...]] = {}
+            self._next_evidence_link_token = 0
+            self._evidence_panel: dict[str, Any] | None = None
+            # Increment before scheduling so stale coroutines cannot reopen a
+            # closed panel or paint a response from a prior session epoch.
+            self._evidence_request_generation = 0
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="root"):
@@ -1190,6 +1599,14 @@ if TEXTUAL_AVAILABLE:
                     yield Static("", id="ext_overlay")
                     yield Static("", id="shortcuts_overlay")
                     yield Static("", id="model_overlay")
+                    with Vertical(id="evidence_overlay"):
+                        yield Static("", id="evidence_header")
+                        with VerticalScroll(id="evidence_body"):
+                            yield Static("", id="evidence_content")
+                        with Horizontal(id="evidence_actions"):
+                            yield Button("Previous page", id="evidence-prev")
+                            yield Button("Next page", id="evidence-next")
+                            yield Button("Close", id="evidence-close")
                     with Vertical(id="agents_overlay"):
                         yield Static("", id="agents_help")
                         with VerticalScroll(id="agents_timeline"):
@@ -1254,6 +1671,7 @@ if TEXTUAL_AVAILABLE:
             # Initial and same-session binds preserve any active approval. A
             # changed session must fail closed before listener detachment.
             self._invalidate_deferred_stream_viewport()
+            self._close_evidence_panel(focus_input=False)
             self._stream_front_trim_pending = 0
             if self._bound_session is not None and self._bound_session is not self.session:
                 self._reject_all_approvals("Session changed")
@@ -1264,9 +1682,15 @@ if TEXTUAL_AVAILABLE:
                 self._session_listener_generation += 1
                 listener_generation = self._session_listener_generation
                 self._pending_ui_events = []
+                self._legacy_deferred_ui_events.clear()
+                self._legacy_deferred_ui_event_bytes = 0
+                self._pending_ui_event_bytes = 0
+                self._pending_ui_events_lock.notify_all()
                 self._pending_assistant_deltas = ""
                 self._ui_flush_wakeup_pending = False
                 self._last_delta_ts = 0.0
+            self._sidebar_generation += 1
+            self._sidebar_cwd = ""
             if callable(self._off_listener):
                 try:
                     self._off_listener()
@@ -1274,6 +1698,7 @@ if TEXTUAL_AVAILABLE:
                     pass
                 self._off_listener = None
             self._bind_subagent_monitor()
+
             def _listener(event: dict[str, Any]) -> None:
                 # Preserve the session's event order, including the ordering
                 # between thinking and ordinary output. Lifecycle events are
@@ -1282,7 +1707,30 @@ if TEXTUAL_AVAILABLE:
                 with self._pending_ui_events_lock:
                     if listener_generation != self._session_listener_generation:
                         return
-                    self._pending_ui_events.append(event)
+                    event_size = self._ui_event_size(event)
+                    # Runtime facade DTOs are already capped.  A legacy direct
+                    # session is still required to use this bound; an oversized
+                    # event is held upstream rather than silently truncated.
+                    if event_size > _UI_EVENT_MAX_BYTES:
+                        event = self._reduce_oversized_ui_event(event)
+                        event_size = self._ui_event_size(event)
+                    if self._legacy_deferred_ui_events:
+                        # Do not let a newer direct event pass deferred output.
+                        self._defer_legacy_ui_event_locked(event, event_size)
+                    elif self._try_coalesce_ui_delta_locked(event, event_size):
+                        pass
+                    else:
+                        # The detached facade checks can_accept_event before
+                        # dispatching.  Direct legacy delivery must also never
+                        # wait on Textual's loop; retain an event for a later
+                        # UI drain rather than blocking or dropping it. The
+                        # compatibility lane has a hard cap and explicit
+                        # BufferError signal on pressure.
+                        if not self._can_accept_ui_event_locked(event, event_size):
+                            self._defer_legacy_ui_event_locked(event, event_size)
+                        else:
+                            self._pending_ui_events.append(event)
+                            self._pending_ui_event_bytes += event_size
                     if (
                         event.get("type") == "message_update"
                         and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
@@ -1310,10 +1758,15 @@ if TEXTUAL_AVAILABLE:
                             with self._pending_ui_events_lock:
                                 self._ui_flush_wakeup_pending = False
 
+            _listener.can_accept_event = self._can_accept_ui_event  # type: ignore[attr-defined]
+
             self._off_listener = self.session.subscribe(_listener)
             self._bound_session = self.session
             self._approval_rebinding = False
-            if (
+            # Approval callbacks and their Futures belong to the runtime
+            # worker.  A detached view receives an ID-bound request event and
+            # returns a command; never install a legacy callback on it.
+            if not isinstance(self.session, TuiSessionView) and (
                 self.session.approval_callback is None
                 and getattr(self.session.settings_manager, "get_tool_approval", lambda: False)()
             ):
@@ -1341,6 +1794,9 @@ if TEXTUAL_AVAILABLE:
             self._clear_agent_link_metadata()
             with self._monitor_dirty_lock:
                 self._monitor_dirty = False
+            if isinstance(self.session, TuiSessionView):
+                self._accept_monitor_snapshot(self.session.monitor_snapshot, generation)
+                return
             monitor = getattr(self.session, "subagent_monitor", None)
             if monitor is None:
                 return
@@ -1379,6 +1835,28 @@ if TEXTUAL_AVAILABLE:
                 dirty, self._monitor_dirty = self._monitor_dirty, False
             if not dirty:
                 return
+            if isinstance(self.session, TuiSessionView):
+                session = self.session
+                epoch = session.epoch
+                generation = self._monitor_generation
+
+                async def refresh() -> None:
+                    try:
+                        await session.refresh()
+                        # A delayed detached snapshot must not repaint a newly
+                        # bound session/epoch after /new, /sessions, or /fork.
+                        if (
+                            self.session is session
+                            and generation == self._monitor_generation
+                            and epoch == session.epoch
+                            and self._accept_monitor_snapshot(session.monitor_snapshot, generation)
+                        ):
+                            self._schedule_sidebar_refresh()
+                            self._render_agents_panel()
+                    except Exception as exc:
+                        self._write(f"[Monitor] {exc}", "error")
+                asyncio.create_task(refresh())
+                return
             monitor = getattr(self.session, "subagent_monitor", None)
             if monitor is None:
                 return
@@ -1387,11 +1865,14 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 return
             if changed:
-                self._refresh_sidebar()
+                self._schedule_sidebar_refresh()
                 self._render_agents_panel()
 
         def _refresh_monitor_snapshot(self) -> bool:
             """Synchronously obtain the current bound monitor snapshot."""
+            if isinstance(self.session, TuiSessionView):
+                self._accept_monitor_snapshot(self.session.monitor_snapshot, self._monitor_generation)
+                return True
             monitor = getattr(self.session, "subagent_monitor", None)
             if monitor is None:
                 return False
@@ -1403,6 +1884,8 @@ if TEXTUAL_AVAILABLE:
         def _rebuild_session_transcript(self) -> None:
             """Replace the viewport cache with the loaded durable transcript."""
             self._stream_lines = []
+            self._stream_line_ids = []
+            self._stream_content_cache.clear()
             self._stream_front_trim_pending = 0
             self._clear_agent_link_metadata()
             self._reset_turn_timing()
@@ -1421,9 +1904,7 @@ if TEXTUAL_AVAILABLE:
                 if isinstance(content, list):
                     content = "".join(str(part.get("text", "")) for part in content if part.get("type") == "text")
                 historical_abort = (
-                    role == "assistant"
-                    and message.get("stopReason") == "abort"
-                    and content == "Request aborted."
+                    role == "assistant" and message.get("stopReason") == "abort" and content == "Request aborted."
                 )
                 # An abort is persisted so the provider history remains
                 # complete.  On reload it is not a live abort, though: render
@@ -1436,6 +1917,9 @@ if TEXTUAL_AVAILABLE:
                         self._write_chat_block(role, str(content))
                 elif role == "toolResult":
                     self._write_result_block(str(content))
+                    evidence_id = message.get("evidenceId")
+                    if isinstance(evidence_id, str):
+                        self._write_evidence_link(evidence_id, unavailable=bool(message.get("evidenceUnavailable")))
                 elif role == "custom":
                     self._write_chat_block("custom", str(content))
                 elif role == "bashExecution":
@@ -1443,7 +1927,11 @@ if TEXTUAL_AVAILABLE:
                     # or reads a referenced raw-output file.
                     self._write_manual_command_block(str(message.get("command", "")))
                     output = str(message.get("output", ""))
-                    if not getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)():
+                    if isinstance(self.session, TuiSessionView):
+                        show_bash = bool(self.session.snapshot["sidebar"].get("bashOutput", True))
+                    else:
+                        show_bash = bool(getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)())
+                    if not show_bash:
                         output = ""
                     self._write_manual_result(
                         output,
@@ -1454,14 +1942,18 @@ if TEXTUAL_AVAILABLE:
                         full_output_path=message.get("fullOutputPath"),
                         stored=True,
                     )
-            self._render_stream()
+            self._schedule_stream_render()
             # Rebuild is a new transcript boundary, not an incremental trim
             # relative to the previously mounted session.
             self._stream_front_trim_pending = 0
 
         def _session_infos(self) -> list[SessionInfo]:
-            manager = self.session.session_manager
-            return SessionManager.list(manager.cwd, manager.session_dir)
+            if not isinstance(self.session, TuiSessionView):
+                manager = self.session.session_manager
+                return SessionManager.list(manager.cwd, manager.session_dir)
+            # The worker is authoritative.  A numbered target intentionally
+            # resolves only against the most recent detached list DTO.
+            return list(self._session_list_snapshot or [])
 
         def _invalidate_session_list_snapshot(self) -> None:
             self._session_list_snapshot = None
@@ -1496,7 +1988,9 @@ if TEXTUAL_AVAILABLE:
             if target.isdigit():
                 return target, new_name, None
 
-            names = {info.name for info in self._session_infos() if info.name and rename_rest.startswith(info.name + " ")}
+            names = {
+                info.name for info in self._session_infos() if info.name and rename_rest.startswith(info.name + " ")
+            }
             if not names:
                 return target, new_name, None
             if len(names) != 1:
@@ -1504,8 +1998,29 @@ if TEXTUAL_AVAILABLE:
             name = names.pop()
             return name, rename_rest[len(name) + 1 :], None
 
-        def _list_sessions(self) -> None:
-            infos = self._session_infos()
+        async def _list_sessions(self) -> None:
+            if isinstance(self.session, TuiSessionView):
+                result = await self.session.command("session_list")
+                infos = []
+                for item in result.get("sessions", []):
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        infos.append(
+                            SessionInfo(
+                                path=str(item["path"]),
+                                id=str(item["id"]),
+                                cwd=str(item.get("cwd", "")),
+                                name=item.get("name") if isinstance(item.get("name"), str) else None,
+                                modified=datetime.fromisoformat(str(item["modified"])),
+                                created=datetime.fromisoformat(str(item["modified"])),
+                                message_count=int(item.get("messageCount", 0)),
+                            )
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            else:
+                infos = self._session_infos()
             self._session_list_snapshot = list(infos)
             if not infos:
                 self._write("No persisted sessions in this project.", "info")
@@ -1514,7 +2029,13 @@ if TEXTUAL_AVAILABLE:
             lines = ["Sessions (newest first):"]
             for index, info in enumerate(infos, 1):
                 seconds = max(0, int(now - info.modified.timestamp()))
-                age = f"{seconds // 86400}d ago" if seconds >= 86400 else f"{seconds // 3600}h ago" if seconds >= 3600 else f"{seconds // 60}m ago"
+                age = (
+                    f"{seconds // 86400}d ago"
+                    if seconds >= 86400
+                    else f"{seconds // 3600}h ago"
+                    if seconds >= 3600
+                    else f"{seconds // 60}m ago"
+                )
                 name = info.name or "(unnamed)"
                 active = " *" if info.id == self.session.session_id else ""
                 lines.append(f"{index}. {name} — {age}, {info.message_count} messages{active}")
@@ -1529,8 +2050,11 @@ if TEXTUAL_AVAILABLE:
                 self._write("Runtime host unavailable: session loading is not supported in this context.", "error")
                 return
             self._prepare_session_change()
-            await self.runtime_host.switch_session(info.path)
-            self.session = self.runtime_host.session
+            if isinstance(self.session, TuiSessionView):
+                await self.session.command("switch_session", path=info.path, id=info.id)
+            else:
+                await self.runtime_host.switch_session(info.path)
+                self.session = self.runtime_host.session
             self._bind_session()
             self._invalidate_session_list_snapshot()
             self._clear_extension_ui_state()
@@ -1540,7 +2064,18 @@ if TEXTUAL_AVAILABLE:
 
         def on_unmount(self) -> None:
             self._approval_rebinding = True
+            self._is_unmounting = True
             self._reject_all_approvals("TUI closed")
+            # Release a producer currently backpressured at the final ingress
+            # boundary. The detached listener observes the generation change and
+            # returns without retaining post-close UI state.
+            with self._pending_ui_events_lock:
+                self._session_listener_generation += 1
+                self._pending_ui_events = []
+                self._legacy_deferred_ui_events.clear()
+                self._legacy_deferred_ui_event_bytes = 0
+                self._pending_ui_event_bytes = 0
+                self._pending_ui_events_lock.notify_all()
             if callable(self._off_listener):
                 try:
                     self._off_listener()
@@ -1554,18 +2089,99 @@ if TEXTUAL_AVAILABLE:
                     pass
                 self._off_monitor_listener = None
 
+        def _schedule_stream_render(self) -> None:
+            """Paint transcript mutations no more than once per mounted frame.
+
+            The synchronous path is intentionally limited to pre-mount/test
+            initialization, where no Textual paint loop exists yet.
+            """
+            self._stream_render_revision += 1
+            if not self.is_running:
+                self._render_stream()
+                return
+            self._stream_render_dirty = True
+            now = time.monotonic()
+            if self._stream_render_timer is not None:
+                return
+            # Textual timers cannot use a zero interval (it divides by the
+            # interval internally); one millisecond still schedules the next
+            # UI turn while preserving the frame cap.
+            delay = max(0.001, self._stream_next_paint - now)
+            timer_token = object()
+            self._stream_render_timer_token = timer_token
+            timer = self.set_timer(delay, lambda: self._paint_scheduled_stream(timer_token))
+            # A sub-millisecond/same-turn timer may have completed before
+            # set_timer returned. Do not resurrect its stale handle.
+            if self._stream_render_timer_token is timer_token:
+                self._stream_render_timer = timer
+
+        def _schedule_sidebar_refresh(self) -> None:
+            """Coalesce sidebar/layout work to one frame after lifecycle reduction."""
+            if self._is_unmounting:
+                return
+            if not self.is_running:
+                self._refresh_sidebar()
+                return
+            self._sidebar_refresh_dirty = True
+            if self._sidebar_refresh_timer is not None:
+                return
+            delay = max(0.001, self._sidebar_next_paint - time.monotonic())
+            self._sidebar_refresh_timer = self.set_timer(delay, self._paint_scheduled_sidebar)
+
+        def _paint_scheduled_sidebar(self) -> None:
+            self._sidebar_refresh_timer = None
+            if self._is_unmounting:
+                self._sidebar_refresh_dirty = False
+                return
+            if not self._sidebar_refresh_dirty:
+                return
+            self._sidebar_refresh_dirty = False
+            self._sidebar_next_paint = time.monotonic() + _UI_FRAME_SECONDS
+            self._refresh_sidebar()
+
+        def _paint_scheduled_stream(self, timer_token: object | None = None) -> None:
+            if timer_token is not None and timer_token is not self._stream_render_timer_token:
+                return
+            self._stream_render_timer = None
+            self._stream_render_timer_token = None
+            if not self._stream_render_dirty:
+                return
+            self._stream_render_dirty = False
+            self._stream_next_paint = time.monotonic() + _UI_FRAME_SECONDS
+            self._render_stream()
+
         def _render_stream(self) -> None:
+            if self._ui_drain_active:
+                # ``_schedule_stream_render`` renders synchronously before the
+                # app has mounted. Mark it dirty instead of recursively calling
+                # back into this guard; the next mounted frame will paint it.
+                self._stream_render_dirty = True
+                if self.is_running and self._stream_render_timer is None:
+                    self._schedule_stream_render()
+                return
+            self._materialize_assistant_live_lines()
             rendered_lines = tuple(self._stream_lines)
+            width = self._main_width()
+            cache_context_changed = width != self._stream_cache_width or self._stream_cache_theme != self._theme.name
             # A stream update can be requested by several lifecycle paths in a
             # frame. Rebuilding identical Rich Text is pure wasted work and can
             # invalidate a mouse selection while output is still streaming.
-            if rendered_lines == self._rendered_stream_lines:
+            if (
+                rendered_lines == self._rendered_stream_lines
+                and self._rendered_stream_revision == self._stream_render_revision
+                and not cache_context_changed
+            ):
                 return
             try:
                 stream_widget = self.query_one("#stream")
                 stream_container = self.query_one("#stream_container", VerticalScroll)
             except Exception:
                 return
+            if cache_context_changed:
+                self._stream_content_cache.clear()
+                self._stream_cache_width = width
+                self._stream_cache_theme = self._theme.name
+            self._sync_stream_line_ids()
             # Sample this before replacing the content.  Updating a Static can
             # change its wrapped height (and therefore max_scroll_y), so the
             # post-update position alone cannot tell whether a reader had
@@ -1577,8 +2193,7 @@ if TEXTUAL_AVAILABLE:
             previous_scroll_target_y = stream_container.scroll_target_y
             sampled_follow_stream = (
                 not self._rendered_stream_lines
-                or
-                previous_max_scroll_y <= 0
+                or previous_max_scroll_y <= 0
                 or previous_scroll_y >= previous_max_scroll_y - _STREAM_FOLLOW_TOLERANCE
             )
             # A tail update already awaiting layout remains tail intent through
@@ -1615,11 +2230,12 @@ if TEXTUAL_AVAILABLE:
                 else:
                     is_tool_line = line.startswith(("tool: ", "tool (", "tool start ", "tool ok: ", "tool err: "))
                     in_tool_block = is_tool_line or (in_tool_block and bool(line))
-                    content = content.append(self._stream_content_line(line_index, line))
+                    content = content.append(self._cached_stream_content_line(line_index, line, width))
                     if not line:
                         in_tool_block = False
             stream_widget.update(content)
             self._rendered_stream_lines = rendered_lines
+            self._rendered_stream_revision = self._stream_render_revision
             try:
                 self._queue_stream_viewport_reconcile(
                     stream_container,
@@ -1633,6 +2249,37 @@ if TEXTUAL_AVAILABLE:
                 self._stream_front_trim_pending = 0
             except Exception:
                 pass
+
+        def _check_resize(self) -> None:
+            """Reflow after Textual has delivered its resize to the active screen."""
+            super()._check_resize()
+            if self._stream_lines:
+                self.call_after_refresh(self._render_stream)
+
+        def _sync_stream_line_ids(self) -> None:
+            """Keep stable IDs aligned even for legacy direct list mutations."""
+            if not self._stream_lines:
+                self._stream_line_ids = []
+                return
+            if len(self._stream_line_ids) > len(self._stream_lines):
+                self._stream_line_ids = self._stream_line_ids[-len(self._stream_lines) :]
+            while len(self._stream_line_ids) < len(self._stream_lines):
+                self._next_stream_line_id += 1
+                self._stream_line_ids.append(self._next_stream_line_id)
+
+        def _cached_stream_content_line(self, line_index: int, line: str, width: int) -> Content:
+            line_id = self._stream_line_ids[line_index]
+            tokens = self._agent_links_by_line.get(line_index, ())
+            links = tuple((token, self._agent_link_labels[token]) for token in tokens if token in self._agent_link_labels)
+            key = (line_id, line, width, self._theme.name, links)
+            cached = self._stream_content_cache.get(key)
+            if cached is not None:
+                self._stream_cache_hits += 1
+                return cached
+            self._stream_cache_misses += 1
+            rendered = self._stream_content_line(line_index, line, links)
+            self._stream_content_cache[key] = rendered
+            return rendered
 
         def _invalidate_deferred_stream_viewport(self) -> None:
             """Make an already queued layout callback harmless."""
@@ -1704,6 +2351,10 @@ if TEXTUAL_AVAILABLE:
                 "anchor": anchor,
                 "front_trim_count": front_trim_count,
                 "user_scroll_generation": self._stream_user_scroll_generation,
+                # A fresh render gets one current-layout reconciliation plus
+                # these settling checks. A newer render replaces this pending
+                # intent and restarts the checks for its own layout.
+                "follow_layout_reconciles": _STREAM_FOLLOW_LAYOUT_RECONCILES,
             }
             if not self._stream_viewport_callback_pending:
                 self._stream_viewport_callback_pending = True
@@ -1717,9 +2368,11 @@ if TEXTUAL_AVAILABLE:
                 return
             self._stream_viewport_callback_pending = False
             pending = self._deferred_stream_viewport
-            self._deferred_stream_viewport = None
             if pending is None:
                 return
+            # A rejected/stale intent is consumed. Successful tail follow may
+            # explicitly retain it below for its bounded layout-settling pass.
+            self._deferred_stream_viewport = None
             if (
                 pending["session_generation"] != self._session_listener_generation
                 or pending["render_generation"] != self._stream_render_generation
@@ -1749,6 +2402,18 @@ if TEXTUAL_AVAILABLE:
                     ):
                         return
                     container.scroll_end(animate=False, immediate=True)
+                    # Textual may finish wrapping/layout after this refresh
+                    # callback. Retain only the latest tail intent for bounded
+                    # post-layout checks, so a later user scroll still wins
+                    # while the final end is not sampled too early.
+                    remaining = pending.get("follow_layout_reconciles", 0)
+                    if isinstance(remaining, int) and remaining > 0:
+                        pending["follow_layout_reconciles"] = remaining - 1
+                        self._deferred_stream_viewport = pending
+                        self._stream_viewport_callback_pending = True
+                        self._stream_viewport_callback_token += 1
+                        next_token = self._stream_viewport_callback_token
+                        self.call_after_refresh(lambda: self._reconcile_stream_viewport(next_token))
                     return
                 anchor = pending["anchor"]
                 if anchor is not None:
@@ -1846,14 +2511,27 @@ if TEXTUAL_AVAILABLE:
                 text.append(line[status_start:], style="bold")
             text.append("\n")
 
-        def _stream_content_line(self, line_index: int, line: str) -> Content:
+        def _stream_content_line(
+            self, line_index: int, line: str, indexed_links: tuple[tuple[int, str], ...] | None = None
+        ) -> Content:
             """Return one literal line plus any trusted generated view actions."""
-            links = [
+            links = list(indexed_links) if indexed_links is not None else [
                 (token, self._agent_link_labels[token])
-                for token, (generation, _child_id, target_line, _call_id) in self._agent_link_tokens.items()
-                if generation == self._monitor_generation and target_line == line_index and token in self._agent_link_labels
+                for token in self._agent_links_by_line.get(line_index, ())
+                if token in self._agent_link_labels
+                and self._agent_link_tokens.get(token, (None,))[0] == self._monitor_generation
             ]
-            if not links:
+            evidence_links = [
+                (token, "[view]")
+                for token in self._evidence_links_by_line.get(line_index, ())
+                if token in self._evidence_link_tokens
+                and self._evidence_link_tokens[token][0] == self._monitor_generation
+                and (
+                    not isinstance(self.session, TuiSessionView)
+                    or self._evidence_link_tokens[token][3] == self.session.epoch
+                )
+            ]
+            if not links and not evidence_links:
                 return self._literal_stream_content(line)
             links.sort()
             # The link location and label come solely from trusted metadata.
@@ -1863,7 +2541,14 @@ if TEXTUAL_AVAILABLE:
             content = self._literal_stream_content(line, newline=False)
             for token, label in links:
                 content = content.append(" ")
-                content = content.append(Content.from_markup(f"[@click=app.open_agent_link({token})]$label[/]", label=label))
+                content = content.append(
+                    Content.from_markup(f"[@click=app.open_agent_link({token})]$label[/]", label=label)
+                )
+            for token, label in evidence_links:
+                content = content.append(" ")
+                content = content.append(
+                    Content.from_markup(f"[@click=app.open_evidence_link({token})]$label[/]", label=label)
+                )
             return content.append("\n")
 
         @staticmethod
@@ -1887,14 +2572,153 @@ if TEXTUAL_AVAILABLE:
                 TextualStyle(bold=True), status_start, len(line)
             )
 
+        @staticmethod
+        def _ui_event_size(event: dict[str, Any]) -> int:
+            """Count detached event bytes conservatively for the ingress budget."""
+            try:
+                return len(json.dumps(event, ensure_ascii=False, default=str, separators=(",", ":")).encode("utf-8"))
+            except (TypeError, ValueError):
+                return _UI_EVENT_MAX_BYTES + 1
+
+        @staticmethod
+        def _reduce_oversized_ui_event(event: dict[str, Any]) -> dict[str, Any]:
+            """Safely reduce malformed direct-session display events."""
+            reduced = dict(event)
+            if reduced.get("type") == "tool_call_end" and isinstance(reduced.get("result"), dict):
+                key = "outputText" if reduced.get("ok") else "error"
+                value = reduced["result"].get(key)
+                if isinstance(value, str):
+                    reduced.setdefault(key, value)
+                # Match facade DTOs: retain one visible projection, never both.
+                reduced.pop("result", None)
+            return _fit_event_snapshot(reduced, _UI_EVENT_MAX_BYTES)
+
+        @staticmethod
+        def _ui_delta(event: dict[str, Any]) -> tuple[str, str] | None:
+            if event.get("type") == "message_update":
+                nested = event.get("assistantMessageEvent")
+                if isinstance(nested, dict) and nested.get("type") == "text_delta" and isinstance(nested.get("delta"), str):
+                    return "message_update", nested["delta"]
+            if event.get("type") == "thinking_delta" and isinstance(event.get("delta"), str):
+                return "thinking_delta", event["delta"]
+            return None
+
+        def _try_coalesce_ui_delta_locked(self, event: dict[str, Any], event_size: int) -> bool:
+            """Coalesce only adjacent compatible deltas; all other events are barriers."""
+            if not self._pending_ui_events:
+                return False
+            previous = self._pending_ui_events[-1]
+            current_delta = self._ui_delta(event)
+            previous_delta = self._ui_delta(previous)
+            if current_delta is None or previous_delta is None or current_delta[0] != previous_delta[0]:
+                return False
+            # Do not merge explicitly different streams.
+            for key in ("sessionId", "messageId", "turnId", "id"):
+                if previous.get(key) is not None and event.get(key) is not None and previous[key] != event[key]:
+                    return False
+            merged = dict(event)
+            if current_delta[0] == "message_update":
+                nested = dict(event["assistantMessageEvent"])
+                nested["delta"] = previous_delta[1] + current_delta[1]
+                merged["assistantMessageEvent"] = nested
+            else:
+                merged["delta"] = previous_delta[1] + current_delta[1]
+            merged_size = self._ui_event_size(merged)
+            if len((self._ui_delta(merged) or ("", "", ""))[1].encode("utf-8")) > _UI_MAX_COALESCED_DELTA_BYTES:
+                return False
+            if merged_size > _UI_EVENT_MAX_BYTES or (
+                self._pending_ui_event_bytes - self._ui_event_size(previous) + merged_size > _UI_EVENT_QUEUE_MAX_BYTES
+            ):
+                return False
+            self._pending_ui_events[-1] = merged
+            self._pending_ui_event_bytes += merged_size - self._ui_event_size(previous)
+            return True
+
+        def _defer_legacy_ui_event_locked(self, event: dict[str, Any], event_size: int) -> None:
+            """Append a direct-session event or explicitly report bounded overflow.
+
+            The direct listener cannot wait for the UI loop.  It also cannot
+            discard a lifecycle barrier: callers receive ``BufferError`` and
+            retain ownership of the source event rather than observing a silent
+            loss. Facade-backed production delivery uses readiness backpressure
+            before reaching this compatibility-only path.
+            """
+            if (
+                len(self._legacy_deferred_ui_events) >= _UI_LEGACY_DEFERRED_CAPACITY
+                or self._legacy_deferred_ui_event_bytes + event_size > _UI_LEGACY_DEFERRED_MAX_BYTES
+            ):
+                raise BufferError("legacy TUI deferred ingress is full; event was not accepted")
+            self._legacy_deferred_ui_events.append(event)
+            self._legacy_deferred_ui_event_bytes += event_size
+
+        def _can_accept_ui_event_locked(self, event: dict[str, Any], event_size: int | None = None) -> bool:
+            """Check bounded ingress capacity without mutating it or waiting."""
+            size = self._ui_event_size(event) if event_size is None else event_size
+            if size > _UI_EVENT_MAX_BYTES:
+                return False
+            if len(self._pending_ui_events) < _UI_EVENT_CAPACITY and self._pending_ui_event_bytes + size <= _UI_EVENT_QUEUE_MAX_BYTES:
+                return True
+            # A compatible tail delta can still be accepted by coalescing.
+            if not self._pending_ui_events or self._ui_delta(event) is None:
+                return False
+            previous = self._pending_ui_events[-1]
+            previous_delta = self._ui_delta(previous)
+            current_delta = self._ui_delta(event)
+            if previous_delta is None or current_delta is None or previous_delta[0] != current_delta[0]:
+                return False
+            for key in ("sessionId", "messageId", "turnId", "id"):
+                if previous.get(key) is not None and event.get(key) is not None and previous[key] != event[key]:
+                    return False
+            merged = dict(event)
+            if current_delta[0] == "message_update":
+                nested = dict(event["assistantMessageEvent"])
+                nested["delta"] = previous_delta[1] + current_delta[1]
+                merged["assistantMessageEvent"] = nested
+            else:
+                merged["delta"] = previous_delta[1] + current_delta[1]
+            merged_size = self._ui_event_size(merged)
+            return merged_size <= _UI_EVENT_MAX_BYTES and (
+                self._pending_ui_event_bytes - self._ui_event_size(previous) + merged_size <= _UI_EVENT_QUEUE_MAX_BYTES
+            )
+
+        def _can_accept_ui_event(self, event: dict[str, Any]) -> bool:
+            with self._pending_ui_events_lock:
+                return self._can_accept_ui_event_locked(event)
+
         def _flush_pending_ui_events(self) -> None:
             """Drain ordered session events without creating a token-rate UI backlog."""
             with self._pending_ui_events_lock:
-                pending, self._pending_ui_events = self._pending_ui_events, []
+                # External test helpers may seed the compatibility list directly;
+                # recalculate before removing a bounded slice.
+                self._pending_ui_event_bytes = sum(self._ui_event_size(event) for event in self._pending_ui_events)
+                self._legacy_deferred_ui_event_bytes = sum(
+                    self._ui_event_size(event) for event in self._legacy_deferred_ui_events
+                )
+                pending = self._pending_ui_events[:_UI_DRAIN_MAX_ITEMS]
+                del self._pending_ui_events[:len(pending)]
+                self._pending_ui_event_bytes -= sum(self._ui_event_size(event) for event in pending)
+                while self._legacy_deferred_ui_events:
+                    event = self._legacy_deferred_ui_events[0]
+                    size = self._ui_event_size(event)
+                    if self._try_coalesce_ui_delta_locked(event, size):
+                        self._legacy_deferred_ui_events.popleft()
+                        self._legacy_deferred_ui_event_bytes -= size
+                        continue
+                    if not self._can_accept_ui_event_locked(event, size):
+                        break
+                    self._legacy_deferred_ui_events.popleft()
+                    self._legacy_deferred_ui_event_bytes -= size
+                    self._pending_ui_events.append(event)
+                    self._pending_ui_event_bytes += size
                 self._pending_assistant_deltas = ""
+                if not self._legacy_deferred_ui_events:
+                    self._legacy_deferred_ui_event_bytes = 0
                 # The queued wakeup is consumed when its drain begins. A
                 # concurrent lifecycle append can now schedule its successor.
                 self._ui_flush_wakeup_pending = False
+                self._pending_ui_events_lock.notify_all()
+            if isinstance(self.session, TuiSessionView):
+                self.session.resume_events()
             if not pending:
                 return
 
@@ -1936,26 +2760,70 @@ if TEXTUAL_AVAILABLE:
                         changed = self._apply_thinking_delta(delta) or changed
                 delta_events.clear()
                 if changed:
-                    self._render_stream()
+                    self._schedule_stream_render()
 
-            for event in pending:
-                event_type = event.get("type")
-                is_text_delta = (
-                    event_type == "message_update"
-                    and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
-                )
-                if is_text_delta or event_type == "thinking_delta":
-                    delta_events.append(event)
-                    continue
+            deadline = time.monotonic() + _UI_DRAIN_MAX_SECONDS
+            processed = 0
+            self._ui_drain_active = True
+            try:
+                for event in pending:
+                    # Do not begin another atomic event after this slice has
+                    # expired. One individual handler may finish just beyond
+                    # the deadline, which is why expensive transcript painting
+                    # is explicitly deferred above.
+                    event_type = event.get("type")
+                    is_text_delta = (
+                        event_type == "message_update"
+                        and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
+                    )
+                    # A bounded display delta is safe to finish after the
+                    # immediately preceding lifecycle barrier. Keep the
+                    # barrier+delta transition atomic while yielding before
+                    # any later lifecycle/formatting work.
+                    if processed and time.monotonic() >= deadline and not (
+                        processed == 1 and (is_text_delta or event_type == "thinking_delta")
+                    ):
+                        break
+                    processed += 1
+                    if is_text_delta or event_type == "thinking_delta":
+                        # Keep formatting bounded at the event chunk limit.
+                        # Applying an entire delta run at its lifecycle barrier
+                        # can turn a nominally time-budgeted drain into one
+                        # large trim/wrap operation.
+                        if is_text_delta:
+                            changed = self._apply_assistant_deltas(
+                                str(event.get("assistantMessageEvent", {}).get("delta", ""))
+                            )
+                        else:
+                            changed = self._apply_thinking_delta(str(event.get("delta", "")))
+                        if changed:
+                            self._schedule_stream_render()
+                        if processed >= _UI_DRAIN_MAX_ITEMS:
+                            break
+                        continue
+                    flush_deltas()
+                    self._handle_session_event(event)
+                    if processed >= _UI_DRAIN_MAX_ITEMS:
+                        break
                 flush_deltas()
-                self._handle_session_event(event)
-            flush_deltas()
+            finally:
+                self._ui_drain_active = False
             # Do not clear a wakeup scheduled by an append racing this drain.
             # With no successor batch, the coalescing flag is reset at both
             # drain boundaries.
             with self._pending_ui_events_lock:
+                # A time-budget expiration returns untouched events to the front,
+                # preserving their sequence before concurrent producer events.
+                if processed < len(pending):
+                    remainder = pending[processed:]
+                    self._pending_ui_events[0:0] = remainder
+                    self._pending_ui_event_bytes += sum(self._ui_event_size(event) for event in remainder)
                 if not self._pending_ui_events:
                     self._ui_flush_wakeup_pending = False
+                else:
+                    # A tiny delayed continuation yields the Textual input queue;
+                    # it is not the paint cadence/fallback interval.
+                    self.set_timer(0.001, self._flush_pending_ui_events)
 
         def _flush_pending_assistant_deltas(self) -> None:
             """Backward-compatible test helper for the ordered UI drain."""
@@ -1979,7 +2847,7 @@ if TEXTUAL_AVAILABLE:
                 self._thinking_label_shown = True
                 self._thinking_buffer = ""
                 self._thinking_line_idx = None
-            self._thinking_buffer += sanitize_display_text(delta)
+            self._thinking_buffer = _truncate_display_bytes(self._thinking_buffer + sanitize_display_text(delta))
             escaped = rich_escape(self._thinking_buffer)
             line_text = f"{_THINKING_TEXT_MARK}[i {self._theme.info}]{escaped}[/]"
             if (
@@ -2066,7 +2934,7 @@ if TEXTUAL_AVAILABLE:
             if not evaluate_waiting(self._turn_active, self._last_delta_ts, now):
                 if self._thinking_active:
                     self._remove_thinking_line()
-                    self._render_stream()
+                    self._schedule_stream_render()
                 return
             # Check for user-gate pending state: show a paused indicator only
             # for ask_user (approval gate is no longer shown as a paused label
@@ -2085,7 +2953,7 @@ if TEXTUAL_AVAILABLE:
                 for i in range(len(self._stream_lines) - 1, -1, -1):
                     if self._stream_lines[i].startswith(_THINKING_MARK):
                         self._stream_lines[i] = line
-                        self._render_stream()
+                        self._schedule_stream_render()
                         break
                 else:
                     # The line was trimmed away; re-append it.
@@ -2099,13 +2967,31 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines.append("")
                 self._trim_stream()
                 self._thinking_active = True
+                self._schedule_stream_render()
 
         def _write(self, text: str, kind: str = "normal", *, render: bool = True) -> None:
             # Store one logical display line per entry. In particular, a large
             # tool/error payload with embedded newlines must not bypass the
             # viewport cap merely because it arrived through _write.
-            self._stream_lines.extend(sanitize_display_text(text).splitlines() or [""])
+            self._stream_lines.extend(_truncate_display_bytes(text).splitlines() or [""])
             self._trim_stream(render=render)
+
+        def _write_evidence_link(self, evidence_id: str, *, unavailable: bool = False) -> None:
+            """Create an app-owned evidence link; transcript text is never parsed."""
+            if unavailable or not evidence_id:
+                self._write("Full result unavailable.", "warn")
+                return
+            self._write("Full sanitized result:", "info", render=False)
+            line = len(self._stream_lines) - 1
+            self._next_evidence_link_token += 1
+            token = self._next_evidence_link_token
+            self._evidence_link_tokens[token] = (
+                self._monitor_generation, evidence_id, 0,
+                self.session.epoch if isinstance(self.session, TuiSessionView) else 0,
+            )
+            self._evidence_links_by_line[line] = (*self._evidence_links_by_line.get(line, ()), token)
+            self._rendered_stream_lines = ()
+            self._schedule_stream_render()
 
         def _write_subagent_entry(self, session_id: str, task: Any) -> None:  # noqa: ARG002
             """Attach a child to its active spawn status heading, never task text."""
@@ -2130,10 +3016,13 @@ if TEXTUAL_AVAILABLE:
                     "[view]" if len(self._active_subagent_link_tokens) == 1 else f"[view {ordinal}]"
                 )
             self._agent_link_tokens[token] = (self._monitor_generation, session_id, heading_line, call_id)
+            self._agent_links_by_line[heading_line] = tuple(
+                [*self._agent_links_by_line.get(heading_line, ()), token]
+            )
             # Inline actions are generated from metadata rather than stored in
             # _stream_lines, so invalidate the otherwise pure line cache.
             self._rendered_stream_lines = ()
-            self._render_stream()
+            self._schedule_stream_render()
 
         def _write_compaction_result(self, result: dict[str, Any]) -> None:
             """Render a compact human-readable result for the TUI."""
@@ -2180,11 +3069,42 @@ if TEXTUAL_AVAILABLE:
             """Trim *_stream_lines* to ``MAX_RENDERED_LINES`` entries. Returns the number of
             lines dropped from the front (0 if no trim happened) so callers
             can rebase any absolute indexes they hold."""
+            self._sync_stream_line_ids()
             before = len(self._stream_lines)
-            if before > MAX_RENDERED_LINES:
-                dropped = before - MAX_RENDERED_LINES
-                self._stream_lines = self._stream_lines[-MAX_RENDERED_LINES:]
-                self._stream_front_trim_pending += dropped
+            # Enforce byte and estimated wrapped-row budgets before Content is
+            # constructed.  The estimate deliberately over-retains no giant
+            # logical line: it uses terminal cell width, not newline count.
+            width = max(10, self._main_width() - 2)
+            per_line_limit = min(MAX_RENDERED_BYTES, width * MAX_RENDERED_ROWS)
+            for index, line in enumerate(self._stream_lines):
+                if len(line.encode("utf-8")) > per_line_limit or cell_len(line) > width * MAX_RENDERED_ROWS:
+                    self._stream_lines[index] = _truncate_display_bytes(line, per_line_limit)
+            used_bytes = used_rows = 0
+            start = len(self._stream_lines)
+            for index in range(len(self._stream_lines) - 1, -1, -1):
+                line = self._stream_lines[index]
+                byte_count = len(line.encode("utf-8")) + 1
+                rows = max(1, math.ceil(max(1, cell_len(line)) / width))
+                if start < len(self._stream_lines) and (
+                    used_bytes + byte_count > MAX_RENDERED_BYTES or used_rows + rows > MAX_RENDERED_ROWS
+                ):
+                    break
+                used_bytes += byte_count
+                used_rows += rows
+                start = index
+            desired_start = max(len(self._stream_lines) - MAX_RENDERED_LINES, start)
+            if desired_start:
+                dropped = desired_start
+                dropped_rows = sum(
+                    max(1, math.ceil(max(1, cell_len(line)) / width))
+                    for line in self._stream_lines[:desired_start]
+                )
+                self._stream_lines = self._stream_lines[desired_start:]
+                self._stream_line_ids = self._stream_line_ids[desired_start:]
+                # Reconciliation works in rendered rows, not logical entries:
+                # one removed long line can otherwise move a retained anchor
+                # beyond the bounded lookup window.
+                self._stream_front_trim_pending += dropped_rows
             else:
                 dropped = 0
 
@@ -2194,7 +3114,21 @@ if TEXTUAL_AVAILABLE:
                     for token, (generation, session_id, line_index, call_id) in self._agent_link_tokens.items()
                     if line_index >= dropped
                 }
+                self._agent_links_by_line = {
+                    line_index - dropped: tuple(token for token in tokens if token in self._agent_link_tokens)
+                    for line_index, tokens in self._agent_links_by_line.items()
+                    if line_index >= dropped
+                }
                 self._prune_agent_link_metadata()
+                self._evidence_link_tokens = {
+                    token: (generation, evidence_id, offset, epoch)
+                    for token, (generation, evidence_id, offset, epoch) in self._evidence_link_tokens.items()
+                    if any(token in tokens for line, tokens in self._evidence_links_by_line.items() if line >= dropped)
+                }
+                self._evidence_links_by_line = {
+                    line - dropped: tuple(token for token in tokens if token in self._evidence_link_tokens)
+                    for line, tokens in self._evidence_links_by_line.items() if line >= dropped
+                }
 
             # --- rebase assistant live bookkeeping ------------------------
             if dropped and self._assistant_live_start_idx >= 0:
@@ -2205,10 +3139,7 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_buffer = ""
                     self._assistant_live_line_count = 0
                     self._assistant_has_live_delta = False
-                elif (
-                    new_idx + self._assistant_live_line_count
-                    > len(self._stream_lines)
-                ):
+                elif new_idx + self._assistant_live_line_count > len(self._stream_lines):
                     # The block extends beyond the trimmed list — invalidate.
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
@@ -2235,9 +3166,7 @@ if TEXTUAL_AVAILABLE:
                     elif new_end > len(self._stream_lines):
                         self._active_tool_block = None
                     else:
-                        self._active_tool_block = (
-                            _name, new_start, new_end, _text
-                        )
+                        self._active_tool_block = (_name, new_start, new_end, _text)
             else:
                 active = self._active_tool_block
                 if active is not None:
@@ -2246,7 +3175,7 @@ if TEXTUAL_AVAILABLE:
                         self._active_tool_block = None
 
             if render:
-                self._render_stream()
+                self._schedule_stream_render()
             return dropped
 
         def _chat_panel_width(self) -> int:
@@ -2268,7 +3197,7 @@ if TEXTUAL_AVAILABLE:
             pad_y: int = 0,
             pad_x: int = 2,
         ) -> list[str]:
-            content = sanitize_display_text(text).strip() or "[empty]"
+            content = _truncate_display_bytes(text).strip() or "[empty]"
             raw_lines = content.splitlines() or [content]
             wrapped: list[str] = []
             target_width = width or self._chat_panel_width()
@@ -2292,6 +3221,8 @@ if TEXTUAL_AVAILABLE:
             out.extend(wrapped)
             for _ in range(max(0, pad_y)):
                 out.append("")
+            if len(out) > MAX_RENDERED_ROWS:
+                return [_DISPLAY_TRUNCATED_MARKER, *out[-(MAX_RENDERED_ROWS - 1) :]]
             return out
 
         def _append_assistant_delta(self, delta: str) -> None:
@@ -2305,8 +3236,51 @@ if TEXTUAL_AVAILABLE:
                 self._assistant_live_buffer = ""
                 self._assistant_live_line_count = 0  # will be set below
                 self._assistant_has_live_delta = True
-            self._assistant_live_buffer += delta
-            panel_lines = self._format_chat_panel("assistant", self._assistant_live_buffer)
+            self._append_live_assistant_source(delta)
+            self._assistant_live_lines_dirty = True
+            # Wrapping/replacing the live panel is presentation work. During a
+            # bounded event reduction, leave it for the already frame-capped
+            # stream paint instead of doing it once for every input DTO.
+            if self._ui_drain_active:
+                return
+            self._materialize_assistant_live_lines()
+
+        def _append_live_assistant_source(self, delta: str) -> None:
+            """Append a bounded live source without re-encoding its whole prefix."""
+            if not self._assistant_live_buffer:
+                self._assistant_live_buffer_bytes = 0
+            if self._assistant_live_buffer.endswith(_DISPLAY_TRUNCATED_MARKER):
+                return
+            clean_delta = sanitize_display_text(delta)
+            encoded = clean_delta.encode("utf-8")
+            if self._assistant_live_buffer_bytes + len(encoded) <= MAX_SOURCE_DISPLAY_BYTES:
+                self._assistant_live_buffer += clean_delta
+                self._assistant_live_buffer_bytes += len(encoded)
+                return
+            marker = "\n" + _DISPLAY_TRUNCATED_MARKER
+            available = max(0, MAX_SOURCE_DISPLAY_BYTES - len(marker.encode("utf-8")) - self._assistant_live_buffer_bytes)
+            self._assistant_live_buffer += encoded[:available].decode("utf-8", "ignore") + marker
+            self._assistant_live_buffer_bytes = len(self._assistant_live_buffer.encode("utf-8"))
+
+        def _materialize_assistant_live_lines(self) -> None:
+            """Build the current live panel only from a scheduled paint path."""
+            if not self._assistant_live_lines_dirty:
+                return
+            # Keep the complete bounded live source for later lifecycle state,
+            # but format it once per scheduled frame. Reformatting an
+            # ever-growing live message for every token defeats the drain
+            # budget even when paint is frame-capped.
+            # Apply the live presentation byte budget before `_format_chat_panel`
+            # splits or wraps text.  Reserving marker space keeps even the
+            # formatted input within the named cap (rather than appending a
+            # marker after an 8 KiB prefix).
+            live_render_text = self._assistant_live_buffer
+            encoded_live = live_render_text.encode("utf-8")
+            if len(encoded_live) > _MAX_LIVE_ASSISTANT_RENDER_BYTES:
+                marker = "\n" + _TRUNCATED_ASSISTANT_MARKER
+                room = max(0, _MAX_LIVE_ASSISTANT_RENDER_BYTES - len(marker.encode("utf-8")))
+                live_render_text = encoded_live[:room].decode("utf-8", "ignore") + marker
+            panel_lines = self._format_chat_panel("assistant", live_render_text)
             # A single message can be larger than the viewport. Keep its tail
             # live (so subsequent deltas continue to replace it) and make the
             # omitted prefix explicit rather than silently presenting a partial
@@ -2321,6 +3295,18 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines.extend(panel_lines)
             self._assistant_live_line_count = len(panel_lines)
             self._trim_stream(render=False)
+            self._assistant_live_lines_dirty = False
+            if self._assistant_live_finalize_pending:
+                end = self._assistant_live_start_idx + self._assistant_live_line_count
+                self._stream_lines.insert(max(0, end), "")
+                self._trim_stream(render=False)
+                self._assistant_stream = ""
+                self._assistant_has_live_delta = False
+                self._assistant_live_start_idx = -1
+                self._assistant_live_buffer = ""
+                self._assistant_live_buffer_bytes = 0
+                self._assistant_live_line_count = 0
+                self._assistant_live_finalize_pending = False
 
         def _discard_live_assistant_block(self) -> None:
             """Remove the currently-tracked live assistant block from
@@ -2462,7 +3448,7 @@ if TEXTUAL_AVAILABLE:
             self._active_tool_call_id = None
             self._active_subagent_link_tokens = []
             self._trim_stream(render=False)
-            self._render_stream()
+            self._schedule_stream_render()
             return True
 
         def _reset_turn_timing(self) -> None:
@@ -2501,6 +3487,9 @@ if TEXTUAL_AVAILABLE:
             if theme is None:
                 return False
             self._theme = theme
+            # Theme styles are part of cached Content. Width is keyed at render
+            # time; clear eagerly for a theme transition.
+            self._stream_content_cache.clear()
             try:
                 self.screen.styles.background = theme.screen_bg
                 self.screen.styles.color = theme.screen_fg
@@ -2597,16 +3586,38 @@ if TEXTUAL_AVAILABLE:
                     approval_summary.update(self._approval_summary(self._approval_pending))
             except Exception:
                 pass
+            # A facade-originated theme change need not add transcript output,
+            # so force a repaint even when the logical lines are unchanged.
+            self._rendered_stream_lines = ()
+            self._schedule_stream_render()
             return True
 
         def _set_theme(self, theme_name: str) -> bool:
             """Apply and persist a theme for both /theme and Ctrl+P callers."""
+            if isinstance(self.session, TuiSessionView):
+                asyncio.create_task(self._run_view_command("set_theme", {"theme": theme_name}))
+                return True
             if not self._apply_theme(theme_name):
                 return False
-            self.session.settings_manager.set_theme(theme_name)
+            if not isinstance(self.session, TuiSessionView):
+                self.session.settings_manager.set_theme(theme_name)
             self._refresh_sidebar()
             self._write(f"Theme set to {theme_name}", "info")
             return True
+
+        async def _run_view_command(self, operation: str, payload: dict[str, Any]) -> bool:
+            """Run an explicit facade mutation and make every failure visible."""
+            try:
+                await self.session.command("ui", operation=operation, payload=payload)
+                if operation == "set_theme":
+                    self._apply_theme(str(self.session.snapshot["sidebar"].get("theme", "default")))
+                self._refresh_sidebar()
+                return True
+            except Exception as exc:
+                self._handle_session_event(
+                    {"type": "tui_command_error", "operation": operation, "error": str(exc)}
+                )
+                return False
 
         def _toast(self, message: str, severity: str = "information", timeout: float = 1.8) -> None:
             notify_fn = getattr(self, "notify", None)
@@ -2736,7 +3747,11 @@ if TEXTUAL_AVAILABLE:
             return f"{'#' * filled}{'-' * (10 - filled)} {percent:.1f}%"
 
         def _refresh_sidebar(self) -> None:
+            if self._is_unmounting:
+                return
             s = build_sidebar_snapshot(self.session)
+            cwd_key = os.fspath(s["cwd"])
+            self._sidebar_cwd = cwd_key
             self._refresh_header(s)
             if s["compacting"]:
                 status = "compacting…"
@@ -2774,8 +3789,8 @@ if TEXTUAL_AVAILABLE:
             )
             info_block.append(f"Agents: {running_agents} running (/agents)\n")
             info_block.append(f"Details: {'on' if s['bashOutput'] else 'off'}\n")
-            cwd = sanitize_display_text(s["cwd"])
-            branch = get_git_branch(s["cwd"])
+            cwd = sanitize_display_text(cwd_key)
+            branch = self._cached_git_branch(cwd_key)
             cwd_display = f"{cwd} ({sanitize_display_text(branch)})" if branch else cwd
             info_block.append(f"CWD: {cwd_display}\n")
             info_block.append(f"Session: {sanitize_display_text(s['sessionId'])}\n")
@@ -2793,10 +3808,13 @@ if TEXTUAL_AVAILABLE:
             mcp_block.append("\n")
             if s["mcpEnabled"] and s["mcpServers"]:
                 for server in s["mcpServers"]:
-                    marker = "[ok]" if server["available"] else "[!]"
-                    marker_style = self._theme.user if server["available"] else self._theme.error
+                    if not isinstance(server, dict):
+                        continue
+                    available = bool(server.get("available", False))
+                    marker = "[ok]" if available else "[!]"
+                    marker_style = self._theme.user if available else self._theme.error
                     mcp_block.append(marker, style=marker_style)
-                    mcp_block.append(f" {sanitize_display_text(server['name'])}\n")
+                    mcp_block.append(f" {sanitize_display_text(str(server.get('name') or ''))}\n")
             else:
                 mcp_block.append("\n".join(mcp_lines) + "\n")
 
@@ -2819,6 +3837,55 @@ if TEXTUAL_AVAILABLE:
                 pass
             self._apply_information_layout()
 
+        def _cached_git_branch(self, cwd: str) -> str | None:
+            """Return a fresh cached branch and request a non-blocking refresh.
+
+            ``get_git_branch`` intentionally remains synchronous for its
+            command-line/helper callers, but is invoked only by ``to_thread``
+            from this paint path.  Failed probes are cached as ``None`` too,
+            avoiding repeated failed subprocess launches on every repaint.
+            """
+            now = time.monotonic()
+            cached = self._git_branch_cache.get(cwd)
+            if cached is not None and cached[0] > now:
+                return cached[1]
+            if cwd not in self._git_branch_inflight:
+                self._start_git_branch_probe(cwd)
+            return cached[1] if cached is not None else None
+
+        def _start_git_branch_probe(self, cwd: str) -> None:
+            """Start at most one worker-thread Git probe for a cwd."""
+            self._git_branch_inflight.add(cwd)
+            session = self.session
+            generation = self._sidebar_generation
+
+            async def probe() -> None:
+                try:
+                    branch = await asyncio.to_thread(get_git_branch, cwd)
+                except Exception:
+                    # ``get_git_branch`` already contains expected subprocess
+                    # failures, but cache an unexpected probe failure as well.
+                    branch = None
+                finally:
+                    self._git_branch_inflight.discard(cwd)
+                self._git_branch_cache[cwd] = (time.monotonic() + _GIT_BRANCH_CACHE_TTL_SECONDS, branch)
+                # A probe may outlive a session switch or a cwd change.  It can
+                # populate its own cache entry, but never repaint that new view.
+                if (
+                    self.session is not session
+                    or self._sidebar_generation != generation
+                    or self._sidebar_cwd != cwd
+                    or not self.is_running
+                ):
+                    return
+                try:
+                    self._schedule_sidebar_refresh()
+                except Exception:
+                    # The app can be unmounting while a worker finishes.
+                    pass
+
+            asyncio.create_task(probe())
+
         def _monitor_child(self, session_id: str) -> dict[str, Any] | None:
             return next(
                 (child for child in self._monitor_snapshot.get("children", []) if child.get("sessionId") == session_id),
@@ -2829,7 +3896,10 @@ if TEXTUAL_AVAILABLE:
             """Discard trusted inline links with their transcript references."""
             self._agent_link_tokens.clear()
             self._agent_link_labels.clear()
+            self._agent_links_by_line.clear()
             self._active_subagent_link_tokens = []
+            self._evidence_link_tokens.clear()
+            self._evidence_links_by_line.clear()
 
         def _prune_agent_link_metadata(self) -> None:
             """Keep inline actions exactly in sync with retained transcript lines."""
@@ -2844,6 +3914,10 @@ if TEXTUAL_AVAILABLE:
             self._agent_link_labels = {
                 token: label for token, label in self._agent_link_labels.items() if token in valid_tokens
             }
+            indexed: dict[int, list[int]] = {}
+            for token, (_generation, _session_id, line_index, _call_id) in self._agent_link_tokens.items():
+                indexed.setdefault(line_index, []).append(token)
+            self._agent_links_by_line = {line: tuple(tokens) for line, tokens in indexed.items()}
 
         def _open_agents_panel(self, session_id: str | None = None) -> None:
             # A lifecycle event can reach the main stream before the coalesced
@@ -2921,13 +3995,20 @@ if TEXTUAL_AVAILABLE:
                 content = Text()
                 if selected is not None:
                     position = next(
-                        (index for index, child in enumerate(children, 1)
-                         if child.get("sessionId") == self._selected_agent_id),
+                        (
+                            index
+                            for index, child in enumerate(children, 1)
+                            if child.get("sessionId") == self._selected_agent_id
+                        ),
                         1,
                     )
                     task = sanitize_display_text(str(selected.get("task") or ""))[:120]
                     model = sanitize_display_text(str(selected.get("model") or ""))[:80]
-                    elapsed = max(0.0, (selected.get("completedAt") or time.monotonic()) - float(selected.get("startedMonotonic") or time.monotonic()))
+                    elapsed = max(
+                        0.0,
+                        (selected.get("completedAt") or time.monotonic())
+                        - float(selected.get("startedMonotonic") or time.monotonic()),
+                    )
                     content.append(f"Agent {position}/{len(children)} · {task}\n", style="bold")
                     content.append(f"Model: {model} · {elapsed:.1f}s\n")
                     tool = selected.get("currentTool")
@@ -2941,9 +4022,7 @@ if TEXTUAL_AVAILABLE:
                     if selected.get("timelineTruncated") or selected.get("previewTruncated"):
                         content.append("[earlier preview text truncated]\n")
                     timeline = [item for item in selected.get("timeline", []) if isinstance(item, dict)]
-                    has_response = any(
-                        item.get("kind") == "response" and item.get("text") for item in timeline
-                    )
+                    has_response = any(item.get("kind") == "response" and item.get("text") for item in timeline)
                     if not has_response:
                         # Tool blocks below still make current activity clear;
                         # avoid implying the child has done nothing.
@@ -2963,8 +4042,15 @@ if TEXTUAL_AVAILABLE:
                         badge = "○" if running else ("✓" if item.get("ok") else "×")
                         elapsed = _format_elapsed_ms(item.get("elapsedMs"))
                         timeout = item.get("effectiveTimeout")
-                        timeout_text = f" (timeout {int(timeout)}s)" if isinstance(timeout, (int, float)) and timeout > 0 else ""
-                        content.append(f"Tool: {badge} {name}" + (timeout_text if running else "") + (f" · {elapsed}" if elapsed else "") + "\n")
+                        timeout_text = (
+                            f" (timeout {int(timeout)}s)" if isinstance(timeout, (int, float)) and timeout > 0 else ""
+                        )
+                        content.append(
+                            f"Tool: {badge} {name}"
+                            + (timeout_text if running else "")
+                            + (f" · {elapsed}" if elapsed else "")
+                            + "\n"
+                        )
                         args = sanitize_display_text(str(item.get("args") or ""))
                         if args:
                             content.append(f"Arguments: {args}\n")
@@ -3083,7 +4169,8 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write(
-                    "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>", "info"
+                    "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>",
+                    "info",
                 )
                 self._write(
                     "/skill [list] | /skill:<name> [args] | /cooperation [on|off] | /subagents [on|off] | /details-show [on|off] | /history [n] (last 50 inputs; Ctrl+Up/Down) | /mcp [list|enable|disable] | /bash <command> | /paste-image",
@@ -3111,11 +4198,16 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
             self._assistant_live_line_count = 0
+            # The production TUI is always a detached view.  Route the legacy
+            # administrative surface before its historical in-process handlers
+            # below so none of these operations can reach a live session object.
+            if isinstance(session, TuiSessionView) and await self._handle_detached_command(cmd):
+                return
             if cmd == "/abort":
                 await session.abort()
                 self._turn_active = False
                 self._remove_thinking_line()
-                self._render_stream()
+                self._schedule_stream_render()
                 self._write("[abort requested]", "warn")
                 return
             if cmd == "/status":
@@ -3173,7 +4265,7 @@ if TEXTUAL_AVAILABLE:
                 self._write(json.dumps({"tools": session.active_tools}, ensure_ascii=False), "info")
                 return
             if cmd == "/sessions":
-                self._list_sessions()
+                await self._list_sessions()
                 return
             if cmd.startswith("/sessions "):
                 rest = cmd[len("/sessions ") :].strip()
@@ -3185,7 +4277,10 @@ if TEXTUAL_AVAILABLE:
                         self._write("Stop or wait for the active turn before deleting a session.", "error")
                     else:
                         self._session_delete_pending = target
-                        self._write(f"Delete session '{target.name or '(unnamed)'}'? Type yes to confirm, anything else cancels.", "warn")
+                        self._write(
+                            f"Delete session '{target.name or '(unnamed)'}'? Type yes to confirm, anything else cancels.",
+                            "warn",
+                        )
                     return
                 if rest.startswith("rename "):
                     rename_rest = rest[len("rename ") :].strip()
@@ -3203,21 +4298,33 @@ if TEXTUAL_AVAILABLE:
                     try:
                         normalized = normalize_session_name(new_name)
                         duplicate = next(
-                            (info for info in self._session_infos() if info.path != target.path and info.name == normalized),
+                            (
+                                info
+                                for info in self._session_infos()
+                                if info.path != target.path and info.name == normalized
+                            ),
                             None,
                         )
                         if duplicate is not None:
                             raise ValueError("A session with that name already exists")
-                        if target.id == session.session_id:
-                            session.set_session_name(normalized)
-                            manager = session.session_manager
+                        if not isinstance(session, TuiSessionView):
+                            if target.id == session.session_id:
+                                session.set_session_name(normalized)
+                                manager = session.session_manager
+                                renamed = manager.get_session_name()
+                            else:
+                                manager = SessionManager.open(target.path, session.session_manager.session_dir)
+                                manager.set_session_name(normalized)
+                                renamed = manager.get_session_name()
                         else:
-                            manager = SessionManager.open(target.path, session.session_manager.session_dir)
-                            manager.set_session_name(normalized)
+                            await session.command(
+                                "ui", operation="rename_session", payload={"path": target.path, "name": normalized}
+                            )
+                            renamed = normalized
                     except ValueError as exc:
                         self._write(str(exc), "error")
                         return
-                    self._write(f"Renamed session to: {manager.get_session_name()}.", "info")
+                    self._write(f"Renamed session to: {renamed}.", "info")
                     self._invalidate_session_list_snapshot()
                     self._refresh_sidebar()
                     return
@@ -3264,7 +4371,9 @@ if TEXTUAL_AVAILABLE:
                 skills_info = session.resource_loader.get_skills()
                 skills = skills_info.get("skills", [])
                 if not skills:
-                    self._write("No skills discovered. Place SKILL.md files in project/global skill directories.", "info")
+                    self._write(
+                        "No skills discovered. Place SKILL.md files in project/global skill directories.", "info"
+                    )
                 else:
                     self._write("Available skills:", "info")
                     for s in skills:
@@ -3277,7 +4386,9 @@ if TEXTUAL_AVAILABLE:
                     skills_info = session.resource_loader.get_skills()
                     skills = skills_info.get("skills", [])
                     if not skills:
-                        self._write("No skills discovered. Place SKILL.md files in project/global skill directories.", "info")
+                        self._write(
+                            "No skills discovered. Place SKILL.md files in project/global skill directories.", "info"
+                        )
                     else:
                         self._write("Available skills:", "info")
                         for s in skills:
@@ -3291,8 +4402,11 @@ if TEXTUAL_AVAILABLE:
                 if result.get("ok"):
                     self._write(f"Skill '{skill_name}' loaded ({result.get('bodyLength', 0)} chars).", "info")
                     # Trust warning for unreviewed skills.
-                    self._write("⚠ Trust warning: skill instructions are loaded as user input. "
-                                "Review the skill before granting cooperation approval for file operations.", "warn")
+                    self._write(
+                        "⚠ Trust warning: skill instructions are loaded as user input. "
+                        "Review the skill before granting cooperation approval for file operations.",
+                        "warn",
+                    )
                 else:
                     err_type = result.get("errorType", "SkillError")
                     err_msg = result.get("error", "unknown")
@@ -3303,7 +4417,12 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd == "/model":
                 current = f"{session.model.provider}/{session.model.id}" if session.model else "none"
-                providers = session.model_registry.providers()
+                detached_models = await session.models() if isinstance(session, TuiSessionView) else None
+                providers = (
+                    sorted({item.provider for item in detached_models})
+                    if detached_models is not None
+                    else session.model_registry.providers()
+                )
                 self._write(
                     json.dumps(
                         {"current": current, "providers": providers, "usage": "/model <provider>/<model-id>"},
@@ -3313,6 +4432,14 @@ if TEXTUAL_AVAILABLE:
                 )
                 return
             if cmd == "/model-cycle":
+                if isinstance(session, TuiSessionView):
+                    result = await session.command("ui", operation="cycle_model", payload={})
+                    if not result.get("cycled", True):
+                        self._write("No available models to cycle.", "error")
+                    else:
+                        self._write(f"Model cycled to {session.model.provider}/{session.model.id}", "info")
+                    self._refresh_sidebar()
+                    return
                 result = await session.cycle_model()
                 if not result:
                     self._write("No available models to cycle.", "error")
@@ -3324,7 +4451,16 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd == "/providers" or cmd.startswith("/providers "):
                 rest = cmd[len("/providers") :].strip()
-                logged_in = sorted({m.provider for m in session.model_registry.get_available()})
+                detached_models = (
+                    await session.models()
+                    if isinstance(session, TuiSessionView)
+                    else None
+                )
+                logged_in = (
+                    sorted({m.provider for m in detached_models})
+                    if detached_models is not None
+                    else sorted({m.provider for m in session.model_registry.get_available()})
+                )
                 if not rest:
                     if not logged_in:
                         self._write("No logged-in providers. Use /login <provider> [apiKey] first.", "info")
@@ -3332,7 +4468,11 @@ if TEXTUAL_AVAILABLE:
                     current_provider = session.model.provider if session.model else None
                     lines = ["Logged-in providers:"]
                     for i, p in enumerate(logged_in, 1):
-                        count = len(session.model_registry.models_for_provider(p))
+                        count = (
+                            len([m for m in detached_models if m.provider == p])
+                            if detached_models is not None
+                            else len(session.model_registry.models_for_provider(p))
+                        )
                         marker = "* " if p == current_provider else "  "
                         cur = f"   (current: {session.model.id})" if p == current_provider and session.model else ""
                         lines.append(f"{marker}{i}. {p}   {count} models{cur}")
@@ -3353,7 +4493,11 @@ if TEXTUAL_AVAILABLE:
                 if not provider:
                     self._write(f"Provider not logged in or unknown: {prov_arg} (see /providers)", "error")
                     return
-                models = session.model_registry.models_for_provider(provider)
+                models = (
+                    [m for m in detached_models if m.provider == provider]
+                    if detached_models is not None
+                    else session.model_registry.models_for_provider(provider)
+                )
                 if len(parts) == 1:
                     lines = [f"{provider} models:"]
                     for i, m in enumerate(models, 1):
@@ -3375,9 +4519,14 @@ if TEXTUAL_AVAILABLE:
                 if not model:
                     self._write(f"Model not found for {provider}: {sel} (see /providers {prov_arg})", "error")
                     return
-                await session.set_model(model)
-                session.settings_manager.set_default_provider(model.provider)
-                session.settings_manager.set_default_model(model.id)
+                if isinstance(session, TuiSessionView):
+                    await session.command(
+                        "ui", operation="set_model", payload={"provider": model.provider, "model": model.id}
+                    )
+                else:
+                    await session.set_model(model)
+                    session.settings_manager.set_default_provider(model.provider)
+                    session.settings_manager.set_default_model(model.id)
                 self._write(f"Model set to {model.provider}/{model.id} (saved as default)", "info")
                 self._refresh_sidebar()
                 return
@@ -3386,7 +4535,11 @@ if TEXTUAL_AVAILABLE:
                 if "/" not in val:
                     # Provider-only: auto-pick the provider's first registered model.
                     provider = val
-                    models = session.model_registry.models_for_provider(provider)
+                    models = (
+                        [item for item in await session.models() if item.provider == provider]
+                        if isinstance(session, TuiSessionView)
+                        else session.model_registry.models_for_provider(provider)
+                    )
                     if not models:
                         self._write(f"Provider not found or has no models: {provider}", "error")
                         return
@@ -3394,14 +4547,31 @@ if TEXTUAL_AVAILABLE:
                     provider, model_id = model.provider, model.id
                 else:
                     provider, model_id = val.split("/", 1)
-                    model = session.model_registry.resolve(provider, model_id, allow_dynamic=True)
+                    model = (
+                        SimpleNamespace(provider=provider, id=model_id)
+                        if isinstance(session, TuiSessionView)
+                        else session.model_registry.resolve(provider, model_id, allow_dynamic=True)
+                    )
                 if not model:
                     self._write(f"Model not found: {provider}/{model_id}", "error")
                     return
-                await session.set_model(model)
-                session.settings_manager.set_default_provider(model.provider)
-                session.settings_manager.set_default_model(model.id)
-                if session.model_registry.find(provider, model_id) is None:
+                if isinstance(session, TuiSessionView):
+                    await session.command(
+                        "ui", operation="set_model", payload={"provider": model.provider, "model": model.id}
+                    )
+                else:
+                    await session.set_model(model)
+                    session.settings_manager.set_default_provider(model.provider)
+                    session.settings_manager.set_default_model(model.id)
+                is_dynamic = (
+                    not any(
+                        m.provider == provider and m.id == model_id
+                        for m in await session.models()
+                    )
+                    if isinstance(session, TuiSessionView)
+                    else session.model_registry.find(provider, model_id) is None
+                )
+                if is_dynamic:
                     self._write(f"Model set to {provider}/{model_id} (dynamic, saved as default)", "info")
                 else:
                     self._write(f"Model set to {provider}/{model_id} (saved as default)", "info")
@@ -3413,12 +4583,19 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd.startswith("/thinking "):
                 level = cmd[len("/thinking ") :].strip()
-                session.set_thinking_level(level)
+                if isinstance(session, TuiSessionView):
+                    await session.command("ui", operation="set_thinking", payload={"level": level})
+                else:
+                    session.set_thinking_level(level)
                 self._write(f"Thinking level set to {session.thinking_level}", "info")
                 self._refresh_sidebar()
                 return
             if cmd == "/thinking-cycle":
-                level = session.cycle_thinking_level()
+                if isinstance(session, TuiSessionView):
+                    await session.command("ui", operation="cycle_thinking", payload={})
+                    level = session.thinking_level
+                else:
+                    level = session.cycle_thinking_level()
                 self._write(f"Thinking level cycled to {level}", "info")
                 self._refresh_sidebar()
                 return
@@ -3430,8 +4607,12 @@ if TEXTUAL_AVAILABLE:
                 value = cmd[len("/temperature ") :].strip()
                 try:
                     from one.core.temperature import temperature_for_mode
+
                     temperature = temperature_for_mode(value) if value.isalpha() else float(value)
-                    session.set_temperature(temperature)
+                    if isinstance(session, TuiSessionView):
+                        await session.command("ui", operation="set_temperature", payload={"value": temperature})
+                    else:
+                        session.set_temperature(temperature)
                 except ValueError as exc:
                     self._write(str(exc), "error")
                     return
@@ -3459,7 +4640,11 @@ if TEXTUAL_AVAILABLE:
                 self._write("Usage: /queue or /queue clear [all|steering|follow]", "error")
                 return
             if cmd == "/theme":
-                current = session.settings_manager.get_theme()
+                current = (
+                    session.snapshot["sidebar"].get("theme", "default")
+                    if isinstance(session, TuiSessionView)
+                    else session.settings_manager.get_theme()
+                )
                 self._write(f"Current theme: {current}", "info")
                 self._write("Available: " + ", ".join(sorted(BUILTIN_TUI_THEMES.keys())), "info")
                 self._write("Usage: /theme <name>", "info")
@@ -3490,8 +4675,12 @@ if TEXTUAL_AVAILABLE:
                 self._refresh_sidebar()
                 return
             if cmd.strip() == "/tree":
-                tree = session.session_manager.get_tree()
-                leaf_id = session.session_manager.get_leaf_id()
+                if isinstance(session, TuiSessionView):
+                    tree_result = await session.command("ui", operation="tree", payload={})
+                    tree, leaf_id = tree_result.get("tree", []), tree_result.get("leafId")
+                else:
+                    tree = session.session_manager.get_tree()
+                    leaf_id = session.session_manager.get_leaf_id()
                 rendered: list[str] = []
 
                 def render_tree(nodes: list[dict[str, Any]], depth: int = 0) -> None:
@@ -3520,10 +4709,16 @@ if TEXTUAL_AVAILABLE:
                     idx = parts.index("--summary")
                     custom = " ".join(parts[idx + 1 :]) or None
                 try:
-                    result = await session.navigate_tree(
-                        entry_id,
-                        {"summarize": summarize, "customInstructions": custom},
-                    )
+                    if isinstance(session, TuiSessionView):
+                        result = await session.command(
+                            "ui",
+                            operation="navigate",
+                            payload={"entryId": entry_id, "summarize": summarize, "customInstructions": custom},
+                        )
+                    else:
+                        result = await session.navigate_tree(
+                            entry_id, {"summarize": summarize, "customInstructions": custom}
+                        )
                     self._write(json.dumps(result, ensure_ascii=False), "info")
                 except ValueError as e:
                     self._write(str(e), "error")
@@ -3539,8 +4734,11 @@ if TEXTUAL_AVAILABLE:
                     return
                 try:
                     self._prepare_session_change()
-                    result = await self.runtime_host.fork(entry_id)
-                    self.session = self.runtime_host.session
+                    if isinstance(self.session, TuiSessionView):
+                        result = await self.session.command("ui", operation="fork", payload={"entryId": entry_id})
+                    else:
+                        result = await self.runtime_host.fork(entry_id)
+                        self.session = self.runtime_host.session
                     self._bind_session()
                     self._invalidate_session_list_snapshot()
                     self._clear_extension_ui_state()
@@ -3554,8 +4752,11 @@ if TEXTUAL_AVAILABLE:
                     self._write("Runtime host unavailable: /new is not supported in this context.", "error")
                     return
                 self._prepare_session_change()
-                result = await self.runtime_host.new_session({})
-                self.session = self.runtime_host.session
+                if isinstance(self.session, TuiSessionView):
+                    result = await self.session.command("new_session")
+                else:
+                    result = await self.runtime_host.new_session({})
+                    self.session = self.runtime_host.session
                 self._bind_session()
                 self._invalidate_session_list_snapshot()
                 # Fresh session: drop stale stream content from the old one.
@@ -3682,8 +4883,11 @@ if TEXTUAL_AVAILABLE:
                 if mode not in {"on", "off", "unlimited"}:
                     self._write("Usage: /retry <on|off|unlimited>", "error")
                     return
-                session.settings_manager.set_retry_mode(mode)
-                session.set_auto_retry_enabled(mode in ("on", "unlimited"))
+                if isinstance(session, TuiSessionView):
+                    await session.command("ui", operation="set_retry", payload={"mode": mode})
+                else:
+                    session.settings_manager.set_retry_mode(mode)
+                    session.set_auto_retry_enabled(mode in ("on", "unlimited"))
                 self._write(f"Auto-retry set to {mode}.", "info")
                 self._refresh_sidebar()
                 return
@@ -3718,9 +4922,14 @@ if TEXTUAL_AVAILABLE:
                     self._write("Usage: /subagents <on|off>", "error")
                     return
                 if getattr(session, "subagents_hard_disabled", False):
-                    self._write("Subagents are unavailable for this session because it was started with --no-subagents.", "info")
+                    self._write(
+                        "Subagents are unavailable for this session because it was started with --no-subagents.", "info"
+                    )
                     return
-                session.settings_manager.set_subagents_enabled(mode == "on")
+                if isinstance(session, TuiSessionView):
+                    await session.command("ui", operation="set_subagents", payload={"enabled": mode == "on"})
+                else:
+                    session.settings_manager.set_subagents_enabled(mode == "on")
                 self._write(f"Subagents set to {mode}.", "info")
                 self._refresh_sidebar()
                 return
@@ -3737,7 +4946,10 @@ if TEXTUAL_AVAILABLE:
                 if mode not in {"on", "off"}:
                     self._write("Usage: /details-show <on|off>", "error")
                     return
-                session.settings_manager.set_bash_show_output(mode == "on")
+                if isinstance(session, TuiSessionView):
+                    await session.command("ui", operation="set_bash_output", payload={"enabled": mode == "on"})
+                else:
+                    session.settings_manager.set_bash_show_output(mode == "on")
                 self._write(f"Details output set to {mode}.", "info")
                 self._refresh_sidebar()
                 return
@@ -4002,6 +5214,264 @@ if TEXTUAL_AVAILABLE:
 
             self._write(f"Unknown command: {cmd}. Use /help.", "error")
 
+        async def _handle_detached_command(self, cmd: str) -> bool:
+            """Handle commands whose old implementation touched worker-owned state."""
+            session = self.session
+            assert isinstance(session, TuiSessionView)
+
+            async def call(operation: str, **payload: Any) -> dict[str, Any] | None:
+                try:
+                    return await session.ui(operation, **payload)
+                except Exception as exc:
+                    self._write(str(exc), "error")
+                    return None
+
+            # Session selection is parsed in the UI, but all persisted-session
+            # mutations remain commands owned by TuiRuntimeHost.  Keep this
+            # ahead of the legacy handlers below: those handlers can open a
+            # SessionManager or mutate a live AgentSession.
+            if cmd == "/sessions":
+                await self._list_sessions()
+                return True
+            if cmd.startswith("/sessions "):
+                rest = cmd[len("/sessions ") :].strip()
+                if rest.startswith("delete "):
+                    target, error = self._resolve_session_target(rest[len("delete ") :])
+                    if error:
+                        self._write(error, "error")
+                    elif session.is_streaming:
+                        self._write("Stop or wait for the active turn before deleting a session.", "error")
+                    else:
+                        self._session_delete_pending = target
+                        self._write(
+                            f"Delete session '{target.name or '(unnamed)'}'? Type yes to confirm, anything else cancels.",
+                            "warn",
+                        )
+                    return True
+                if rest.startswith("rename "):
+                    target_text, new_name, error = self._parse_session_rename_target(rest[len("rename ") :].strip())
+                    if error:
+                        self._write(error, "error")
+                        return True
+                    target, error = self._resolve_session_target(target_text or "")
+                    if error:
+                        self._write(error, "error")
+                        return True
+                    if session.is_streaming:
+                        self._write("Stop or wait for the active turn before renaming a session.", "error")
+                        return True
+                    try:
+                        normalized = normalize_session_name(new_name or "")
+                        if any(info.path != target.path and info.name == normalized for info in self._session_infos()):
+                            raise ValueError("A session with that name already exists")
+                    except ValueError as exc:
+                        self._write(str(exc), "error")
+                        return True
+                    result = await call("rename_session", path=target.path, name=normalized)
+                    if result is not None:
+                        self._write(f"Renamed session to: {normalized}.", "info")
+                        self._invalidate_session_list_snapshot()
+                        self._refresh_sidebar()
+                    return True
+                target, error = self._resolve_session_target(rest)
+                if error:
+                    self._write(error, "error")
+                else:
+                    await self._switch_to_session(target)
+                return True
+
+            if cmd == "/status":
+                result = await call("status")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd == "/stats":
+                result = await call("stats")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd == "/state":
+                result = await call("state")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd == "/tools":
+                result = await call("tools")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd == "/queue":
+                result = await call("queues")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd.startswith("/queue clear"):
+                target = cmd[len("/queue clear") :].strip() or "all"
+                result = await call("clear_queues", target=target)
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd == "/inspect-timeout":
+                result = await call("inspect_timeout")
+                self._write(
+                    json.dumps(result or {"message": "No subagent-timeout diagnostics available."}, ensure_ascii=False),
+                    "info",
+                )
+                return True
+            if cmd == "/reload":
+                result = await call("reload")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd in {"/skill", "/skill list"} or cmd == "/skill:":
+                result = await call("skills")
+                if result is not None:
+                    self._write(json.dumps(result.get("skills", result), ensure_ascii=False), "info")
+                return True
+            if cmd.startswith("/skill:"):
+                parts = cmd[len("/skill:") :].strip().split(None, 1)
+                if not parts:
+                    result = await call("skills")
+                else:
+                    result = await call("invoke_skill", name=parts[0], args=parts[1] if len(parts) > 1 else "")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd.startswith("/bash "):
+                command = cmd[len("/bash ") :].strip()
+                if not command:
+                    self._write("Usage: /bash <command>", "error")
+                    return True
+                self._write_manual_command_block(command)
+                result = await call("execute_bash", command=command)
+                if result is not None:
+                    output = (
+                        str(result.get("output") or "") if session.snapshot["sidebar"].get("bashOutput", True) else ""
+                    )
+                    self._write_manual_result(
+                        output,
+                        exit_code=result.get("exitCode"),
+                        timed_out=bool(result.get("timedOut")),
+                        cancelled=bool(result.get("cancelled")),
+                        truncated=bool(result.get("truncated")),
+                        full_output_path=result.get("fullOutputPath"),
+                        stored=True,
+                    )
+                return True
+            if cmd.startswith("/login"):
+                parts = cmd[len("/login") :].strip().split()
+                if parts and parts[0] == "status":
+                    result = await call("auth_status", provider=parts[1] if len(parts) > 1 else "")
+                elif len(parts) >= 2 and parts[0] == "refresh":
+                    result = await call("login_refresh", provider=parts[1])
+                elif len(parts) >= 2 and parts[1].lower() in {"subscription", "oauth"}:
+                    result = await call("oauth_login", provider=parts[0])
+                elif parts:
+                    provider, api_key, model = (
+                        parts[0],
+                        parts[1] if len(parts) > 1 else "",
+                        parts[2] if len(parts) > 2 else "",
+                    )
+                    if not api_key:
+                        self._login_pending = {"provider": provider, "envVar": None}
+                        self.query_one("#input", TextArea).placeholder = f"API key for {provider}:"
+                        return True
+                    result = await call("login", provider=provider, apiKey=api_key, model=model)
+                else:
+                    self._write("Usage: /login <provider> [apiKey] [model]", "error")
+                    return True
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd.startswith("/logout "):
+                result = await call("logout", provider=cmd[len("/logout ") :].strip())
+                if result is not None:
+                    self._write("Removed credentials locally.", "info")
+                return True
+            if cmd == "/mcp" or cmd == "/mcp list":
+                result = await call("mcp_list")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd.startswith("/mcp enable ") or cmd.startswith("/mcp disable "):
+                enabled = cmd.startswith("/mcp enable ")
+                name = cmd.split(maxsplit=2)[2]
+                result = await call("mcp_enable" if enabled else "mcp_disable", name=name)
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd.startswith("/config"):
+                rest = cmd[len("/config") :].strip()
+                if not rest:
+                    self._write("Use /config <key> [jsonValue] in detached TUI.", "info")
+                    return True
+                key, *raw = rest.split(maxsplit=1)
+                if not raw:
+                    result = await call("config_get", key=key)
+                else:
+                    try:
+                        value = json.loads(raw[0])
+                    except json.JSONDecodeError:
+                        value = raw[0]
+                    result = await call("config_set", key=key, value=value)
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd.startswith("/extui") or cmd.startswith("/ext-ui"):
+                rest = cmd.split(" ", 1)[1].strip() if " " in cmd else ""
+                parts = rest.split(maxsplit=3)
+                sub = parts[0] if parts else ""
+                if sub == "list":
+                    result = await call("extension_state")
+                elif sub == "clear":
+                    result = await call("extension_clear")
+                elif sub == "request" and len(parts) >= 3:
+                    try:
+                        payload = json.loads(parts[3]) if len(parts) == 4 else {}
+                    except json.JSONDecodeError:
+                        self._write("Invalid JSON payload for /extui request", "error")
+                        return True
+                    result = await call(
+                        "extension_request",
+                        extension=parts[1],
+                        uiType=parts[2],
+                        payload=payload if isinstance(payload, dict) else {"value": payload},
+                    )
+                elif sub in {"respond", "cancel"} and len(parts) >= 2:
+                    raw = parts[2] if len(parts) > 2 else "{}"
+                    try:
+                        payload = json.loads(raw) if sub == "respond" else {}
+                    except json.JSONDecodeError:
+                        self._write("Invalid JSON payload for /extui respond", "error")
+                        return True
+                    result = await call(
+                        "answer_extension",
+                        id=parts[1],
+                        payload=payload if isinstance(payload, dict) else {"value": payload},
+                        cancelled=sub == "cancel",
+                    )
+                else:
+                    self._write("Usage: /extui <list|request|respond|cancel|clear>", "error")
+                    return True
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd == "/cooperation":
+                result = await call("cooperation_status")
+                if result is not None:
+                    self._write(json.dumps(result, ensure_ascii=False), "info")
+                return True
+            if cmd.startswith("/cooperation "):
+                mode = cmd[len("/cooperation ") :].strip().lower()
+                if mode not in {"on", "off"}:
+                    self._write("Usage: /cooperation [on|off]", "error")
+                    return True
+                result = await call("set_cooperation", enabled=mode == "on")
+                if result is not None:
+                    self._write(f"[Cooperation] {'enabled' if mode == 'on' else 'disabled'}", "info")
+                return True
+            return False
+
         def _record_input_history(self, value: str) -> None:
             """Store a non-empty submitted input in the local 50-entry history."""
             if not value.strip():
@@ -4036,13 +5506,19 @@ if TEXTUAL_AVAILABLE:
                         if self.runtime_host is None:
                             self._write("Runtime host unavailable: cannot replace the active session.", "error")
                             return
-                        await self.runtime_host.new_session({})
-                        self.session = self.runtime_host.session
+                        if not isinstance(self.session, TuiSessionView):
+                            await self.runtime_host.new_session({})
+                            self.session = self.runtime_host.session
+                        else:
+                            await self.session.command("new_session")
                         self._bind_session()
                         self._invalidate_session_list_snapshot()
                         self._rebuild_session_transcript()
                         self._clear_extension_ui_state()
-                    SessionManager.delete(target.path, self.session.session_manager.session_dir)
+                    if not isinstance(self.session, TuiSessionView):
+                        SessionManager.delete(target.path, self.session.session_manager.session_dir)
+                    else:
+                        await self.session.command("ui", operation="delete_session", payload={"path": target.path})
                 except (OSError, ValueError) as exc:
                     self._write(f"Session deletion failed: {exc}", "error")
                     return
@@ -4157,6 +5633,7 @@ if TEXTUAL_AVAILABLE:
 
                 async def _run_prompt() -> None:
                     queued = False
+                    prompt_completed = False
                     try:
                         if self.session.is_streaming:
                             # Resolve the delivery mode the same way as
@@ -4168,11 +5645,7 @@ if TEXTUAL_AVAILABLE:
                             elif sm == "queue":
                                 resolved = "steer"
                             else:
-                                resolved = (
-                                    "followUp"
-                                    if self.session.follow_up_mode == "follow_up"
-                                    else "steer"
-                                )
+                                resolved = "followUp" if self.session.follow_up_mode == "follow_up" else "steer"
                             await self.session.prompt(
                                 clean_text,
                                 images=image_refs if image_refs else None,
@@ -4187,14 +5660,25 @@ if TEXTUAL_AVAILABLE:
                                 clean_text,
                                 images=image_refs if image_refs else None,
                             )
+                        prompt_completed = True
                     except Exception as e:
                         self._write(f"[error] {e}", "error")
                         self._refresh_sidebar()
                     finally:
-                        if not queued:
+                        # The detached runtime acknowledges ``prompt`` only
+                        # after its owner-loop turn has completed, but its
+                        # ordered event bridge may still have message_end and
+                        # turn_end queued on Textual.  Let that authoritative
+                        # turn_end transition the spinner: clearing it here
+                        # lets consumers observe completion before the final
+                        # assistant delta has even entered the UI reducer.
+                        # Legacy in-loop sessions retain the old fallback.
+                        if not queued and (
+                            not isinstance(self.session, TuiSessionView) or not prompt_completed
+                        ):
                             self._turn_active = False
                             self._remove_thinking_line()
-                            self._render_stream()
+                            self._schedule_stream_render()
                         self._refresh_sidebar()
 
                 asyncio.create_task(_run_prompt())
@@ -4277,14 +5761,20 @@ if TEXTUAL_AVAILABLE:
             request_id = str(req.get("id") or "")
             try:
                 if not text:
-                    self.session.respond_extension_ui(request_id=request_id, cancelled=True)
+                    if isinstance(self.session, TuiSessionView):
+                        await self.session.extension_response(request_id, cancelled=True)
+                    else:
+                        self.session.respond_extension_ui(request_id=request_id, cancelled=True)
                 else:
                     try:
                         parsed = json.loads(text)
                         payload = parsed if isinstance(parsed, dict) else {"answer": text}
                     except Exception:
                         payload = {"answer": text}
-                    self.session.respond_extension_ui(request_id=request_id, payload=payload)
+                    if isinstance(self.session, TuiSessionView):
+                        await self.session.extension_response(request_id, payload=payload)
+                    else:
+                        self.session.respond_extension_ui(request_id=request_id, payload=payload)
                 # Success — clear pending state (panel, placeholder, request ref).
                 # The extension_ui_response event also drives _clear_extension_ui_state;
                 # that call is safe (idempotent) so both paths may fire.
@@ -4324,13 +5814,28 @@ if TEXTUAL_AVAILABLE:
                 pass
             answer = text.strip() or "(no answer)"
             try:
-                self.session.answer_question(str(pending.get("id") or ""), answer)
+                if isinstance(self.session, TuiSessionView):
+                    epoch = self._detached_waiter_epoch(pending)
+                    if epoch is None:
+                        raise ValueError("stale or invalid question response")
+                    await self.session.answer_question(str(pending.get("id") or ""), answer, epoch)
+                else:
+                    await self.session.answer_question(str(pending.get("id") or ""), answer)
             except ValueError as e:
                 self._write(f"[AskUser] {e}", "error")
 
         async def _complete_login(self, provider: str, api_key: str, model_input: str) -> None:
             """Persist provider apiKey + defaults and optionally switch the model."""
             session = self.session
+            if isinstance(session, TuiSessionView):
+                try:
+                    result = await session.ui("login", provider=provider, apiKey=api_key, model=model_input)
+                except Exception as exc:
+                    self._write(str(exc), "error")
+                    return
+                self._write(json.dumps(result, ensure_ascii=False), "info")
+                self._refresh_sidebar()
+                return
             # Phase 11: validate the key BEFORE storing, then fetch + register
             # the provider's model list.
             adapter = getattr(session, "providers", {}).get(provider)
@@ -4374,11 +5879,11 @@ if TEXTUAL_AVAILABLE:
                 + (f" Default model set to {selected_model.id}." if selected_model else ""),
                 "info",
             )
-            self._refresh_sidebar()
+            self._schedule_sidebar_refresh()
 
         def _approval_summary(self, pending: dict[str, Any]) -> Text:
             """Build the pending-approval summary using the active palette."""
-            args = SubagentMonitor.display_tool_args(pending["args"])[:600]
+            args = str(pending.get("displayArgs") or SubagentMonitor.display_tool_args(pending.get("args", {})))[:600]
             queued = len(self._approval_waiters) - 1
             summary = Text("PENDING TOOL APPROVAL\n", style=f"bold {self._theme.warn}")
             body_style = self._theme.screen_fg
@@ -4404,6 +5909,7 @@ if TEXTUAL_AVAILABLE:
 
         def _install_approval_callback(self, session: Any) -> None:
             """Bind an approval callback to exactly one session lifetime."""
+
             async def callback(tool_name: str, args: dict[str, Any]) -> tuple[bool, str]:
                 if self._approval_rebinding or session is not self.session:
                     return False, "Session changed"
@@ -4426,11 +5932,51 @@ if TEXTUAL_AVAILABLE:
                     overlay.add_class("visible")
             except Exception:
                 pass
-            self._refresh_sidebar()
+            self._schedule_sidebar_refresh()
+
+        @staticmethod
+        def _detached_waiter_epoch(pending: dict[str, Any]) -> int | None:
+            """Return a usable detached runtime epoch without coercing bad DTOs."""
+            epoch = pending.get("epoch")
+            return epoch if type(epoch) is int and epoch >= 0 else None
 
         def _resolve_approval(self, approved: bool, reason: str = "Rejected by user") -> None:
             pending = self._approval_pending
             if pending is None:
+                return
+            if isinstance(self.session, TuiSessionView):
+                if pending.get("resolving"):
+                    return
+                pending["resolving"] = True
+                approval_id = str(pending.get("id") or "")
+                epoch = self._detached_waiter_epoch(pending)
+                if epoch is None:
+                    self._write("[Approval] stale or invalid approval response", "error")
+                    try:
+                        self._approval_waiters.remove(pending)
+                    except ValueError:
+                        pass
+                    self._show_next_approval()
+                    return
+
+                async def resolve() -> None:
+                    try:
+                        await self.session.command(
+                            "approval_resolve",
+                            approval_id=approval_id,
+                            approved=approved,
+                            reason="" if approved else reason,
+                            epoch=epoch,
+                        )
+                    except Exception as exc:
+                        self._write(f"[Approval] {exc}", "error")
+                        pending["resolving"] = False
+                        return
+                    if self._approval_pending is pending:
+                        self._approval_waiters.popleft()
+                        self._show_next_approval()
+
+                asyncio.create_task(resolve())
                 return
             future = pending["future"]
             if not future.done():
@@ -4438,8 +5984,12 @@ if TEXTUAL_AVAILABLE:
 
         def _reject_all_approvals(self, reason: str) -> None:
             for pending in tuple(self._approval_waiters):
-                future = pending["future"]
-                if not future.done():
+                # Detached waiters are UI DTOs (ID/tool/origin/epoch), not
+                # local callback futures.  Their runtime-owned futures are
+                # rejected by the set_cooperation command or host disposal;
+                # only dismiss the local surface here.
+                future = pending.get("future")
+                if future is not None and not future.done():
                     future.set_result((False, reason))
             self._approval_waiters.clear()
             self._show_next_approval()
@@ -4450,9 +6000,7 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 return ""
 
-        async def _approval_prompt(
-            self, tool_name: str, args: dict[str, Any], origin: Any = None
-        ) -> tuple[bool, str]:
+        async def _approval_prompt(self, tool_name: str, args: dict[str, Any], origin: Any = None) -> tuple[bool, str]:
             """Queue fail-closed approvals behind a dedicated overlay control."""
             # Children inherit this callback at spawn time. Once cooperation is
             # disabled on the parent, inherited callbacks must reject rather
@@ -4489,6 +6037,8 @@ if TEXTUAL_AVAILABLE:
                 event.stop()
                 event.prevent_default()
                 return
+            if self._handle_evidence_panel_key(event):
+                return
             if self._handle_agents_panel_key(event):
                 return
             await super()._on_key(event)
@@ -4521,7 +6071,7 @@ if TEXTUAL_AVAILABLE:
             await self.session.abort()
             self._turn_active = False
             self._remove_thinking_line()
-            self._render_stream()
+            self._schedule_stream_render()
             self._write("[abort requested]", "warn")
             self._refresh_sidebar()
 
@@ -4533,16 +6083,136 @@ if TEXTUAL_AVAILABLE:
             target = self._agent_link_tokens.get(token)
             if target is None:
                 return
-            generation, session_id, line_index, _call_id = target
+            generation, session_id, line_index, call_id = target
             if (
                 generation != self._monitor_generation
+                or token not in self._agent_links_by_line.get(line_index, ())
+                or token not in self._agent_link_labels
                 or not (0 <= line_index < len(self._stream_lines))
+                or not isinstance(call_id, int)
             ):
                 return
             self._refresh_monitor_snapshot()
             if not any(child.get("sessionId") == session_id for child in self._monitor_snapshot.get("children", [])):
                 return
             self._open_agents_panel(session_id)
+
+        def action_open_evidence_link(self, token: int) -> None:
+            """Fetch one bounded, session/epoch-bound safe evidence page."""
+            target = self._evidence_link_tokens.get(token)
+            if target is None:
+                return
+            generation, evidence_id, offset, epoch = target
+            if (
+                generation != self._monitor_generation
+                or (isinstance(self.session, TuiSessionView) and epoch != self.session.epoch)
+                or token not in self._evidence_links_by_line.get(
+                next((line for line, tokens in self._evidence_links_by_line.items() if token in tokens), -1), ()
+                )
+            ):
+                return
+            self._schedule_evidence_page(generation, evidence_id, offset, ())
+
+        def _schedule_evidence_page(
+            self, generation: int, evidence_id: str, offset: int, previous_offsets: tuple[int, ...]
+        ) -> None:
+            """Start one page request and invalidate every older response."""
+            self._evidence_request_generation += 1
+            request_generation = self._evidence_request_generation
+            asyncio.create_task(
+                self._open_evidence_page(generation, evidence_id, offset, previous_offsets, request_generation)
+            )
+
+        async def _open_evidence_page(
+            self, generation: int, evidence_id: str, offset: int,
+            previous_offsets: tuple[int, ...], request_generation: int,
+        ) -> None:
+            request_session = self.session
+            if not isinstance(request_session, TuiSessionView) or generation != self._monitor_generation:
+                return
+            request_epoch = request_session.epoch
+            if request_generation != self._evidence_request_generation:
+                return
+            try:
+                result = await request_session.command(
+                    "evidence_page", evidence_id=evidence_id, offset=offset, epoch=request_epoch
+                )
+            except Exception:
+                if request_generation == self._evidence_request_generation:
+                    self._write("Full result unavailable.", "warn")
+                return
+            if (
+                request_generation != self._evidence_request_generation
+                or request_session is not self.session
+                or generation != self._monitor_generation
+                or request_epoch != request_session.epoch
+            ):
+                return
+            if result.get("epoch") != request_epoch or not result.get("available"):
+                self._write("Full result unavailable.", "warn")
+                return
+            self._evidence_panel = {
+                "generation": generation, "evidenceId": evidence_id, "offset": offset,
+                "text": str(result.get("text", "")), "nextOffset": result.get("nextOffset"),
+                # Byte offsets may be shortened at a UTF-8 boundary. Keep the
+                # actual returned starts rather than guessing with a character
+                # subtraction when navigating backwards.
+                "previousOffsets": previous_offsets,
+            }
+            self._render_evidence_panel()
+
+        def _render_evidence_panel(self) -> None:
+            panel = self._evidence_panel
+            if panel is None:
+                return
+            previous = "PageUp previous" if panel.get("previousOffsets") else "PageUp unavailable"
+            following = "PageDown next" if isinstance(panel.get("nextOffset"), int) else "PageDown unavailable"
+            # Rich Text is literal data, unlike a string passed to Static. This
+            # prevents evidence from supplying markup or Textual @click actions.
+            self.query_one("#evidence_header", Static).update(
+                Text(f"Full sanitized result ({panel['offset']}) — {previous} · {following} · Esc close")
+            )
+            self.query_one("#evidence_content", Static).update(
+                Text(panel.get("text") or "Full result unavailable.")
+            )
+            overlay = self.query_one("#evidence_overlay", Vertical)
+            overlay.add_class("visible")
+
+        def _close_evidence_panel(self, *, focus_input: bool = True) -> None:
+            self._evidence_request_generation += 1
+            self._evidence_panel = None
+            try:
+                self.query_one("#evidence_overlay", Vertical).remove_class("visible")
+                if focus_input:
+                    self.query_one("#input", TextArea).focus()
+            except Exception:
+                pass
+
+        def _navigate_evidence_panel(self, direction: str) -> None:
+            panel = self._evidence_panel
+            if panel is None:
+                return
+            history = tuple(item for item in panel.get("previousOffsets", ()) if isinstance(item, int))
+            if direction == "next" and isinstance(panel.get("nextOffset"), int):
+                self._schedule_evidence_page(
+                    panel["generation"], panel["evidenceId"], panel["nextOffset"], history + (panel["offset"],)
+                )
+            elif direction == "prev" and history:
+                self._schedule_evidence_page(panel["generation"], panel["evidenceId"], history[-1], history[:-1])
+
+        def _handle_evidence_panel_key(self, event: events.Key) -> bool:
+            panel = self._evidence_panel
+            if panel is None or event.key not in {"escape", "pageup", "page_up", "pagedown", "page_down"}:
+                return False
+            if event.key == "escape":
+                self._close_evidence_panel()
+            elif event.key in {"pagedown", "page_down"}:
+                self._navigate_evidence_panel("next")
+            elif event.key in {"pageup", "page_up"}:
+                self._navigate_evidence_panel("prev")
+            event.stop()
+            event.prevent_default()
+            return True
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             """Route fixed app-created controls without interpreting user text."""
@@ -4553,29 +6223,54 @@ if TEXTUAL_AVAILABLE:
             if button_id == "approval-reject":
                 self._resolve_approval(False, self._approval_reason())
                 return
+            if button_id == "evidence-prev":
+                self._navigate_evidence_panel("prev")
+                return
+            if button_id == "evidence-next":
+                self._navigate_evidence_panel("next")
+                return
+            if button_id == "evidence-close":
+                self._close_evidence_panel()
+                return
 
         def action_toggle_cooperation(self) -> None:
+            if not isinstance(self.session, TuiSessionView):
+                enabled = self.session.approval_callback is None
+                try:
+                    self.session.settings_manager.set_tool_approval(enabled)
+                except Exception as e:
+                    self._write(f"Unable to persist cooperation setting: {e}", "error")
+                    return
+                if enabled:
+                    self._install_approval_callback(self.session)
+                    self._cooperation_disabled = False
+                    self._write(
+                        "[Cooperation] enabled: mutating tools (bash/write/edit/plan/apply_patch) ask first", "info"
+                    )
+                else:
+                    self.session.approval_callback = None
+                    self._cooperation_disabled = True
+                    self._reject_all_approvals("Cooperation disabled")
+                    self._write("[Cooperation] disabled: all tools run freely", "info")
+                self._schedule_sidebar_refresh()
+                return
+            asyncio.create_task(self._toggle_cooperation())
+
+        async def _toggle_cooperation(self) -> None:
             """Ctrl+Z: toggle ask-before-running (cooperation) mode.
 
             Disabling cooperation releases pending approvals and model
             questions.
             """
-            enabled = self.session.approval_callback is None
-            try:
-                self.session.settings_manager.set_tool_approval(enabled)
-            except Exception as e:
-                self._write(f"Unable to persist cooperation setting: {e}", "error")
+            enabled = not bool(self.session.snapshot["sidebar"].get("cooperation", False))
+            if isinstance(self.session, TuiSessionView):
+                if not await self._run_view_command("set_cooperation", {"enabled": enabled}):
+                    return
+                self._cooperation_disabled = not enabled
+                if not enabled:
+                    self._reject_all_approvals("Cooperation disabled")
+                self._write(f"[Cooperation] {'enabled' if enabled else 'disabled'}", "info")
                 return
-            if enabled:
-                self._install_approval_callback(self.session)
-                self._cooperation_disabled = False
-                self._write("[Cooperation] enabled: mutating tools (bash/write/edit/plan/apply_patch) ask first", "info")
-            else:
-                self.session.approval_callback = None
-                self._cooperation_disabled = True
-                self._reject_all_approvals("Cooperation disabled")
-                self._write("[Cooperation] disabled: all tools run freely", "info")
-            self._refresh_sidebar()
 
         def action_approve_tool(self) -> None:
             self._resolve_approval(True)
@@ -4585,11 +6280,20 @@ if TEXTUAL_AVAILABLE:
 
         def action_show_model_picker(self) -> None:
             """Open a small, authenticated-model-only picker using existing selection semantics."""
+            if isinstance(self.session, TuiSessionView):
+                asyncio.create_task(self._open_detached_model_picker())
+                return
+            self._open_model_picker(list(self.session.model_registry.get_available()))
+
+        async def _open_detached_model_picker(self) -> None:
+            self._open_model_picker(await self.session.models())
+
+        def _open_model_picker(self, models: list[Any]) -> None:
             overlay = self.query_one("#model_overlay", Static)
             if self._model_picker_models:
                 self._dismiss_model_picker()
                 return
-            self._model_picker_models = list(self.session.model_registry.get_available())
+            self._model_picker_models = list(models)
             if not self._model_picker_models:
                 self._write("No available authenticated models. Use /login first.", "warn")
                 return
@@ -4607,9 +6311,14 @@ if TEXTUAL_AVAILABLE:
                 self._write("Model picker cancelled: enter a listed number.", "warn")
                 return
             model = models[int(text) - 1]
-            await self.session.set_model(model)
-            self.session.settings_manager.set_default_provider(model.provider)
-            self.session.settings_manager.set_default_model(model.id)
+            if not isinstance(self.session, TuiSessionView):
+                await self.session.set_model(model)
+                self.session.settings_manager.set_default_provider(model.provider)
+                self.session.settings_manager.set_default_model(model.id)
+            else:
+                await self.session.command(
+                    "ui", operation="set_model", payload={"provider": model.provider, "model": model.id}
+                )
             self._write(f"Model set to {model.provider}/{model.id} (saved as default)", "info")
             self._refresh_sidebar()
 
@@ -4622,45 +6331,92 @@ if TEXTUAL_AVAILABLE:
                 pass
 
         def action_toggle_subagents(self) -> None:
+            asyncio.create_task(self._toggle_subagents())
+
+        async def _toggle_subagents(self) -> None:
             if getattr(self.session, "subagents_hard_disabled", False):
-                self._write("Subagents are unavailable for this session because it was started with --no-subagents.", "info")
-                self._refresh_sidebar()
+                self._write(
+                    "Subagents are unavailable for this session because it was started with --no-subagents.", "info"
+                )
+                self._schedule_sidebar_refresh()
                 return
-            enabled = getattr(getattr(self.session, "settings_manager", None), "get_subagents_enabled", lambda: True)()
-            self.session.settings_manager.set_subagents_enabled(not enabled)
+            enabled = True
+            if isinstance(self.session, TuiSessionView):
+                enabled = bool(self.session.snapshot["sidebar"].get("subagents", True))
+            else:
+                enabled = getattr(getattr(self.session, "settings_manager", None), "get_subagents_enabled", lambda: True)()
+            if isinstance(self.session, TuiSessionView):
+                if not await self._run_view_command("set_subagents", {"enabled": not enabled}):
+                    return
+            if not isinstance(self.session, TuiSessionView):
+                self.session.settings_manager.set_subagents_enabled(not enabled)
             self._write(f"Subagents {'enabled' if not enabled else 'disabled'}.", "info")
             self._refresh_sidebar()
 
         def action_toggle_bash_show(self) -> None:
-            state = getattr(getattr(self.session, "settings_manager", None), "get_bash_show_output", lambda: True)()
-            self.session.settings_manager.set_bash_show_output(not state)
+            asyncio.create_task(self._toggle_bash_show())
+
+        async def _toggle_bash_show(self) -> None:
+            state = True
+            if isinstance(self.session, TuiSessionView):
+                state = bool(self.session.snapshot["sidebar"].get("bashOutput", True))
+            else:
+                state = getattr(getattr(self.session, "settings_manager", None), "get_bash_show_output", lambda: True)()
+            if isinstance(self.session, TuiSessionView):
+                if not await self._run_view_command("set_bash_output", {"enabled": not state}):
+                    return
+            if not isinstance(self.session, TuiSessionView):
+                self.session.settings_manager.set_bash_show_output(not state)
             self._write(f"Bash output: {'on' if not state else 'off'}.", "info")
             self._refresh_sidebar()
 
         def action_cycle_retry_mode(self) -> None:
+            asyncio.create_task(self._cycle_retry_mode())
+
+        async def _cycle_retry_mode(self) -> None:
             """Ctrl+R: cycle retry mode off → on → unlimited → off."""
-            current = getattr(
-                getattr(self.session, "settings_manager", None),
-                "get_retry_mode",
-                lambda: "on",
-            )()
+            current = "on"
+            if isinstance(self.session, TuiSessionView):
+                current = self.session.snapshot["sidebar"].get("retry", "on")
+            else:
+                current = getattr(
+                    getattr(self.session, "settings_manager", None),
+                    "get_retry_mode",
+                    lambda: "on",
+                )()
             if current == "off":
                 new_mode = "on"
             elif current == "on":
                 new_mode = "unlimited"
             else:
                 new_mode = "off"
-            self.session.settings_manager.set_retry_mode(new_mode)
-            self.session.set_auto_retry_enabled(new_mode in ("on", "unlimited"))
+            if isinstance(self.session, TuiSessionView):
+                if not await self._run_view_command("set_retry", {"mode": new_mode}):
+                    return
+            if not isinstance(self.session, TuiSessionView):
+                self.session.settings_manager.set_retry_mode(new_mode)
+                self.session.set_auto_retry_enabled(new_mode in ("on", "unlimited"))
             self._write(f"Auto-retry set to {new_mode}.", "info")
             self._refresh_sidebar()
 
         def action_decrease_temperature(self) -> None:
-            self.session.adjust_temperature(-0.1)
+            asyncio.create_task(self._decrease_temperature())
+
+        async def _decrease_temperature(self) -> None:
+            if isinstance(self.session, TuiSessionView):
+                await self._run_view_command("adjust_temperature", {"delta": -0.1})
+            if not isinstance(self.session, TuiSessionView):
+                self.session.adjust_temperature(-0.1)
             self._refresh_sidebar()
 
         def action_increase_temperature(self) -> None:
-            self.session.adjust_temperature(0.1)
+            asyncio.create_task(self._increase_temperature())
+
+        async def _increase_temperature(self) -> None:
+            if isinstance(self.session, TuiSessionView):
+                await self._run_view_command("adjust_temperature", {"delta": 0.1})
+            if not isinstance(self.session, TuiSessionView):
+                self.session.adjust_temperature(0.1)
             self._refresh_sidebar()
 
         def action_clear_stream(self) -> None:
@@ -4676,8 +6432,10 @@ if TEXTUAL_AVAILABLE:
             self._rendered_stream_lines = ()
             with self._pending_ui_events_lock:
                 self._pending_ui_events = []
+                self._pending_ui_event_bytes = 0
                 self._pending_assistant_deltas = ""
                 self._ui_flush_wakeup_pending = False
+                self._pending_ui_events_lock.notify_all()
             self._assistant_stream_open = False
             self._assistant_stream = ""
             self._assistant_has_live_delta = False
@@ -4771,11 +6529,24 @@ if TEXTUAL_AVAILABLE:
 
         def _handle_session_event(self, event: dict[str, Any]) -> None:
             et = event.get("type")
-            if et == "subagent_start":
+            if et == "subagent_monitor_invalidated":
+                with self._monitor_dirty_lock:
+                    self._monitor_dirty = True
+            elif et == "tui_command_error":
+                self._write(f"[{event.get('operation', 'command')}] {event.get('error', 'command failed')}", "error")
+            elif et == "subagent_start":
                 self._write_subagent_entry(str(event.get("sessionId") or ""), event.get("task"))
             elif et == "message_start":
                 msg = event.get("message", {})
-                if msg.get("role") == "assistant":
+                if msg.get("role", event.get("role")) == "assistant":
+                    # ``message_end`` only *schedules* the final live-tail
+                    # materialization so token bursts do not format on every
+                    # event.  A following prompt can, however, reach this
+                    # lifecycle barrier before that frame runs.  Do not let
+                    # its normal stale-live cleanup discard the completed
+                    # predecessor in that window.
+                    if self._assistant_live_finalize_pending:
+                        self._materialize_assistant_live_lines()
                     # Discard any partial block left from a failed stream
                     # before resetting bookkeeping so the buffer is still
                     # available to calculate the block extent.
@@ -4785,6 +6556,8 @@ if TEXTUAL_AVAILABLE:
                     self._assistant_live_start_idx = -1
                     self._assistant_live_buffer = ""
                     self._assistant_live_line_count = 0
+                    self._assistant_live_lines_dirty = False
+                    self._assistant_live_finalize_pending = False
                     self._assistant_stream_open = True
             elif et == "message_update":
                 ae = event.get("assistantMessageEvent", {})
@@ -4794,10 +6567,10 @@ if TEXTUAL_AVAILABLE:
                     # this path for manually-posted test/UI events.
                     self._last_delta_ts = time.monotonic()
                     if self._apply_assistant_deltas(delta):
-                        self._render_stream()
+                        self._schedule_stream_render()
             elif et == "message_end":
                 msg = event.get("message", {})
-                if msg.get("role") == "assistant":
+                if msg.get("role", event.get("role")) == "assistant":
                     # When the provider suppressed streamed content (tool JSON
                     # detected early), the message_end carries suppressed=True.
                     # Skip creating an assistant block — the tool call events
@@ -4807,29 +6580,39 @@ if TEXTUAL_AVAILABLE:
                         # If live deltas were already streamed, the content is
                         # visible in the stream — don't re-render it.
                         if self._assistant_has_live_delta:
-                            end = self._assistant_live_start_idx + self._assistant_live_line_count
-                            self._stream_lines.insert(max(0, end), "")
-                            self._trim_stream()
+                            if self._assistant_live_lines_dirty:
+                                # Preserve the message-end ordering without
+                                # pulling frame-only wrapping back into this
+                                # lifecycle reduction.
+                                self._assistant_live_finalize_pending = True
+                                self._schedule_stream_render()
+                            else:
+                                end = self._assistant_live_start_idx + self._assistant_live_line_count
+                                self._stream_lines.insert(max(0, end), "")
+                                self._trim_stream()
                         else:
                             text = self._assistant_stream.strip()
                             if not text:
                                 content = msg.get("content", "")
                                 if isinstance(content, list):
-                                    text = "".join(x.get("text", "") for x in content if x.get("type") == "text").strip()
+                                    text = "".join(
+                                        x.get("text", "") for x in content if x.get("type") == "text"
+                                    ).strip()
                                 else:
                                     text = str(content).strip()
                             final_text = text or "[empty response]"
                             self._write_chat_block("assistant", final_text)
                     # Always reset live state regardless of suppression.
-                    self._assistant_stream = ""
-                    self._assistant_has_live_delta = False
-                    self._assistant_live_start_idx = -1
-                    self._assistant_live_buffer = ""
-                    self._assistant_live_line_count = 0
+                    if not self._assistant_live_finalize_pending:
+                        self._assistant_stream = ""
+                        self._assistant_has_live_delta = False
+                        self._assistant_live_start_idx = -1
+                        self._assistant_live_buffer = ""
+                        self._assistant_live_line_count = 0
                     self._assistant_stream_open = False
             elif et == "thinking_delta":
                 if self._apply_thinking_delta(str(event.get("delta", ""))):
-                    self._render_stream()
+                    self._schedule_stream_render()
             elif et == "turn_start":
                 # A turn is in flight — arm the waiting spinner. This also
                 # covers turns the session starts by itself (queued follow-ups
@@ -4865,6 +6648,9 @@ if TEXTUAL_AVAILABLE:
             elif et == "tool_call_start":
                 tool_name = str(event.get("tool") or "tool")
                 args_text = json.dumps(event.get("args", {}), ensure_ascii=False)
+                # A tool block must follow visible assistant prose. This is a
+                # genuine ordering barrier, unlike ordinary token updates.
+                self._materialize_assistant_live_lines()
                 self._finalize_thinking_block()
                 self._assistant_stream_open = False
                 # Remove any partially-rendered assistant delta so that
@@ -4908,10 +6694,31 @@ if TEXTUAL_AVAILABLE:
                         "invalid_tool_call_shape": "invalid tool-call shape",
                     }.get(event.get("category"), "invalid tool-call candidate")
                     self._write(f"[Tool] {source}: {category}; no tool was executed.", "warn")
+            elif et == "tui_approval_request":
+                # Runtime-owned FIFO approval.  The event has no Future or
+                # live child/session object; reply is correlated by ID+epoch.
+                pending = {
+                    "id": str(event.get("approvalId") or ""),
+                    "tool": str(event.get("tool") or "tool"),
+                    "args": {},
+                    "origin": event.get("origin"),
+                    "epoch": event.get("epoch"),
+                }
+                if isinstance(self.session, TuiSessionView) and self._detached_waiter_epoch(pending) is None:
+                    self._write("[Approval] ignored stale or invalid approval request", "error")
+                    return
+                self._approval_waiters.append(pending)
+                if self._approval_pending is None:
+                    self._show_next_approval()
+                self._toast(f"Approve: {event.get('tool', 'tool')}", severity="warning", timeout=8.0)
             elif et == "tool_approval_rejected":
                 self._write(f"[Rejected] {event.get('tool')}: {event.get('reason', '')}", "warn")
             elif et == "ask_user":
-                self._ask_user_pending = {"id": str(event.get("id") or "")}
+                pending = {"id": str(event.get("id") or ""), "epoch": event.get("epoch")}
+                if isinstance(self.session, TuiSessionView) and self._detached_waiter_epoch(pending) is None:
+                    self._write("[AskUser] ignored stale or invalid question request", "error")
+                    return
+                self._ask_user_pending = pending
                 self._write_tool_block(f"agent asks: {event.get('question')}")
                 self._toast("Agent waiting for response", severity="warning")
                 try:
@@ -4928,8 +6735,8 @@ if TEXTUAL_AVAILABLE:
                     self.query_one("#input", TextArea).placeholder = "Type a command or /help"
                 except Exception:
                     pass
-                self._render_stream()
-                self._refresh_sidebar()
+                self._schedule_stream_render()
+                self._schedule_sidebar_refresh()
             elif et == "cooperation_changed" and not event.get("enabled"):
                 self._cooperation_disabled = True
                 self._reject_all_approvals("Cooperation disabled")
@@ -4975,13 +6782,24 @@ if TEXTUAL_AVAILABLE:
                         f"Tool: {badge} {tool_name}" + (f" · {elapsed}" if elapsed else ""),
                         f"tool {status}: {tool_name}",
                     )
-                if (
-                    tool_name != "finish"
-                    and getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)()
-                ):
-                    out = SubagentMonitor.visible_tool_result(event)
+                show_output = True
+                if isinstance(self.session, TuiSessionView):
+                    show_output = bool(self.session.snapshot["sidebar"].get("bashOutput", True))
+                else:
+                    show_output = bool(getattr(self.session.settings_manager, "get_bash_show_output", lambda: True)())
+                if tool_name != "finish" and show_output:
+                    # Facade DTOs keep the bounded visible result at top level
+                    # so it is not JSON-counted twice at UI ingress. Direct
+                    # legacy sessions still use the nested result shape.
+                    key = "outputText" if event.get("ok") else "error"
+                    out = event.get(key) if isinstance(event.get(key), str) else SubagentMonitor.visible_tool_result(event)
                     if out:
                         self._write_result_block(out)
+                    evidence_id = event.get("evidenceId")
+                    if isinstance(evidence_id, str):
+                        self._write_evidence_link(evidence_id, unavailable=bool(event.get("evidenceUnavailable")))
+                    elif event.get("evidenceUnavailable"):
+                        self._write_evidence_link("", unavailable=True)
             elif et == "tool_call_nudge_start":
                 self._finalize_thinking_block()
             elif et == "turn_end":
@@ -4990,7 +6808,7 @@ if TEXTUAL_AVAILABLE:
                 self._assistant_stream_open = False
                 self._finalize_thinking_block()
                 self._remove_thinking_line()
-                self._render_stream()
+                self._schedule_stream_render()
                 if event.get("ok") is False:
                     err = str(event.get("error") or "Unknown error").strip()
                     self._write(f"[error] {err}", "error")
@@ -5001,7 +6819,7 @@ if TEXTUAL_AVAILABLE:
                 self._turn_active = False
                 self._assistant_stream_open = False
                 self._remove_thinking_line()
-                self._render_stream()
+                self._schedule_stream_render()
             elif et == "auto_retry_start":
                 self._retry_state = f"retry-{event.get('attempt')}"
                 self._assistant_stream_open = False
@@ -5026,13 +6844,14 @@ if TEXTUAL_AVAILABLE:
                 else:
                     self._write_plan_block(None)
 
-            # Delta batches repaint only the stream. Sidebar work stays tied
-            # to lifecycle/state-changing events, never token rate.
+            # Delta batches repaint only the stream. Lifecycle changes mark
+            # the sidebar dirty, then one post-drain frame performs the
+            # expensive widget/layout update.
             if not (
                 et == "thinking_delta"
                 or (et == "message_update" and event.get("assistantMessageEvent", {}).get("type") == "text_delta")
             ):
-                self._refresh_sidebar()
+                self._schedule_sidebar_refresh()
 
 
 class TuiMode:
@@ -5043,17 +6862,41 @@ class TuiMode:
     async def run(self) -> None:
         if not TEXTUAL_AVAILABLE:
             raise RuntimeError("TUI mode requires 'textual'. Install dependencies: pip install -e .")
-        session = self.runtime_host.session
-        app = _OneTextualApp(session, self.options, self.runtime_host)
-        if (
-            bool(self.options.get("cooperation"))
-            or getattr(session.settings_manager, "get_tool_approval", lambda: False)()
-        ):
-            app._install_approval_callback(session)
+        # Production supplies AgentRuntimeFacade, never a live runtime host.
+        # Keep the explicit host route only for existing in-process test apps.
+        facade = (
+            self.runtime_host
+            if hasattr(self.runtime_host, "command") and not hasattr(self.runtime_host, "session")
+            else None
+        )
+        session: Any | None = None
         try:
+            if facade is not None:
+                await facade.start()
+                session = TuiSessionView(facade)
+                await session.refresh()
+            else:
+                session = self.runtime_host.session
+            app = _OneTextualApp(session, self.options, self.runtime_host)
+            if facade is None and (
+                bool(self.options.get("cooperation"))
+                or getattr(session.settings_manager, "get_tool_approval", lambda: False)()
+            ):
+                app._install_approval_callback(session)
             await app.run_async()
         finally:
             # Abort the session on Ctrl+Q (or any exit) so in-flight
             # provider calls, tool tasks, and bash subprocesses are
             # cancelled before the main cleanup path runs.
-            await session.abort()
+            if session is not None:
+                try:
+                    await session.abort()
+                except Exception:
+                    # Startup failures may leave no command intake path. The
+                    # facade's owned shutdown below remains authoritative.
+                    pass
+            if facade is not None:
+                try:
+                    await facade.close()
+                finally:
+                    facade.finalize()

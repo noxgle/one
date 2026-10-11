@@ -76,7 +76,11 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
                 system_prompt=bootstrap.get("resourceLoaderOptions", {}).get("systemPrompt"),
                 append_system_prompt=bootstrap.get("resourceLoaderOptions", {}).get("appendSystemPrompt"),
             )
-    await resource_loader.reload()
+    # The TUI worker bootstraps resources before starting transports/session
+    # construction so it can publish detached startup diagnostics.  Other
+    # callers retain the established runtime-owned reload behavior.
+    if not bootstrap.get("resourceLoaderAlreadyLoaded", False):
+        await resource_loader.reload()
 
     # ── Session manager (explicit > default under agentDir) ──────────────
     explicit_session = options.get("sessionManager")
@@ -139,7 +143,9 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
             temperature = settings_manager.get_default_temperature()
 
     tools = bootstrap.get("tools")
-    if tools:
+    # An explicit empty list deliberately selects no tools. Do not turn it back
+    # into defaults while constructing a detached TUI runtime.
+    if tools is not None:
         tool_names = [t.name if hasattr(t, "name") else str(t) for t in tools]
     else:
         tool_names = list(DEFAULT_TOOL_NAMES)
@@ -158,7 +164,14 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         storage_dir=session_manager.session_dir or "",
         subagents_hard_disabled=bool(bootstrap.get("subagentsHardDisabled", False)),
     )
-    await session.bind_extensions()
+    try:
+        await session.bind_extensions()
+    except BaseException:
+        # A failed extension bind occurs after the session has acquired its
+        # runtime resources but before it can be returned to the caller.  The
+        # caller cannot dispose an object it never received.
+        await session.dispose()
+        raise
 
     return AgentSessionRuntime(
         session=session,

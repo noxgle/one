@@ -31,8 +31,9 @@ data flows, contracts, and extension points.
 
 `one` is a Python 3.12+ application distributed as `one-agent` (import and
 console-script name are `one`). It provides four user-visible interfaces (TUI,
-text, JSON, RPC) plus a headless `one run` subcommand, all driven by a single
-synchronous agent loop.
+text, JSON, RPC) plus a headless `one run` subcommand. Explicit TUI mode uses a
+Textual-owned UI loop and a dedicated agent-runtime worker loop; other modes
+retain their established session ownership.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -94,6 +95,33 @@ The default mode (when none is specified) is `tui`.
 ## 3. Core agent loop
 
 **File:** `one/core/agent_session.py`
+
+### 3.0 TUI runtime boundary
+
+`AgentRuntimeFacade` and `ThreadedAgentRuntime` own the TUI execution loop.
+`TuiRuntimeHost` creates providers, MCP clients, extensions, storage, and the
+current `AgentSession` on that owner loop. `TuiSessionView`, on Textual's loop,
+holds copied bounded snapshots only and sends commands through the facade. It
+never owns a live session, provider, future, or approval waiter.
+
+The facade has a bounded event queue and byte budget. It coalesces compatible
+text deltas, preserves lifecycle barriers, and applies backpressure before
+moving work to the bounded UI accumulator. Control commands use their own
+runtime submission path. The UI drains a limited item/time slice and schedules
+transcript paint at most once per frame; an active assistant block is capped at
+8 KiB before wrapping/formatting (full content remains in session history and
+evidence). Cached sidebar/Git and transcript projections avoid history scans on
+input/paint paths. The offline R6 report records paint/render p99 and count,
+the maximum measured event-loop block across key, wheel, input-refresh, paint,
+drain, and sidebar work, and retains targets of no ordinary stall above 250 ms
+and reduction-slice p99 at most 8 ms.
+
+This is concurrency isolation, not sandboxing: runtime code, extensions, MCP
+servers, and tools still run with agent permissions. Threads share the process,
+memory, and Python GIL, so CPU-heavy Python work can still delay UI scheduling;
+the offline R6 profiler records this as a gate result rather than claiming that
+threads guarantee latency. Worker shutdown/drain cannot safely kill arbitrary
+running work. No Textual widget may be touched from the runtime thread.
 
 Lifecycle telemetry uses a dedicated monotonic clock. Durable `timing` entries
 record nonnegative integer `elapsedMs` for whole turns, attempts, provider

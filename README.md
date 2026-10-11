@@ -155,11 +155,11 @@ tool lifecycle status, retains sessions, and accepts slash commands such as
 `/help`, `/agents`, `/steer`, `/follow`, `/abort`, `/login`, and `/mcp list`. It displays a
 startup banner and status information.
 
-The TUI and agent share one asyncio loop; they are not separate agent threads.
-Blocking built-in read-only filesystem operations (`read`, `grep`, `find`, and
-`ls`) run in a worker thread so streaming, input, and approvals remain
-responsive. Mutating tools and provider/MCP operations retain their existing
-dispatch behavior.
+In explicit TUI mode, Textual owns the UI loop while the agent runtime owns a
+separate worker loop. The UI exchanges bounded, detached command/event DTOs
+with that runtime; it does not access live session state. This improves
+isolation from blocked runtime I/O, but threads still share the Python GIL and
+do not provide a security sandbox or an unconditional latency guarantee.
 
 `/agents` opens a read-only monitor for direct child agents of the current
 session only. One frame shows the selected child's header and bounded live response/tool
@@ -170,6 +170,11 @@ toggle is enabled; it does not switch sessions or provide execution controls. Cl
 application-generated inline **[view]** link beside a `spawn_subagent` tool call to open the
 same monitor with that child selected. `/subagents on|off` remains only the
 enable/disable control for subagent tools.
+
+Completed durable tool results can also have an application-generated **[view]**
+action. It opens a bounded, sanitized page viewer; PageUp/PageDown retrieves the
+next worker-side page. It never exposes tool arguments or raw evidence records,
+and links become unavailable after a session change or unavailable evidence.
 
 Configure the startup information panel in `settings.json`:
 

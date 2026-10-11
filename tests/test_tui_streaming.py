@@ -12,13 +12,43 @@ from typing import Any
 import pytest
 
 from one.modes.tui_mode import (
+    _DISPLAY_TRUNCATED_MARKER,
     _THINKING_FRAMES,
     _THINKING_MARK,
+    MAX_RENDERED_BYTES,
     MAX_RENDERED_LINES,
+    MAX_SOURCE_DISPLAY_BYTES,
     _format_elapsed_ms,
     advance_thinking_frame,
 )
 from tests.support.tui import _mk_app_session, _submit
+
+
+@pytest.mark.asyncio
+async def test_tui_next_assistant_start_keeps_predecessor_awaiting_final_paint(tmp_path: Path) -> None:
+    """A lifecycle barrier must not discard a completed live tail before its frame."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Model a queued detached bridge batch: message_end has scheduled its
+        # paint, but the next prompt's message_start is reduced first.
+        app._ui_drain_active = True
+        try:
+            app._handle_session_event({"type": "message_start", "message": {"role": "assistant"}})
+            app._handle_session_event({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "completed tail"},
+            })
+            app._handle_session_event({"type": "message_end", "message": {"role": "assistant"}})
+            assert app._assistant_live_finalize_pending
+            app._handle_session_event({"type": "message_start", "message": {"role": "assistant"}})
+        finally:
+            app._ui_drain_active = False
+
+        assert "completed tail" in "\n".join(app._stream_lines)
+        assert not app._assistant_live_finalize_pending
 
 
 @pytest.mark.asyncio
@@ -97,6 +127,116 @@ async def test_tui_agents_panel_live_snapshot_and_trusted_stream_click(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_tui_evidence_overlay_pilot_click_pages_unicode_and_invalidates_stale_requests(tmp_path: Path) -> None:
+    """Exercise the runtime-host/facade/view evidence path through a real click."""
+    from types import SimpleNamespace
+
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    from one.core.session_manager import SessionManager
+    from one.core.tui_runtime_host import TuiRuntimeHost
+    from one.modes.tui_mode import TuiSessionView, _OneTextualApp
+
+    manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    raw = {
+        "args": {"token": "no"},
+        "outputText": (
+            "TOP-MARKER\n" + "α" * 5_000 + "[@click=app.abort]" + "α" * 1_123
+            + " Bearer split-secret " + "α" * 973_900 + "\nTAIL-MARKER"
+        ),
+    }
+    evidence_id, error = manager.append_evidence({"id": "large", "rawResult": raw})
+    assert error is None and evidence_id == "large"
+    host = object.__new__(TuiRuntimeHost)
+    host._epoch = 4
+    host._host = SimpleNamespace(session=SimpleNamespace(session_manager=manager))
+    first_host_page = host.evidence_page(evidence_id, 0, 4)
+    assert first_host_page["nextOffset"] is not None
+    # The secret straddles the first byte-page boundary in the stored source;
+    # it must be redacted before, rather than after, that page is selected.
+    assert "split-secret" not in first_host_page["text"]
+    stored = manager.read_evidence(evidence_id)
+    assert stored is not None and stored["rawResult"] == raw
+    total = first_host_page["totalChars"]
+    last_offset = total - len(b'TAIL-MARKER"}')
+    last_host_page = host.evidence_page(evidence_id, last_offset, 4)
+    assert last_host_page["nextOffset"] is None and "TAIL-MARKER" in last_host_page["text"]
+
+    class Facade:
+        def __init__(self) -> None:
+            self.listeners: list[object] = []
+            self.delay = asyncio.Event()
+            self.delay.set()
+
+        async def command(self, name, payload=None):
+            payload = payload or {}
+            if name == "snapshot":
+                return {"result": {"epoch": host._epoch, "sidebar": {"sessionId": "s", "model": "p/m", "bashOutput": True}, "messages": []}}
+            if name == "evidence_page":
+                await self.delay.wait()
+                return {"result": await host.dispatch(name, payload)}
+            return {"result": {"accepted": True}}
+
+        def subscribe(self, listener, **_kwargs):
+            self.listeners.append(listener)
+            return lambda: self.listeners.remove(listener)
+
+        def emit(self, event):
+            for listener in tuple(self.listeners):
+                listener(event)
+
+    facade = Facade()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    async with app.run_test(size=(100, 30)) as pilot:
+        facade.emit({"type": "tool_call_end", "tool": "read", "ok": True, "outputText": "[truncated]", "evidenceId": evidence_id})
+        await pilot.pause()
+        stream = app.query_one("#stream", Static)
+        span = next(item for item in stream.content._spans if "@click" in str(item.style))
+        before = stream.content.plain[:span.start]
+        assert await pilot.click("#stream", offset=(len(before.rsplit("\n", 1)[-1]) + 2, before.count("\n")))
+        await pilot.pause(0.1)
+        body = app.query_one("#evidence_content", Static)
+        evidence_text = str(body.content)
+        assert "α" in evidence_text and "never-show" not in evidence_text
+        assert "[@click=app.abort]" in evidence_text
+        evidence_body = app.query_one("#evidence_body", VerticalScroll)
+        assert evidence_body.max_scroll_y > 0
+        start_scroll = evidence_body.scroll_y
+        evidence_body.scroll_end(animate=False, immediate=True)
+        await pilot.pause()
+        assert evidence_body.scroll_y > start_scroll
+        assert app._evidence_panel["nextOffset"] is not None
+        assert await pilot.click("#evidence-next")
+        await pilot.pause(0.1)
+        second_offset = app._evidence_panel["offset"]
+        assert second_offset > 0
+        await pilot.press("page_up")
+        await pilot.pause(0.1)
+        assert app._evidence_panel["offset"] == 0
+        # A known valid bounded byte offset opens the final source page.
+        app._schedule_evidence_page(app._monitor_generation, evidence_id, last_offset, ())
+        await pilot.pause(0.1)
+        assert app._evidence_panel["nextOffset"] is None
+        assert "TAIL-MARKER" in str(body.content)
+        # A response that was already in flight must not paint after its view
+        # changes epochs (independent of rejecting an old stream link).
+        app._close_evidence_panel()
+        facade.delay.clear()
+        app._schedule_evidence_page(app._monitor_generation, evidence_id, 0, ())
+        await pilot.pause()
+        view._replace_snapshot({"epoch": 5, "sidebar": {"sessionId": "s", "model": "p/m"}, "messages": []})
+        facade.delay.set()
+        await pilot.pause(0.1)
+        assert app._evidence_panel is None
+        app.action_open_evidence_link(next(iter(app._evidence_link_tokens)))
+        await pilot.pause()
+        assert app._evidence_panel is None
+
+
+@pytest.mark.asyncio
 async def test_tui_agents_preview_renders_mixed_timeline_in_chronological_order(tmp_path: Path) -> None:
     from textual.widgets import Static
 
@@ -169,6 +309,92 @@ async def test_tui_agent_link_metadata_is_removed_on_trim_and_transcript_rebuild
         await pilot.pause()
         assert not app._agent_link_tokens
         assert not app.query(".agent-link")
+
+
+@pytest.mark.asyncio
+async def test_tui_trim_rebases_surviving_trusted_agent_link(tmp_path: Path) -> None:
+    """A link that survives front trimming remains on its rebased tool row."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.subagent_monitor.register("surviving-child", "task", "model")
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(100, 24)) as pilot:
+        # Leave room for the generated Tool: row, then force a front trim when
+        # the child entry arrives. The trusted metadata must move with it.
+        app._stream_lines.extend(f"old-{index}" for index in range(MAX_RENDERED_LINES))
+        app._render_stream()
+        session._emit({"type": "tool_call_start", "tool": "spawn_subagent", "args": {"task": "task"}})
+        session._emit({"type": "subagent_start", "sessionId": "surviving-child", "task": "task"})
+        await pilot.pause()
+
+        assert len(app._agent_link_tokens) == 1
+        token, (_generation, child_id, line_index, _call_id) = next(iter(app._agent_link_tokens.items()))
+        assert child_id == "surviving-child"
+        assert app._stream_lines[line_index] == "Tool: ○ spawn_subagent"
+        assert app.query_one("#stream", Static).content.plain.splitlines()[line_index].endswith("[view]")
+
+        app.action_open_agent_link(token)
+        await pilot.pause()
+        assert app._agents_panel_open
+        assert app._selected_agent_id == "surviving-child"
+
+
+@pytest.mark.asyncio
+async def test_tui_multi_megabyte_entry_is_bounded_and_unchanged_lines_hit_render_cache(tmp_path: Path) -> None:
+    """Pilot coverage for pre-Content byte/row bounds and cached history."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test(size=(48, 18)) as pilot:
+        app._write("x" * (3 * 1024 * 1024))
+        await pilot.pause()
+        assert sum(len(line.encode("utf-8")) + 1 for line in app._stream_lines) <= MAX_RENDERED_BYTES
+        assert any("display truncated" in line for line in app._stream_lines)
+
+        app._write("cached tail")
+        await pilot.pause()
+        hits_before = app._stream_cache_hits
+        app._write("changed tail")
+        await pilot.pause()
+        assert app._stream_cache_hits > hits_before
+
+
+@pytest.mark.asyncio
+async def test_tui_multi_megabyte_live_assistant_response_is_bounded_and_marked(tmp_path: Path) -> None:
+    """Large live text is byte-bounded before formatting; ordinary text survives."""
+    from one.modes.tui_mode import _MAX_LIVE_ASSISTANT_RENDER_BYTES, _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    formatted_bytes: list[int] = []
+    original_format = app._format_chat_panel
+
+    def record_format(role: str, text: str, *args, **kwargs):
+        formatted_bytes.append(len(text.encode("utf-8")))
+        return original_format(role, text, *args, **kwargs)
+
+    app._format_chat_panel = record_format  # type: ignore[method-assign]
+    async with app.run_test(size=(48, 18)) as pilot:
+        # The normal-output case is below the presentation cap and remains whole.
+        app._append_assistant_delta("normal-" + "n" * (4 * 1024))
+        await pilot.pause()
+        assert formatted_bytes[-1] == len(("normal-" + "n" * (4 * 1024)).encode("utf-8"))
+
+        app._discard_live_assistant_block()
+        app._assistant_live_lines_dirty = False
+        app._append_assistant_delta("x" * (3 * 1024 * 1024))
+        await pilot.pause()
+
+        assert len(app._assistant_live_buffer.encode("utf-8")) <= MAX_SOURCE_DISPLAY_BYTES
+        assert _DISPLAY_TRUNCATED_MARKER in app._assistant_live_buffer
+        assert formatted_bytes[-1] <= _MAX_LIVE_ASSISTANT_RENDER_BYTES
+        assert "earlier assistant output truncated" in "\n".join(app._stream_lines)
+        stream = "\n".join(app._stream_lines)
+        assert "earlier assistant output truncated" in stream
+        assert sum(len(line.encode("utf-8")) + 1 for line in app._stream_lines) <= MAX_RENDERED_BYTES
+        assert len(app._stream_lines) <= MAX_RENDERED_LINES
 
 
 @pytest.mark.asyncio
@@ -880,10 +1106,10 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
-    """Every mutation of the spinner line must trigger a widget refresh.
+    """Every mutation of the spinner line must trigger a scheduled widget refresh.
 
     Regression: _tick_waiting rewrote the spinner line in-place but never
-    called _render_stream, so the visible widget stayed frozen.
+    requested a stream frame, so the visible widget stayed frozen.
     """
     from textual.widgets import Static
 
@@ -899,16 +1125,10 @@ async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
         assert app._thinking_active is False
         stream_widget = app.query_one("#stream", Static)
 
-        # NOTE: captures happen synchronously right after each manual tick
-        # with no `await` in between. The app's own 0.15s interval timer also
-        # drives _tick_waiting, and any await would let it fire extra ticks;
-        # with a 6-frame cycle that can land back on the same glyph and make
-        # consecutive-inequality assertions flaky on loaded runners.
         # --- First tick: initial append path (else branch) ---
         app._tick_waiting()
         assert app._thinking_active is True
         first_lines = list(app._stream_lines)
-        first_render = str(stream_widget.content)
         assert any(l.startswith("__MK__:") for l in app._stream_lines), (
             "spinner line must be present after first tick"
         )
@@ -920,17 +1140,22 @@ async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
         assert second_lines != first_lines, (
             "_stream_lines should change when spinner frame advances"
         )
+        # Stream mutations share the central 30 Hz scheduler, so rendering is
+        # intentionally deferred rather than synchronously rebuilding twice.
+        await pilot.pause(0.05)
         second_render = str(stream_widget.content)
-        assert second_render != first_render, (
-            "rendered #stream content must change between ticks — the frozen-spinner bug"
-        )
+        assert "Ctrl+C abort" in second_render
 
         # --- Third tick: verify continued animation ---
         app._tick_waiting()
+        await pilot.pause(0.05)
         third_render = str(stream_widget.content)
-        assert third_render != second_render, (
-            "spinner must keep animating on subsequent ticks"
-        )
+        # The 150 ms app timer may advance another frame during this pilot
+        # pause, including back to the same glyph. The scheduler's rendered
+        # revision proves the newest spinner mutation reached ``Static``
+        # without bypassing the 30 Hz frame cap.
+        assert app._rendered_stream_revision == app._stream_render_revision
+        assert "Ctrl+C abort" in third_render
 
 
 @pytest.mark.asyncio
@@ -1568,7 +1793,9 @@ async def test_tui_coalesces_lifecycle_wakeup_and_drains_delta_batch(tmp_path: P
 
         assert wakeups == [{"type": "_flush_pending_ui_events"}]
         with app._pending_ui_events_lock:
-            assert len(app._pending_ui_events) == 251
+            # Adjacent deltas are represented by one bounded chunk behind the
+            # lifecycle barrier, rather than one retained object per token.
+            assert len(app._pending_ui_events) == 2
 
         app._flush_pending_ui_events()
         assert app._assistant_stream == "x" * 250
@@ -1595,6 +1822,8 @@ async def test_tui_batch_drain_does_not_refresh_sidebar_for_deltas(tmp_path: Pat
         app._refresh_sidebar = record_refresh  # type: ignore[method-assign]
         session._emit({"type": "message_start", "message": {"role": "assistant", "content": ""}})
         app._flush_pending_ui_events()
+        assert refreshes == 0
+        app._paint_scheduled_sidebar()  # noqa: SLF001
         assert refreshes == 1
 
         for _ in range(100):
@@ -1606,6 +1835,7 @@ async def test_tui_batch_drain_does_not_refresh_sidebar_for_deltas(tmp_path: Pat
 
         session._emit({"type": "turn_end", "ok": True})
         app._flush_pending_ui_events()
+        app._paint_scheduled_sidebar()  # noqa: SLF001
         assert refreshes == 2
 
 
@@ -1779,6 +2009,8 @@ async def test_tui_delta_batch_renders_once_and_large_live_block_has_marker(tmp_
                 {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "x"}}
             )
         app._flush_pending_ui_events()
+        # Token paint is frame-scheduled rather than performed in the drain.
+        await pilot.pause()
         assert renders == 1
 
         session._emit(
@@ -1788,6 +2020,7 @@ async def test_tui_delta_batch_renders_once_and_large_live_block_has_marker(tmp_
             }
         )
         app._flush_pending_ui_events()
+        await pilot.pause()
         assert len(app._stream_lines) <= MAX_RENDERED_LINES
         assert _TRUNCATED_ASSISTANT_MARKER in app._stream_lines
 

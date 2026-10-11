@@ -6,11 +6,390 @@ user-facing changes are recorded in [`CHANGELOG.md`](CHANGELOG.md). Do not keep
 completed task logs or unprioritized feature proposals here. Record accepted
 future work as GitHub issues.
 
+## Project: Responsive TUI with an independently owned agent runtime
+
+**Status: Complete.** The approved responsive-TUI implementation and independent
+R6 verification are complete. The sandbox roadmap remains deferred and is not
+part of this work.
+
+### Goal
+
+Keep keyboard input and history browsing responsive while the main agent and
+subagents execute tools, stream output, compact context and persist evidence.
+Separate UI ownership from execution and verify improvement with latency measurements,
+not only functional tests or subjective claims.
+
+### Context
+
+Source inspection found that `TuiMode.run()` and the detached task awaiting
+`AgentSession.prompt()` still share Textual's asyncio loop. Read-only tool bodies
+already use `asyncio.to_thread`; Bash and MCP already use asynchronous transports.
+However, synchronous persistence/fsync, evidence processing, local mutations,
+extension hooks and context preparation can still block the shared loop.
+
+UI-local costs also remain: `build_sidebar_snapshot()` computes context usage and
+full statistics repeatedly; `_refresh_sidebar()` performs a synchronous Git probe;
+child monitor invalidations trigger sidebar work; drains process a whole event batch
+without a time budget; live text is repeatedly wrapped and retained transcript
+`Content` is rebuilt. The 30 Hz timer is not a hard paint-rate limit. These
+paths were profiled and addressed by the completed work below.
+
+### Scope
+
+#### In Scope
+
+- Dedicated agent-owned asyncio loop in a runtime thread; Textual remains UI-owned.
+- Transport-neutral command/event/snapshot boundary, suitable for later process use.
+- Cheap revisioned sidebar and monitor display projections; asynchronous cached Git probe.
+- Bounded/coalesced UI ingress, frame scheduling and incremental transcript presentation.
+- Main and child approval/questions, ordinary prompt/steer/follow-up, abort, settings,
+  model changes, resource reload, sessions and shutdown through the runtime boundary.
+- Deterministic offline responsiveness benchmarks and regression tests.
+
+#### Non-Goals
+
+- Implementing the deferred subagent sandbox, changing autonomy or granting permissions.
+- Running Textual widgets on a worker thread; indiscriminately threading async Bash/MCP.
+- Changing approval/execution/event contracts to hide delays or weakening fsync durability.
+- Promising instantaneous cancellation of writes, remote actions or running read threads.
+- Shipping a separate process immediately without evidence that the thread solution
+  fails the agreed latency gates; pretending threads remove GIL contention.
+- New dependencies, process-level security claims or new platform support claims.
+
+### Assumptions
+
+- Runtime thread is the first execution backend. If measured CPU/GIL contention still
+  fails the gates after bounded rendering, switch the same facade to a process in a
+  separately approved follow-up; do not mark this project successful merely for adding
+  a thread.
+- UI consumes copied, allowlisted DTOs only, not shared session/messages/settings
+  objects. All runtime state has one owner.
+- Proposed targets are reference-environment targets, not universal terminal guarantees.
+  Freeze Python/Textual versions, terminal size, hardware and workload in R1.
+- Preserve the current 500-entry viewport contract; add byte and physical-row bounds
+  to prevent one giant thinking/live entry bypassing presentation limits.
+
+### Open Questions
+
+- R1 established the reference offline benchmark and byte/backlog limits; the
+  recorded R6 profile results are the completion evidence for this project.
+- Exact thread-vs-process cutoff is empirical: inability to meet R1 gates under CPU
+  stress is a blocker requiring process-backend scope review, not a silent fallback.
+- Some third-party extensions assume main-thread execution; identify and document
+  compatibility constraints rather than invoking runtime hooks from both loops.
+
+### Tech Stack
+
+- **Python 3.12+ / asyncio / threading:** independent runtime loop and safe transport.
+- **Textual / Content:** UI-thread-only input, layout, viewport and inline actions.
+- **Existing providers/MCP/extensions/session manager:** created and disposed by runtime.
+- **pytest and offline fake providers:** deterministic functional and latency workloads.
+
+### Constraints
+
+- No real state, provider APIs or MCP servers in tests/benchmarks. Seed scratch state.
+- Do not change `AgentSession._emit` globally to asynchronous delivery: retain existing
+  listeners/event contracts and add a fast adapter at the TUI boundary.
+- Create/start/use/close MCP and provider transports on their owner loop. Moving just
+  `prompt()` while reusing objects started by CLI on the UI loop is not isolation.
+- Command intake must continue while a prompt awaits execution/approval. Never serialize
+  control requests behind completion of the whole turn.
+- Report durable success only after required persistence succeeds; drain before shutdown.
+
+### Architecture
+
+Introduce an `AgentRuntimeFacade` with thread-safe asynchronous command submission and
+bounded event/snapshot delivery. The dedicated runtime thread owns `AgentSession`,
+runtime host, providers, MCP, extensions, storage, settings/auth changes, child tasks,
+approval/question futures and watchdogs. A bootstrap spec carries configuration inputs;
+loop-bound clients are constructed inside the runtime loop. Audit `one/cli/main.py`
+mode dispatch so non-TUI modes retain their existing ownership and cleanup contracts.
+
+Textual's UI thread owns widgets, input draft/history, scroll intent, theme, display
+buffers and frame scheduler. UI callbacks only enqueue commands; they never read full
+runtime history, call `get_session_stats()` while painting, or set runtime asyncio
+futures/events directly. Schedule replies onto the owner loop using thread-safe loop
+submission. Do not block UI with `Future.result()` or wait for a worker thread to join
+synchronously.
+
+Every message has a session epoch, sequence/revision and relevant command/turn/tool/
+approval/question ID. Runtime publishes detached safe DTOs; no raw credentials,
+evidence or large argument dictionaries enter UI transport. Ordered delta runs may
+coalesce without crossing lifecycle barriers. Bounded ingress applies backpressure
+or sends explicit overflow/resync state; it never silently drops approvals, questions,
+errors or terminal events. Abort/answers/shutdown have a separate bounded control lane
+so output pressure cannot prevent them being accepted.
+
+Prompt submission acknowledges actual started/steer/follow-up delivery. Session changes
+are guarded runtime transactions: release waits, handle old work, publish a new epoch
+and initial bounded transcript. Approval futures remain runtime-owned; UI displays the
+current FIFO request and rejection-reason field, then sends an ID-bound decision.
+Late/duplicate/stale decisions cannot approve another request. Model/config/theme
+commands return authoritative revisions; no direct UI mutation of shared settings.
+Runtime shutdown rejects waits, aborts/reaps tasks, drains storage, closes owned MCP/
+providers/extensions, and stops the loop. Dispose the authoritative current session,
+not the session captured when TUI first started.
+
+Sidebar projections contain only necessary display fields, calculated/cached by runtime
+revision. Avoid duplicate context estimates and full historical scans per UI refresh;
+keep exact context/model/pruning semantics. Git branch is cached by cwd and refreshed
+asynchronously with a bounded timeout/TTL. Monitor output changes must not invalidate
+unrelated sidebar fields; UI never blocks acquiring a live monitor lock or deep-copying
+every child under it during input handling.
+
+UI reduction and painting are separate. Limit a reduction slice to approximately
+5–8 ms and schedule at most one transcript paint per 33 ms frame; lifecycle ordering
+is preserved in model state rather than forcing full painting at each event. Immutable
+completed blocks cache layout by width/theme revision; active text uses append/replace-
+tail chunks and incremental wrapping. Bound previews before JSON display formatting,
+not after wrapping a multi-megabyte payload. Keep spinner outside the transcript rebuild.
+Index trusted inline actions by stable block/row IDs. Width-aware retained anchors
+preserve scroll while history survives; user movement always supersedes deferred follow.
+
+### Architecture Decisions
+
+#### ADR-R01: Runtime thread with transport-neutral facade
+
+**Decision:** Dedicated runtime loop/thread first; no direct shared UI/session state.
+**Alternatives:** More scattered `to_thread` calls on one loop; a separate runtime
+process immediately; moving only the provider coroutine into a thread.
+**Rationale:** Removes blocking execution I/O from Textual while preserving a reusable
+runtime API and avoiding per-tool mutable-state races.
+**Trade-offs:** GIL still permits CPU contention; synchronous runtime work may delay
+abort acknowledgment even though UI stays responsive. Ownership migration is substantial,
+not a one-line listener change.
+**Consequences:** Measure CPU stress; process follow-up if gates fail. Async MCP remains
+async on runtime loop; no thread wrapping of its transport objects.
+
+#### ADR-R02: Snapshot-driven UI and budgeted incremental rendering
+
+**Decision:** UI paints cheap projections with bounded work and cached block layouts.
+**Alternatives:** Compute sidebar/history statistics during painting; rebuild entire
+transcript on every delta; move agent only and keep current renderer untouched.
+**Rationale:** Execution separation alone cannot fix UI-local layout/serialization costs.
+**Trade-offs:** Requires stable identities, invalidation and explicit queue bounds.
+**Consequences:** Preserve literal rendering, link security, lifecycle ordering, selection
+and scroll contracts; test both throughput and input latency.
+
+### Phases
+
+#### Phase R1: Measured offline baseline and responsiveness contract
+
+**Objective:** Reproduce input/scroll lag and quantify the hot paths.
+**Prerequisites:** Existing monitor/scroll behavior as baseline.
+**Expected outcome:** Reproducible baseline and reference benchmark configuration.
+**Estimated effort:** 1–2 days. **Confidence:** High.
+
+- [ ] **Task R1: Add offline latency instrumentation and stress fixtures**
+  - **Description:** Measure named production paths separately from synthetic stress
+    probes: actual `_render_stream`/`_format_chat_panel`, event accumulator drain,
+    sidebar/context/stats flattening, scratch persistence/evidence and Git helper with
+    I/O stubs. Report virtual-driver `after_refresh` as distinct from physical terminal
+    flush; mark unavailable offline paths unmeasured rather than relabeling toy work.
+    Use in-memory and scratch-only durable history with increasing history and the
+    identical 500-line visible viewport/delta burst.
+  - **Files:** Proposed `scripts/profile_tui_responsiveness.py`,
+    `tests/test_tui_responsiveness.py`, `tests/support/tui.py`,
+    `one/modes/tui_mode.py` (opt-in timing only).
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** No live APIs/state; metrics include p95/p99/max, not just
+    averages; capture actual paint latency; record reference versions/size/hardware;
+    identify blocking paths before architectural conclusions.
+  - **Verification:** Offline benchmark with 50/500/5,000/50,000 durable entries,
+    narrow/wide viewports, rapid alternating deltas and silent-provider periods.
+    Future `.venv/bin/python -m pytest -q tests/test_tui_responsiveness.py`.
+
+#### Phase R2: Runtime protocol and owner-loop execution
+
+**Objective:** Remove direct UI access to mutable agent state.
+**Prerequisites:** R1.
+**Expected outcome:** Runtime facade starts/controls/disposes all execution on one worker loop.
+**Estimated effort:** 4–7 days. **Confidence:** Medium.
+
+- [ ] **Task R2: Introduce command/event facade and runtime backend**
+  - **Description:** Define copied bounded DTOs, IDs/epochs, async acknowledgments,
+    control lane and runtime-owned snapshots. Construct loop-bound resources in the
+    worker; dispatch active prompt as a tracked task while intake continues. Preserve
+    non-TUI modes and public event semantics. Define unavailable/startup-failed/closed
+    states, graceful shutdown and mutation outcome handling.
+  - **Files:** Proposed `one/core/agent_runtime_facade.py`,
+    `one/core/threaded_agent_runtime.py`, `one/core/agent_session_runtime.py`,
+    `one/cli/main.py`, `tests/test_agent_runtime_facade.py`,
+    `tests/test_threaded_agent_runtime.py`, `tests/test_mcp_shutdown.py`.
+  - **Dependencies:** R1.
+  - **Acceptance Criteria:** UI/runtime loop identity verified; provider/MCP objects
+    never cross owner loops; blocked runtime I/O does not freeze UI; controls accepted
+    during active turns; disposal drains owned work; no unsupported thread-kill claim.
+  - **Verification:** Stubbed startup, MCP lifecycle, timeout, crash/error and shutdown
+    tests; ordered event snapshots; non-TUI CLI/RPC/run regression tests.
+
+#### Phase R3: TUI commands, approvals and session lifecycle via facade
+
+**Objective:** Preserve all human-facing operations across the runtime boundary.
+**Prerequisites:** R2.
+**Expected outcome:** TUI never calls live session state directly during painting/input.
+**Estimated effort:** 3–5 days. **Confidence:** Medium.
+
+- [x] **Task R3: Route TUI interactions through commands and projections** *(completed: the full TUI command, approval, question, and session lifecycle surface now uses facade commands and detached runtime projections; independent full-suite and final review passed.)*
+  - **Description:** Migrate prompt/steer/follow, abort, approval/question replies,
+    settings/model/resource actions and new/fork/load sessions. Keep runtime futures
+    private and responses epoch/ID-bound. Preserve common main/child approval FIFO,
+    reason field, inert Enter and independent main prompt. Handle failure/rebind/close
+    without orphaned waits or stale approvals. Seed bounded transcripts/monitor snapshots.
+  - **Files:** `one/modes/tui_mode.py`, `one/core/agent_runtime_facade.py`,
+    `one/core/agent_session_runtime.py`, `tests/test_tui_cooperation.py`,
+    `tests/test_tui_commands.py`, `tests/test_tui_input.py`,
+    `tests/test_tui_streaming.py`, `tests/test_session_branching_export.py`.
+  - **Dependencies:** R2.
+  - **Acceptance Criteria:** No cross-loop Future/Event mutation; stale child/session
+    replies rejected; main/child actions correlated; input remains responsive while
+    awaiting decision; exact-name and session-sidecar behavior preserved.
+  - **Verification:** Real Textual pilots while fake runtime is busy/blocked; concurrent
+    child approvals, reason entry, duplicate/late answers, coop disable, abort, failed
+    session switch and shutdown. Include live settings/model changes during streams.
+
+#### Phase R4: Cheap sidebar and bounded event/paint scheduling
+
+**Objective:** Make UI work independent of token rate and durable history size.
+**Prerequisites:** R3.
+**Expected outcome:** No synchronous Git/context/stats calls on the UI paint path.
+**Estimated effort:** 2–3 days. **Confidence:** High.
+
+- [x] **Task R4: Publish cached sidebar/monitor projections and budget UI drains** *(completed: cached projections, bounded/coalesced ingress, budgeted drains, and frame-scheduled painting are verified by the independent full suite and offline profile.)*
+  - **Description:** Remove repeated runtime history scans from sidebar painting;
+    cache/invalidate display snapshots accurately; async Git probe by cwd/TTL; separate
+    child text updates from running count. Coalesce ingress deltas by bounded chunks,
+    preserve barriers, schedule slices and one paint per frame. Define pressure/resync
+    behavior and keep critical controls deliverable without silent loss.
+  - **Files:** `one/modes/tui_mode.py`, `one/core/agent_runtime_facade.py`,
+    `one/core/threaded_agent_runtime.py`, `one/core/agent_session.py`,
+    `one/core/subagent_monitor.py`, `tests/test_tui_responsiveness.py`,
+    `tests/test_tui_streaming.py`, `tests/test_session_stats.py`.
+  - **Dependencies:** R3.
+  - **Acceptance Criteria:** Paint never computes provider context or launches Git;
+    slow probes do not stall input; queue work/buffers bounded; pressure cannot reorder
+    or drop approval/error/terminal state; steady-state paint rate ≤30 Hz.
+  - **Verification:** Benchmark/sidebar call-count assertions under child token bursts,
+    increasing history, slow Git and producer flood; exact lifecycle/compaction tests.
+
+#### Phase R5: Incremental transcript, bounded live blocks and stable viewport
+
+**Objective:** Avoid full-message/full-transcript work per token or spinner tick.
+**Prerequisites:** R4.
+**Expected outcome:** Cached completed blocks, cheap live-tail updates, stable history browsing.
+**Estimated effort:** 3–5 days. **Confidence:** Medium.
+
+- [x] **Task R5: Refactor presentation cache and renderer** *(completed: bounded live presentation, incremental rendering, and stable viewport behavior are verified by the independent full suite and offline profile.)*
+  - **Description:** Introduce stable block IDs and width-aware layout caches; chunk
+    live text and wrap only changed tails; bound bytes/physical rows before expensive
+    formatting, including thinking and large tool arguments/results. Separate spinner
+    refresh from transcript. Index trusted inline actions without per-line scans.
+    Preserve user anchor and selection under append/trim/reflow; invalidate deferred
+    follow on later user input and session changes.
+  - **Files:** `one/modes/tui_mode.py`, proposed `one/modes/tui_transcript.py`,
+    `tests/test_tui_rendering.py`, `tests/test_tui_navigation.py`,
+    `tests/test_tui_streaming.py`, `tests/test_tui_responsiveness.py`,
+    `tests/test_tui_snapshots.py`.
+  - **Dependencies:** R4.
+  - **Acceptance Criteria:** Work for unchanged history bounded/cached; long single
+    entry cannot bypass bounds; literal task/result text cannot create actions; `[view]`
+    opens correct child; reading history never fights auto-follow; retained anchors
+    survive heavily wrapped front removal and resize when possible.
+  - **Verification:** Actual pilot wheel/typing/resize/click/selection under output flood;
+    Unicode, repeated text, >256 wrapped removed rows, multi-megabyte bodies and
+    coalesced completion bursts; reviewed deterministic snapshots.
+
+#### Phase R6: Latency gates, independent review and integration readiness
+
+**Objective:** Verify comfort of use under load and regressions across modes.
+**Prerequisites:** R1–R5.
+**Expected outcome:** Measured latency targets met, or explicit process-backend follow-up blocker.
+**Estimated effort:** 2–3 days. **Confidence:** Medium.
+
+- [x] **Task R6: Validate responsiveness and lifecycle guarantees** *(completed: independent review found no blockers; the paired schema-v5 profile passed all 8 detached cases and approval, compaction, and critical-event checks. Worst detached drain p99 was 4.99 ms; keypress p99 2.48 ms; wheel p99 0.041 ms; input-to-refresh p99 1.45 ms; paint p99/max 11.98 ms; and maximum queue usage was 38 items/20.8 KiB. The paired legacy route is a synthetic in-process reference, not a historical binary; virtual-driver timings are not physical flush measurements.)*
+  - **Description:** Repeat R1 workloads; independent concurrency/performance/security
+    review of owner-loop transport, critical queues, approval correlation and mutations.
+    Document async/thread architecture and limitations; add Unreleased entry, bump
+    then-current version and regenerate snapshots by repo policy. If CPU/GIL stress
+    fails targets, record evidence and request process-backend scope rather than claim
+    completion. Do not weaken measurements or disable safety to pass.
+  - **Files:** `README.md`, `docs/architecture.md`, `docs/QUICKSTART.md`,
+    `CHANGELOG.md`, `one/config.py`, `tests/test_tui_snapshots.py`,
+    `tests/snapshots/tui/base.txt`, `tests/snapshots/tui/overlay.txt`,
+    `tests/snapshots/tui/widget_panel.txt`, `tests/snapshots/tui/agents.txt`, R1–R5 files.
+  - **Dependencies:** R5.
+  - **Acceptance Criteria:** Reference keyboard/wheel p95 ≤50 ms and p99 ≤100 ms;
+    no regular ordinary stalls >250 ms; UI loop p99 lag ≤50 ms; normally ≤5–8 ms
+    reduction slices; one transcript paint/frame ≤30 Hz; no critical event loss or
+    unbounded backlog; review has no unresolved blockers.
+  - **Verification:** Offline repeatable benchmark comparing baseline/final values;
+    CPU and slow-I/O stress, multiple children, long histories, approval/compaction;
+    full future `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check .`,
+    `git diff --check` in order; platform lifecycle tests and snapshot diff review.
+
+### Rollout & Rollback
+
+Develop on a feature branch with facade contracts first; preserve text/JSON/RPC/run
+modes. No session-data migration expected. Shutdown/drain authoritative runtime before
+rollback; do not leave mutation threads/transports active. Commit, merge, push and
+release only with user authorization. Do not fall back to shared-loop execution silently
+and still report the UI as decoupled.
+
+### Observability
+
+Opt-in metadata-only loop/drain/paint/queue/probe/persistence timing. Reference workloads
+report p95/p99/max and counts; production instrumentation must stay lightweight.
+Display runtime disconnected/busy/approval states honestly. Do not log raw prompt,
+argument, evidence, reason-field or credential content as performance telemetry.
+
+### Security Considerations
+
+UI receives safe bounded projections; approvals and questions use IDs plus epochs.
+Runtime stays privileged and authoritative; transport separation is not sandboxing.
+Never auto-approve during migration or replay ambiguous mutations after transport loss.
+Preserve evidence durability, sanitization and secret-redaction contracts.
+
+### Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Loop-bound MCP/provider reused on wrong loop | Hangs or broken I/O | High | Runtime-owned creation/use/close; identity tests |
+| Direct mutable session access from UI | Races and stale decisions | High | Facade-only commands and detached revisioned projections |
+| Thread GIL contention | Input still lags under CPU work | Medium | CPU benchmarks; transport-neutral process follow-up if gates fail |
+| Faster producer floods UI | Jank or memory growth | High | Ingress coalescing/backpressure, time slices, frame cap |
+| Full-history render/stat scans remain | Latency grows with sessions | High | Cheap snapshots, incremental caches, scaling benchmarks |
+| Approval/session reply miscorrelated | Wrong action approved | Medium | IDs/epochs/FIFO; stale/duplicate rejection tests |
+| Mutation continues after cancellation | Inconsistent external state | Medium | Honest completion semantics, owned tracked work, drain/reap |
+| Renderer refactor breaks clicks/scroll | Loss of usability | Medium | Actual pilot clicks/wheel/typing and stable block anchors |
+
+### Project Acceptance Criteria
+
+- [ ] UI loop remains available while agent execution performs blocked I/O.
+- [ ] Keyboard/wheel/paint latency meets reference p95/p99 gates during realistic work.
+- [ ] Runtime owns all execution resources; UI manipulates no live agent state.
+- [ ] Sidebar and monitor refresh do not compute full history or synchronous Git in UI.
+- [ ] Streaming/event bursts have bounded queue/slice/paint work and preserve critical events.
+- [ ] Completed transcript layout is cached; live text/thinking budgets prevent scaling stalls.
+- [ ] Scroll, `[view]`, approval reason and independent prompt input behave as before.
+- [ ] Session/abort/rebind/shutdown correctly release waits and dispose current runtime.
+- [ ] Durability, tool outcomes, non-TUI modes and existing event contracts remain verified.
+- [ ] Independent review and full regression/performance gates pass; sandbox stays deferred.
+
+### Estimated Timeline
+
+Approximately 15–25 implementer working days for the thread-backed facade and renderer,
+including baseline/review uncertainty; confidence medium. This is an ownership and
+presentation refactor, not a two-thread wrapper around `prompt()`. Process-backend
+implementation is a separately scoped follow-up only if measured thread/GIL results
+require it. Research compared shared-loop offloads, runtime thread and runtime process;
+unmeasured percentage improvements and optimistic one-line migration estimates were
+not adopted.
+
 ## Project: Current-session live subagent monitor
 
-**Current focus:** polish and verify the monitor already under development on
-`feat/tui-live-subagent-monitor`. The cooperative sandbox project below is deferred;
-do not start its implementation as part of this active monitor work.
+**Relationship to completed work:** existing monitor requirements were preserved during
+the completed responsiveness project above. They are not a reason to reimplement already
+present functionality. The cooperative sandbox project below remains deferred.
 
 ### Goal
 
@@ -20,11 +399,12 @@ agent execution. Scope approved by the user.
 
 ### Context
 
-`one/core/agent_session.py` creates children in `_run_subagent` and emits
-`subagent_start` / `subagent_end`, but has no authoritative child registry.
-Its child listener records activity without forwarding response text.
-`one/modes/tui_mode.py` exposes subagent availability, not running children.
-Its session listener queue already protects against stale events on rebinding.
+The original implementation created children in `_run_subagent` and emitted
+`subagent_start` / `subagent_end` without a live observation registry. The current
+code now has `one/core/subagent_monitor.py`, live response/tool observations and
+the `/agents` view. The requirements below describe behavior to preserve and verify,
+not a claim that the already-implemented monitor is still missing. Session listener
+generation protection must survive the responsiveness refactor.
 
 ### Scope
 
@@ -433,9 +813,9 @@ installed-version action dispatch still requires implementation-time verificatio
 ## Deferred roadmap: Cooperative subagent policies and replaceable process sandbox
 
 **Status: Deferred.** This is future work, not the current implementation target.
-Keep it as an architectural roadmap only while the active priority is polishing and
-verifying `Current-session live subagent monitor` above. Begin sandbox implementation
-only after the user explicitly re-prioritizes it.
+Keep it as an architectural roadmap following completion of the responsive TUI
+and independently owned runtime project above, preserving the existing monitor.
+Begin sandbox implementation only after the user explicitly re-prioritizes it.
 
 ### Goal
 

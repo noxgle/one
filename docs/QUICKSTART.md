@@ -57,6 +57,9 @@ For the interactive TUI, run:
 one
 ```
 
+TUI work runs on an isolated worker runtime, so the interface remains responsive
+while tools run.
+
 Then authenticate, if needed:
 
 ```text

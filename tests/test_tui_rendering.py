@@ -3,7 +3,10 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import asyncio
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,7 @@ from one.cli.args import parse_args
 from one.modes.tui_mode import (
     BUILTIN_TUI_THEMES,
     TUI_SHORTCUTS,
+    TuiSessionView,
     build_sidebar_snapshot,
     evaluate_waiting,
     format_tui_shortcuts,
@@ -244,11 +248,109 @@ async def test_tui_sidebar_includes_attached_branch_only_when_available(tmp_path
     monkeypatch.setattr(tui_mode, "get_git_branch", lambda cwd: "feature/test")
     async with app.run_test() as pilot:
         await pilot.pause()
+        await asyncio.sleep(0.01)
+        await pilot.pause()
         assert "CWD: /safe/project (feature/test)" in app.query_one("#sidebar", Static).content
 
         monkeypatch.setattr(tui_mode, "get_git_branch", lambda cwd: None)
+        app._git_branch_cache.clear()
         app._refresh_sidebar()
+        await asyncio.sleep(0.01)
+        await pilot.pause()
         assert "CWD: /safe/project\n" in app.query_one("#sidebar", Static).content
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_git_probe_is_worker_cached_and_never_blocks_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from textual.widgets import Static, TextArea
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, settings_override={"tui": {"infoPanel": "sidebar"}})
+    session.session_manager._cwd = "/slow/project"
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+    ui_thread = threading.get_ident()
+
+    def slow_branch(_cwd: str) -> str:
+        calls.append(threading.get_ident())
+        started.set()
+        assert release.wait(2)
+        return "feature/async"
+
+    monkeypatch.setattr(tui_mode, "get_git_branch", slow_branch)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert started.is_set()
+        # Calling paint repeatedly and typing remain prompt while the worker is blocked.
+        began = time.monotonic()
+        app._refresh_sidebar()
+        app._refresh_sidebar()
+        await pilot.press("x")
+        assert time.monotonic() - began < 0.2
+        assert app.query_one("#input", TextArea).text == "x"
+        assert len(calls) == 1
+        assert calls[0] != ui_thread
+
+        release.set()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if "feature/async" in str(app.query_one("#sidebar", Static).content):
+                break
+        assert "CWD: /slow/project (feature/async)" in app.query_one("#sidebar", Static).content
+        app._refresh_sidebar()
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_sidebar_git_probe_does_not_repaint_after_session_cwd_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from textual.widgets import Static
+
+    from one.modes import tui_mode
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path, settings_override={"tui": {"infoPanel": "sidebar"}})
+    session.session_manager._cwd = "/old/project"
+    old_started = threading.Event()
+    release_old = threading.Event()
+
+    def branch(cwd: str) -> str:
+        if cwd == "/old/project":
+            old_started.set()
+            assert release_old.wait(2)
+            return "old-branch"
+        return "new-branch"
+
+    monkeypatch.setattr(tui_mode, "get_git_branch", branch)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        for _ in range(100):
+            if old_started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert old_started.is_set()
+        session.session_manager._cwd = "/new/project"
+        app._bind_session()
+        app._refresh_sidebar()
+        release_old.set()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            content = str(app.query_one("#sidebar", Static).content)
+            if "new-branch" in content:
+                break
+        content = str(app.query_one("#sidebar", Static).content)
+        assert "CWD: /new/project (new-branch)" in content
+        assert "old-branch" not in content
 
 
 @pytest.mark.asyncio
@@ -522,6 +624,71 @@ async def test_tui_sidebar_renders_mcp_clients_list(tmp_path: Path) -> None:
         assert "[!] web" in s
         assert "old" not in s.splitlines()
         assert s.index("MCP") < s.index("Keys")
+
+
+@pytest.mark.asyncio
+async def test_detached_tui_sidebar_normalizes_and_renders_mcp_statuses(tmp_path: Path) -> None:
+    """Detached snapshots receive status records, not the legacy derived DTO."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    class _Facade:
+        def subscribe(self, _listener, **_kwargs):
+            return lambda: None
+
+        async def command(self, command: str, _payload: object = None) -> dict:
+            assert command == "snapshot"
+            return {
+                "result": {
+                    "epoch": 1,
+                    "sidebar": {
+                        "model": "stub/model",
+                        "mcpEnabled": True,
+                        "mcpServers": [
+                            {"name": "running", "enabled": True, "running": True, "tools": ["a"]},
+                            {
+                                "name": "failed", "enabled": True, "running": True,
+                                "runtimeState": "failed", "tools": [],
+                            },
+                            {"name": "disabled", "enabled": False, "running": True, "tools": []},
+                        ],
+                    },
+                    "messages": [],
+                },
+            }
+
+    view = TuiSessionView(_Facade())
+    await view.refresh()
+    snapshot = build_sidebar_snapshot(view)
+    assert [server["name"] for server in snapshot["mcpServers"]] == ["running", "failed"]
+    assert [server["available"] for server in snapshot["mcpServers"]] == [True, False]
+
+    app = _OneTextualApp(view)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Static)
+        rendered = str(sidebar.content)
+        assert "[ok] running" in rendered
+        assert "[!] failed" in rendered
+        assert "disabled" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_tui_unmount_approval_cleanup_does_not_refresh_sidebar(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    future: asyncio.Future[tuple[bool, str]] = asyncio.get_running_loop().create_future()
+    app._approval_waiters.append({"future": future})
+    sidebar_refreshes: list[None] = []
+    app._refresh_sidebar = lambda: sidebar_refreshes.append(None)  # type: ignore[method-assign]
+
+    app.on_unmount()
+
+    assert future.result() == (False, "TUI closed")
+    assert not app._approval_waiters
+    assert sidebar_refreshes == []
 
 
 def test_evaluate_waiting_rule() -> None:
@@ -1215,6 +1382,88 @@ async def test_tui_main_stream_trimming_preserves_scrolled_viewport(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_tui_resize_reflows_stream_cache_and_preserves_trim_anchor(tmp_path: Path):
+    """A resize invalidates cached lines and a heavily wrapped trim keeps the reader's row."""
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        # Direct setup deliberately exceeds the later physical-row cap so the
+        # following normal write removes more than the 256-row anchor search.
+        app._stream_lines.extend(
+            " ".join(f"anchor-{index:03d}-part-{part} " + "x" * 5 for part in range(12))
+            for index in range(1_000)
+        )
+        app._render_stream()
+        await pilot.pause()
+        old_width = app._stream_cache_width
+        old_height = app.query_one("#stream", Static).virtual_size.height
+
+        await pilot.resize_terminal(60, 24)
+        await pilot.pause()
+        transcript = app.query_one("#stream", Static)
+        assert app._stream_cache_width != old_width
+        assert transcript.virtual_size.height > old_height
+        assert app._apply_theme("light")
+        await pilot.pause(0.05)
+        assert app._stream_cache_theme == "light"
+        assert app._stream_content_cache
+
+        container = app.query_one("#stream_container", VerticalScroll)
+        container.scroll_to(y=5_400, animate=False, immediate=True)
+        await pilot.pause()
+        content_origin = transcript.region.y - container.region.y + container.scroll_y
+        visible_before = transcript.render_line(int(container.scroll_y - content_origin)).text
+        assert "anchor-" in visible_before
+
+        # The trim drops thousands of physical rows, rather than just the
+        # logical-line count. The reader's selected row remains retained and
+        # is therefore a valid anchor candidate for reconciliation.
+        app._stream_lines.append("new tail " + "y" * 180)
+        app._trim_stream(render=False)
+        assert app._stream_front_trim_pending > 256
+        assert visible_before.split()[0].rsplit("-part", 1)[0] in "\n".join(app._stream_lines)
+        app._render_stream()
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_tui_session_rebind_invalidates_pending_viewport_callback(tmp_path: Path):
+    """An old session's queued post-layout viewport restore cannot run after rebind."""
+    from textual.containers import VerticalScroll
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._stream_lines.extend(f"history-{index}" for index in range(120))
+        app._render_stream()
+        container = app.query_one("#stream_container", VerticalScroll)
+        app._queue_stream_viewport_reconcile(
+            container,
+            follow=True,
+            previous_scroll_y=container.scroll_y,
+            previous_max_scroll_y=container.max_scroll_y,
+            previous_scroll_target_y=container.scroll_target_y,
+            anchor=None,
+            front_trim_count=0,
+        )
+        callback_token = app._stream_viewport_callback_token
+        app.session = _mk_app_session(tmp_path)
+        app._bind_session()
+        assert app._deferred_stream_viewport is None
+        assert callback_token != app._stream_viewport_callback_token
+        app._reconcile_stream_viewport(callback_token)
+        await pilot.pause()
+        assert app._deferred_stream_viewport is None
+
+
+@pytest.mark.asyncio
 async def test_tui_deferred_tail_follow_coalesces_and_respects_user_scroll(tmp_path: Path):
     """A queued tail callback must not override a later wheel/scrollbar intent."""
     from textual import events
@@ -1239,15 +1488,18 @@ async def test_tui_deferred_tail_follow_coalesces_and_respects_user_scroll(tmp_p
         await pilot.pause()
         assert container.scroll_y < container.max_scroll_y
 
-        # Several renders before one layout pass still produce one final tail
-        # follow when the reader has deliberately returned to the tail.
+        # Two frame-capped paints can complete before Static's wrapped height
+        # settles. The latest pending tail intent must follow the final layout,
+        # not an intermediate max_scroll_y.
         container.scroll_end(animate=False, immediate=True)
         app._write("first coalesced delta")
+        await asyncio.sleep(1 / 30 * 1.1)
         app._write("second coalesced delta")
-        await pilot.pause()
-        # The first barrier applies Static's layout; the deferred callback is
-        # observed at the following deterministic idle barrier.
-        await pilot.pause()
+        # One barrier applies each scheduled paint; extra refresh barriers are
+        # intentional because the deferred viewport reconcile waits for the
+        # final wrapped layout without issuing another transcript paint.
+        for _ in range(4):
+            await pilot.pause()
         assert container.scroll_y == container.max_scroll_y
 
 

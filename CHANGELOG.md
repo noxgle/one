@@ -10,6 +10,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Bounded TUI result viewer** — durable tool results expose a trusted `[view]`
+  action. Pages are fetched on the runtime worker, show only sanitized result
+  data, and are rejected after a session change; very large results are read
+  with PageUp/PageDown rather than copied into the transcript.
+
 - **Live subagent monitor** — the TUI now provides `/agents`, a read-only view
   of the current session's direct child agents with a selected bounded live
    response and single-row tool lifecycle preview, with safe redacted operation summaries
@@ -20,6 +25,16 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **TUI responsiveness validation** — the offline profiler now exercises the
+   detached `TuiSessionView`/runtime-facade route under bounded delta floods,
+   child invalidations, slow worker I/O/Git stubs, and CPU contention. It reports
+   measured UI latency and explicit gate status without recording content,
+   including paint/render p99 and count plus the maximum measured event-loop
+   block across input, paint, drain, and sidebar paths.
+- **TUI runtime ownership** — explicit `--mode tui` startup now constructs
+  settings, providers, resources, MCP, and session state on the dedicated
+  runtime loop instead of the Textual loop; CLI image paths are imported by
+  that owner when sent with the first TUI prompt.
 - **Bash prompt guidance** — system instructions now use the actual `exitCode`
   result field, distinguish successful process exit from task completion, and
   advise diagnostic retries only for changed commands that can address a
@@ -32,10 +47,27 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI assistant response retained** — when the next message starts before a
+  scheduled final paint, the assistant response is preserved and runtime events
+  are bridged so no output is dropped.
+
+- **Detached TUI streaming** — the runtime host now bridges its current
+  session's events into the facade and safely rebinds them after session
+  changes, so streamed assistant, thinking, and tool activity remains visible.
+- **Default TUI mode startup** — bare `one` now honors the configured
+  `defaultMode` when starting through the detached TUI runtime.
+- **Large TUI tool results** — tool-result previews no longer exceed the 64 KiB
+  UI ingress limit because duplicated output fields are removed.
+- **MCP TUI rendering** — sidebar and shutdown status rendering is now
+  normalized and safe.
 - **TUI main transcript scrolling** — incoming assistant, tool, and subagent
   activity now follows output only when the viewer is already at the tail. Tail
   follow is coalesced and respects later wheel/scrollbar input; retained history
-  stays anchored across viewport trimming where possible.
+   stays anchored across viewport trimming where possible.
+- **Live assistant paint stalls** — active assistant presentation is now capped
+  at 8 KiB before wrapping/formatting (while full content remains in session
+  history and evidence), preventing a large in-progress response from causing
+  an ordinary UI stall.
 - **TUI responsiveness during filesystem inspection** — synchronous built-in
   `read`, `grep`, `find`, and `ls` bodies now run in a worker thread while the
   shared asyncio loop continues to process UI input, approvals, and events.

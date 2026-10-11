@@ -11,13 +11,16 @@ from pathlib import Path
 from typing import Any
 
 from one.config import APP_NAME, ENV_AGENT_DIR, VERSION, get_agent_dir, get_models_path
+from one.core.agent_runtime_facade import AgentRuntimeFacade
 from one.core.agent_session_runtime import AgentSessionRuntimeHost, create_agent_session_runtime
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
-from one.core.persistence import ensure_private_dir
+from one.core.persistence import ensure_private_dir, load_json_text_safe
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
 from one.core.temperature import temperature_for_mode
+from one.core.threaded_agent_runtime import RuntimeBootstrapSpec
+from one.core.tui_runtime_host import TUI_COMMANDS, TuiBootstrap, create_tui_runtime
 from one.mcp import McpManager
 from one.modes import InteractiveMode, TuiMode, run_print_mode, run_rpc_mode, run_run_mode
 from one.resources.default_skill_installer import install_default_skills
@@ -66,6 +69,35 @@ def _expand_file_tokens(tokens: list[str], params: dict[str, str]) -> tuple[list
             content = content.replace("{{" + name + "}}", value)
         out.append(content)
     return out, errors
+
+
+def _resolve_default_mode(cwd: str, agent_dir: str) -> tuple[str, list[tuple[str, Exception]]]:
+    """Read only the setting needed for early TUI dispatch.
+
+    This deliberately mirrors ``SettingsManager.merged()`` precedence without
+    constructing a settings object on Textual's loop: project settings override
+    global settings, and malformed/non-object files are ignored as the manager
+    does.  The worker creates the authoritative SettingsManager later.
+    """
+    value: Any = "tui"
+    errors: list[tuple[str, Exception]] = []
+    for scope, path in (
+        ("global", Path(agent_dir) / "settings.json"),
+        ("project", Path(cwd) / ".one" / "settings.json"),
+    ):
+        if not path.exists():
+            continue
+        data, error = load_json_text_safe(path)
+        if error is not None:
+            errors.append((scope, error))
+            continue
+        if not isinstance(data, dict):
+            errors.append((scope, ValueError(f"{scope} settings is not a JSON object")))
+            continue
+        if "defaultMode" in data:
+            value = data["defaultMode"]
+    mode = str(value or "tui").lower()
+    return (mode if mode in {"tui", "cli"} else "tui"), errors
 
 
 async def _run(argv: list[str]) -> int:
@@ -129,6 +161,72 @@ async def _run(argv: list[str]) -> int:
     os.environ[ENV_AGENT_DIR] = str(agent_dir_path)
     agent_dir = str(agent_dir_path)
 
+    # TUI is a separate application boundary: do not create settings, auth,
+    # registry, resources, MCP, a session, or a runtime on Textual's loop.
+    # Commands which are inherently CLI-only (model listing/export/etc.) retain
+    # their established legacy dispatch below.
+    # Resolve an omitted mode before the legacy startup objects are created.
+    # Explicit modes remain authoritative; bare invocation follows the same
+    # global-then-project settings precedence as SettingsManager.
+    effective_mode = parsed.mode
+    mode_errors: list[tuple[str, Exception]] = []
+    if effective_mode is None:
+        effective_mode, mode_errors = _resolve_default_mode(cwd, agent_dir)
+
+    if (
+        effective_mode == "tui"
+        and not parsed.command
+        and not parsed.print_mode
+        and parsed.list_models is None
+        and not parsed.export
+    ):
+        import sys as _sys
+
+        for scope, exc in mode_errors:
+            print(f"[warn] {scope} config load error: {type(exc).__name__}: {exc}", file=_sys.stderr)
+        tui_bootstrap = TuiBootstrap(
+            cwd=cwd,
+            agent_dir=agent_dir,
+            session_path=parsed.session,
+            session_dir=parsed.session_dir,
+            provider=parsed.provider,
+            model=parsed.model,
+            api_key=parsed.api_key,
+            thinking=parsed.thinking,
+            temperature=parsed.temperature,
+            temperature_mode=parsed.temperature_mode,
+            tools=tuple(parsed.tools or ()),
+            no_tools=parsed.no_tools,
+            no_session=parsed.no_session,
+            no_mcp=parsed.no_mcp,
+            no_subagents=parsed.no_subagents,
+            no_bash_output=parsed.no_bash_output,
+            cooperation=parsed.cooperation,
+            continue_session=parsed.continue_session,
+            resume=parsed.resume,
+            fork=parsed.fork,
+            scoped_models=tuple(parsed.models or ()),
+            extensions=tuple(parsed.extensions),
+            skills=tuple(parsed.skills),
+            prompt_templates=tuple(parsed.prompt_templates),
+            themes=tuple(parsed.themes),
+            no_extensions=parsed.no_extensions,
+            no_skills=parsed.no_skills,
+            no_prompt_templates=parsed.no_prompt_templates,
+            no_themes=parsed.no_themes,
+            system_prompt=parsed.system_prompt,
+            append_system_prompt=parsed.append_system_prompt,
+            initial_image_paths=tuple(parsed.image_paths),
+        )
+        facade = AgentRuntimeFacade(
+            RuntimeBootstrapSpec(cwd=cwd, agent_dir=agent_dir),
+            lambda _spec: create_tui_runtime(tui_bootstrap),
+            command_allowlist=TUI_COMMANDS,
+        )
+        tui = TuiMode(facade, {"verbose": parsed.verbose, "cooperation": parsed.cooperation})
+        await tui.run()
+        return 0
+
     # Best effort only: a failed default-skill copy must not block startup.
     import sys as _sys
 
@@ -149,7 +247,9 @@ async def _run(argv: list[str]) -> int:
             print(f"[warn] {scope} config load error: {type(exc).__name__}: {msg}", file=_sys.stderr)
 
     if parsed.mode is None:
-        parsed.mode = settings.get_default_mode()
+        # ``effective_mode`` was resolved without creating a live settings
+        # object for the TUI path. Reuse it here so the two dispatches agree.
+        parsed.mode = effective_mode
     if parsed.no_bash_output:
         settings.set_bash_show_output(False, persist=False)
 
