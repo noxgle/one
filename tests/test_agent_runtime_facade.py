@@ -123,6 +123,38 @@ async def test_start_command_events_and_shutdown_stay_on_their_owners() -> None:
 
 
 @pytest.mark.asyncio
+async def test_facade_preserves_safe_rejected_tool_diagnostics() -> None:
+    created: list[_Runtime] = []
+
+    def factory(_spec: RuntimeBootstrapSpec) -> _Runtime:
+        runtime = _Runtime()
+        created.append(runtime)
+        return runtime
+
+    facade = AgentRuntimeFacade(_spec(), factory)
+    events: list[dict[str, Any]] = []
+    facade.subscribe(events.append)
+    await facade.start()
+    created[0].session.emit({
+        "type": "tool_call_parse_failed",
+        "source": "format_repair",
+        "category": "malformed_json",
+        "reason": "untrusted raw candidate must not cross",
+        "tool": "bash",
+        "toolCallId": "call-1",
+        "args": {"command": "secret"},
+    })
+    await asyncio.sleep(0)
+    event = next(event for event in events if event["type"] == "tool_call_parse_failed")
+    assert event["source"] == "format_repair"
+    assert event["category"] == "malformed_json"
+    assert event["tool"] == "bash"
+    assert event["toolCallId"] == "call-1"
+    assert "args" not in event
+    await facade.close()
+
+
+@pytest.mark.asyncio
 async def test_startup_is_awaitable_not_blocking_and_reports_factory_error() -> None:
     entered = asyncio.Event()
 

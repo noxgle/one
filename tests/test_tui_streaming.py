@@ -244,8 +244,7 @@ async def test_tui_evidence_overlay_pilot_click_pages_unicode_and_invalidates_st
         facade.emit({"type": "turn_end", "ok": True})
         await pilot.pause(0.1)
         assert "[preview limited to 100 logical lines]" in "\n".join(app._stream_lines)
-        # Reflow and a second render intentionally exercise the completed-line
-        # Content cache before locating the generated action span.
+        # A second unchanged virtual paint must not reformat retained rows.
         await pilot.resize_terminal(70, 24)
         await pilot.pause()
         app._rendered_stream_lines = ()
@@ -253,7 +252,7 @@ async def test_tui_evidence_overlay_pilot_click_pages_unicode_and_invalidates_st
         hits = app._stream_cache_hits
         app._rendered_stream_lines = ()
         app._render_stream()
-        assert app._stream_cache_hits > hits
+        assert app._stream_cache_hits == hits
         stream = app.query_one("#stream", Static)
         assert any("open_evidence_link" in str(item.style) for item in stream.content._spans)
         # The link is after the 100-line visible preview, so scroll it into the
@@ -464,7 +463,9 @@ async def test_tui_multi_megabyte_entry_is_bounded_and_unchanged_lines_hit_rende
         hits_before = app._stream_cache_hits
         app._write("changed tail")
         await pilot.pause()
-        assert app._stream_cache_hits > hits_before
+        # The virtual renderer must not format off-screen retained rows merely
+        # because a later line was appended.
+        assert app._stream_cache_hits == hits_before
 
 
 @pytest.mark.asyncio
@@ -1194,8 +1195,8 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
         app._ask_user_pending = {"id": "x"}
         app._tick_waiting()
         await pilot.pause()
-        stream = "\n".join(app._stream_lines)
-        assert "waiting for your response" in stream
+        status = app.query_one("#waiting_status")
+        assert "waiting for your response" in str(status.render())
         assert app._thinking_frame == start_frame
 
         # Clear the gate.
@@ -1203,19 +1204,14 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
         # Second tick: should animate again (frame advances).
         app._tick_waiting()
         await pilot.pause()
-        stream = "\n".join(app._stream_lines)
-        assert "Ctrl+C abort" in stream
+        assert "Ctrl+C abort" in str(status.render())
         # Frame should have advanced.
         assert app._thinking_frame > start_frame
 
 
 @pytest.mark.asyncio
 async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
-    """Every mutation of the spinner line must trigger a scheduled widget refresh.
-
-    Regression: _tick_waiting rewrote the spinner line in-place but never
-    requested a stream frame, so the visible widget stayed frozen.
-    """
+    """Waiting animation repaints only its own widget, not the transcript."""
     from textual.widgets import Static
 
     from one.modes.tui_mode import _OneTextualApp
@@ -1229,44 +1225,32 @@ async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
         app._last_delta_ts = 0.0
         assert app._thinking_active is False
         stream_widget = app.query_one("#stream", Static)
+        status_widget = app.query_one("#waiting_status", Static)
 
         # --- First tick: initial append path (else branch) ---
         app._tick_waiting()
         assert app._thinking_active is True
         first_lines = list(app._stream_lines)
-        assert any(l.startswith("__MK__:") for l in app._stream_lines), (
-            "spinner line must be present after first tick"
-        )
+        first_stream = str(stream_widget.content)
+        assert "Ctrl+C abort" in str(status_widget.render())
 
         # --- Second tick: in-place rewrite path (if branch) ---
         app._tick_waiting()
-        second_lines = list(app._stream_lines)
-        # _stream_lines must have changed (frame advanced).
-        assert second_lines != first_lines, (
-            "_stream_lines should change when spinner frame advances"
-        )
-        # Stream mutations share the central 30 Hz scheduler, so rendering is
-        # intentionally deferred rather than synchronously rebuilding twice.
+        assert app._stream_lines == first_lines
         await pilot.pause(0.05)
-        second_render = str(stream_widget.content)
-        assert "Ctrl+C abort" in second_render
+        assert str(stream_widget.content) == first_stream
+        assert "Ctrl+C abort" in str(status_widget.render())
 
         # --- Third tick: verify continued animation ---
         app._tick_waiting()
         await pilot.pause(0.05)
-        third_render = str(stream_widget.content)
-        # The 150 ms app timer may advance another frame during this pilot
-        # pause, including back to the same glyph. The scheduler's rendered
-        # revision proves the newest spinner mutation reached ``Static``
-        # without bypassing the 30 Hz frame cap.
-        assert app._rendered_stream_revision == app._stream_render_revision
-        assert "Ctrl+C abort" in third_render
+        assert str(stream_widget.content) == first_stream
+        assert "Ctrl+C abort" in str(status_widget.render())
 
 
 @pytest.mark.asyncio
 async def test_tui_spinner_cleared_on_turn_end(tmp_path: Path):
-    """When the turn ends (turn_active cleared), the spinner line
-    and any thinking text must be removed from the stream."""
+    """When the turn ends, the independent waiting status is cleared."""
     from textual.widgets import Static
 
     from one.modes.tui_mode import _OneTextualApp
@@ -1280,23 +1264,15 @@ async def test_tui_spinner_cleared_on_turn_end(tmp_path: Path):
         app._last_delta_ts = 0.0
         app._tick_waiting()
         await pilot.pause()
-        stream_widget = app.query_one("#stream", Static)
-        before_render = str(stream_widget.content)
-        assert "Ctrl+C abort" in before_render or "thinking" in before_render.lower(), (
-            "spinner should be visible"
-        )
+        status_widget = app.query_one("#waiting_status", Static)
+        assert "Ctrl+C abort" in str(status_widget.render())
 
         # Simulate turn completion: the event handler calls _remove_thinking_line
         # and sets _turn_active = False.
         app._turn_active = False
         app._remove_thinking_line()
-        app._render_stream()
         await pilot.pause()
-
-        after_render = str(stream_widget.content)
-        assert "Ctrl+C abort" not in after_render, (
-            "spinner must be removed after turn ends"
-        )
+        assert "Ctrl+C abort" not in str(status_widget.render())
 
 
 @pytest.mark.asyncio

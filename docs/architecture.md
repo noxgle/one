@@ -35,6 +35,18 @@ text, JSON, RPC) plus a headless `one run` subcommand. Explicit TUI mode uses a
 Textual-owned UI loop and a dedicated agent-runtime worker loop; other modes
 retain their established session ownership.
 
+### TUI transcript rendering
+
+`one/modes/tui_transcript.py` provides the stream widget's Textual line API.
+The TUI model owns bounded logical lines and stable line IDs; the widget keeps a
+row-offset index and wraps `Content` only when Textual requests a visible row.
+Rows are cached by line identity and invalidated on a line change, resize, or
+theme change. This avoids rebuilding one aggregate `Content`/`Static` visual for
+every stream delta while retaining trusted generated `@click` metadata. Its
+`content` property is an inspection compatibility view only, never the paint
+path. The logo remains a sibling above this virtual transcript in the existing
+scroll container.
+
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                      one/cli/main.py                      │
@@ -115,6 +127,30 @@ input/paint paths. The offline R6 report records paint/render p99 and count,
 the maximum measured event-loop block across key, wheel, input-refresh, paint,
 drain, and sidebar work, and retains targets of no ordinary stall above 250 ms
 and reduction-slice p99 at most 8 ms.
+
+### Sustained offline benchmark (R6)
+
+The offline profiler exercises the detached `TuiSessionView`/runtime-facade
+route under bounded delta floods, child invalidations, slow worker I/O/Git
+stubs, and CPU contention with an independent 10 ms heartbeat and a real wheel /
+key at gate 40 (virtual driver — not real llama.cpp, not a physical terminal).
+Spinner idle ticks = 0; transcript renders; cache entries 490 / 490 / 490 / 492
+at delta budgets 10 / 20 / 40 / 80.
+
+| Phase | p99 UI loop | p99 render | max loop | max render |
+| --- | --- | --- | --- | --- |
+| Before renderer rewrite | 232.974 ms | 242.624 ms | 251.082 ms | — |
+| After full geometry / cache / status fixes | 24.888 ms | 13.705 ms | 84.577 ms | 32.616 ms |
+
+Gate targets (one per trial):
+
+| Gate | Target | Latest | Verdict |
+| --- | --- | --- | --- |
+| UI lag p99 | ≤ 50 ms | 24.888 ms | met |
+| Render p99 (strict) | ≤ 8 ms | 13.705 ms | not met |
+
+Other trials vary — the strict render p99 ≤ 8 ms target is not claimed solved
+universally or at comfort.
 
 This is concurrency isolation, not sandboxing: runtime code, extensions, MCP
 servers, and tools still run with agent permissions. Threads share the process,

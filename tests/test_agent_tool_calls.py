@@ -416,15 +416,90 @@ async def test_invalid_initial_tool_call_reports_malformed_json(tmp_path: Path):
     agent = AgentSession(
         SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=["read"]
     )
-    agent.providers = {"openai": _FakeProvider(['{"tool":"read","args":{' + "x" * 300])}
+    provider = _FakeProvider(['{"tool":"read","args":{' + "x" * 300])
+    agent.providers = {"openai": provider}
     events: list[dict[str, Any]] = []
     agent.subscribe(events.append)
 
     await agent.prompt("Read the file.")
 
     assert [event for event in events if event["type"] == "tool_call_parse_failed"] == [
-        {"type": "tool_call_parse_failed", "source": "response", "category": "malformed_json"}
+        {"type": "tool_call_parse_failed", "source": "response", "category": "malformed_json"},
+        {"type": "tool_call_parse_failed", "source": "format_repair", "category": "malformed_json"}
     ]
+    assert provider.calls == 2
+    assert agent.get_last_assistant_text() == "The model produced an invalid tool call and could not recover. No tool was executed."
+    assert next(event for event in events if event["type"] == "turn_end")["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_initial_tool_call_repaired_to_ordinary_final_is_successful(tmp_path: Path) -> None:
+    agent = _read_only_agent(tmp_path, ["read"])
+    provider = _FakeProvider([
+        '{"tool":"read","args":' + "x" * 300,
+        "The requested inspection cannot continue because the file is unavailable.",
+    ])
+    agent.providers = {"openai": provider}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Inspect the file.")
+
+    assert provider.calls == 2
+    assert agent.get_last_assistant_text().startswith("The requested inspection")
+    turn_end = next(event for event in events if event["type"] == "turn_end")
+    assert turn_end["ok"] is True
+    assert "errorType" not in turn_end
+
+
+@pytest.mark.asyncio
+async def test_args_first_long_invalid_tool_call_is_repaired_once(tmp_path: Path) -> None:
+    agent = _read_only_agent(tmp_path, ["read"])
+    provider = _FakeProvider([
+        '{"args":{"path":"a.txt"},"tool":"read",' + "x" * 300,
+        "The inspection cannot continue.",
+    ])
+    agent.providers = {"openai": provider}
+
+    await agent.prompt("Inspect the file.")
+
+    assert provider.calls == 2
+    assert agent.get_last_assistant_text() == "The inspection cannot continue."
+
+
+@pytest.mark.asyncio
+async def test_invalid_nudge_response_gets_one_repair_and_can_succeed(tmp_path: Path) -> None:
+    agent = _read_only_agent(tmp_path, ["read"])
+    provider = _FakeProvider([
+        "I'll inspect it.",
+        '{"arguments":{"path":"a.txt"},"name":"read"',
+        "The inspection cannot continue.",
+    ])
+    agent.providers = {"openai": provider}
+
+    await agent.prompt("Inspect the file.")
+
+    assert provider.calls == 3
+    assert agent.get_last_assistant_text() == "The inspection cannot continue."
+
+
+@pytest.mark.asyncio
+async def test_invalid_nudge_response_fails_after_one_repair(tmp_path: Path) -> None:
+    agent = _read_only_agent(tmp_path, ["read"])
+    provider = _FakeProvider([
+        "I'll inspect it.",
+        '{"function":{"arguments":{"path":"a.txt"},"name":"read"',
+        '{"tool":"read","args":',
+    ])
+    agent.providers = {"openai": provider}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("Inspect the file.")
+
+    assert provider.calls == 3
+    assert agent.get_last_assistant_text() == "The model produced an invalid tool call and could not recover. No tool was executed."
+    assert next(event for event in events if event["type"] == "turn_end")["ok"] is False
 
 
 @pytest.mark.asyncio
@@ -482,7 +557,7 @@ async def test_malformed_bash_repair_does_not_execute_or_repeat_bash_events(tmp_
     await agent.prompt("Run a command.")
 
     assert provider.calls == 3
-    assert agent.get_last_assistant_text() == '{"tool":"bash","args":{"command":" "}}'
+    assert agent.get_last_assistant_text() == "The model produced an invalid tool call and could not recover. No tool was executed."
     assert [event["args"] for event in events if event["type"] == "tool_call_start"] == [{"command": "true"}]
     assert len([event for event in events if event["type"] == "tool_response_repair_start"]) == 1
     assert len([event for event in events if event["type"] == "tool_response_repair_end"]) == 1

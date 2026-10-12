@@ -39,4 +39,8 @@ async def run_print_mode(runtime_host: Any, options: dict[str, Any]) -> int:
         last = session.get_last_assistant_text()
         if last:
             print(last)
-    return 0
+    last_message = next(
+        (message for message in reversed(session.messages) if message.get("role") == "assistant"),
+        {},
+    )
+    return 1 if last_message.get("errorType") == "invalid_tool_call" else 0

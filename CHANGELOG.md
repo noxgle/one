@@ -25,6 +25,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **TUI transcript renderer** — the bounded stream now uses a virtual,
+  line-at-a-time Textual renderer with stable line IDs and demand-cached wrapped
+  rows instead of rebuilding an aggregate `Content` visual for each update.
+
 - **Sidebar subagent status** — `Subagents: on` and `Agents: N running` are
   consolidated into a single `Subagents: on (N running)` line; the `/agents`
   command is unchanged.
@@ -50,6 +54,16 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   line-offset, and line-limit arguments, bounded output, and image handling.
 
 ### Fixed
+
+- **Sustained TUI tool runs** — waiting animation now updates a dedicated status
+  widget instead of rebuilding the transcript. Transcript line fragments are
+  bounded by retained stable IDs and evidence actions use constant-time line
+  lookup, avoiding repeated sequence matching during normal paints.
+
+- **Invalid tool-call recovery** — explicit malformed text and rejected native
+  tool batches now receive one bounded repair attempt. Persistent invalid calls
+  end as a visible failed turn rather than a successful raw-JSON answer; detached
+  TUI diagnostics retain their safe source/category/reason metadata.
 
 - **TUI evidence overlay theming** — evidence viewer (header, body, content,
   actions, and Previous/Next/Close buttons) now follows the selected theme

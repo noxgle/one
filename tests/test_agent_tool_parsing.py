@@ -294,6 +294,45 @@ def test_tool_parser_preserves_valid_bash_command(tmp_path: Path):
     }
 
 
+def test_tool_parser_defaults_empty_args_only_for_trusted_zero_arg_builtin(tmp_path: Path):
+    registry = ModelRegistry.create(AuthStorage.in_memory())
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, _Loader(), model, "medium", tools=["ls", "bash"],
+    )
+
+    assert agent._try_parse_tool_call('{"tool":"ls"}') == {"tool": "ls", "args": {}, "toolCallId": None}
+    assert agent._try_parse_tool_call('{"tool":"bash"}') is None
+    assert agent._try_parse_tool_call('Quoted example: {"tool":"ls"}') is None
+    assert agent._try_parse_tool_call('Quoted example: TOOL_CALL: {"tool":"ls"}') is None
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        '{"tool":"read","args":{',
+        '{"args":{"path":"a.txt"},"tool":"read"',
+        '{"arguments":{"path":"a.txt"},"name":"read"',
+        '{"function":{"arguments":{"path":"a.txt"},"name":"read"',
+    ],
+)
+def test_explicit_tool_candidate_uses_top_level_json_discriminators(tmp_path: Path, candidate: str) -> None:
+    agent = _chatgpt_agent(SessionManager.in_memory(str(tmp_path)), tmp_path, ["read"])
+
+    assert agent._is_explicit_tool_candidate(candidate) is True
+
+
+def test_explicit_tool_candidate_rejects_quoted_and_nested_examples(tmp_path: Path) -> None:
+    agent = _chatgpt_agent(SessionManager.in_memory(str(tmp_path)), tmp_path, ["read"])
+
+    assert agent._is_explicit_tool_candidate('{"name":"Alice"}') is False
+    assert agent._is_explicit_tool_candidate('{"example":{"tool":"read","args":{}}}') is False
+    escaped_example = '{"note":"escaped \\"tool\\": \\"read\\""}'
+    assert agent._is_explicit_tool_candidate(escaped_example) is False
+    assert agent._try_parse_tool_call(escaped_example) is None
+
+
 def test_valid_write_json_is_parsed_losslessly_before_compatibility_repair(tmp_path: Path):
     registry = ModelRegistry.create(AuthStorage.in_memory())
     model = registry.find("openai", "gpt-4.1")

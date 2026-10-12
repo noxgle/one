@@ -157,6 +157,9 @@ def _event_projection(event: Mapping[str, Any]) -> dict[str, Any]:
     }
     if event_type in known_lifecycle:
         result.update(_fields(event, _IDENTITY_FIELDS + lifecycle_fields))
+        if event_type == "tool_call_parse_failed":
+            # Safe parser diagnostics only: never forward candidate text/args.
+            result.update(_fields(event, ("source", "category", "reason", "tool", "toolCallId")))
     return result
 
 

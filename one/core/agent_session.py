@@ -653,6 +653,17 @@ class AgentSession:
                         return None
                 elif allow_flat and flat:
                     args = flat
+                elif (
+                    allow_flat
+                    and tool.strip() in self._active_tools
+                    and tool.strip() in all_tools
+                    and not all_tools[tool.strip()].schema.get("required")
+                    and not all_tools[tool.strip()].schema.get("oneOf")
+                    and not all_tools[tool.strip()].schema.get("anyOf")
+                ):
+                    # Empty arguments are safe only for an explicitly framed,
+                    # registered builtin whose own schema requires none.
+                    args = {}
                 else:
                     # In particular, never synthesize {} for missing command/task
                     # arguments (or turn an empty finish into a synthetic success).
@@ -687,8 +698,9 @@ class AgentSession:
                 candidates.append(m.group(1).strip())
 
             marker = "TOOL_CALL:"
-            if marker in raw_text:
-                candidates.append(raw_text.split(marker, 1)[1].strip())
+            has_marker = raw_text.strip().startswith(marker)
+            if has_marker:
+                candidates.append(raw_text.strip()[len(marker) :].strip())
 
             # Fallback: extract balanced JSON objects from arbitrary text.
             candidates.extend(balanced_json_objects(raw_text))
@@ -713,7 +725,7 @@ class AgentSession:
                 # the historical canonical parser but cannot broaden execution.
                 parsed = parse_from_obj(
                     obj,
-                    allow_flat=(c == stripped or c.startswith("{") and raw_text.strip().startswith("```") or marker in raw_text),
+                    allow_flat=(c == stripped or c.startswith("{") and raw_text.strip().startswith("```") or has_marker),
                 )
                 if parsed is not None:
                     return parsed
@@ -840,6 +852,116 @@ class AgentSession:
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
         return "malformed_json"
+
+    def _is_explicit_tool_candidate(self, text: str) -> bool:
+        """Recognize authoritative text tool framing without parsing prose."""
+        stripped = text.strip()
+        if not stripped:
+            return False
+        if stripped.startswith(("TOOL_CALL:", "<|tool_call", "<tool_call")):
+            return True
+        # Markdown fences are frequently examples, not actions.
+        if not stripped.startswith("{"):
+            return False
+        def string_at(value: str, start: int) -> tuple[str | None, int]:
+            if start >= len(value) or value[start] != '"':
+                return None, start
+            escaped = False
+            for end in range(start + 1, len(value)):
+                char = value[end]
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    try:
+                        return json.loads(value[start : end + 1]), end + 1
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        return None, end + 1
+            return None, len(value)
+
+        def members(value: str) -> dict[str, str]:
+            """Return only lexically top-level JSON-object members.
+
+            This deliberately tolerates an unfinished value so a malformed explicit
+            call can be repaired, but never searches quoted text or nested objects.
+            """
+            result: dict[str, str] = {}
+            index = 1
+            length = len(value)
+            while index < length:
+                while index < length and value[index].isspace():
+                    index += 1
+                if index >= length or value[index] == "}":
+                    break
+                key, index = string_at(value, index)
+                if key is None:
+                    break
+                while index < length and value[index].isspace():
+                    index += 1
+                if index >= length or value[index] != ":":
+                    break
+                index += 1
+                while index < length and value[index].isspace():
+                    index += 1
+                value_start = index
+                depth = 0
+                in_string = False
+                escaped = False
+                while index < length:
+                    char = value[index]
+                    if in_string:
+                        if escaped:
+                            escaped = False
+                        elif char == "\\":
+                            escaped = True
+                        elif char == '"':
+                            in_string = False
+                    elif char == '"':
+                        in_string = True
+                    elif char in "[{":
+                        depth += 1
+                    elif char in "]}":
+                        if depth == 0:
+                            break
+                        depth -= 1
+                    elif char == "," and depth == 0:
+                        break
+                    index += 1
+                result[key] = value[value_start:index].strip()
+                if index >= length or value[index] == "}":
+                    break
+                index += 1
+            return result
+
+        def active_name(value: str) -> bool:
+            name, _end = string_at(value, 0)
+            return isinstance(name, str) and name in self._active_tools
+
+        envelope = members(stripped)
+        # ``tool`` is an unambiguous action discriminator even when its malformed
+        # value cannot name an active tool. ``name`` needs an active tool match so
+        # ordinary structured answers such as {"name": "Alice"} stay prose.
+        if "tool" in envelope or active_name(envelope.get("name", "")):
+            return True
+        function = envelope.get("function", "").lstrip()
+        if function.startswith("{"):
+            function_envelope = members(function)
+            return "tool" in function_envelope or active_name(function_envelope.get("name", ""))
+        return False
+
+    def _invalid_tool_call_assistant_message(self) -> dict[str, Any]:
+        """Create a durable failure without retaining invalid model JSON."""
+        return {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "The model produced an invalid tool call and could not recover. No tool was executed."}],
+            "provider": self.model.provider if self.model else None,
+            "model": self.model.id if self.model else None,
+            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+            "stopReason": "invalid_tool_call",
+            "errorType": "invalid_tool_call",
+            "timestamp": int(time.time() * 1000),
+        }
 
     def _should_tool_nudge(
         self,
@@ -3062,6 +3184,7 @@ class AgentSession:
                         is_unlimited = tool_max == 0
                         tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
                         final_assistant: dict[str, Any] | None = None
+                        invalid_tool_call_failure = False
                         # Unlimited mode (maxSteps=0): infinite iterator → loop only
                         # exits via break (abort, budget, finish, no-tool-call).
                         # Bounded mode (maxSteps>0): finite range → exits when exhausted.
@@ -3129,25 +3252,14 @@ class AgentSession:
                             # candidates. Flat candidates get the existing bounded
                             # repair path, while malformed canonical JSON retains
                             # its normal post-tool-only repair behavior.
-                            toolish = (
-                                '"tool"' in assistant_text
-                                and '"args"' in assistant_text
-                                and (
-                                    assistant_text.strip().startswith("{")
-                                    or "```" in assistant_text
-                                    or "TOOL_CALL:" in assistant_text
-                                )
-                            )
-                            flat_toolish = (
-                                '"tool"' in assistant_text
-                                and '"args"' not in assistant_text
-                                and any(field in assistant_text for field in ('"command"', '"task"', '"tasks"', '"summary"'))
-                                and (
-                                    assistant_text.strip().startswith("{")
-                                    or "```" in assistant_text
-                                    or "TOOL_CALL:" in assistant_text
-                                )
-                            )
+                            toolish = self._is_explicit_tool_candidate(assistant_text)
+                            flat_toolish = toolish
+                            if toolish and not tool_calls:
+                                self._emit({
+                                    "type": "tool_call_parse_failed",
+                                    "source": "response",
+                                    "category": self._tool_call_parse_failure_category(assistant_text),
+                                })
                             if (
                                 not tool_calls
                                 and not native_present
@@ -3207,6 +3319,13 @@ class AgentSession:
                                     assistant = nudged
                                     assistant_text = nudged_text
                                     tool_call_source = "nudge"
+                                    # The nudge response replaces the candidate. Its native
+                                    # and text framing must be classified afresh rather than
+                                    # inheriting the ordinary first response's flags.
+                                    native_present = nudged_native
+                                    pseudo_recipient = self._is_pseudo_recipient(assistant_text)
+                                    toolish = self._is_explicit_tool_candidate(assistant_text)
+                                    flat_toolish = toolish
                                     self._nudge_conversions["false"] += 1
                                     self._emit(
                                         {"type": "tool_call_nudge_end", "used": False, "fireCount": self._nudge_fires}
@@ -3216,10 +3335,11 @@ class AgentSession:
                             # as well as persistence and provider requests.
                             assistant.pop("_hadThinking", None)
                             assistant.pop("_hadNativeToolCall", None)
+                            repaired_native = False
                             if (
                                 not tool_calls
                                 and not format_repair_attempted
-                                and (self._should_repair_tool_response(tool_results) or pseudo_recipient or native_present or flat_toolish)
+                                and (self._should_repair_tool_response(tool_results) or pseudo_recipient or native_present or toolish)
                             ):
                                 # This is intentionally independent of the short-text nudge.
                                 # One repair request per post-tool interval bounds recovery
@@ -3265,26 +3385,8 @@ class AgentSession:
                                 # A bounded repair may have replaced the response.
                                 # Reclassify only for the safe diagnostic, never to
                                 # start another repair cycle.
-                                toolish = toolish or (
-                                    '"tool"' in assistant_text
-                                    and '"args"' in assistant_text
-                                    and (
-                                        assistant_text.strip().startswith("{")
-                                        or "```" in assistant_text
-                                        or "TOOL_CALL:" in assistant_text
-                                    )
-                                )
-                                flat_toolish = flat_toolish or (
-                                    '"tool"' in assistant_text
-                                    and '"args"' not in assistant_text
-                                    and any(field in assistant_text for field in ('"command"', '"task"', '"tasks"', '"summary"'))
-                                    and (
-                                        assistant_text.strip().startswith("{")
-                                        or "```" in assistant_text
-                                        or "TOOL_CALL:" in assistant_text
-                                    )
-                                )
-                                if toolish or flat_toolish:
+                                final_toolish = repaired_native or self._is_explicit_tool_candidate(assistant_text)
+                                if final_toolish:
                                     self._emit(
                                         {
                                             "type": "tool_call_parse_failed",
@@ -3292,6 +3394,12 @@ class AgentSession:
                                             "category": self._tool_call_parse_failure_category(assistant_text),
                                         }
                                     )
+                                    # A repair which remains an explicit invalid
+                                    # tool candidate is not an ordinary answer.
+                                    # Do not persist raw model JSON as a success.
+                                    if format_repair_attempted:
+                                        invalid_tool_call_failure = True
+                                        final_assistant = self._invalid_tool_call_assistant_message()
 
                             if tool_calls:
                                 for tool_call in tool_calls:
@@ -3365,7 +3473,7 @@ class AgentSession:
                                 await self._inject_pending_steering()
                                 continue
 
-                            final_assistant = assistant
+                            final_assistant = final_assistant or assistant
                             break
 
                         if final_assistant is None and not is_unlimited:
@@ -3430,15 +3538,18 @@ class AgentSession:
                         self._emit(
                             {
                                 "type": "turn_end",
-                                "ok": True,
+                                "ok": not invalid_tool_call_failure,
                                 "attempt": attempt + 1,
                                 "aborted": final_assistant.get("stopReason") == "abort",
                                 "reason": final_assistant.get("stopReason") or "completed",
+                                **({"errorType": "invalid_tool_call", "error": "Invalid tool-call candidate; no tool was executed."} if invalid_tool_call_failure else {}),
                                 "message": final_assistant,
                                 "toolResults": tool_results,
                             }
                         )
                         self._agent_event("agent_end", [user_msg, final_assistant])
+                        if invalid_tool_call_failure:
+                            terminal_error = True
                         break
                     except _CapabilityError as e:
                         terminal_error = True

@@ -101,8 +101,7 @@ async def test_tui_spinner_paused_shows_ask_user_wait(tmp_path: Path):
         app._ask_user_pending = {"id": "x"}
         app._tick_waiting()
         await pilot.pause()
-        stream = "\n".join(app._stream_lines)
-        assert "waiting for your response" in stream
+        assert "waiting for your response" in str(app.query_one("#waiting_status").render())
 
 
 @pytest.mark.asyncio

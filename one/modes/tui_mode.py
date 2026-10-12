@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import difflib
 import json
 import math
 import os
@@ -57,7 +56,7 @@ _UI_MAX_COALESCED_DELTA_BYTES = 512
 # A Static update can take more than one refresh turn to settle its wrapped
 # height. Tail follow is therefore rechecked after two subsequent layout turns;
 # this is viewport-only work and does not relax the transcript paint cap.
-_STREAM_FOLLOW_LAYOUT_RECONCILES = 2
+_STREAM_FOLLOW_LAYOUT_RECONCILES = 5
 
 
 class TuiSessionView:
@@ -83,10 +82,41 @@ class TuiSessionView:
         self._replace_snapshot(result)
         return self.snapshot
 
+    async def refresh_status(self) -> dict[str, Any]:
+        """Refresh only the status paint DTO, never the transcript snapshot."""
+        reply = await self._facade.command("status_snapshot")
+        result = reply.get("result", reply)
+        return result if isinstance(result, dict) else {}
+
+    async def refresh_monitor(self) -> dict[str, Any]:
+        """Refresh only the bounded child monitor DTO."""
+        reply = await self._facade.command("monitor_snapshot")
+        result = reply.get("result", reply)
+        return result if isinstance(result, dict) else {}
+
+    def apply_status_snapshot(self, result: dict[str, Any]) -> None:
+        if isinstance(result.get("sidebar"), dict):
+            self._snapshot["sidebar"] = dict(result["sidebar"])
+        if isinstance(result.get("mcp"), list):
+            self._snapshot["mcp"] = [dict(item) for item in result["mcp"] if isinstance(item, dict)]
+        if isinstance(result.get("epoch"), int):
+            self._snapshot["epoch"] = result["epoch"]
+
+    def apply_monitor_snapshot(self, result: dict[str, Any]) -> None:
+        if isinstance(result.get("monitor"), dict):
+            self._snapshot["monitor"] = dict(result["monitor"])
+        if isinstance(result.get("epoch"), int):
+            self._snapshot["epoch"] = result["epoch"]
+
     @property
     def snapshot(self) -> dict[str, Any]:
         # JSON round-trip prevents a caller retaining our mutable projection.
         return json.loads(json.dumps(self._snapshot, ensure_ascii=False))
+
+    @property
+    def sidebar(self) -> dict[str, Any]:
+        """Small detached paint DTO; avoid copying the retained transcript."""
+        return dict(self._snapshot["sidebar"])
 
     def _replace_snapshot(self, snapshot: Any) -> None:
         if not isinstance(snapshot, dict):
@@ -185,7 +215,8 @@ class TuiSessionView:
     def monitor_snapshot(self) -> dict[str, Any]:
         """Copied monitor projection; the live monitor remains runtime-owned."""
         monitor = self._snapshot.get("monitor", {"revision": 0, "children": []})
-        return json.loads(json.dumps(monitor, ensure_ascii=False))
+        children = monitor.get("children") if isinstance(monitor, dict) else []
+        return {"revision": monitor.get("revision", 0), "children": [dict(child) for child in children if isinstance(child, dict)]}
 
     @property
     def session_id(self) -> str:
@@ -324,6 +355,8 @@ try:
     from textual.widgets import Button, Input, Static, TextArea
     from textual.widgets.text_area import Edit
 
+    from one.modes.tui_transcript import TranscriptWidget
+
     TEXTUAL_AVAILABLE = True
 except Exception:  # pragma: no cover
     TEXTUAL_AVAILABLE = False
@@ -362,7 +395,7 @@ def build_sidebar_snapshot(
         # The detached snapshot is authoritative.  Do not reconstruct it from
         # compatibility-shaped attributes, which would silently consult a live
         # host if one were ever attached to the view.
-        sidebar = session.snapshot["sidebar"]
+        sidebar = session.sidebar
         defaults = {
             "model": "none", "thinking": "medium", "temperature": 0.5,
             "temperatureMode": "balanced", "cwd": ".", "sessionId": "-",
@@ -376,7 +409,7 @@ def build_sidebar_snapshot(
         defaults.update(sidebar)
         # Snapshot.mcp is retained as a compatibility alias; the sidebar DTO is
         # authoritative and already contains no schemas or raw status records.
-        defaults["mcpServers"] = normalize_mcp_servers(defaults.get("mcpServers") or session.snapshot.get("mcp"))
+        defaults["mcpServers"] = normalize_mcp_servers(defaults.get("mcpServers") or session._snapshot.get("mcp"))
         return defaults
     usage = session.get_context_usage() or {}
     queues = session.get_pending_queues() or {"steering": [], "followUp": []}
@@ -471,11 +504,10 @@ def get_git_branch(cwd: str | os.PathLike[str]) -> str | None:
     return branch if result.returncode == 0 and branch else None
 
 
-# Braille spinner frames shown in the chat stream while the model is working.
+# Braille spinner frames shown beside the chat stream while the model is working.
 _THINKING_FRAMES = "░▒▓█▓▒"
-# Sentinel prefix marking the animated "waiting" line inside _stream_lines so
-# it can be located and removed reliably (even after list trimming). The
-# __MK__: prefix is stripped at render time, so it never shows in the UI.
+# Legacy sentinel retained only for loading old presentation fixtures. New
+# waiting frames live in #waiting_status, outside the transcript cache.
 _THINKING_MARK = "__MK__:"
 _THINKING_TEXT_MARK = "__MK_THINK__: "
 _GIT_BRANCH_CACHE_TTL_SECONDS = 5.0
@@ -1258,6 +1290,11 @@ if TEXTUAL_AVAILABLE:
             padding: 0 2;
         }
 
+        #waiting_status {
+            height: 1;
+            padding: 0 2;
+        }
+
         #input {
             margin: 1 0 0 0;
             border: round #456ca8;
@@ -1574,6 +1611,9 @@ if TEXTUAL_AVAILABLE:
             self._monitor_snapshot: dict[str, Any] = {"revision": 0, "children": []}
             self._monitor_dirty = False
             self._monitor_dirty_lock = threading.Lock()
+            self._monitor_refresh_inflight = False
+            self._status_refresh_inflight = False
+            self._status_refresh_dirty = False
             self._selected_agent_id: str | None = None
             self._agents_panel_open = False
             # A link token is generated only for an application-created stream
@@ -1588,6 +1628,10 @@ if TEXTUAL_AVAILABLE:
             # mutable list offsets.  Tool completion and front trimming can
             # splice the display list after a link was created.
             self._evidence_link_line_ids: dict[int, int] = {}
+            # Render-time evidence lookup must be by immutable line identity;
+            # scanning every token for every retained line made long tool runs
+            # quadratic in the number of links.
+            self._evidence_tokens_by_line_id: dict[int, tuple[int, ...]] = {}
             self._next_evidence_link_token = 0
             self._evidence_panel: dict[str, Any] | None = None
             # Increment before scheduling so stale coroutines cannot reopen a
@@ -1600,7 +1644,8 @@ if TEXTUAL_AVAILABLE:
                     yield Static(id="header")
                     with VerticalScroll(id="stream_container"):
                         yield Static("", id="logo")
-                        yield Static("", id="stream")
+                        yield TranscriptWidget("", id="stream")
+                    yield Static("", id="waiting_status")
                     yield Static("", id="ext_panel")
                     yield Static("", id="ext_overlay")
                     yield Static("", id="shortcuts_overlay")
@@ -1801,6 +1846,7 @@ if TEXTUAL_AVAILABLE:
             self._evidence_link_tokens.clear()
             self._evidence_links_by_line.clear()
             self._evidence_link_line_ids.clear()
+            self._evidence_tokens_by_line_id.clear()
             with self._monitor_dirty_lock:
                 self._monitor_dirty = False
             if isinstance(self.session, TuiSessionView):
@@ -1841,9 +1887,27 @@ if TEXTUAL_AVAILABLE:
 
         def _flush_monitor_refresh(self) -> None:
             with self._monitor_dirty_lock:
-                dirty, self._monitor_dirty = self._monitor_dirty, False
-            if not dirty:
+                if not self._monitor_dirty:
+                    return
+                if isinstance(self.session, TuiSessionView) and self._monitor_refresh_inflight:
+                    return
+                # Keep dirty until the response is accepted. An invalidation
+                # during the await leaves it true and schedules one retry.
+                self._monitor_dirty = False
+            if not isinstance(self.session, TuiSessionView):
+                monitor = getattr(self.session, "subagent_monitor", None)
+                if monitor is None:
+                    return
+                try:
+                    changed = self._accept_monitor_snapshot(monitor.snapshot(), self._monitor_generation)
+                except Exception:
+                    return
+                if changed:
+                    self._schedule_sidebar_refresh()
+                    self._render_agents_panel()
                 return
+            with self._monitor_dirty_lock:
+                self._monitor_refresh_inflight = True
             if isinstance(self.session, TuiSessionView):
                 session = self.session
                 epoch = session.epoch
@@ -1851,31 +1915,26 @@ if TEXTUAL_AVAILABLE:
 
                 async def refresh() -> None:
                     try:
-                        await session.refresh()
+                        result = await session.refresh_monitor()
                         # A delayed detached snapshot must not repaint a newly
                         # bound session/epoch after /new, /sessions, or /fork.
                         if (
                             self.session is session
                             and generation == self._monitor_generation
                             and epoch == session.epoch
-                            and self._accept_monitor_snapshot(session.monitor_snapshot, generation)
+                            and result.get("epoch") == epoch
                         ):
-                            self._schedule_sidebar_refresh()
-                            self._render_agents_panel()
+                            session.apply_monitor_snapshot(result)
+                            if self._accept_monitor_snapshot(session.monitor_snapshot, generation):
+                                self._schedule_sidebar_refresh()
+                                self._render_agents_panel()
                     except Exception as exc:
                         self._write(f"[Monitor] {exc}", "error")
+                    finally:
+                        with self._monitor_dirty_lock:
+                            self._monitor_refresh_inflight = False
                 asyncio.create_task(refresh())
                 return
-            monitor = getattr(self.session, "subagent_monitor", None)
-            if monitor is None:
-                return
-            try:
-                changed = self._accept_monitor_snapshot(monitor.snapshot(), self._monitor_generation)
-            except Exception:
-                return
-            if changed:
-                self._schedule_sidebar_refresh()
-                self._render_agents_panel()
 
         def _refresh_monitor_snapshot(self) -> bool:
             """Synchronously obtain the current bound monitor snapshot."""
@@ -2140,6 +2199,8 @@ if TEXTUAL_AVAILABLE:
             """Coalesce sidebar/layout work to one frame after lifecycle reduction."""
             if self._is_unmounting:
                 return
+            if isinstance(self.session, TuiSessionView):
+                self._request_status_refresh()
             if not self.is_running:
                 self._refresh_sidebar()
                 return
@@ -2148,6 +2209,40 @@ if TEXTUAL_AVAILABLE:
                 return
             delay = max(0.001, self._sidebar_next_paint - time.monotonic())
             self._sidebar_refresh_timer = self.set_timer(delay, self._paint_scheduled_sidebar)
+
+        def _request_status_refresh(self) -> None:
+            """Coalesce cheap status commands without delaying input controls."""
+            self._status_refresh_dirty = True
+            if self._status_refresh_inflight:
+                return
+            session = self.session
+            generation = self._session_listener_generation
+            epoch = session.epoch
+            self._status_refresh_inflight = True
+            self._status_refresh_dirty = False
+
+            async def refresh() -> None:
+                try:
+                    result = await session.refresh_status()
+                    if (
+                        self.session is session
+                        and generation == self._session_listener_generation
+                        and epoch == session.epoch
+                        and result.get("epoch") == epoch
+                    ):
+                        session.apply_status_snapshot(result)
+                        # Paint the accepted projection now. Do not schedule
+                        # through _schedule_sidebar_refresh here: that would
+                        # request another status snapshot forever.
+                        self._refresh_sidebar()
+                except Exception:
+                    pass
+                finally:
+                    self._status_refresh_inflight = False
+                    if self._status_refresh_dirty and not self._is_unmounting:
+                        self._request_status_refresh()
+
+            asyncio.create_task(refresh())
 
         def _paint_scheduled_sidebar(self) -> None:
             self._sidebar_refresh_timer = None
@@ -2181,20 +2276,23 @@ if TEXTUAL_AVAILABLE:
                     self._schedule_stream_render()
                 return
             self._materialize_assistant_live_lines()
-            rendered_lines = tuple(self._stream_lines)
             width = self._main_width()
             cache_context_changed = width != self._stream_cache_width or self._stream_cache_theme != self._theme.name
             # A stream update can be requested by several lifecycle paths in a
             # frame. Rebuilding identical Rich Text is pure wasted work and can
             # invalidate a mouse selection while output is still streaming.
+            try:
+                stream_widget = self.query_one("#stream", TranscriptWidget)
+            except Exception:
+                return
             if (
-                rendered_lines == self._rendered_stream_lines
+                tuple(self._stream_lines) == self._rendered_stream_lines
                 and self._rendered_stream_revision == self._stream_render_revision
                 and not cache_context_changed
+                and not stream_widget.needs_reflow
             ):
                 return
             try:
-                stream_widget = self.query_one("#stream")
                 stream_container = self.query_one("#stream_container", VerticalScroll)
             except Exception:
                 return
@@ -2202,6 +2300,7 @@ if TEXTUAL_AVAILABLE:
                 self._stream_content_cache.clear()
                 self._stream_cache_width = width
                 self._stream_cache_theme = self._theme.name
+                stream_widget.invalidate_wrap()
             self._sync_stream_line_ids()
             # Sample this before replacing the content.  Updating a Static can
             # change its wrapped height (and therefore max_scroll_y), so the
@@ -2234,28 +2333,29 @@ if TEXTUAL_AVAILABLE:
                 if not follow_stream and front_trimmed
                 else None
             )
-            # Content, unlike Rich Text passed through Static, preserves native
-            # Textual actions. Every transcript value is a markup variable, so
-            # only the fixed app-generated view suffix is ever parsed as markup.
-            content = Content()
-            in_tool_block = False
-            for line_index, line in enumerate(self._stream_lines):
+            # Textual requests only visible physical rows from TranscriptWidget.
+            # In particular, do not append 500 Content fragments or Static.update
+            # an aggregate visual on every token/lifecycle event.
+            def content_for_line(line_index: int) -> Content:
+                line = self._stream_lines[line_index]
                 if line.startswith(_THINKING_MARK):
-                    content = content.append(Content.from_markup(line[len(_THINKING_MARK) :]))
-                    content = content.append("\n")
-                elif line.startswith(_THINKING_TEXT_MARK):
-                    content = content.append(Content.from_markup(line[len(_THINKING_TEXT_MARK) :]))
-                    content = content.append("\n")
-                elif line in {"Thinking:", "Thought:"}:
-                    content = content.append(Content.from_markup("[i]$line[/]\n", line=line))
-                else:
-                    is_tool_line = line.startswith(("tool: ", "tool (", "tool start ", "tool ok: ", "tool err: "))
-                    in_tool_block = is_tool_line or (in_tool_block and bool(line))
-                    content = content.append(self._cached_stream_content_line(line_index, line, width))
-                    if not line:
-                        in_tool_block = False
-            stream_widget.update(content)
-            self._rendered_stream_lines = rendered_lines
+                    return Content.from_markup(line[len(_THINKING_MARK) :] + "\n")
+                if line.startswith(_THINKING_TEXT_MARK):
+                    return Content.from_markup(line[len(_THINKING_TEXT_MARK) :] + "\n")
+                if line in {"Thinking:", "Thought:"}:
+                    return Content.from_markup("[i]$line[/]\n", line=line)
+                return self._cached_stream_content_line(line_index, line, width)
+
+            line_revisions = [
+                (
+                    self._agent_links_by_line.get(index, ()),
+                    self._evidence_tokens_by_line_id.get(line_id, ()),
+                    self._theme.name,
+                )
+                for index, line_id in enumerate(self._stream_line_ids)
+            ]
+            stream_widget.set_transcript(self._stream_line_ids, self._stream_lines, line_revisions, content_for_line)
+            self._rendered_stream_lines = tuple(self._stream_lines)
             self._rendered_stream_revision = self._stream_render_revision
             try:
                 self._queue_stream_viewport_reconcile(
@@ -2278,44 +2378,120 @@ if TEXTUAL_AVAILABLE:
                 self.call_after_refresh(self._render_stream)
 
         def _sync_stream_line_ids(self) -> None:
-            """Keep IDs stable across append, trim, and arbitrary list splices."""
+            """Repair direct test list setup without diffing on a paint path.
+
+            Normal mutations retain the parallel IDs explicitly.  A few old
+            tests assign ``_stream_lines`` directly; that unsupported shortcut
+            gets fresh IDs at changed positions and loses actions there rather
+            than matching repeated text to a potentially wrong result.
+            """
             if not self._stream_lines:
                 self._stream_line_ids = []
                 self._stream_line_values = []
                 return
-            if len(self._stream_line_values) == len(self._stream_line_ids) and self._stream_line_values:
-                ids: list[int | None] = [None] * len(self._stream_lines)
-                # Matching blocks preserve identity even when completion
-                # replaces a tool body or a caller inserts/deletes before it.
-                matcher = difflib.SequenceMatcher(a=self._stream_line_values, b=self._stream_lines, autojunk=False)
-                for old_start, new_start, size in matcher.get_matching_blocks():
-                    for offset in range(size):
-                        ids[new_start + offset] = self._stream_line_ids[old_start + offset]
-                self._stream_line_ids = [item for item in ids if item is not None]
-                # Fill below in exact current-list order, rather than retaining
-                # an index-based suffix from the old presentation.
-                if len(self._stream_line_ids) != len(self._stream_lines):
-                    rebuilt: list[int] = []
-                    for item in ids:
-                        if item is None:
-                            self._next_stream_line_id += 1
-                            rebuilt.append(self._next_stream_line_id)
-                        else:
-                            rebuilt.append(item)
-                    self._stream_line_ids = rebuilt
+            if self._stream_line_values != self._stream_lines:
+                old_values = self._stream_line_values
+                old_ids = self._stream_line_ids
+                rebuilt: list[int] = []
+                changed = False
+                for index, value in enumerate(self._stream_lines):
+                    if index < len(old_values) and index < len(old_ids) and old_values[index] == value:
+                        rebuilt.append(old_ids[index])
+                    else:
+                        self._next_stream_line_id += 1
+                        rebuilt.append(self._next_stream_line_id)
+                        changed = True
+                self._stream_line_ids = rebuilt
+                if changed and len(old_values) == len(self._stream_lines) and not (
+                    self._agent_links_by_line or self._evidence_links_by_line
+                ):
+                    # A same-size direct replacement is the legacy test setup
+                    # bridge. Drop actions rather than attaching an identical
+                    # replacement value to an old trusted target. Appends and
+                    # front trims retain their explicit bookkeeping below.
+                    self._agent_links_by_line.clear()
+                    self._evidence_links_by_line.clear()
+                    self._evidence_link_line_ids.clear()
+                    self._evidence_tokens_by_line_id.clear()
             while len(self._stream_line_ids) < len(self._stream_lines):
                 self._next_stream_line_id += 1
                 self._stream_line_ids.append(self._next_stream_line_id)
             self._stream_line_values = list(self._stream_lines)
+            # A live tail replacement gets a new ID. Drop its old rendered
+            # fragment immediately instead of retaining every streamed version.
+            retained_ids = set(self._stream_line_ids)
+            if self._stream_content_cache:
+                self._stream_content_cache = {
+                    key: content for key, content in self._stream_content_cache.items() if key[0] in retained_ids
+                }
+
+        def _replace_stream_slice(self, start: int, end: int, values: list[str]) -> None:
+            """Apply a normal presentation splice while preserving retained IDs.
+
+            This is the only mutation primitive for replace/delete paths that
+            can sit before an evidence line.  It prevents a live assistant or
+            tool-body resize from rebinding a later, repeated result heading.
+            """
+            self._sync_stream_line_ids()
+            start = max(0, min(start, len(self._stream_lines)))
+            end = max(start, min(end, len(self._stream_lines)))
+            removed_ids = set(self._stream_line_ids[start:end])
+            replacement_ids: list[int] = []
+            for _value in values:
+                self._next_stream_line_id += 1
+                replacement_ids.append(self._next_stream_line_id)
+            delta = len(values) - (end - start)
+            self._stream_lines[start:end] = values
+            self._stream_line_ids[start:end] = replacement_ids
+            self._stream_line_values[start:end] = values
+            if removed_ids:
+                self._stream_content_cache = {
+                    key: content for key, content in self._stream_content_cache.items() if key[0] not in removed_ids
+                }
+                for line_id in removed_ids:
+                    for token in self._evidence_tokens_by_line_id.pop(line_id, ()):
+                        self._evidence_link_tokens.pop(token, None)
+                        self._evidence_link_line_ids.pop(token, None)
+
+            def rebase(index: int) -> int | None:
+                if start <= index < end:
+                    return None
+                return index + delta if index >= end else index
+
+            self._agent_links_by_line = {
+                rebased: tokens for line, tokens in self._agent_links_by_line.items()
+                if (rebased := rebase(line)) is not None
+            }
+            self._evidence_links_by_line = {
+                rebased: tokens for line, tokens in self._evidence_links_by_line.items()
+                if (rebased := rebase(line)) is not None
+            }
+            self._agent_link_tokens = {
+                token: (generation, session_id, rebased, call_id)
+                for token, (generation, session_id, line, call_id) in self._agent_link_tokens.items()
+                if (rebased := rebase(line)) is not None
+            }
+
+        def _append_stream_lines(self, values: list[str]) -> None:
+            self._replace_stream_slice(len(self._stream_lines), len(self._stream_lines), values)
+
+        def _set_stream_line(self, index: int, value: str) -> None:
+            """Replace text in an existing logical block without changing ID."""
+            self._sync_stream_line_ids()
+            if not 0 <= index < len(self._stream_lines):
+                return
+            line_id = self._stream_line_ids[index]
+            self._stream_lines[index] = value
+            self._stream_line_values[index] = value
+            self._stream_content_cache = {
+                key: content for key, content in self._stream_content_cache.items() if key[0] != line_id
+            }
 
         def _cached_stream_content_line(self, line_index: int, line: str, width: int) -> Content:
             line_id = self._stream_line_ids[line_index]
             tokens = self._agent_links_by_line.get(line_index, ())
             links = tuple((token, self._agent_link_labels[token]) for token in tokens if token in self._agent_link_labels)
-            evidence_links = tuple(
-                token for token, linked_line_id in self._evidence_link_line_ids.items()
-                if linked_line_id == line_id and token in self._evidence_link_tokens
-            )
+            evidence_links = self._evidence_tokens_by_line_id.get(line_id, ())
             key = (line_id, line, width, self._theme.name, links, evidence_links)
             cached = self._stream_content_cache.get(key)
             if cached is not None:
@@ -2879,7 +3055,10 @@ if TEXTUAL_AVAILABLE:
         def _apply_assistant_deltas(self, delta: str) -> bool:
             if not delta or not self._assistant_stream_open:
                 return False
-            self._assistant_stream += delta
+            # This is only a fallback for providers that omit a final message;
+            # durable history owns the complete response. Do not retain a
+            # second unbounded cumulative copy in the UI.
+            self._assistant_stream = _truncate_display_bytes(self._assistant_stream + delta)
             self._append_assistant_delta(delta)
             return True
 
@@ -2926,19 +3105,11 @@ if TEXTUAL_AVAILABLE:
             return True
 
         def _remove_thinking_line(self) -> None:
-            """Drop the animated 'waiting' line from the stream, if present.
-
-            Also removes the blank separator lines that wrapped the spinner, so
-            removing it does not leave extra vertical gaps between blocks.
-            """
-            for i in range(len(self._stream_lines) - 1, -1, -1):
-                if self._stream_lines[i].startswith(_THINKING_MARK):
-                    self._stream_lines.pop(i)
-                    if i < len(self._stream_lines) and self._stream_lines[i] == "":
-                        self._stream_lines.pop(i)
-                    if i > 0 and self._stream_lines[i - 1] == "":
-                        self._stream_lines.pop(i - 1)
-                    break
+            """Clear the independent waiting status without touching transcript."""
+            try:
+                self.query_one("#waiting_status", Static).update("")
+            except Exception:
+                pass
             self._thinking_active = False
 
         def _finalize_thinking_block(self) -> None:
@@ -2976,12 +3147,11 @@ if TEXTUAL_AVAILABLE:
             self._thinking_label_idx = None
 
         def _tick_waiting(self) -> None:
-            """Animate the in-stream spinner while the model is working."""
+            """Animate a tiny status widget; never rebuild the transcript."""
             now = time.monotonic()
             if not evaluate_waiting(self._turn_active, self._last_delta_ts, now):
                 if self._thinking_active:
                     self._remove_thinking_line()
-                    self._schedule_stream_render()
                 return
             # Check for user-gate pending state: show a paused indicator only
             # for ask_user (approval gate is no longer shown as a paused label
@@ -2990,31 +3160,16 @@ if TEXTUAL_AVAILABLE:
             if self._ask_user_pending is not None:
                 pending_label = "waiting for your response"
             if pending_label:
-                line = f"{_THINKING_MARK}[{self._theme.warn}]⏸ {pending_label}[/]"
+                line = f"[{self._theme.warn}]⏸ {pending_label}[/]"
             else:
                 self._thinking_frame = advance_thinking_frame(self._thinking_frame)
                 frame = _THINKING_FRAMES[self._thinking_frame]
-                line = f"{_THINKING_MARK}[{self._theme.info}]{frame} Ctrl+C abort[/]"
-            if self._thinking_active:
-                # Rewrite the existing spinner line in place.
-                for i in range(len(self._stream_lines) - 1, -1, -1):
-                    if self._stream_lines[i].startswith(_THINKING_MARK):
-                        self._stream_lines[i] = line
-                        self._schedule_stream_render()
-                        break
-                else:
-                    # The line was trimmed away; re-append it.
-                    self._stream_lines.append("")
-                    self._stream_lines.append(line)
-                    self._stream_lines.append("")
-                    self._trim_stream()
-            else:
-                self._stream_lines.append("")
-                self._stream_lines.append(line)
-                self._stream_lines.append("")
-                self._trim_stream()
-                self._thinking_active = True
-                self._schedule_stream_render()
+                line = f"[{self._theme.info}]{frame} Ctrl+C abort[/]"
+            try:
+                self.query_one("#waiting_status", Static).update(Content.from_markup(line))
+            except Exception:
+                pass
+            self._thinking_active = True
 
         def _write(self, text: str, kind: str = "normal", *, render: bool = True) -> None:
             # Store one logical display line per entry. In particular, a large
@@ -3039,6 +3194,10 @@ if TEXTUAL_AVAILABLE:
             self._evidence_links_by_line[line] = (*self._evidence_links_by_line.get(line, ()), token)
             self._sync_stream_line_ids()
             self._evidence_link_line_ids[token] = self._stream_line_ids[line]
+            line_id = self._stream_line_ids[line]
+            self._evidence_tokens_by_line_id[line_id] = (
+                *self._evidence_tokens_by_line_id.get(line_id, ()), token
+            )
             self._rendered_stream_lines = ()
             self._schedule_stream_render()
 
@@ -3151,6 +3310,10 @@ if TEXTUAL_AVAILABLE:
                 self._stream_lines = self._stream_lines[desired_start:]
                 self._stream_line_ids = self._stream_line_ids[desired_start:]
                 self._stream_line_values = self._stream_line_values[desired_start:]
+                retained_ids = set(self._stream_line_ids)
+                self._stream_content_cache = {
+                    key: content for key, content in self._stream_content_cache.items() if key[0] in retained_ids
+                }
                 # Reconciliation works in rendered rows, not logical entries:
                 # one removed long line can otherwise move a retained anchor
                 # beyond the bounded lookup window.
@@ -3183,6 +3346,11 @@ if TEXTUAL_AVAILABLE:
                 self._evidence_link_line_ids = {
                     token: line_id for token, line_id in self._evidence_link_line_ids.items()
                     if token in self._evidence_link_tokens and line_id in retained_line_ids
+                }
+                self._evidence_tokens_by_line_id = {
+                    line_id: tuple(token for token in tokens if token in self._evidence_link_tokens)
+                    for line_id, tokens in self._evidence_tokens_by_line_id.items()
+                    if line_id in retained_line_ids
                 }
 
             # --- rebase assistant live bookkeeping ------------------------
@@ -3345,15 +3513,15 @@ if TEXTUAL_AVAILABLE:
             if self._assistant_live_start_idx >= 0:
                 tail_start = self._assistant_live_start_idx + self._assistant_live_line_count
                 tail = self._stream_lines[tail_start:]
-                self._stream_lines = self._stream_lines[: self._assistant_live_start_idx] + panel_lines + tail
+                self._replace_stream_slice(self._assistant_live_start_idx, tail_start, panel_lines)
             else:
-                self._stream_lines.extend(panel_lines)
+                self._append_stream_lines(panel_lines)
             self._assistant_live_line_count = len(panel_lines)
             self._trim_stream(render=False)
             self._assistant_live_lines_dirty = False
             if self._assistant_live_finalize_pending:
                 end = self._assistant_live_start_idx + self._assistant_live_line_count
-                self._stream_lines.insert(max(0, end), "")
+                self._replace_stream_slice(max(0, end), max(0, end), [""])
                 self._trim_stream(render=False)
                 self._assistant_stream = ""
                 self._assistant_has_live_delta = False
@@ -3377,7 +3545,7 @@ if TEXTUAL_AVAILABLE:
             idx = self._assistant_live_start_idx
             count = self._assistant_live_line_count
             if idx >= 0 and count > 0 and idx < len(self._stream_lines):
-                del self._stream_lines[idx : idx + count]
+                self._replace_stream_slice(idx, idx + count, [])
             # Always invalidate bookkeeping — whether we deleted anything or
             # not, the caller will reset / rebuild state.
             self._assistant_live_start_idx = -1
@@ -3516,11 +3684,11 @@ if TEXTUAL_AVAILABLE:
             active_name, start, end, text = active
             if active_name != tool_name or not (0 <= start <= end <= len(self._stream_lines)):
                 return False
-            self._stream_lines[start:end] = self._bounded_tool_panel(f"{text} [{status}]")
+            self._replace_stream_slice(start, end, self._bounded_tool_panel(f"{text} [{status}]"))
             badge = "✓" if status in {"ok", "success"} else "△" if status in {"warning", "disabled"} else "×"
             if start > 0 and self._stream_lines[start - 1].startswith("Tool:"):
                 elapsed = _format_elapsed_ms(elapsed_ms)
-                self._stream_lines[start - 1] = f"Tool: {badge} {tool_name}" + (f" · {elapsed}" if elapsed else "")
+                self._set_stream_line(start - 1, f"Tool: {badge} {tool_name}" + (f" · {elapsed}" if elapsed else ""))
             self._active_tool_block = None
             self._active_tool_call_id = None
             self._active_subagent_link_tokens = []
@@ -3608,6 +3776,12 @@ if TEXTUAL_AVAILABLE:
             try:
                 stream_text = self.query_one("#stream", Static)
                 stream_text.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
+                waiting_status = self.query_one("#waiting_status", Static)
+                waiting_status.styles.background = theme.panel_bg
+                waiting_status.styles.color = theme.info
             except Exception:
                 pass
             try:
@@ -4003,6 +4177,7 @@ if TEXTUAL_AVAILABLE:
             self._evidence_link_tokens.clear()
             self._evidence_links_by_line.clear()
             self._evidence_link_line_ids.clear()
+            self._evidence_tokens_by_line_id.clear()
 
         def _prune_agent_link_metadata(self) -> None:
             """Keep inline actions exactly in sync with retained transcript lines."""

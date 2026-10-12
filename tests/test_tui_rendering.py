@@ -1294,8 +1294,19 @@ async def test_tui_welcome_logo_is_a_dedicated_non_transcript_widget(tmp_path: P
         assert stream.scroll_y == stream.max_scroll_y
 
         # A normal update continues following only while already at the tail.
+        # The render is frame-scheduled; wait for actual commit and deferred
+        # viewport reconcile to clear before asserting tail position.
         app._write("conversation delta")
-        await pilot.pause()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if (
+                app._rendered_stream_revision == app._stream_render_revision
+                and not app._stream_viewport_callback_pending
+                and app._deferred_stream_viewport is None
+            ):
+                break
+            await pilot.pause(0.01)
+        # Don't mask a real lost-tail: assert scroll is actually at the tail.
         assert stream.scroll_y == stream.max_scroll_y
 
 

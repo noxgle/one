@@ -275,6 +275,20 @@ async def test_print_mode_without_images_works(tmp_path: Path, capsys):
     assert code == 0
 
 
+@pytest.mark.asyncio
+async def test_print_mode_invalid_tool_failure_uses_last_assistant_message(tmp_path: Path) -> None:
+    host = _mk_image_session(tmp_path, ['{"tool":"read","args":'])
+
+    code = await run_print_mode(host, {
+        "mode": "text",
+        "messages": ["inspect"],
+        "initialMessage": None,
+        "images": None,
+    })
+
+    assert code == 1
+
+
 # ---------------------------------------------------------------------------
 # Run mode with images
 # ---------------------------------------------------------------------------

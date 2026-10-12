@@ -47,6 +47,10 @@ _SNAPSHOT_MESSAGES_MAX_BYTES = 36 * 1024
 _MODELS_PAGE_SIZE = 100
 _EVIDENCE_PAGE_CHARS = 12 * 1024
 _EVIDENCE_PAGE_BYTES = 12 * 1024
+_STATUS_SNAPSHOT_MAX_BYTES = 48 * 1024
+_STATUS_MCP_MAX_SERVERS = 32
+_MONITOR_MAX_CHILDREN = 20
+_MONITOR_MAX_TIMELINE = 2
 
 
 def _bounded_snapshot_text(value: Any) -> str:
@@ -227,6 +231,7 @@ class TuiRuntimeHost:
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._off_session: Any = None
         self._off_monitor: Any = None
+        self._sidebar_expensive: dict[str, Any] | None = None
         self._bind_session_events()
         self._bind_monitor()
 
@@ -262,6 +267,8 @@ class TuiRuntimeHost:
             if self._epoch != epoch or self._session() is not session:
                 return
             stamped = dict(event)
+            if stamped.get("type") in {"agent_end", "turn_end", "error", "compaction_end", "temperature_change", "cooperation_changed"}:
+                self._sidebar_expensive = None
             # Keep event sessionId (for child/monitor identities) intact while
             # attaching the authoritative owner-session identity separately.
             stamped["epoch"] = epoch
@@ -316,6 +323,10 @@ class TuiRuntimeHost:
         """The complete TUI command grammar; no reflective dispatch exists here."""
         if command == "snapshot" and not payload:
             return await self.snapshot()
+        if command == "status_snapshot" and not payload:
+            return self.status_snapshot()
+        if command == "monitor_snapshot" and not payload:
+            return self.monitor_snapshot()
         if command == "prompt" and set(payload) == {"text"}:
             return await self.prompt(payload["text"])
         if command == "abort" and not payload:
@@ -342,7 +353,7 @@ class TuiRuntimeHost:
         """Return the sole compact, schema-free MCP display DTO."""
         mcp = getattr(self, "_mcp", None)
         mcp_servers = []
-        for item in (mcp.server_status() if mcp is not None else []):
+        for item in (mcp.server_status() if mcp is not None else [])[:_STATUS_MCP_MAX_SERVERS]:
             if not isinstance(item, dict):
                 continue
             runtime_state = str(item.get("runtimeState") or "configured").lower()
@@ -361,12 +372,20 @@ class TuiRuntimeHost:
             })
         return mcp_servers
 
+    def _refresh_sidebar_expensive(self) -> None:
+        session = self._session()
+        self._sidebar_expensive = {
+            "usage": session.get_context_usage() or {},
+            "stats": session.get_session_stats() or {},
+        }
+
     def _sidebar(self) -> dict[str, Any]:
         session = self._session()
         model = session.model
-        usage = session.get_context_usage() or {}
         queues = session.get_pending_queues() or {}
-        stats = session.get_session_stats() or {}
+        cache = getattr(self, "_sidebar_expensive", None)
+        usage = cache.get("usage", {}) if isinstance(cache, dict) else {}
+        stats = cache.get("stats", {}) if isinstance(cache, dict) else {}
         tokens = stats.get("tokens") or {}
         return {
             "sessionId": str(session.session_id),
@@ -406,6 +425,34 @@ class TuiRuntimeHost:
             "mcpEnabled": self._mcp is not None,
             "toolResultPreviewLines": session.settings_manager.get_tui_tool_result_preview_lines(),
         }
+
+    def _monitor_projection(self) -> dict[str, Any]:
+        monitor = getattr(self._session(), "subagent_monitor", None)
+        raw = monitor.snapshot() if monitor is not None else {"revision": 0, "children": []}
+        children = raw.get("children", []) if isinstance(raw, dict) else []
+        return {
+            "revision": int(raw.get("revision", 0)) if isinstance(raw, dict) else 0,
+            "children": [
+                {
+                    **{key: _bounded_snapshot_text(child.get(key))[:96] if isinstance(child.get(key), str) else child.get(key)
+                       for key in ("sessionId", "task", "model", "status", "activity", "currentTool") if key in child},
+                    "outputTail": _bounded_snapshot_text(child.get("outputTail"))[:192],
+                    "timeline": [
+                        {key: _bounded_snapshot_text(item.get(key))[:96] if isinstance(item.get(key), str) else item.get(key)
+                         for key in ("kind", "text", "tool", "status", "args", "error", "elapsedMs") if key in item}
+                        for item in child.get("timeline", [])[-_MONITOR_MAX_TIMELINE:] if isinstance(item, dict)
+                    ],
+                } for child in children[:_MONITOR_MAX_CHILDREN] if isinstance(child, dict)
+            ],
+        }
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Small status-only DTO: never reads history, model catalog, or stats."""
+        return self._json({"epoch": self._epoch, "sidebar": self._sidebar(), "mcp": self._mcp_snapshot()}, maximum=_STATUS_SNAPSHOT_MAX_BYTES)
+
+    def monitor_snapshot(self) -> dict[str, Any]:
+        """Small bounded monitor-only DTO."""
+        return self._json({"epoch": self._epoch, "monitor": self._monitor_projection()}, maximum=_STATUS_SNAPSHOT_MAX_BYTES)
 
     def _snapshot(self) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
@@ -477,25 +524,7 @@ class TuiRuntimeHost:
         # paginated command; a snapshot only says that a catalogue exists.
         registry = getattr(self._session(), "model_registry", None)
         model_count = len(registry.get_available()) if registry is not None else 0
-        monitor = getattr(self._session(), "subagent_monitor", None)
-        raw_monitor = monitor.snapshot() if monitor is not None else {"revision": 0, "children": []}
-        monitor_snapshot = {
-            "revision": int(raw_monitor.get("revision", 0)) if isinstance(raw_monitor, dict) else 0,
-            "children": [
-                {
-                    **{key: _bounded_snapshot_text(child.get(key))[:512] if isinstance(child.get(key), str) else child.get(key)
-                       for key in ("sessionId", "task", "model", "status", "activity", "currentTool") if key in child},
-                    "outputTail": _bounded_snapshot_text(child.get("outputTail"))[:2048],
-                    "timeline": [
-                        {key: _bounded_snapshot_text(item.get(key))[:1024] if isinstance(item.get(key), str) else item.get(key)
-                         for key in ("kind", "text", "tool", "status", "args", "error", "elapsedMs") if key in item}
-                        for item in child.get("timeline", [])[-16:] if isinstance(item, dict)
-                    ],
-                }
-                for child in (raw_monitor.get("children", [])[:20] if isinstance(raw_monitor, dict) and isinstance(raw_monitor.get("children"), list) else [])
-                if isinstance(child, dict)
-            ],
-        }
+        monitor_snapshot = self._monitor_projection()
         questions = [
             {"id": str(item.get("id", ""))[:256], "question": _bounded_snapshot_text(item.get("question"))[:1024], "epoch": self._epoch}
             for item in getattr(self._session(), "get_pending_questions", lambda: [])()[:16]
@@ -508,6 +537,10 @@ class TuiRuntimeHost:
         } if getattr(self, "_approval_active", None) else None
         if approval is not None:
             approval["epoch"] = self._epoch
+        # Tests and embedders may replace the display formatter; do not make a
+        # full-snapshot formatter stub implement accounting internals.
+        if getattr(self._sidebar, "__func__", None) is TuiRuntimeHost._sidebar:
+            self._refresh_sidebar_expensive()
         sidebar = self._sidebar()
         mcp_status = self._mcp_snapshot()
         snapshot = {
@@ -594,6 +627,9 @@ class TuiRuntimeHost:
     async def switch_session(self, path: str, session_id: str) -> dict[str, Any]:
         if not isinstance(path, str) or not path or not isinstance(session_id, str) or not session_id:
             raise ValueError("session path is required")
+        # Never present prior-session accounting while a switch is rejected or
+        # in progress. The next full snapshot repopulates this authoritatively.
+        self._sidebar_expensive = None
         manager = self._session().session_manager
         if not any(
             item.path == path and item.id == session_id
@@ -608,6 +644,7 @@ class TuiRuntimeHost:
         return self._snapshot()
 
     async def new_session(self) -> dict[str, Any]:
+        self._sidebar_expensive = None
         self._close_waits("Session changed")
         await self._host.new_session({})
         self._epoch += 1
@@ -854,6 +891,7 @@ class TuiRuntimeHost:
         elif operation == "tree":
             return {"tree": session.session_manager.get_tree(), "leafId": session.session_manager.get_leaf_id()}
         elif operation == "navigate":
+            self._sidebar_expensive = None
             result = await session.navigate_tree(
                 str(payload["entryId"]),
                 {"summarize": bool(payload["summarize"]), "customInstructions": payload["customInstructions"]},
@@ -864,6 +902,7 @@ class TuiRuntimeHost:
                 self._bind_monitor()
             return result
         elif operation == "fork":
+            self._sidebar_expensive = None
             previous_session = session
             result = await self._host.fork(str(payload["entryId"]))
             if self._session() is not previous_session:
@@ -1250,6 +1289,8 @@ async def create_tui_runtime(bootstrap: TuiBootstrap) -> TuiRuntimeHost:
 TUI_COMMANDS = frozenset(
     {
         "snapshot",
+        "status_snapshot",
+        "monitor_snapshot",
         "prompt",
         "abort",
         "models_page",

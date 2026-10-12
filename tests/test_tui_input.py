@@ -8,10 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from one.modes.tui_mode import (
-    _THINKING_MARK,
-    _TRUNCATED_ASSISTANT_MARKER,
-)
+from one.modes.tui_mode import _TRUNCATED_ASSISTANT_MARKER
 from tests.support.tui import _mk_app_session, _submit, _visible_text_area_text
 
 
@@ -247,7 +244,7 @@ async def test_tui_spinner_survives_queued_prompt_injected_before_next_request(t
         spinner_visible = False
         for _ in range(300):
             await pilot.pause()
-            any_spinner = any(line.startswith(_THINKING_MARK) for line in app._stream_lines)
+            any_spinner = "Ctrl+C abort" in str(app.query_one("#waiting_status").render())
             if any_spinner and not spinner_visible:
                 spinner_windows += 1
                 spinner_visible = True

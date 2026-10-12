@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections import deque
 from copy import deepcopy
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from one.core.agent_runtime_facade import AgentRuntimeFacade
+from one.core.session_manager import SessionManager
 from one.core.threaded_agent_runtime import RuntimeBootstrapSpec
 from one.core.tui_runtime_host import TUI_COMMANDS, TuiBootstrap, TuiRuntimeHost, create_tui_runtime
 from one.modes.tui_mode import TuiSessionView
@@ -186,6 +188,146 @@ async def test_production_facade_pilot_opens_durable_evidence_and_flat_finish(tm
             # own lifecycle events cross the detached bridge.
     finally:
         provider.release.set()
+        await facade.close()
+        assert facade.finalize()
+
+
+@pytest.mark.asyncio
+async def test_production_tui_recovers_malformed_candidate_through_real_facade(tmp_path) -> None:
+    """Textual receives real worker/host events, including parser diagnostics."""
+    from textual.widgets import Static
+
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.base import ChatResult
+
+    class Loader:
+        cwd = str(tmp_path)
+
+        def get_system_prompt(self, selected_tools=None):  # noqa: ARG002
+            return "test"
+
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(text='{"tool":"read","args":{' + "x" * 320, raw={}, usage={})
+            if self.calls == 2:
+                return ChatResult(text='{"tool":"read","args":{"path":"input.txt"}}', raw={}, usage={})
+            return ChatResult(text='{"tool":"finish","args":{"summary":"recovered finish","goal_success":true}}', raw={}, usage={})
+
+    provider = Provider()
+    executed: list[str] = []
+
+    async def factory(_spec):
+        auth = AuthStorage.in_memory()
+        auth.set_runtime_api_key("openai", "test")
+        registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+        model = registry.find("openai", "gpt-4.1")
+        assert model is not None
+        session = AgentSession(SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory({"tools": {"maxSteps": 4}}), registry, Loader(), model, "medium", tools=["read", "finish"])
+        original = session._execute_tool_by_name
+
+        async def execute(name, arguments, timeout_sec=None):  # noqa: ANN001
+            executed.append(name)
+            if name == "read":
+                return {"ok": True, "output": "stub read"}
+            return await original(name, arguments, timeout_sec)
+
+        session._execute_tool_by_name = execute  # type: ignore[method-assign]
+        session.providers = {"openai": provider}
+        return TuiRuntimeHost(SimpleNamespace(session=session, dispose=session.dispose), None)
+
+    facade = AgentRuntimeFacade(RuntimeBootstrapSpec(cwd=str(tmp_path), agent_dir=str(tmp_path / "agent")), factory, command_allowlist=TUI_COMMANDS)
+    seen: list[dict] = []
+    facade.subscribe(seen.append)
+    await facade.start()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    try:
+        async with app.run_test() as pilot:
+            await pilot.press(*list("inspect"), "enter")
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if not app._turn_active:
+                    break
+            rendered = str(app.query_one("#stream", Static).content)
+            assert executed == ["read", "finish"]
+            assert "Response: malformed JSON; no tool was executed." in rendered
+            assert "recovered finish" in rendered
+            assert any(event.get("type") == "tool_call_parse_failed" and event.get("source") == "response" and event.get("category") == "malformed_json" for event in seen)
+    finally:
+        await facade.close()
+        assert facade.finalize()
+
+
+@pytest.mark.asyncio
+async def test_production_tui_persistent_malformed_candidate_is_safe_failure(tmp_path) -> None:
+    """A failed bounded repair is a failed turn, never raw JSON completion."""
+    from textual.widgets import Static
+
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.base import ChatResult
+
+    class Loader:
+        cwd = str(tmp_path)
+
+        def get_system_prompt(self, selected_tools=None):  # noqa: ARG002
+            return "test"
+
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.calls += 1
+            return ChatResult(text='{"tool":"read","args":{' + "x" * 320, raw={}, usage={})
+
+    provider = Provider()
+
+    async def factory(_spec):
+        auth = AuthStorage.in_memory()
+        auth.set_runtime_api_key("openai", "test")
+        registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+        model = registry.find("openai", "gpt-4.1")
+        assert model is not None
+        session = AgentSession(SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory(), registry, Loader(), model, "medium", tools=["read"])
+        session.providers = {"openai": provider}
+        return TuiRuntimeHost(SimpleNamespace(session=session, dispose=session.dispose), None)
+
+    facade = AgentRuntimeFacade(RuntimeBootstrapSpec(cwd=str(tmp_path), agent_dir=str(tmp_path / "agent")), factory, command_allowlist=TUI_COMMANDS)
+    seen: list[dict] = []
+    facade.subscribe(seen.append)
+    await facade.start()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    try:
+        async with app.run_test() as pilot:
+            await pilot.press(*list("inspect"), "enter")
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if not app._turn_active:
+                    break
+            rendered = str(app.query_one("#stream", Static).content)
+            assert provider.calls == 2
+            assert any(event.get("type") == "turn_end" and event.get("ok") is False for event in seen)
+            assert "invalid tool call and could not recover" in rendered
+            assert '"tool":"read"' not in rendered
+    finally:
         await facade.close()
         assert facade.finalize()
 
@@ -579,8 +721,13 @@ async def test_detached_tui_monitor_refreshes_from_snapshots_and_rebinds_epoch()
             }
 
         async def command(self, command, _payload=None):
-            assert command == "snapshot"
-            return {"result": deepcopy(self.snapshot)}
+            if command == "snapshot":
+                return {"result": deepcopy(self.snapshot)}
+            if command == "monitor_snapshot":
+                return {"result": {"epoch": self.snapshot["epoch"], "monitor": deepcopy(self.snapshot["monitor"])}}
+            if command == "status_snapshot":
+                return {"result": {"epoch": self.snapshot["epoch"], "sidebar": deepcopy(self.snapshot["sidebar"]), "mcp": []}}
+            raise AssertionError(command)
 
         def subscribe(self, listener):
             self.listeners.append(listener)
@@ -617,6 +764,136 @@ async def test_detached_tui_monitor_refreshes_from_snapshots_and_rebinds_epoch()
         app._bind_session()
         assert app._monitor_child("old-child") is None
         assert app._monitor_child("new-child") is not None
+
+
+@pytest.mark.asyncio
+async def test_detached_monitor_refresh_is_single_flight_and_retries_dirty_state() -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    class Facade:
+        def __init__(self) -> None:
+            self.listeners = []
+            self.calls = 0
+            self.entered = asyncio.Event()
+            self.second_entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.snapshot = {"epoch": 1, "sidebar": {"sessionId": "s"}, "messages": [],
+                             "monitor": {"revision": 1, "children": []}}
+
+        async def command(self, command, _payload=None):
+            if command == "snapshot":
+                return {"result": deepcopy(self.snapshot)}
+            if command == "status_snapshot":
+                return {"result": {"epoch": 1, "sidebar": {"sessionId": "s"}, "mcp": []}}
+            assert command == "monitor_snapshot"
+            self.calls += 1
+            (self.entered if self.calls == 1 else self.second_entered).set()
+            await self.release.wait()
+            return {"result": {"epoch": 1, "monitor": deepcopy(self.snapshot["monitor"])}}
+
+        def subscribe(self, listener, **_kwargs):
+            self.listeners.append(listener)
+            return lambda: self.listeners.remove(listener)
+
+        def emit(self, event):
+            for listener in tuple(self.listeners):
+                listener(event)
+
+    facade = Facade()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    async with app.run_test() as pilot:
+        facade.emit({"type": "subagent_monitor_invalidated", "epoch": 1})
+        # The listener deliberately uses the bounded UI ingress. Reduce its
+        # queued barrier before asking the monitor scheduler to dispatch.
+        app._flush_pending_ui_events()
+        app._flush_monitor_refresh()
+        app._flush_monitor_refresh()
+        await facade.entered.wait()
+        assert facade.calls == 1
+        facade.snapshot["monitor"] = {"revision": 2, "children": [{"sessionId": "new"}]}
+        facade.emit({"type": "subagent_monitor_invalidated", "epoch": 1})
+        app._flush_pending_ui_events()
+        accepted = asyncio.Event()
+        original_accept = app._accept_monitor_snapshot
+
+        def accepted_new(snapshot, generation):
+            result = original_accept(snapshot, generation)
+            if result and app._monitor_child("new") is not None:
+                accepted.set()
+            return result
+
+        app._accept_monitor_snapshot = accepted_new  # type: ignore[method-assign]
+        facade.release.set()
+        await facade.second_entered.wait()
+        app._flush_monitor_refresh()
+        await accepted.wait()
+        assert facade.calls == 2
+        assert app._monitor_child("new") is not None
+
+
+@pytest.mark.asyncio
+async def test_delayed_old_epoch_monitor_response_cannot_mutate_or_repaint_new_view() -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    class Facade:
+        def __init__(self) -> None:
+            self.listeners = []
+            self.entered, self.release = asyncio.Event(), asyncio.Event()
+            self.snapshot = {"epoch": 4, "sidebar": {"sessionId": "old"}, "messages": [],
+                             "monitor": {"revision": 1, "children": [{"sessionId": "old-child"}]}}
+
+        async def command(self, command, _payload=None):
+            if command == "snapshot":
+                return {"result": deepcopy(self.snapshot)}
+            if command == "status_snapshot":
+                return {"result": {"epoch": self.snapshot["epoch"], "sidebar": deepcopy(self.snapshot["sidebar"]), "mcp": []}}
+            assert command == "monitor_snapshot"
+            old = {"epoch": 4, "monitor": {"revision": 2, "children": [{"sessionId": "old-result"}]}}
+            self.entered.set()
+            await self.release.wait()
+            return {"result": old}
+
+        def subscribe(self, listener, **_kwargs):
+            self.listeners.append(listener)
+            return lambda: self.listeners.remove(listener)
+
+        def emit(self, event):
+            for listener in tuple(self.listeners):
+                listener(event)
+
+    facade = Facade()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    response_returned = asyncio.Event()
+    original_refresh_monitor = view.refresh_monitor
+
+    async def refresh_monitor_barrier():
+        result = await original_refresh_monitor()
+        response_returned.set()
+        return result
+
+    view.refresh_monitor = refresh_monitor_barrier  # type: ignore[method-assign]
+    async with app.run_test():
+        facade.emit({"type": "subagent_monitor_invalidated", "epoch": 4})
+        app._flush_pending_ui_events()
+        app._flush_monitor_refresh()
+        await facade.entered.wait()
+        facade.snapshot = {"epoch": 5, "sidebar": {"sessionId": "new"}, "messages": [],
+                           "monitor": {"revision": 0, "children": [{"sessionId": "new-child"}]}}
+        await view.refresh()
+        app._bind_session()
+        rendered = []
+        app._render_agents_panel = lambda: rendered.append("paint")  # type: ignore[method-assign]
+        facade.release.set()
+        # There is no await between this wrapper's signal and the app's epoch
+        # guard, so the barrier proves the stale reply finished reduction.
+        await response_returned.wait()
+        assert app._monitor_child("new-child") is not None
+        assert app._monitor_child("old-result") is None
+        assert rendered == []
 
 
 def test_tui_host_ignores_inflight_old_monitor_notification_after_epoch_rebind() -> None:
@@ -856,6 +1133,96 @@ def test_tui_snapshot_normalizes_mcp_state_without_schemas() -> None:
         {"name": "retry", "enabled": True, "running": False, "transport": "http", "runtimeState": "retrying", "available": False, "toolCount": 0, "error": "retrying"},
         {"name": "off", "enabled": False, "running": False, "transport": "", "runtimeState": "disabled", "available": False, "toolCount": 0, "error": ""},
     ]
+
+
+def test_tui_status_and_monitor_projections_do_not_walk_full_snapshot_or_stats() -> None:
+    """The ten-Hz paint path must remain independent of transcript accounting."""
+    class Settings:
+        def get_bash_show_output(self): return True
+        def get_theme(self): return "default"
+        def get_tui_info_panel(self): return "top"
+        def get_retry_mode(self): return "on"
+        def get_subagents_enabled(self): return True
+        def get_tui_tool_result_preview_lines(self): return 100
+
+    class Session:
+        model = SimpleNamespace(provider="stub", id="model")
+        session_id = "current"
+        session_manager = SimpleNamespace(cwd="/tmp", session_dir="/tmp")
+        thinking_level, temperature, is_streaming, temperature_mode = "medium", 0.5, False, "balanced"
+        is_compacting, approval_callback, subagents_hard_disabled = False, None, False
+        settings_manager = Settings()
+        active_tools, pending_message_count = [], 0
+        steering_mode, follow_up_mode = "queue", "queue"
+        messages = property(lambda _self: (_ for _ in ()).throw(AssertionError("history accessed")))
+        model_registry = property(lambda _self: (_ for _ in ()).throw(AssertionError("catalogue accessed")))
+        def get_pending_queues(self): return {"steering": [], "followUp": []}
+        def get_context_usage(self): raise AssertionError("context stats accessed")
+        def get_session_stats(self): raise AssertionError("session stats accessed")
+        subagent_monitor = SimpleNamespace(snapshot=lambda: {"revision": 1, "children": []})
+
+    host = object.__new__(TuiRuntimeHost)
+    host._epoch, host._session, host._mcp = 3, lambda: Session(), None
+    host._sidebar_expensive = None
+
+    status = host.status_snapshot()
+    monitor = host.monitor_snapshot()
+    assert status["epoch"] == monitor["epoch"] == 3
+    assert status["sidebar"]["contextKnown"] is False
+    assert monitor["monitor"] == {"revision": 1, "children": []}
+
+
+def test_tui_status_and_monitor_dtos_fit_48k_with_maximum_bounded_children() -> None:
+    session = SimpleNamespace(subagent_monitor=SimpleNamespace(snapshot=lambda: {
+        "revision": 1,
+        "children": [
+            {"sessionId": str(index), "task": "x" * 50_000, "outputTail": "y" * 50_000,
+             "timeline": [{"text": "z" * 50_000, "args": "a" * 50_000} for _ in range(16)]}
+            for index in range(20)
+        ],
+    }))
+    host = object.__new__(TuiRuntimeHost)
+    host._epoch, host._session = 7, lambda: session
+    host._sidebar = lambda: {"sessionId": "s"}  # type: ignore[method-assign]
+    host._mcp = SimpleNamespace(server_status=lambda: [
+        {"name": str(index), "enabled": True, "error": "e" * 50_000} for index in range(100)
+    ])
+
+    status = host.status_snapshot()
+    monitor = host.monitor_snapshot()
+    assert len(json.dumps(status, ensure_ascii=False).encode()) <= 48 * 1024
+    assert len(json.dumps(monitor, ensure_ascii=False).encode()) <= 48 * 1024
+    assert len(monitor["monitor"]["children"]) == 20
+    assert len(status["mcp"]) == 32
+
+
+@pytest.mark.asyncio
+async def test_session_switches_clear_cached_expensive_sidebar_before_success_or_failure(monkeypatch) -> None:
+    old = SimpleNamespace(session_manager=SimpleNamespace(cwd="/tmp", session_dir="/tmp/sessions"))
+    new = SimpleNamespace(session_manager=SimpleNamespace(cwd="/tmp", session_dir="/tmp/sessions"))
+
+    class Owner:
+        session = old
+        async def switch_session(self, _path): self.session = new
+
+    host = object.__new__(TuiRuntimeHost)
+    host._host, host._epoch = Owner(), 2
+    host._session = lambda: host._host.session
+    host._approvals, host._approval_active = deque(), None
+    host._sidebar_expensive = {"usage": {"percent": 99}, "stats": {"cost": 12}}
+    host._bind_session_events = lambda: None
+    host._bind_monitor = lambda: None
+    host._snapshot = lambda: {"cache": host._sidebar_expensive}  # type: ignore[method-assign]
+
+    monkeypatch.setattr(SessionManager, "list", staticmethod(lambda *_args: []))
+    with pytest.raises(ValueError, match="no longer available"):
+        await host.switch_session("/tmp/missing", "missing")
+    assert host._sidebar_expensive is None
+
+    host._sidebar_expensive = {"usage": {"percent": 99}, "stats": {"cost": 12}}
+    monkeypatch.setattr(SessionManager, "list", staticmethod(lambda *_args: [SimpleNamespace(path="/tmp/new", id="new")]))
+    assert await host.switch_session("/tmp/new", "new") == {"cache": None}
+    assert host._epoch == 3
 
 
 def test_tui_snapshot_whole_document_is_bounded_and_keeps_latest_control_state() -> None:
