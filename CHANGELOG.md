@@ -25,6 +25,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Sidebar subagent status** — `Subagents: on` and `Agents: N running` are
+  consolidated into a single `Subagents: on (N running)` line; the `/agents`
+  command is unchanged.
+
 - **TUI responsiveness validation** — the offline profiler now exercises the
    detached `TuiSessionView`/runtime-facade route under bounded delta floods,
    child invalidations, slow worker I/O/Git stubs, and CPU contention. It reports
@@ -46,6 +50,16 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   line-offset, and line-limit arguments, bounded output, and image handling.
 
 ### Fixed
+
+- **TUI evidence overlay theming** — evidence viewer (header, body, content,
+  actions, and Previous/Next/Close buttons) now follows the selected theme
+  via `_apply_theme`; changes apply immediately while the viewer is open
+  without raw content leakage.
+
+- **TUI approval summary displayArgs** — detached runtime `tui_approval_request`
+  events now propagate sanitized `displayArgs` (bounded to 512 characters) into
+  the pending approval dict so `_approval_summary` shows the actual tool
+  arguments instead of `{}`.
 
 - **TUI evidence and model paging** — production runtime command allowlisting now
   permits bounded evidence and model pages. The viewer distinguishes a rejected

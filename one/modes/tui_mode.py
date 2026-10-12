@@ -1384,8 +1384,6 @@ if TEXTUAL_AVAILABLE:
             padding: 1 2;
             layer: above;
             layout: vertical;
-            border: heavy #456ca8;
-            background: #0d1424;
         }
         #evidence_overlay.visible { display: block; }
         #evidence_header { height: auto; }
@@ -3665,6 +3663,32 @@ if TEXTUAL_AVAILABLE:
                     approval_summary.update(self._approval_summary(self._approval_pending))
             except Exception:
                 pass
+            try:
+                evidence_overlay = self.query_one("#evidence_overlay", Vertical)
+                evidence_overlay.styles.background = theme.panel_bg
+                evidence_overlay.styles.border = ("heavy", theme.panel_border)
+                evidence_overlay.styles.color = theme.screen_fg
+                self.query_one("#evidence_header", Static).styles.color = theme.screen_fg
+                self.query_one("#evidence_body", VerticalScroll).styles.background = theme.panel_bg
+                self.query_one("#evidence_body", VerticalScroll).styles.color = theme.screen_fg
+                self.query_one("#evidence_content", Static).styles.color = theme.screen_fg
+                evidence_actions = self.query_one("#evidence_actions", Horizontal)
+                evidence_actions.styles.background = theme.panel_bg
+                evidence_actions.styles.color = theme.screen_fg
+                evidence_prev = self.query_one("#evidence-prev", Button)
+                evidence_prev.styles.background = theme.user_bg
+                evidence_prev.styles.color = theme.user
+                evidence_prev.styles.border = ("round", theme.user)
+                evidence_next = self.query_one("#evidence-next", Button)
+                evidence_next.styles.background = theme.user_bg
+                evidence_next.styles.color = theme.user
+                evidence_next.styles.border = ("round", theme.user)
+                evidence_close = self.query_one("#evidence-close", Button)
+                evidence_close.styles.background = theme.panel_bg
+                evidence_close.styles.color = theme.error
+                evidence_close.styles.border = ("round", theme.error)
+            except Exception:
+                pass
             # A facade-originated theme change need not add transcript output,
             # so force a repaint even when the logical lines are unchanged.
             self._rendered_stream_lines = ()
@@ -3862,11 +3886,10 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Status: {sanitize_display_text(status)}\n")
             info_block.append(f"Delivery: {sanitize_display_text(s['deliveryMode'])}\n")
             info_block.append(f"COOP: {'ON' if s['coop'] == 'on' or self._approval_pending is not None else 'OFF'}\n")
-            info_block.append(f"Subagents: {'on' if s['subagents'] else 'off'}\n")
             running_agents = sum(
                 1 for child in self._monitor_snapshot.get("children", []) if child.get("status") == "running"
             )
-            info_block.append(f"Agents: {running_agents} running (/agents)\n")
+            info_block.append(f"Subagents: {'on' if s['subagents'] else 'off'} ({running_agents} running)\n")
             info_block.append(f"Details: {'on' if s['bashOutput'] else 'off'}\n")
             cwd = sanitize_display_text(cwd_key)
             branch = self._cached_git_branch(cwd_key)
@@ -6784,12 +6807,18 @@ if TEXTUAL_AVAILABLE:
             elif et == "tui_approval_request":
                 # Runtime-owned FIFO approval.  The event has no Future or
                 # live child/session object; reply is correlated by ID+epoch.
+                # Copy sanitized displayArgs from the host so the approval
+                # summary can render the actual tool arguments.
+                display_args = event.get("displayArgs")
+                if isinstance(display_args, str):
+                    display_args = display_args[:512]
                 pending = {
                     "id": str(event.get("approvalId") or ""),
                     "tool": str(event.get("tool") or "tool"),
                     "args": {},
                     "origin": event.get("origin"),
                     "epoch": event.get("epoch"),
+                    "displayArgs": display_args,
                 }
                 if isinstance(self.session, TuiSessionView) and self._detached_waiter_epoch(pending) is None:
                     self._write("[Approval] ignored stale or invalid approval request", "error")

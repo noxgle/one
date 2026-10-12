@@ -1410,8 +1410,21 @@ async def test_tui_resize_reflows_stream_cache_and_preserves_trim_anchor(tmp_pat
         assert app._stream_cache_width != old_width
         assert transcript.virtual_size.height > old_height
         assert app._apply_theme("light")
-        await pilot.pause(0.05)
+        # Resize and theme invalidation share the frame-capped renderer.  Wait
+        # for the scheduled render that owns the cache transition rather than
+        # assuming it completes in an arbitrary sleep interval.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if (
+                app._stream_cache_theme == "light"
+                and app._rendered_stream_revision == app._stream_render_revision
+                and not app._stream_render_dirty
+            ):
+                break
+            await pilot.pause(0.01)
         assert app._stream_cache_theme == "light"
+        assert app._rendered_stream_revision == app._stream_render_revision
+        assert not app._stream_render_dirty
         assert app._stream_content_cache
 
         container = app.query_one("#stream_container", VerticalScroll)
