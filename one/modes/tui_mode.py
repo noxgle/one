@@ -6181,7 +6181,7 @@ if TEXTUAL_AVAILABLE:
             """Fetch one bounded, session/epoch-bound safe evidence page."""
             target = self._evidence_link_tokens.get(token)
             if target is None:
-                self._write("Full result unavailable.", "warn")
+                self._write("Full result unavailable: this link is no longer in the active transcript.", "warn")
                 return
             generation, evidence_id, offset, epoch = target
             if (
@@ -6189,7 +6189,7 @@ if TEXTUAL_AVAILABLE:
                 or (isinstance(self.session, TuiSessionView) and epoch != self.session.epoch)
                 or self._evidence_link_line_ids.get(token) not in set(self._stream_line_ids)
             ):
-                self._write("Full result unavailable.", "warn")
+                self._write("Full result unavailable: this link belongs to an earlier session view.", "warn")
                 return
             self._schedule_evidence_page(generation, evidence_id, offset, ())
 
@@ -6219,7 +6219,9 @@ if TEXTUAL_AVAILABLE:
                 )
             except Exception:
                 if request_generation == self._evidence_request_generation:
-                    self._write("Full result unavailable.", "warn")
+                    # Do not expose runtime exception text: it can contain paths,
+                    # transport details, or provider data.
+                    self._write("Unable to open full result: the runtime rejected the request.", "warn")
                 return
             if (
                 request_generation != self._evidence_request_generation
@@ -6228,8 +6230,11 @@ if TEXTUAL_AVAILABLE:
                 or request_epoch != request_session.epoch
             ):
                 return
-            if result.get("epoch") != request_epoch or not result.get("available"):
-                self._write("Full result unavailable.", "warn")
+            if result.get("epoch") != request_epoch:
+                self._write("Full result unavailable: the session view changed.", "warn")
+                return
+            if not result.get("available"):
+                self._write("Full result is no longer available.", "warn")
                 return
             self._evidence_panel = {
                 "generation": generation, "evidenceId": evidence_id, "offset": offset,

@@ -47,6 +47,14 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI evidence and model paging** — production runtime command allowlisting now
+  permits bounded evidence and model pages. The viewer distinguishes a rejected
+  runtime request, stale session view, and genuinely unavailable durable result
+  without exposing runtime error details.
+- **Flat JSON tool calls** — conservative normalization now accepts unambiguous
+  flat `bash`, `spawn_subagent`, and `finish` arguments while rejecting conflicts
+  with nested arguments and preserving bounded malformed-call repair.
+
 - **TUI tool results and evidence actions** — result previews now default to 100
   logical lines, preserve safe command/task summaries, and generated full-result
   links remain valid across completion, later turns, reflow, and transcript trim.

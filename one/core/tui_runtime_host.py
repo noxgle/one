@@ -1252,6 +1252,8 @@ TUI_COMMANDS = frozenset(
         "snapshot",
         "prompt",
         "abort",
+        "models_page",
+        "evidence_page",
         "answer_question",
         "approval_resolve",
         "switch_session",

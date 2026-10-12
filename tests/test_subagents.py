@@ -111,6 +111,47 @@ def _mk_agent(
 
 
 @pytest.mark.asyncio
+async def test_flat_tool_arguments_dispatch_once_and_finish_is_not_rendered_as_prose(tmp_path: Path) -> None:
+    """Text-only providers may omit args, without granting ambiguous calls execution."""
+    agent = _mk_agent(tmp_path, tools=["spawn_subagent", "bash", "finish"])
+    agent.providers = {"openai": _Provider([
+        json.dumps({"tool": "spawn_subagent", "task": "inspect ['Ω']"}),
+        json.dumps({"tool": "bash", "command": "printf '[Ω]'"}),
+        json.dumps({"tool": "finish", "summary": "flat tools complete", "goal_success": True}),
+    ])}
+    dispatched: list[tuple[str, dict[str, Any]]] = []
+    original_execute = agent._execute_tool_by_name
+
+    async def execute(name: str, args: dict[str, Any], timeout_sec=None):  # noqa: ANN001
+        dispatched.append((name, dict(args)))
+        if name == "finish":
+            return await original_execute(name, args, timeout_sec)
+        return {"ok": True, "output": name}
+
+    agent._execute_tool_by_name = execute  # type: ignore[method-assign]
+    await agent.prompt("go")
+
+    assert dispatched == [
+        ("spawn_subagent", {"task": "inspect ['Ω']"}),
+        ("bash", {"command": "printf '[Ω]'"}),
+        ("finish", {"summary": "flat tools complete", "goal_success": True}),
+    ]
+    assert agent.get_last_finish_result()["finished"] is True
+    assert agent.messages[-1]["content"][0]["text"] == "flat tools complete"
+
+
+def test_flat_tool_parser_rejects_missing_or_conflicting_args_and_prose(tmp_path: Path) -> None:
+    agent = _mk_agent(tmp_path, tools=["bash", "spawn_subagent", "finish"])
+    assert agent._try_parse_tool_call('{"tool":"bash","command":"printf \\"[Ω]\\""}') == {
+        "tool": "bash", "args": {"command": 'printf "[Ω]"'}, "toolCallId": None,
+    }
+    assert agent._try_parse_tool_call('{"tool":"bash"}') is None
+    assert agent._try_parse_tool_call('{"tool":"spawn_subagent"}') is None
+    assert agent._try_parse_tool_call('{"tool":"bash","args":{"command":"one"},"command":"two"}') is None
+    assert agent._try_parse_tool_call('I saw {"tool":"bash","command":"not an action"} in a log.') is None
+
+
+@pytest.mark.asyncio
 async def test_spawn_subagent_single_delegates(tmp_path: Path):
     """spawn_subagent with a single task: subagent runs and finishes, parent sees the summary."""
     spawn_json = json.dumps({"tool": "spawn_subagent", "args": {"task": "sub task"}})

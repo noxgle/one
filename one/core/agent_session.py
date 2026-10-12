@@ -452,12 +452,26 @@ class AgentSession:
             self._emit({"type": "ask_user_released", "reason": "cooperation disabled"})
 
     def _try_parse_tool_call(self, text: str, provider_tool_call_id: str | None = None) -> dict[str, Any] | None:
+        # Flat arguments are accepted only for the small, explicit set below.
+        # Do not turn arbitrary JSON mentioned in assistant prose into an action.
+        # These names mirror the registered tool argument schemas.
+        flat_argument_fields = {
+            "bash": frozenset({"command", "timeout"}),
+            "spawn_subagent": frozenset({"task", "tasks", "model", "tools", "temperature", "temperatureMode", "timeout"}),
+            "finish": frozenset({"summary", "goal_success"}),
+        }
+
         def normalize_tool_args(tool: str, raw_args: Any) -> dict[str, Any] | None:
             t = tool.strip().lower()
             if isinstance(raw_args, dict):
                 if t == "bash":
                     command = raw_args.get("command")
                     if not isinstance(command, str) or not command.strip():
+                        return None
+                if t == "finish":
+                    # goal_success has an established false-by-explicit-value
+                    # defaulting contract; an omitted summary does not.
+                    if not isinstance(raw_args.get("summary"), str):
                         return None
                 return raw_args
             if isinstance(raw_args, str):
@@ -606,11 +620,14 @@ class AgentSession:
             value = str(value).strip()
             return value[:128] if value else None
 
-        def parse_from_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
+        def parse_from_obj(obj: dict[str, Any], *, allow_flat: bool = False) -> dict[str, Any] | None:
             tool = obj.get("tool") or obj.get("name")
             function = obj.get("function")
             if tool is None and isinstance(function, dict):
                 tool = function.get("name") or function.get("tool")
+            nested_supplied = any(key in obj for key in ("args", "input", "arguments")) or (
+                isinstance(function, dict) and any(key in function for key in ("arguments", "args", "input"))
+            )
             args = obj.get("args")
             if args is None:
                 args = obj.get("input")
@@ -618,8 +635,6 @@ class AgentSession:
                 args = obj.get("arguments")
             if args is None and isinstance(function, dict):
                 args = function.get("arguments") or function.get("args") or function.get("input")
-            if args is None:
-                args = {}
             if isinstance(args, str):
                 # raw-function-call often encodes arguments as JSON string.
                 try:
@@ -628,12 +643,20 @@ class AgentSession:
                         args = parsed_args
                 except Exception:
                     pass
-            if not args and tool == "finish":
-                # Flat form: {"tool":"finish","summary":"...","goal_success":true}
-                flat = {k: v for k, v in obj.items() if k not in ("tool", "name", "args", "input", "arguments")}
-                if flat:
-                    args = flat
             if isinstance(tool, str):
+                fields = flat_argument_fields.get(tool.strip().lower(), frozenset())
+                flat = {key: obj[key] for key in fields if key in obj}
+                if nested_supplied:
+                    # Nested arguments are canonical. A contradictory duplicate is
+                    # ambiguity, not a licence to choose an action silently.
+                    if flat and isinstance(args, dict) and any(args.get(key) != value for key, value in flat.items()):
+                        return None
+                elif allow_flat and flat:
+                    args = flat
+                else:
+                    # In particular, never synthesize {} for missing command/task
+                    # arguments (or turn an empty finish into a synthetic success).
+                    return None
                 normalized_args = normalize_tool_args(tool, args)
                 if normalized_args is not None:
                     call_id = bounded_id(
@@ -685,7 +708,13 @@ class AgentSession:
                     continue
                 if not isinstance(obj, dict):
                     continue
-                parsed = parse_from_obj(obj)
+                # Only a complete response or explicit tool framing may use the
+                # convenience flat form. Balanced objects embedded in prose retain
+                # the historical canonical parser but cannot broaden execution.
+                parsed = parse_from_obj(
+                    obj,
+                    allow_flat=(c == stripped or c.startswith("{") and raw_text.strip().startswith("```") or marker in raw_text),
+                )
                 if parsed is not None:
                     return parsed
             return None
@@ -716,7 +745,7 @@ class AgentSession:
                     continue
                 if not isinstance(obj, dict):
                     continue
-                parsed = parse_from_obj(obj)
+                parsed = parse_from_obj(obj, allow_flat=obj.get("type") in {"raw-function-call", "function_call"})
                 if parsed is not None and ("arguments" in obj or obj.get("type") in {"raw-function-call", "function_call"}):
                     return parsed
 
@@ -3096,6 +3125,29 @@ class AgentSession:
                                 assistant["content"] = [{"type": "text", "text": ""}]
                                 assistant["_streamedSuppressed"] = True
                                 assistant_text = ""
+                            # Keep the long-standing diagnostic shape for canonical
+                            # candidates. Flat candidates get the existing bounded
+                            # repair path, while malformed canonical JSON retains
+                            # its normal post-tool-only repair behavior.
+                            toolish = (
+                                '"tool"' in assistant_text
+                                and '"args"' in assistant_text
+                                and (
+                                    assistant_text.strip().startswith("{")
+                                    or "```" in assistant_text
+                                    or "TOOL_CALL:" in assistant_text
+                                )
+                            )
+                            flat_toolish = (
+                                '"tool"' in assistant_text
+                                and '"args"' not in assistant_text
+                                and any(field in assistant_text for field in ('"command"', '"task"', '"tasks"', '"summary"'))
+                                and (
+                                    assistant_text.strip().startswith("{")
+                                    or "```" in assistant_text
+                                    or "TOOL_CALL:" in assistant_text
+                                )
+                            )
                             if (
                                 not tool_calls
                                 and not native_present
@@ -3167,7 +3219,7 @@ class AgentSession:
                             if (
                                 not tool_calls
                                 and not format_repair_attempted
-                                and (self._should_repair_tool_response(tool_results) or pseudo_recipient or native_present)
+                                and (self._should_repair_tool_response(tool_results) or pseudo_recipient or native_present or flat_toolish)
                             ):
                                 # This is intentionally independent of the short-text nudge.
                                 # One repair request per post-tool interval bounds recovery
@@ -3210,7 +3262,10 @@ class AgentSession:
                                     tool_call_source = "format_repair"
                                     self._emit({"type": "tool_response_repair_end", "used": False})
                             if not tool_calls:
-                                toolish = (
+                                # A bounded repair may have replaced the response.
+                                # Reclassify only for the safe diagnostic, never to
+                                # start another repair cycle.
+                                toolish = toolish or (
                                     '"tool"' in assistant_text
                                     and '"args"' in assistant_text
                                     and (
@@ -3219,7 +3274,17 @@ class AgentSession:
                                         or "TOOL_CALL:" in assistant_text
                                     )
                                 )
-                                if toolish:
+                                flat_toolish = flat_toolish or (
+                                    '"tool"' in assistant_text
+                                    and '"args"' not in assistant_text
+                                    and any(field in assistant_text for field in ('"command"', '"task"', '"tasks"', '"summary"'))
+                                    and (
+                                        assistant_text.strip().startswith("{")
+                                        or "```" in assistant_text
+                                        or "TOOL_CALL:" in assistant_text
+                                    )
+                                )
+                                if toolish or flat_toolish:
                                     self._emit(
                                         {
                                             "type": "tool_call_parse_failed",
