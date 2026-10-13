@@ -559,6 +559,22 @@ async def test_event_projection_is_allowlisted_and_queue_remains_bounded() -> No
     await facade.close()
 
 
+def test_plan_update_projection_is_explicit_bounded_and_literal() -> None:
+    from one.core.agent_runtime_facade import _event_projection
+
+    projected = _event_projection({
+        "type": "plan_update",
+        "plan": "[not markup]",
+        "planItems": [{"step": f"step {index}", "status": "pending", "secret": "no"} for index in range(12)],
+    })
+    assert projected["planPresent"] is True
+    assert projected["cleared"] is False
+    assert projected["plan"] == "[not markup]"
+    assert len(projected["planItems"]) == 12
+    assert "secret" not in projected["planItems"][0]
+    assert _event_projection({"type": "plan_update", "plan": ""})["cleared"] is True
+
+
 @pytest.mark.asyncio
 async def test_shutdown_attempts_dispose_when_abort_fails() -> None:
     class BrokenAbort(_Runtime):

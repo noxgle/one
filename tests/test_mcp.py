@@ -143,6 +143,39 @@ async def test_mcp_manager_call_error_tool_raises(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_stdio_timeout_late_response_does_not_cross_correlate_next_request() -> None:
+    """The serialized stdio reader skips a late ID 1 response before ID 2."""
+    client = McpClient(McpServerConfig("fake", "unused"))
+    reads = iter([
+        TimeoutError(),
+        {"jsonrpc": "2.0", "id": 1, "result": {"late": True}},
+        {"jsonrpc": "2.0", "id": 2, "result": {"fresh": True}},
+    ])
+    async def write(_obj): pass  # noqa: ANN001
+    async def read(_timeout):  # noqa: ANN001
+        value = next(reads)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+    client._write = write  # type: ignore[method-assign]
+    client._read = read  # type: ignore[method-assign]
+    with pytest.raises(asyncio.TimeoutError):
+        await client._request("tools/call", {}, timeout=0.01)
+    assert await client._request("tools/call", {}, timeout=0.01) == {"fresh": True}
+
+
+@pytest.mark.asyncio
+async def test_http_session_404_is_transport_loss_not_healthy_catalog() -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(404, request=request))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = HttpMcpClient(McpServerConfig("web", "", url="http://x/mcp"), client=http)
+        client._session_id = "expired"
+        with pytest.raises(mcp_client_module.McpTransportError, match="session not found"):
+            await client.call_tool("x", {})
+        assert client._session_id is None
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_missing_command_reports_error(tmp_path: Path):
     manager = McpManager([McpServerConfig("ghost", "/nonexistent/binary-xyz")])
     await manager.start()
@@ -665,6 +698,36 @@ class _FailingHttpCallClient:
 
     def stderr_tail(self) -> list[str]:
         return []
+
+
+class _OperationalErrorClient(_FailingHttpCallClient):
+    def __init__(self, config: McpServerConfig) -> None:
+        super().__init__(config)
+        self.calls = 0
+
+    async def call_tool(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:
+        self.calls += 1
+        if self.calls % 2:
+            raise RuntimeError("tool rpc error")
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+
+@pytest.mark.asyncio
+async def test_operational_mcp_failures_do_not_remove_healthy_tools():
+    config = McpServerConfig("web", "", url="http://x/mcp", restart=True)
+    manager = McpManager([config])
+    client = _OperationalErrorClient(config)
+    manager._clients = [client]  # type: ignore[list-item]
+    manager._tools = [McpTool(name="web_tool", description="", input_schema=None, server="web")]
+
+    for _ in range(40):
+        try:
+            await manager.call_tool("web_tool", {})
+        except RuntimeError as error:
+            assert str(error) == "tool rpc error"
+        assert manager.has_tool("web_tool")
+        assert manager._clients == [client]
+    assert manager._restart_tasks == {}
 
 
 @pytest.mark.asyncio

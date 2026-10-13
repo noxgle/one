@@ -38,6 +38,7 @@ _DISPLAY_TEXT_FIELDS = frozenset({
     "text", "delta", "value", "content", "task", "question", "error", "reason",
     "warning", "answer", "displayArgs", "outputText",
 })
+_PLAN_ITEM_FIELDS = ("title", "step", "status")
 
 
 def _bounded_text(value: Any, maximum: int = _DISPLAY_TEXT_MAX_BYTES) -> str:
@@ -118,8 +119,44 @@ def _event_projection(event: Mapping[str, Any]) -> dict[str, Any]:
         result.update(_fields(event, _IDENTITY_FIELDS + ("delta", "text")))
         return result
 
+    if event_type == "plan_update":
+        # Plans are state, rather than arbitrary tool output.  Keep an explicit
+        # presence/clear marker: an omitted plan must never be interpreted as a
+        # request to clear the UI projection.
+        result["planPresent"] = "plan" in event or "planItems" in event
+        result["cleared"] = event.get("plan") == "" if "plan" in event else False
+        if isinstance(event.get("plan"), str):
+            result["plan"] = _display_text(event["plan"], 24 * 1024)
+        items = event.get("planItems")
+        if isinstance(items, list):
+            safe_items: list[dict[str, str]] = []
+            budget = 24 * 1024
+            omitted = 0
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                safe = {
+                    name: _display_text(item.get(name), 512)
+                    for name in _PLAN_ITEM_FIELDS if isinstance(item.get(name), str)
+                }
+                if safe:
+                    size = len(json.dumps(safe, ensure_ascii=False).encode("utf-8"))
+                    if size <= budget:
+                        safe_items.append(safe)
+                        budget -= size
+                    else:
+                        omitted += 1
+            result["planItems"] = safe_items
+            if omitted:
+                result["planItemsOmitted"] = omitted
+        return result
+
     if event_type == "subagent_monitor_invalidated":
         result.update(_fields(event, ("sessionId", "revision", "changeType")))
+        return result
+
+    if event_type == "mcp_availability":
+        result.update(_fields(event, ("name", "state", "toolCount", "reasonCode")))
         return result
 
     if event_type == "tui_approval_request":

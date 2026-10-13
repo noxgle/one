@@ -14,6 +14,14 @@ import httpx
 from one.config import VERSION as _ONE_VERSION
 
 
+class McpRpcError(RuntimeError):
+    """A server answered the request; its tool/RPC error is not a dead transport."""
+
+
+class McpTransportError(RuntimeError):
+    """The connection is known to be unusable and must be removed/recovered."""
+
+
 def _ensure_url(config: McpServerConfig) -> str:
     """Return config.url, raising if None (caller should only use this for HTTP transport)."""
     if config.url is None:
@@ -75,6 +83,10 @@ class McpClient:
         self._proc: asyncio.subprocess.Process | None = None
         self._next_id = 0
         self._stderr_tail: list[str] = []
+        # JSON-RPC over one stdio stream has no multiplexed response reader.
+        # Serialize calls so a timed-out request cannot have its late response
+        # consumed as another call's reply.
+        self._request_lock = asyncio.Lock()
 
     async def start(self) -> None:
         env = os.environ.copy()
@@ -127,13 +139,17 @@ class McpClient:
             raise RuntimeError(f"MCP server '{self.config.name}' is not running")
         line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=timeout)
         if not line:
-            raise RuntimeError(f"MCP server '{self.config.name}' closed stdout")
+            raise McpTransportError(f"MCP server '{self.config.name}' closed stdout")
         try:
             return json.loads(line.decode("utf-8", errors="replace"))
         except Exception as e:
             raise RuntimeError(f"MCP server '{self.config.name}' sent invalid JSON: {e}") from e
 
     async def _request(self, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+        async with self._request_lock:
+            return await self._request_serialized(method, params, timeout)
+
+    async def _request_serialized(self, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
         self._next_id += 1
         req_id = self._next_id
         await self._write({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
@@ -143,7 +159,7 @@ class McpClient:
                 continue  # ignore unrelated notifications/other responses
             if "error" in msg:
                 err = msg["error"]
-                raise RuntimeError(f"MCP server '{self.config.name}' error {err.get('code')}: {err.get('message')}")
+                raise McpRpcError(f"MCP server '{self.config.name}' error {err.get('code')}: {err.get('message')}")
             return msg.get("result") or {}
 
     async def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
@@ -279,7 +295,14 @@ class HttpMcpClient:
         resp = await self._client.post(url, headers=headers, json=payload, timeout=timeout)
         if resp.status_code >= 400:
             body = resp.text[:300] if resp.text else ""
-            raise RuntimeError(f"MCP server '{self.config.name}' HTTP {resp.status_code}: {body}")
+            if resp.status_code == 404 and self._session_id is not None:
+                # A session-scoped endpoint disappearing means this client can
+                # no longer safely advertise the old tool catalog.
+                self._session_id = None
+                raise McpTransportError(f"MCP server '{self.config.name}' session not found")
+            # HTTP responses prove that the transport is alive.  A temporary
+            # HTTP failure must not erase this server's catalog.
+            raise McpRpcError(f"MCP server '{self.config.name}' HTTP {resp.status_code}: {body}")
         content_type = resp.headers.get("content-type", "")
         if "text/event-stream" in content_type:
             return self._parse_sse(resp.text), resp.headers
@@ -306,7 +329,7 @@ class HttpMcpClient:
                 continue
             if "error" in msg:
                 err = msg["error"]
-                raise RuntimeError(f"MCP server '{self.config.name}' error {err.get('code')}: {err.get('message')}")
+                raise McpRpcError(f"MCP server '{self.config.name}' error {err.get('code')}: {err.get('message')}")
             return msg.get("result") or {}
         raise RuntimeError(f"MCP server '{self.config.name}' did not respond to '{method}'")
 
@@ -362,6 +385,7 @@ class McpManager:
         self._monitor_tasks: dict[str, asyncio.Task[None]] = {}
         self._closing = False
         self._tools_changed_callback: Any = None
+        self._availability_callback: Any = None
 
     @classmethod
     def create(cls, settings_manager: Any) -> McpManager:
@@ -400,12 +424,49 @@ class McpManager:
         """Install the session hook used to refresh the agent's MCP tool catalog."""
         self._tools_changed_callback = callback
 
+    def set_availability_callback(self, callback: Any) -> None:
+        """Install a metadata-only availability observer for detached UIs."""
+        self._availability_callback = callback
+
+    def _notify_availability(self, name: str, reason_code: str) -> None:
+        callback = self._availability_callback
+        if callback is None:
+            return
+        runtime = self._runtime.get(name, {})
+        try:
+            callback({
+                "name": name, "state": str(runtime.get("state", "configured")),
+                "toolCount": sum(1 for tool in self._tools if tool.server == name),
+                "reasonCode": reason_code,
+            })
+        except Exception:
+            pass
+
     def _notify_tools_changed(self) -> None:
         if self._tools_changed_callback is not None:
             try:
                 self._tools_changed_callback()
             except Exception:
                 pass
+
+    @staticmethod
+    def _transport_failed(error: BaseException) -> bool:
+        """Return true only when a client cannot safely serve a later call.
+
+        Timeouts, JSON-RPC errors and HTTP error responses are request-level
+        failures: they do not establish that a persistent stdio/HTTP transport
+        died.  Keep tools visible in those cases.
+        """
+        if isinstance(error, (McpTransportError, BrokenPipeError, ConnectionError)):
+            return True
+        if isinstance(error, (asyncio.TimeoutError, httpx.TimeoutException, McpRpcError)):
+            return False
+        if isinstance(error, httpx.TransportError):
+            return True
+        text = str(error).lower()
+        return any(marker in text for marker in (
+            "closed stdout", "is not running", "broken pipe", "network failed", "transport failed",
+        ))
 
     def _clear_error(self, name: str) -> None:
         self._errors = [error for error in self._errors if not error.startswith(f"MCP server '{name}':")]
@@ -434,6 +495,7 @@ class McpManager:
             if isinstance(client, McpClient):
                 self._monitor_tasks[config.name] = asyncio.create_task(self._monitor_stdio(client))
             self._notify_tools_changed()
+            self._notify_availability(config.name, "connected")
             return added
         except Exception:
             await client.close()
@@ -490,8 +552,10 @@ class McpManager:
         self._errors.append(self._failure_message(name, client, error))
         runtime = self._runtime.setdefault(name, {"attempts": 0})
         runtime["state"] = "failed"
+        runtime["reasonCode"] = "transport_closed"
         if removed_tools:
             self._notify_tools_changed()
+        self._notify_availability(name, "transport_closed")
         await asyncio.gather(*(failed.close() for failed in failed_clients), return_exceptions=True)
         if config.restart and config.enabled:
             self._schedule_restart(config)
@@ -512,6 +576,7 @@ class McpManager:
                     return
                 delay = config.retry_interval_sec if exhausted else config.restart_delay_sec
                 runtime["state"] = "retrying"
+                self._notify_availability(config.name, "retrying")
                 await asyncio.sleep(delay)
                 if self._closing or not config.enabled:
                     return
@@ -521,6 +586,8 @@ class McpManager:
                 except Exception as error:
                     runtime["attempts"] = attempts + 1
                     runtime["state"] = "failed"
+                    runtime["reasonCode"] = "restart_failed"
+                    self._notify_availability(config.name, "restart_failed")
                     self._errors = [entry for entry in self._errors if not entry.startswith(f"MCP server '{config.name}':")]
                     self._errors.append(self._failure_message(config.name, None, error))
         finally:
@@ -558,7 +625,15 @@ class McpManager:
         try:
             result = await client.call_tool(name, arguments, timeout=120.0 if timeout is None else timeout)
         except Exception as error:
-            await self._server_failed(tool.server, client, error)
+            # Do not turn one failed tool invocation into a global MCP outage.
+            # A monitor/actual transport closure still removes only this
+            # server's tools and follows its existing restart policy.
+            if self._transport_failed(error):
+                await self._server_failed(tool.server, client, error)
+            else:
+                reason = "request_timeout" if isinstance(error, (asyncio.TimeoutError, httpx.TimeoutException)) else "tool_rpc_error"
+                self._runtime.setdefault(tool.server, {})["reasonCode"] = reason
+                self._notify_availability(tool.server, reason)
             raise
         # Normalize MCP result into the session tool-result contract.
         content = result.get("content") or []
@@ -649,6 +724,7 @@ class McpManager:
         self._runtime[name] = {"state": "disabled", "attempts": 0}
         self._clear_error(name)
         self._notify_tools_changed()
+        self._notify_availability(name, "server_disabled")
         return removed
 
     def server_status(self) -> list[dict]:
@@ -674,6 +750,7 @@ class McpManager:
                     "restartAttempts": runtime.get("attempts", 0),
                     "maxRestartAttempts": config.max_restart_attempts,
                     "restartExhaustion": config.restart_exhaustion,
+                    "reasonCode": runtime.get("reasonCode", ""),
                 }
             )
         return statuses

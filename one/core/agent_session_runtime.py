@@ -3,6 +3,7 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from one.core.temperature import normalize_temperature
 from one.resources.default_skill_installer import install_default_skills
 from one.resources.resource_loader import DefaultResourceLoader
 from one.tools.index import DEFAULT_TOOL_NAMES
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -194,17 +197,39 @@ class AgentSessionRuntimeHost:
     async def _replace(
         self, session_manager: SessionManager, cwd: str | None = None, *, fresh_session: bool = False
     ) -> dict[str, Any]:
-        runtime = await create_agent_session_runtime(
-            self._bootstrap,
-            {
-                "cwd": cwd or session_manager.cwd,
-                "sessionManager": session_manager,
-                "resourceLoader": self._runtime.resource_loader,
-                "freshSession": fresh_session,
-                "restoreSession": not fresh_session,
-            },
-        )
+        old_runtime = self._runtime
+        try:
+            runtime = await create_agent_session_runtime(
+                self._bootstrap,
+                {
+                    "cwd": cwd or session_manager.cwd,
+                    "sessionManager": session_manager,
+                    "resourceLoader": self._runtime.resource_loader,
+                    "freshSession": fresh_session,
+                    "restoreSession": not fresh_session,
+                },
+            )
+        except BaseException:
+            # Session construction registers the shared MCP callback before
+            # extension binding. Restore the still-live session if that later
+            # construction step fails.
+            manager = self._bootstrap.get("mcpManager")
+            set_callback = getattr(manager, "set_tools_changed_callback", None)
+            if callable(set_callback):
+                set_callback(old_runtime.session.sync_mcp_tools)
+            raise
+        # Publish only a fully constructed replacement.  If construction fails
+        # the old listener and session remain usable.  The MCP manager is a
+        # shared worker resource and AgentSession.dispose deliberately does not
+        # close it.
         self._runtime = runtime
+        try:
+            await old_runtime.session.dispose()
+        except Exception:
+            # The replacement is already authoritative.  Do not report it as
+            # failed after publishing the pointer: that would leave the TUI
+            # event bridge attached to the disposed predecessor.
+            _LOG.exception("old session disposal failed after runtime replacement")
         return {"cancelled": False}
 
     async def new_session(self, options: dict[str, Any] | None = None) -> dict[str, Any]:

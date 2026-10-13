@@ -193,6 +193,72 @@ async def test_production_facade_pilot_opens_durable_evidence_and_flat_finish(tm
 
 
 @pytest.mark.asyncio
+async def test_production_facade_plan_seven_steps_survives_update_and_finish_clear(tmp_path) -> None:
+    """A real session/tool loop drives plan projection through TUI_COMMANDS."""
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.settings_manager import SettingsManager
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.base import ChatResult
+
+    steps = [{"step": f"step {index}", "status": "pending"} for index in range(1, 8)]
+
+    class Loader:
+        cwd = str(tmp_path)
+        def get_system_prompt(self, selected_tools=None):  # noqa: ARG002
+            return "test"
+
+    class Provider:
+        def __init__(self): self.calls = 0
+        async def chat(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.calls += 1
+            calls = (
+                [{"id": "p1", "name": "plan", "arguments": {"plan": steps}}] if self.calls == 1 else
+                [{"id": "r", "name": "read", "arguments": {"path": "x"}}] if self.calls == 2 else
+                [{"id": "p2", "name": "plan", "arguments": {"plan": [{**item, "status": "done" if item["step"] == "step 1" else "pending"} for item in steps]}}] if self.calls == 3 else
+                [{"id": "f", "name": "finish", "arguments": {"summary": "done", "goal_success": True}}]
+            )
+            return ChatResult(text="", raw={}, usage={}, stop_reason="tool_calls", had_native_tool_call=True, native_tool_calls=calls)
+
+    provider = Provider()
+    async def factory(_spec):
+        auth = AuthStorage.in_memory()
+        auth.set_runtime_api_key("openai", "test")
+        registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+        model = registry.find("openai", "gpt-4.1")
+        session = AgentSession(SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory({"tools": {"maxSteps": 8}}), registry, Loader(), model, "medium", tools=["plan", "read", "finish"])
+        async def read_stub(name, arguments, timeout_sec=None):  # noqa: ANN001
+            if name == "read":
+                return {"ok": True, "output": "read"}
+            return await original(name, arguments, timeout_sec)
+        original = session._execute_tool_by_name
+        session._execute_tool_by_name = read_stub  # type: ignore[method-assign]
+        session.providers = {"openai": provider}
+        return TuiRuntimeHost(SimpleNamespace(session=session, dispose=session.dispose), None)
+
+    facade = AgentRuntimeFacade(RuntimeBootstrapSpec(cwd=str(tmp_path), agent_dir=str(tmp_path / "agent")), factory, command_allowlist=TUI_COMMANDS)
+    await facade.start()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    try:
+        async with app.run_test() as pilot:
+            await pilot.press(*list("plan it"), "enter")
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if not app._turn_active:
+                    break
+            stream = "\n".join(app._stream_lines)
+            assert all(f"step {index}" in stream for index in range(1, 8))
+            assert "Plan: cleared" in stream  # only terminal finish emits the clear
+            assert view.sidebar["planPresent"] is False
+    finally:
+        await facade.close()
+        assert facade.finalize()
+
+
+@pytest.mark.asyncio
 async def test_production_tui_recovers_malformed_candidate_through_real_facade(tmp_path) -> None:
     """Textual receives real worker/host events, including parser diagnostics."""
     from textual.widgets import Static

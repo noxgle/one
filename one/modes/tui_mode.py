@@ -102,6 +102,17 @@ class TuiSessionView:
         if isinstance(result.get("epoch"), int):
             self._snapshot["epoch"] = result["epoch"]
 
+    def apply_plan_update(self, event: dict[str, Any]) -> None:
+        """Apply an event's plan state without waiting for a full resync."""
+        if event.get("cleared") is True:
+            self._snapshot["sidebar"].update({"plan": [], "planText": "", "planPresent": False})
+        elif event.get("planPresent"):
+            if isinstance(event.get("planItems"), list):
+                self._snapshot["sidebar"]["plan"] = [dict(item) for item in event["planItems"] if isinstance(item, dict)]
+            if isinstance(event.get("plan"), str):
+                self._snapshot["sidebar"]["planText"] = event["plan"]
+            self._snapshot["sidebar"]["planPresent"] = True
+
     def apply_monitor_snapshot(self, result: dict[str, Any]) -> None:
         if isinstance(result.get("monitor"), dict):
             self._snapshot["monitor"] = dict(result["monitor"])
@@ -1793,7 +1804,10 @@ if TEXTUAL_AVAILABLE:
                         and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
                     ):
                         self._pending_assistant_deltas += str(event.get("assistantMessageEvent", {}).get("delta", ""))
-                    if event.get("type") in ("message_update", "thinking_delta"):
+                    # Reasoning is useful transcript content, but it must not
+                    # suppress the independent waiting/abort footer.  Only
+                    # visible assistant prose counts as output activity.
+                    if event.get("type") == "message_update":
                         self._last_delta_ts = time.monotonic()
                     if self.is_running and not self._ui_flush_wakeup_pending:
                         self._ui_flush_wakeup_pending = True
@@ -4056,7 +4070,11 @@ if TEXTUAL_AVAILABLE:
                 mcp_lines = ["none"]
             else:
                 mcp_lines = []
-            plan = getattr(self.session, "_plan", None)
+            plan = (
+                self.session.sidebar.get("plan") or self.session.sidebar.get("planText", "")
+                if isinstance(self.session, TuiSessionView)
+                else getattr(self.session, "_plan", None)
+            )
 
             info_block = Text()
             info_block.append_text(Text.from_markup(f"[b {self._theme.info}]Info[/]"))
@@ -6829,6 +6847,10 @@ if TEXTUAL_AVAILABLE:
                     self._monitor_dirty = True
             elif et == "tui_command_error":
                 self._write(f"[{event.get('operation', 'command')}] {event.get('error', 'command failed')}", "error")
+            elif et == "mcp_availability":
+                name = sanitize_display_text(str(event.get("name") or "server"))
+                reason = sanitize_display_text(str(event.get("reasonCode") or "updated"))
+                self._write(f"MCP {name}: {reason}", "warn")
             elif et == "subagent_start":
                 self._write_subagent_entry(str(event.get("sessionId") or ""), event.get("task"))
             elif et == "message_start":
@@ -7137,17 +7159,21 @@ if TEXTUAL_AVAILABLE:
                     "warn",
                 )
             elif et == "plan_update":
-                plan = event.get("plan", "")
-                if plan:
+                # A projection can omit plan content under a transport budget;
+                # omission is not a clear.  Only an explicit cleared marker
+                # changes the visible plan state.
+                if isinstance(self.session, TuiSessionView):
+                    self.session.apply_plan_update(event)
+                if event.get("cleared") is True or event.get("plan") == "":
+                    self._write_plan_block(None)
+                elif event.get("plan"):
                     from one.tools.plan import render_plan
 
                     # This is an informational standalone block. Do not make
                     # it the active lifecycle tool block: the surrounding
                     # plan tool's later tool_call_end must still finish its
                     # own Tool: status panel.
-                    self._write_plan_block(render_plan(plan))
-                else:
-                    self._write_plan_block(None)
+                    self._write_plan_block(render_plan(event["plan"]))
 
             # Delta batches repaint only the stream. Lifecycle changes mark
             # the sidebar dirty, then one post-drain frame performs the

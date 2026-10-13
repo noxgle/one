@@ -277,6 +277,13 @@ class TuiRuntimeHost:
                 listener(stamped)
 
         self._off_session = subscribe(forwarded)
+        mcp = self._mcp
+        set_availability = getattr(mcp, "set_availability_callback", None)
+        if callable(set_availability):
+            def mcp_availability(notice: dict[str, Any]) -> None:
+                if self._session() is session and self._epoch == epoch:
+                    session._emit({"type": "mcp_availability", **notice})
+            set_availability(mcp_availability)
 
     def _bind_monitor(self) -> None:
         """Forward monitor invalidations from the current owner session."""
@@ -360,7 +367,7 @@ class TuiRuntimeHost:
             enabled = bool(item.get("enabled"))
             running = bool(item.get("running"))
             error = item.get("error")
-            mcp_servers.append({
+            projected = {
                 "name": _bounded_snapshot_text(item.get("name"))[:256],
                 "enabled": enabled,
                 "running": running,
@@ -369,7 +376,10 @@ class TuiRuntimeHost:
                 "available": enabled and running and not error and runtime_state not in {"failed", "retrying", "disabled"},
                 "toolCount": len(item.get("tools") or []),
                 "error": _bounded_snapshot_text(error)[:512] if isinstance(error, str) else "",
-            })
+            }
+            if isinstance(item.get("reasonCode"), str) and item["reasonCode"]:
+                projected["reasonCode"] = _bounded_snapshot_text(item["reasonCode"])[:64]
+            mcp_servers.append(projected)
         return mcp_servers
 
     def _refresh_sidebar_expensive(self) -> None:
@@ -387,6 +397,12 @@ class TuiRuntimeHost:
         usage = cache.get("usage", {}) if isinstance(cache, dict) else {}
         stats = cache.get("stats", {}) if isinstance(cache, dict) else {}
         tokens = stats.get("tokens") or {}
+        plan = getattr(session, "_plan", None)
+        plan_items = plan if isinstance(plan, list) else []
+        safe_plan_items = [
+            {key: _bounded_snapshot_text(item.get(key))[:512] for key in ("title", "step", "status") if isinstance(item.get(key), str)}
+            for item in plan_items if isinstance(item, dict)
+        ]
         return {
             "sessionId": str(session.session_id),
             "cwd": str(session.session_manager.cwd),
@@ -424,6 +440,9 @@ class TuiRuntimeHost:
             ) if session.is_streaming else "idle",
             "mcpEnabled": self._mcp is not None,
             "toolResultPreviewLines": session.settings_manager.get_tui_tool_result_preview_lines(),
+            "plan": safe_plan_items,
+            "planText": _bounded_snapshot_text(plan) if isinstance(plan, str) else "",
+            "planPresent": plan is not None,
         }
 
     def _monitor_projection(self) -> dict[str, Any]:
@@ -1268,7 +1287,10 @@ async def create_tui_runtime(bootstrap: TuiBootstrap) -> TuiRuntimeHost:
             "resourceLoader": loader,
         }
         runtime = await create_agent_session_runtime(runtime_bootstrap, runtime_options)
-        host = TuiRuntimeHost(AgentSessionRuntimeHost({}, runtime), mcp, _safe_startup_data(mcp, loader))
+        # Keep the full worker bootstrap for every /new, /sessions switch and
+        # fork.  Replacing it with {} silently dropped MCP, auth, tools and
+        # extension configuration after the first session.
+        host = TuiRuntimeHost(AgentSessionRuntimeHost(runtime_bootstrap, runtime), mcp, _safe_startup_data(mcp, loader))
         host._initial_image_paths = tuple(bootstrap.initial_image_paths)
         if bootstrap.cooperation or settings.get_tool_approval():
             runtime.session.approval_callback = host._approval_callback

@@ -10,6 +10,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Detached TUI plan projection** — active structured plans now cross the
+  runtime facade with explicit presence and clear state, so seven-step plans
+  survive streaming, reloads, and the sidebar without treating omitted data as
+  a clear.
+
 - **TUI footer inside conversation border** — the spinner/abort footer (`#waiting_status`)
   now lives inside a shared `#conversation` wrapper with the scrollable transcript.
   The wrapper carries the panel border, background, and theme; the inner scroll body
@@ -61,6 +66,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   line-offset, and line-limit arguments, bounded output, and image handling.
 
 ### Fixed
+
+- **TUI runtime replacement** — new, switched, and forked sessions retain the
+  worker-owned MCP, auth, tool, and resource configuration.
 
 - **Sustained TUI tool runs** — waiting animation now updates a dedicated status
   widget instead of rebuilding the transcript. Transcript line fragments are
