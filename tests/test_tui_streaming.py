@@ -1118,13 +1118,13 @@ async def test_tui_stream_spinner_markup_still_rendered(tmp_path: Path):
         await pilot.pause()
         # Directly add a thinking marker line to simulate spinner.
         app._stream_lines.append("")
-        app._stream_lines.append(f"{_THINKING_MARK}[{app._theme.info}]{_THINKING_FRAMES[0]} Ctrl+C abort[/]")
+        app._stream_lines.append(f"{_THINKING_MARK}[{app._theme.info}]{_THINKING_FRAMES[0]} Ctrl+C \u2014 abort[/]")
         app._stream_lines.append("")
         app._render_stream()
         await pilot.pause()
         widget = app.query_one("#stream", Static)
         # The spinner text (without __MK__ prefix) must be present.
-        assert "Ctrl+C abort" in widget.content.plain
+        assert "Ctrl+C \u2014 abort" in widget.content.plain
         # The raw thinking mark must NOT appear in rendered content.
         assert _THINKING_MARK not in widget.content.plain
 
@@ -1204,7 +1204,7 @@ async def test_tui_spinner_resumes_after_gate_clears(tmp_path: Path):
         # Second tick: should animate again (frame advances).
         app._tick_waiting()
         await pilot.pause()
-        assert "Ctrl+C abort" in str(status.render())
+        assert "Ctrl+C \u2014 abort" in str(status.render())
         # Frame should have advanced.
         assert app._thinking_frame > start_frame
 
@@ -1232,20 +1232,20 @@ async def test_tui_spinner_animation_refreshes_widget_each_tick(tmp_path: Path):
         assert app._thinking_active is True
         first_lines = list(app._stream_lines)
         first_stream = str(stream_widget.content)
-        assert "Ctrl+C abort" in str(status_widget.render())
+        assert "Ctrl+C \u2014 abort" in str(status_widget.render())
 
         # --- Second tick: in-place rewrite path (if branch) ---
         app._tick_waiting()
         assert app._stream_lines == first_lines
         await pilot.pause(0.05)
         assert str(stream_widget.content) == first_stream
-        assert "Ctrl+C abort" in str(status_widget.render())
+        assert "Ctrl+C \u2014 abort" in str(status_widget.render())
 
         # --- Third tick: verify continued animation ---
         app._tick_waiting()
         await pilot.pause(0.05)
         assert str(stream_widget.content) == first_stream
-        assert "Ctrl+C abort" in str(status_widget.render())
+        assert "Ctrl+C \u2014 abort" in str(status_widget.render())
 
 
 @pytest.mark.asyncio
@@ -1265,14 +1265,14 @@ async def test_tui_spinner_cleared_on_turn_end(tmp_path: Path):
         app._tick_waiting()
         await pilot.pause()
         status_widget = app.query_one("#waiting_status", Static)
-        assert "Ctrl+C abort" in str(status_widget.render())
+        assert "Ctrl+C \u2014 abort" in str(status_widget.render())
 
         # Simulate turn completion: the event handler calls _remove_thinking_line
         # and sets _turn_active = False.
         app._turn_active = False
         app._remove_thinking_line()
         await pilot.pause()
-        assert "Ctrl+C abort" not in str(status_widget.render())
+        assert "Ctrl+C \u2014 abort" not in str(status_widget.render())
 
 
 @pytest.mark.asyncio

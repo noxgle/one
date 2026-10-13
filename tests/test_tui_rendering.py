@@ -410,7 +410,7 @@ async def test_tui_temperature_mode_renders_in_compact_header_and_wide_sidebar(t
 
 @pytest.mark.asyncio
 async def test_tui_compact_to_wide_aligns_conversation_and_sidebar_frames(tmp_path: Path) -> None:
-    from textual.containers import VerticalScroll
+    from textual.containers import Vertical, VerticalScroll
     from textual.widgets import Static, TextArea
 
     from one.modes.tui_mode import _OneTextualApp
@@ -421,12 +421,13 @@ async def test_tui_compact_to_wide_aligns_conversation_and_sidebar_frames(tmp_pa
         main = app.query_one("#main")
         header = app.query_one("#header", Static)
         stream = app.query_one("#stream_container", VerticalScroll)
+        conversation = app.query_one("#conversation", Vertical)
         sidebar = app.query_one("#sidebar", Static)
         input_widget = app.query_one("#input", TextArea)
         logo = app.query_one("#logo", Static)
 
         assert not main.has_class("layout-wide")
-        assert stream.styles.margin.top == 1
+        assert conversation.styles.margin.top == 1
         assert stream.region.y > header.region.bottom
         assert "██████╗" in str(logo.content)
 
@@ -436,10 +437,10 @@ async def test_tui_compact_to_wide_aligns_conversation_and_sidebar_frames(tmp_pa
         assert main.has_class("layout-wide")
         assert header.styles.display == "none"
         assert sidebar.styles.display != "none"
-        assert stream.styles.margin.top == 0
+        assert conversation.styles.margin.top == 0
         assert main.region.y == sidebar.region.y
         assert main.region.height == sidebar.region.height
-        assert stream.region.y == sidebar.region.y
+        assert conversation.region.y == sidebar.region.y
         assert input_widget.region.bottom == main.region.bottom
         assert "██████╗" in str(logo.content)
 
@@ -447,14 +448,14 @@ async def test_tui_compact_to_wide_aligns_conversation_and_sidebar_frames(tmp_pa
         await pilot.pause()
 
         assert not main.has_class("layout-wide")
-        assert stream.styles.margin.top == 1
+        assert conversation.styles.margin.top == 1
         assert stream.region.y > header.region.bottom
         assert "██████╗" in str(logo.content)
 
 
 @pytest.mark.asyncio
 async def test_tui_narrow_compact_and_wide_frames_remain_aligned(tmp_path: Path) -> None:
-    from textual.containers import VerticalScroll
+    from textual.containers import Vertical, VerticalScroll
     from textual.widgets import Static
 
     from one.modes.tui_mode import _OneTextualApp
@@ -465,6 +466,7 @@ async def test_tui_narrow_compact_and_wide_frames_remain_aligned(tmp_path: Path)
         main = app.query_one("#main")
         header = app.query_one("#header", Static)
         stream = app.query_one("#stream_container", VerticalScroll)
+        conversation = app.query_one("#conversation", Vertical)
         sidebar = app.query_one("#sidebar", Static)
         logo = app.query_one("#logo", Static)
 
@@ -476,7 +478,7 @@ async def test_tui_narrow_compact_and_wide_frames_remain_aligned(tmp_path: Path)
 
         assert main.region.y == sidebar.region.y
         assert main.region.height == sidebar.region.height
-        assert stream.region.y == sidebar.region.y
+        assert conversation.region.y == sidebar.region.y
 
         await app._handle_command("/layout compact")
         await pilot.pause()

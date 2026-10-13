@@ -1266,16 +1266,21 @@ if TEXTUAL_AVAILABLE:
             text-overflow: ellipsis;
         }
 
-        #stream_container {
-            height: 1fr;
+        #conversation {
             margin: 1 0 0 0;
             border: round #2f466e;
             background: #0f1a2e;
-            overflow-y: auto;
+            layout: vertical;
         }
 
-        #main.layout-wide #stream_container {
+        #main.layout-wide #conversation {
             margin: 0;
+        }
+
+        #stream_container {
+            height: 1fr;
+            background: transparent;
+            overflow-y: auto;
         }
 
         #logo {
@@ -1642,10 +1647,11 @@ if TEXTUAL_AVAILABLE:
             with Horizontal(id="root"):
                 with Vertical(id="main"):
                     yield Static(id="header")
-                    with VerticalScroll(id="stream_container"):
-                        yield Static("", id="logo")
-                        yield TranscriptWidget("", id="stream")
-                    yield Static("", id="waiting_status")
+                    with Vertical(id="conversation"):
+                        with VerticalScroll(id="stream_container"):
+                            yield Static("", id="logo")
+                            yield TranscriptWidget("", id="stream")
+                        yield Static("", id="waiting_status")
                     yield Static("", id="ext_panel")
                     yield Static("", id="ext_overlay")
                     yield Static("", id="shortcuts_overlay")
@@ -3164,7 +3170,7 @@ if TEXTUAL_AVAILABLE:
             else:
                 self._thinking_frame = advance_thinking_frame(self._thinking_frame)
                 frame = _THINKING_FRAMES[self._thinking_frame]
-                line = f"[{self._theme.info}]{frame} Ctrl+C abort[/]"
+                line = f"[{self._theme.info}]{frame} Ctrl+C \u2014 abort[/]"
             try:
                 self.query_one("#waiting_status", Static).update(Content.from_markup(line))
             except Exception:
@@ -3743,7 +3749,7 @@ if TEXTUAL_AVAILABLE:
             try:
                 stream_widget = self.query_one("#stream_container")
                 stream_widget.styles.background = theme.panel_bg
-                stream_widget.styles.border = ("round", theme.panel_border)
+                stream_widget.styles.border = None
                 stream_widget.styles.color = theme.screen_fg
             except Exception:
                 pass
@@ -3776,6 +3782,12 @@ if TEXTUAL_AVAILABLE:
             try:
                 stream_text = self.query_one("#stream", Static)
                 stream_text.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
+                conversation = self.query_one("#conversation")
+                conversation.styles.background = theme.panel_bg
+                conversation.styles.border = ("round", theme.panel_border)
             except Exception:
                 pass
             try:

@@ -126,7 +126,7 @@ async def test_tui_thinking_batches_preserve_output_and_retry_boundary(tmp_path:
 
 @pytest.mark.asyncio
 async def test_tui_error_turn_resets_spinner(tmp_path: Path):
-    """A turn ending with an error must not leave the 'Ctrl+C abort' spinner running forever."""
+    """A turn ending with an error must not leave the 'Ctrl+C — abort' spinner running forever."""
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path, runtime_key="sk-test")

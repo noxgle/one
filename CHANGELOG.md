@@ -10,6 +10,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **TUI footer inside conversation border** — the spinner/abort footer (`#waiting_status`)
+  now lives inside a shared `#conversation` wrapper with the scrollable transcript.
+  The wrapper carries the panel border, background, and theme; the inner scroll body
+  has no border. The footer row is reserved even when idle to avoid relayout, stays
+  fixed while browsing the transcript, and displays an animated block-shade glyph
+  followed by `Ctrl+C — abort`. Theme changes apply to both wrapper and footer.
+
 - **Bounded TUI result viewer** — durable tool results expose a trusted `[view]`
   action. Pages are fetched on the runtime worker, show only sanitized result
   data, and are rejected after a session change; very large results are read

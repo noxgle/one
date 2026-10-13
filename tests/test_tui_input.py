@@ -244,7 +244,7 @@ async def test_tui_spinner_survives_queued_prompt_injected_before_next_request(t
         spinner_visible = False
         for _ in range(300):
             await pilot.pause()
-            any_spinner = "Ctrl+C abort" in str(app.query_one("#waiting_status").render())
+            any_spinner = "Ctrl+C \u2014 abort" in str(app.query_one("#waiting_status").render())
             if any_spinner and not spinner_visible:
                 spinner_windows += 1
                 spinner_visible = True
