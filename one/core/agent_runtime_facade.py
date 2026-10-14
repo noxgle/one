@@ -159,6 +159,9 @@ def _event_projection(event: Mapping[str, Any]) -> dict[str, Any]:
         result.update(_fields(event, ("name", "state", "toolCount", "reasonCode")))
         return result
 
+    if event_type == "status_invalidated":
+        return result
+
     if event_type == "tui_approval_request":
         result.update(_fields(event, ("approvalId", "tool", "origin", "reason", "displayArgs")))
         return result
@@ -176,6 +179,12 @@ def _event_projection(event: Mapping[str, Any]) -> dict[str, Any]:
         message = event.get("message")
         if isinstance(message, Mapping):
             result.update(_fields(message, ("role", "model")))
+            # The owner host attaches an opaque completed-message reference to
+            # this barrier.  Never put canonical text here: event DTOs remain
+            # bounded and the UI obtains completed prose through a separately
+            # validated, paginated command.
+            if event_type == "message_end":
+                result.update(_fields(event, ("completed", "completedRef", "completedSource")))
         return result
 
     lifecycle_fields = (

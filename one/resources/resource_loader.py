@@ -224,7 +224,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "find": "{pattern?, path?}",
     "ls": "{path?}",
     "evidence_read": "{evidenceId, offset?, maxChars?}  # retrieve a bounded chunk of prior durable tool evidence; use nextOffset to continue",
-    "finish": "{summary, goal_success}  # terminal task result; do not use summary to ask for missing information when ask_user is available",
+    "finish": "{summary, goal_success}  # terminal task result with full summary or answer; do not use summary to ask for missing information when ask_user is available",
     "plan": "{plan: [{step, status}]}  # status is pending|in_progress|completed|blocked; send the complete plan on every update",
     "spawn_subagent": "{task, tasks?, model?, tools?, temperature?, temperatureMode?, timeout?}  # For smaller/less capable models, prefer one child with exactly one non-empty task string. Use tasks as a non-empty list only when multiple independent parallel subtasks are explicitly requested. Provide exactly one of task or tasks; never both. Examples: {\"task\":\"inspect X\"}; {\"tasks\":[\"inspect X\",\"inspect Y\"]}. timeout overrides child idle timeout; numeric temperature overrides temperatureMode, otherwise inherits parent",
     "ask_user": "{question, timeoutSec?}  # for necessary preferences, materially ambiguous requirements, or unapproved destructive/security/account decisions; waits for one human answer, then continue the same task",

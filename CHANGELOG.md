@@ -10,6 +10,14 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Theme-aware CommandPalette (Ctrl+P) and model overlay (Ctrl+K)** — every built-in
+  TUI palette is now registered as a Textual ``Theme`` so native widgets (CommandPalette,
+  Input, OptionList, etc.) pick up ``$foreground``, ``$background``, ``$surface``,
+  ``$panel``, ``$border``, and ``$block-cursor-*`` colours immediately via
+  ``app.set_theme()``. The model picker overlay is styled dynamically in
+  ``_apply_theme`` and model/provider strings are sanitised with ``rich_escape``
+  to prevent markup injection.
+
 - **Detached TUI plan projection** — active structured plans now cross the
   runtime facade with explicit presence and clear state, so seven-step plans
   survive streaming, reloads, and the sidebar without treating omitted data as
@@ -66,6 +74,18 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   line-offset, and line-limit arguments, bounded output, and image handling.
 
 ### Fixed
+
+- **TUI transcript selection** — virtual cached rows now apply Textual selection
+  at paint time with physical-row character offsets, preserving CJK, emoji,
+  combining characters, and whitespace without leaking a selection into shared
+  row cache entries.
+- **TUI completed responses** — the detached runtime carries the canonical
+  completed assistant text separately from the bounded live preview, so a
+  completed answer replaces a streaming preview rather than retaining its
+  truncation marker.
+- **TUI context projection** — provider and tool completion coalesce an
+  owner-loop context/stat refresh during a turn; the sidebar no longer waits
+  solely for the final turn event to update.
 
 - **TUI runtime replacement** — new, switched, and forked sessions retain the
   worker-owned MCP, auth, tool, and resource configuration.

@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +47,9 @@ _SNAPSHOT_MESSAGES_MAX_BYTES = 36 * 1024
 _MODELS_PAGE_SIZE = 100
 _EVIDENCE_PAGE_CHARS = 12 * 1024
 _EVIDENCE_PAGE_BYTES = 12 * 1024
+_ASSISTANT_PAGE_ROWS = 96
+_ASSISTANT_PAGE_CACHE_BYTES = 128 * 1024
+_ASSISTANT_MEASUREMENTS = 8
 _STATUS_SNAPSHOT_MAX_BYTES = 48 * 1024
 _STATUS_MCP_MAX_SERVERS = 32
 _MONITOR_MAX_CHILDREN = 20
@@ -96,6 +99,59 @@ def _utf8_page(text: str, offset: int) -> tuple[str, int | None, int]:
         except UnicodeDecodeError:
             end -= 1
     return "", (offset if offset < len(raw) else None), len(raw)
+
+
+def _assistant_text(message: Any) -> str | None:
+    """Return only canonical assistant prose; never stringify tool structures."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+    return None
+
+
+def _is_paged_assistant(message: Any) -> bool:
+    text = _assistant_text(message)
+    return bool(text is not None and (message.get("stopReason") == "completed" or len(text.encode("utf-8")) > 8 * 1024))
+
+
+def _wrap_assistant_rows(text: str, width: int) -> list[str]:
+    """Measure literal prose into terminal-cell rows without dropping spaces."""
+    from rich.cells import cell_len
+
+    rows: list[str] = []
+    for logical in text.split("\n"):
+        if not logical:
+            rows.append("")
+            continue
+        row = ""
+        cells = 0
+        for character in logical:
+            character_cells = max(0, cell_len(character))
+            if row and cells + character_cells > width:
+                rows.append(row)
+                row, cells = "", 0
+            row += character
+            cells += character_cells
+        rows.append(row)
+    return rows or [""]
+
+
+def _fit_assistant_rows(rows: list[str], envelope: dict[str, Any]) -> list[str]:
+    """Keep an assistant-page JSON document below its 12 KiB transport budget."""
+    selected: list[str] = []
+    for row in rows:
+        candidate = [*selected, row]
+        if len(json.dumps({**envelope, "rows": candidate}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > _EVIDENCE_PAGE_BYTES:
+            break
+        selected = candidate
+    return selected
 
 
 def _safe_startup_projection(value: Any) -> dict[str, Any]:
@@ -232,6 +288,15 @@ class TuiRuntimeHost:
         self._off_session: Any = None
         self._off_monitor: Any = None
         self._sidebar_expensive: dict[str, Any] | None = None
+        self._sidebar_refresh_task: asyncio.Task[None] | None = None
+        self._sidebar_refresh_epoch = 0
+        self._sidebar_refresh_dirty = False
+        # These caches contain only already-safe assistant prose pages and
+        # measurement metadata.  They are bounded; canonical text remains in
+        # the session/persisted transcript, never in this presentation cache.
+        self._assistant_page_cache: OrderedDict[tuple[str, int, int, int], tuple[list[str], int, int]] = OrderedDict()
+        self._assistant_page_cache_bytes = 0
+        self._assistant_measurements: OrderedDict[tuple[str, int], int] = OrderedDict()
         self._bind_session_events()
         self._bind_monitor()
 
@@ -267,8 +332,21 @@ class TuiRuntimeHost:
             if self._epoch != epoch or self._session() is not session:
                 return
             stamped = dict(event)
-            if stamped.get("type") in {"agent_end", "turn_end", "error", "compaction_end", "temperature_change", "cooperation_changed"}:
-                self._sidebar_expensive = None
+            if (
+                stamped.get("type") == "message_end"
+                and not stamped.get("suppressed", False)
+                and _is_paged_assistant(stamped.get("message"))
+            ):
+                ref = self._completed_ref(stamped["message"])
+                if ref is not None:
+                    stamped["completed"] = True
+                    stamped["completedRef"] = ref
+                    stamped["completedSource"] = source_session_id
+            if stamped.get("type") in {
+                "agent_end", "turn_end", "error", "compaction_end", "temperature_change",
+                "cooperation_changed", "provider_request_end", "tool_call_end",
+            }:
+                self._schedule_sidebar_refresh(epoch)
             # Keep event sessionId (for child/monitor identities) intact while
             # attaching the authoritative owner-session identity separately.
             stamped["epoch"] = epoch
@@ -284,6 +362,41 @@ class TuiRuntimeHost:
                 if self._session() is session and self._epoch == epoch:
                     session._emit({"type": "mcp_availability", **notice})
             set_availability(mcp_availability)
+
+    def _schedule_sidebar_refresh(self, epoch: int) -> None:
+        """Coalesce owner-loop context/stat refreshes during a busy turn.
+
+        The UI only reads this projection.  Context estimation can inspect
+        history, so it must neither run in paint nor once for every token/tool.
+        """
+        self._sidebar_refresh_epoch = epoch
+        self._sidebar_refresh_dirty = True
+        task = self._sidebar_refresh_task
+        if task is not None and not task.done() and epoch != getattr(task, "_one_epoch", epoch):
+            task.cancel()
+            task = None
+        if task is None or task.done():
+            self._sidebar_refresh_task = asyncio.create_task(self._refresh_sidebar_later(epoch))
+            setattr(self._sidebar_refresh_task, "_one_epoch", epoch)
+
+    async def _refresh_sidebar_later(self, epoch: int) -> None:
+        try:
+            await asyncio.sleep(0.75)
+            if self._disposed or epoch != self._epoch or epoch != self._sidebar_refresh_epoch:
+                return
+            # Keep the last known projection visible while the coalesced owner
+            # refresh is pending; never replace it with an "unknown" gauge on
+            # every tool/provider event.
+            self._sidebar_refresh_dirty = False
+            self._refresh_sidebar_expensive()
+            if epoch == self._epoch and not self._disposed:
+                for listener in tuple(self._listeners):
+                    listener({"type": "status_invalidated", "epoch": epoch})
+        finally:
+            if self._sidebar_refresh_task is asyncio.current_task():
+                self._sidebar_refresh_task = None
+            if self._sidebar_refresh_dirty and not self._disposed and epoch == self._epoch:
+                self._schedule_sidebar_refresh(epoch)
 
     def _bind_monitor(self) -> None:
         """Forward monitor invalidations from the current owner session."""
@@ -342,6 +455,8 @@ class TuiRuntimeHost:
             return self.models_page(payload["offset"], payload["limit"])
         if command == "evidence_page" and set(payload) == {"evidence_id", "offset", "epoch"}:
             return self.evidence_page(payload["evidence_id"], payload["offset"], payload["epoch"])
+        if command == "assistant_page" and set(payload) == {"ref", "offset", "limit", "width", "epoch"}:
+            return self.assistant_page(**payload)
         if command == "answer_question" and set(payload) == {"question_id", "answer", "epoch"}:
             return await self.answer_question(**payload)
         if command == "approval_resolve" and set(payload) == {"approval_id", "approved", "reason", "epoch"}:
@@ -505,6 +620,10 @@ class TuiRuntimeHost:
             if len(encoded) > _SNAPSHOT_ENTRY_MAX_BYTES:
                 content = encoded[:_SNAPSHOT_ENTRY_MAX_BYTES].decode("utf-8", "ignore") + "\n<truncated>"
             row: dict[str, Any] = {"role": str(role), "content": str(content)}
+            if role == "assistant" and _is_paged_assistant(message):
+                ref = self._completed_ref(message)
+                if ref is not None:
+                    row["completedRef"] = ref
             # Durable tool results carry a safe evidence identity.  Do not copy
             # raw result objects, args, schemas, or sidecar contents into a
             # snapshot just to make a transcript link.
@@ -623,6 +742,78 @@ class TuiRuntimeHost:
         chunk, next_offset, total = _utf8_page(text, offset)
         return self._json({"epoch": self._epoch, "available": True, "text": chunk, "offset": offset,
                            "nextOffset": next_offset, "totalChars": total})
+
+    def _completed_ref(self, message: dict[str, Any]) -> str | None:
+        """Make an opaque, session-bound reference for one persisted assistant message."""
+        text = _assistant_text(message)
+        if text is None:
+            return None
+        for index in range(len(self._session().messages) - 1, -1, -1):
+            if self._session().messages[index] is message:
+                return f"a:{str(getattr(self._session(), 'session_id', ''))}:{index}:{int(message.get('timestamp') or 0)}"
+        # Rehydrated snapshots need equality rather than object identity.
+        for index in range(len(self._session().messages) - 1, -1, -1):
+            candidate = self._session().messages[index]
+            if candidate == message and _assistant_text(candidate) is not None:
+                return f"a:{str(getattr(self._session(), 'session_id', ''))}:{index}:{int(candidate.get('timestamp') or 0)}"
+        return None
+
+    def _completed_message(self, ref: Any) -> tuple[str, str] | None:
+        if not isinstance(ref, str) or not ref.startswith("a:"):
+            return None
+        try:
+            _prefix, session_id, index_text, stamp_text = ref.split(":", 3)
+            index, stamp = int(index_text), int(stamp_text)
+        except ValueError:
+            return None
+        if session_id != str(getattr(self._session(), "session_id", "")):
+            return None
+        messages = self._session().messages
+        if not 0 <= index < len(messages) or int(messages[index].get("timestamp") or 0) != stamp:
+            return None
+        text = _assistant_text(messages[index])
+        return (ref, text) if text is not None else None
+
+    def assistant_page(self, ref: Any, offset: Any, limit: Any, width: Any, epoch: Any) -> dict[str, Any]:
+        """Return a bounded page of a completed assistant message's physical rows."""
+        if epoch != self._epoch or not isinstance(offset, int) or offset < 0:
+            raise ValueError("stale or invalid completed assistant request")
+        if not isinstance(limit, int) or not 1 <= limit <= _ASSISTANT_PAGE_ROWS:
+            raise ValueError("invalid completed assistant page limit")
+        if not isinstance(width, int) or not 1 <= width <= 512:
+            raise ValueError("invalid completed assistant page width")
+        resolved = self._completed_message(ref)
+        if resolved is None:
+            raise ValueError("stale or invalid completed assistant reference")
+        ref, text = resolved
+        measurement_key = (ref, width)
+        key = (ref, width, offset, limit)
+        cached = self._assistant_page_cache.get(key)
+        if cached is not None:
+            page, _page_bytes, total = cached
+            self._assistant_page_cache.move_to_end(key)
+            envelope = {"epoch": self._epoch, "ref": ref, "offset": offset, "totalRows": total, "width": width}
+            fitted = _fit_assistant_rows(page[:limit], envelope)
+            return self._json({**envelope, "rows": fitted,
+                               "nextOffset": offset + len(fitted) if offset + len(fitted) < total else None}, maximum=_EVIDENCE_PAGE_BYTES)
+        rows = _wrap_assistant_rows(SubagentMonitor._safe_text(text), width)
+        total = len(rows)
+        self._assistant_measurements[measurement_key] = total
+        self._assistant_measurements.move_to_end(measurement_key)
+        while len(self._assistant_measurements) > _ASSISTANT_MEASUREMENTS:
+            self._assistant_measurements.popitem(last=False)
+        if offset > total:
+            raise ValueError("invalid completed assistant offset")
+        page = _fit_assistant_rows(rows[offset : offset + limit], {"epoch": self._epoch, "ref": ref, "offset": offset, "totalRows": total, "width": width})
+        page_bytes = sum(len(row.encode("utf-8")) for row in page)
+        self._assistant_page_cache[key] = (page, page_bytes, total)
+        self._assistant_page_cache_bytes += page_bytes
+        while self._assistant_page_cache and self._assistant_page_cache_bytes > _ASSISTANT_PAGE_CACHE_BYTES:
+            _old_key, (_old_page, old_bytes, _old_total) = self._assistant_page_cache.popitem(last=False)
+            self._assistant_page_cache_bytes -= old_bytes
+        return self._json({"epoch": self._epoch, "ref": ref, "offset": offset, "rows": page,
+                           "nextOffset": offset + len(page) if offset + len(page) < total else None,
+                           "totalRows": total, "width": width}, maximum=_EVIDENCE_PAGE_BYTES)
 
     async def answer_question(self, question_id: str, answer: str, epoch: int) -> dict[str, Any]:
         if epoch != self._epoch or not question_id or not isinstance(answer, str):
@@ -1099,6 +1290,9 @@ class TuiRuntimeHost:
 
     async def dispose(self) -> None:
         self._disposed = True
+        if self._sidebar_refresh_task is not None:
+            self._sidebar_refresh_task.cancel()
+            self._sidebar_refresh_task = None
         self._close_waits("TUI closed")
         if callable(self._off_session):
             self._off_session()
@@ -1317,6 +1511,7 @@ TUI_COMMANDS = frozenset(
         "abort",
         "models_page",
         "evidence_page",
+        "assistant_page",
         "answer_question",
         "approval_resolve",
         "switch_session",

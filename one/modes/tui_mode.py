@@ -20,7 +20,10 @@ from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from textual.theme import Theme
 
 from rich.cells import cell_len, set_cell_size
 from rich.markup import escape as rich_escape
@@ -52,6 +55,7 @@ _UI_LEGACY_DEFERRED_MAX_BYTES = 512 * 1024
 _UI_DRAIN_MAX_ITEMS = 8
 _UI_DRAIN_MAX_SECONDS = 0.004
 _UI_FRAME_SECONDS = 1 / 30
+_SELECTION_COPY_TIMEOUT_SECONDS = 5.0
 _UI_MAX_COALESCED_DELTA_BYTES = 512
 # A Static update can take more than one refresh turn to settle its wrapped
 # height. Tail follow is therefore rechecked after two subsequent layout turns;
@@ -210,6 +214,11 @@ class TuiSessionView:
         if isinstance(result, dict) and "sidebar" in result:
             self._replace_snapshot(result)
         return result if isinstance(result, dict) else {}
+
+    async def assistant_page(self, ref: str, offset: int, limit: int, width: int) -> dict[str, Any]:
+        return await self.command(
+            "assistant_page", ref=ref, offset=offset, limit=limit, width=width, epoch=self.epoch
+        )
 
     # Detached renderer projections.  SimpleNamespace instances are newly
     # allocated for every access and contain scalar values only.
@@ -833,6 +842,53 @@ def resolve_tui_theme(name: str | None) -> TuiPalette:
     if not name:
         return BUILTIN_TUI_THEMES["default"]
     return BUILTIN_TUI_THEMES.get(name.strip().lower(), BUILTIN_TUI_THEMES["default"])
+
+
+def _tui_palette_to_textual_theme(palette: TuiPalette) -> Theme:
+    """Map a one ``TuiPalette`` into a Textual ``Theme`` so built-in widgets
+    (CommandPalette, Input, OptionList, etc.) pick up the same colours via CSS
+    variables such as ``$foreground``, ``$background``, ``$surface``,
+    ``$panel``, ``$border``, and ``$block-cursor-*``.
+
+    The mapping is deliberately one-to-one and lossless – every palette slot
+    maps to a Textual token that the built-in CSS uses.
+    """
+    from textual.theme import Theme
+
+    return Theme(
+        name=f"one-{palette.name}",
+        primary=palette.screen_fg,
+        secondary=palette.panel_border,
+        warning=palette.warn,
+        error=palette.error,
+        success=palette.user,
+        accent=palette.assistant,
+        foreground=palette.screen_fg,
+        background=palette.screen_bg,
+        surface=palette.panel_bg,
+        panel=palette.sidebar_bg,
+        boost=palette.tool,
+        dark=palette.name != "light",
+        variables={
+            "border": palette.panel_border,
+            "border-blurred": palette.panel_border,
+            "block-cursor-background": palette.info,
+            "block-cursor-foreground": palette.screen_fg,
+            "block-cursor-text-style": "none",
+            "block-cursor-blurred-background": palette.info + "55",
+            "block-cursor-blurred-foreground": palette.screen_fg,
+            "block-cursor-blurred-text-style": "none",
+            "button-color-foreground": palette.screen_fg,
+            "input-selection-background": palette.info + "35",
+            "footer-key-foreground": palette.screen_fg,
+        },
+    )
+
+
+# Pre-computed Textual Theme objects keyed by one theme name.
+_TEXTUAL_THEME_MAP: dict[str, Theme] = {
+    name: _tui_palette_to_textual_theme(palette) for name, palette in BUILTIN_TUI_THEMES.items()
+}
 
 
 def _paste_from_system_clipboard() -> str | None:
@@ -1523,6 +1579,11 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_line_count = 0
             self._assistant_live_lines_dirty = False
             self._assistant_live_finalize_pending = False
+            # Completed assistant prose is a separately paged virtual block.
+            # It is deliberately outside the 500-entry live/history buffer.
+            self._completed_virtuals: dict[str, dict[str, Any]] = {}
+            self._completed_page_inflight = 0
+            self._selection_copy_generation = 0
             # Providers can produce both text and thinking deltas much faster
             # than Textual can paint. Keep *all* session events in one ordered
             # accumulator: delta runs are painted at a bounded cadence and a
@@ -1719,6 +1780,13 @@ if TEXTUAL_AVAILABLE:
 
         def on_mount(self) -> None:
             self.query_one("#input", TextArea).focus()
+            # Register every one TUI palette as a Textual Theme so the built-in
+            # CommandPalette (Ctrl+P) and other widgets pick up the same colours
+            # via CSS variables ($foreground, $background, $surface, $panel,
+            # $block-cursor-*, $border, …).
+            for textual_theme in _TEXTUAL_THEME_MAP.values():
+                self.register_theme(textual_theme)
+            self.theme = f"one-{self._theme.name}"
             self._apply_theme(self._theme.name)
             # Drive the "waiting for the model" spinner while a turn is in
             # flight but no assistant text is currently streaming.
@@ -1985,6 +2053,7 @@ if TEXTUAL_AVAILABLE:
             self._assistant_live_start_idx = -1
             self._assistant_live_buffer = ""
             self._assistant_live_line_count = 0
+            self._completed_virtuals = {}
             self._active_tool_block = None
             self._remove_thinking_line()
             for message in self.session.messages:
@@ -2003,6 +2072,10 @@ if TEXTUAL_AVAILABLE:
                     self._write("Previous request was aborted.", "info")
                 if role in {"user", "assistant"}:
                     if not historical_abort:
+                        completed_ref = message.get("completedRef")
+                        if role == "assistant" and isinstance(completed_ref, str) and isinstance(self.session, TuiSessionView):
+                            self._open_completed_virtual(completed_ref)
+                            continue
                         self._write_chat_block(role, str(content))
                 elif role == "toolResult":
                     # Durable tool-result content is a JSON envelope. Render
@@ -2296,8 +2369,6 @@ if TEXTUAL_AVAILABLE:
                     self._schedule_stream_render()
                 return
             self._materialize_assistant_live_lines()
-            width = self._main_width()
-            cache_context_changed = width != self._stream_cache_width or self._stream_cache_theme != self._theme.name
             # A stream update can be requested by several lifecycle paths in a
             # frame. Rebuilding identical Rich Text is pure wasted work and can
             # invalidate a mouse selection while output is still streaming.
@@ -2305,6 +2376,8 @@ if TEXTUAL_AVAILABLE:
                 stream_widget = self.query_one("#stream", TranscriptWidget)
             except Exception:
                 return
+            width = max(1, int(stream_widget.region.width or self._main_width()))
+            cache_context_changed = width != self._stream_cache_width or self._stream_cache_theme != self._theme.name
             if (
                 tuple(self._stream_lines) == self._rendered_stream_lines
                 and self._rendered_stream_revision == self._stream_render_revision
@@ -2374,7 +2447,27 @@ if TEXTUAL_AVAILABLE:
                 )
                 for index, line_id in enumerate(self._stream_line_ids)
             ]
-            stream_widget.set_transcript(self._stream_line_ids, self._stream_lines, line_revisions, content_for_line)
+            virtual_blocks: dict[int, tuple[int, dict[int, str], Any]] = {}
+            for index, line in enumerate(self._stream_lines):
+                if not line.startswith("\0completed:"):
+                    continue
+                ref = line.removeprefix("\0completed:")
+                virtual = self._completed_virtuals.get(ref)
+                if virtual is not None:
+                    if virtual["width"] != width:
+                        virtual["request_generation"] += 1
+                        virtual.update({"total": 1, "rows": {}, "pages": [], "pending": set(), "queued": set(), "error": None, "geometry_loaded": False})
+                        virtual["width"] = width
+                        # A completed placeholder can be outside the current
+                        # viewport, so paint may never ask it for row zero.
+                        # Prime the geometry/page at the actual widget width
+                        # instead of relying on a demand paint that may not
+                        # occur until the reader scrolls there.
+                        self._need_completed_virtual_row(ref, 0)
+                    virtual_blocks[index] = (virtual["total"], virtual["rows"], lambda row, ref=ref: self._need_completed_virtual_row(ref, row))
+            stream_widget.set_transcript(
+                self._stream_line_ids, self._stream_lines, line_revisions, content_for_line, virtual_blocks=virtual_blocks
+            )
             self._rendered_stream_lines = tuple(self._stream_lines)
             self._rendered_stream_revision = self._stream_render_revision
             try:
@@ -2394,8 +2487,105 @@ if TEXTUAL_AVAILABLE:
         def _check_resize(self) -> None:
             """Reflow after Textual has delivered its resize to the active screen."""
             super()._check_resize()
+            # Physical selection coordinates name wrapped rows. A pending copy
+            # must not reinterpret them after a terminal resize.
+            self._selection_copy_generation += 1
             if self._stream_lines:
                 self.call_after_refresh(self._render_stream)
+
+        def _need_completed_virtual_row(self, ref: str, row: int) -> None:
+            """Schedule, never perform, the page request demanded by paint."""
+            virtual = self._completed_virtuals.get(ref)
+            if virtual is None or row in virtual["rows"]:
+                return
+            virtual["queued"].add(row)
+            self._start_completed_page_requests(ref)
+
+        def _start_completed_page_requests(self, ref: str) -> None:
+            """Bound page work while retaining every demanded row for later fetch."""
+            virtual = self._completed_virtuals.get(ref)
+            if virtual is None or virtual.get("error") is not None:
+                return
+            while virtual["queued"] and len(virtual["pending"]) < 2 and self._completed_page_inflight < 4:
+                # A single request consumes nearby demands through nextOffset;
+                # rows stay queued until the returned range proves they arrived.
+                available = {
+                    row for row in virtual["queued"]
+                    if not any(offset <= row < offset + 96 for offset in virtual["pending"])
+                }
+                if not available:
+                    break
+                offset = min(available)
+                virtual["pending"].add(offset)
+                self._completed_page_inflight += 1
+                asyncio.create_task(self._fetch_completed_virtual_page(ref, offset, virtual["request_generation"]))
+
+        async def _fetch_completed_virtual_page(self, ref: str, offset: int, request_generation: int | None = None) -> None:
+            virtual = self._completed_virtuals.get(ref)
+            if virtual is None or not isinstance(self.session, TuiSessionView):
+                return
+            generation = self._session_listener_generation
+            ref = virtual["ref"]
+            # ``-1`` was the old unknown-width sentinel. It is truthy, so the
+            # former ``or`` fallback sent width -1 through the facade and the
+            # host correctly rejected it. Keep every transport request valid.
+            width = max(1, min(512, int(virtual.get("width", self._main_width()))))
+
+            try:
+                page = await self.session.assistant_page(ref, offset, 96, width)
+                current = self._completed_virtuals.get(ref)
+                if (
+                    current is None or current["ref"] != ref or generation != self._session_listener_generation
+                    or request_generation != current["request_generation"] or width != current["width"]
+                    or page.get("epoch") != self.session.epoch or page.get("width") != width
+                ):
+                    return
+                rows = page.get("rows")
+                if not isinstance(rows, list) or not all(isinstance(row, str) for row in rows):
+                    current["error"] = "unavailable"
+                    return
+                current["total"] = int(page.get("totalRows", 0))
+                current["geometry_loaded"] = True
+                current["rows"].update({offset + index: row for index, row in enumerate(rows)})
+                next_offset = page.get("nextOffset")
+                loaded_end = int(next_offset) if isinstance(next_offset, int) else offset + len(rows)
+                current["queued"] = {row for row in current["queued"] if not offset <= row < loaded_end}
+                current["pages"].append(offset)
+                while len(current["pages"]) > 12:
+                    old = current["pages"].pop(0)
+                    for row in range(old, old + 96):
+                        current["rows"].pop(row, None)
+                # An explicit long copy owns a stable source snapshot. Do not
+                # repaint each fetched page (which would demand viewport rows
+                # again and churn the bounded display cache beneath the copy).
+                if current.get("selection_copy") is None:
+                    self._stream_render_revision += 1
+                    self._schedule_stream_render()
+            except Exception:
+                current = self._completed_virtuals.get(ref)
+                if current is not None and current.get("ref") == ref and request_generation == current["request_generation"]:
+                    current["error"] = "unavailable"
+            finally:
+                current = self._completed_virtuals.get(ref)
+                if current is not None:
+                    current["pending"].discard(offset)
+                self._completed_page_inflight = max(0, self._completed_page_inflight - 1)
+                if current is not None:
+                    self._start_completed_page_requests(ref)
+
+        def _open_completed_virtual(self, ref: str) -> None:
+            """Replace a bounded live preview with lazy canonical assistant rows."""
+            if not isinstance(self.session, TuiSessionView):
+                return
+            self._discard_live_assistant_block()
+            width = max(1, min(512, int(self._main_width())))
+            self._completed_virtuals[ref] = {
+                "ref": ref, "total": 1, "width": width, "rows": {}, "pages": [], "pending": set(), "queued": set(), "request_generation": 0, "error": None, "geometry_loaded": False,
+            }
+            self._append_stream_lines(["\0completed:" + ref])
+            # Do this before the next frame as the completed block may be
+            # below the visible rows and therefore never trigger render_line.
+            self._need_completed_virtual_row(ref, 0)
 
         def _sync_stream_line_ids(self) -> None:
             """Repair direct test list setup without diffing on a paint path.
@@ -3828,6 +4018,13 @@ if TEXTUAL_AVAILABLE:
             except Exception:
                 pass
             try:
+                model_overlay = self.query_one("#model_overlay", Static)
+                model_overlay.styles.background = theme.panel_bg
+                model_overlay.styles.border = ("heavy", theme.panel_border)
+                model_overlay.styles.color = theme.screen_fg
+            except Exception:
+                pass
+            try:
                 agents_overlay = self.query_one("#agents_overlay", Vertical)
                 agents_overlay.styles.background = theme.panel_bg
                 agents_overlay.styles.border = ("heavy", theme.panel_border)
@@ -4387,6 +4584,146 @@ if TEXTUAL_AVAILABLE:
                 self._toast("no clipboard backend. Install wl-clipboard/xclip/xsel or pyperclip.", severity="warning")
             return True
 
+        def _copy_transcript_selection(self, widget: Any, selection: Any) -> None:
+            """Copy a stable drag only after every virtual source row is present."""
+            if selection is None:
+                return
+            if not isinstance(self.session, TuiSessionView):
+                text, _separator = widget.get_selection(selection)
+                self._copy_selected_stream_text(text)
+                return
+            self._selection_copy_generation += 1
+            token, generation, epoch = self._selection_copy_generation, self._session_listener_generation, self.session.epoch
+
+            async def copy() -> None:
+                from bisect import bisect_right
+
+                from textual.geometry import Offset
+                from textual.selection import Selection
+
+                start = selection.start.y if selection.start is not None else 0
+                end = selection.end.y if selection.end is not None else widget._offsets[-1] - 1
+                if start > end:
+                    start, end = end, start
+                deadline = time.monotonic() + _SELECTION_COPY_TIMEOUT_SECONDS
+
+                # Do not clamp a selection to provisional virtual geometry.
+                # The first page establishes a completed block's real physical
+                # height asynchronously; wait for that height to reach the
+                # widget, then either snapshot every selected row or fail closed.
+                while end >= widget._offsets[-1]:
+                    for index, line in enumerate(self._stream_lines):
+                        if line.startswith("\0completed:"):
+                            self._need_completed_virtual_row(line.removeprefix("\0completed:"), 0)
+                    if time.monotonic() >= deadline:
+                        self._toast("Copy unavailable: selection geometry did not settle.", severity="warning")
+                        return
+                    await asyncio.sleep(0.01)
+                    geometry_settled = True
+                    for index, line in enumerate(self._stream_lines):
+                        if not line.startswith("\0completed:"):
+                            continue
+                        virtual = self._completed_virtuals.get(line.removeprefix("\0completed:"))
+                        if virtual is None or not virtual.get("geometry_loaded"):
+                            geometry_settled = False
+                            continue
+                        if widget._offsets[index + 1] - widget._offsets[index] != virtual["total"]:
+                            geometry_settled = False
+                    if geometry_settled:
+                        self._toast("Copy unavailable: selection geometry changed.", severity="warning")
+                        return
+                geometry_offsets = tuple(widget._offsets)
+                wanted: list[tuple[int, str | None, int]] = []
+                for y in range(max(0, start), end + 1):
+                    index = bisect_right(widget._offsets, y) - 1
+                    ref = None
+                    row = y - widget._offsets[index]
+                    if 0 <= index < len(self._stream_lines) and self._stream_lines[index].startswith("\0completed:"):
+                        ref = self._stream_lines[index].removeprefix("\0completed:")
+                    wanted.append((y, ref, row))
+                saved: dict[tuple[str, int], str] = {}
+                refs = {ref for _y, ref, _row in wanted if ref is not None}
+                for ref in refs:
+                    virtual = self._completed_virtuals.get(ref)
+                    if virtual is not None:
+                        virtual["selection_copy"] = token
+
+                def finish_copy() -> None:
+                    for ref in refs:
+                        virtual = self._completed_virtuals.get(ref)
+                        if virtual is not None and virtual.get("selection_copy") == token:
+                            virtual.pop("selection_copy", None)
+                    self._stream_render_revision += 1
+                    self._schedule_stream_render()
+
+                def is_current() -> bool:
+                    if (
+                        token != self._selection_copy_generation
+                        or generation != self._session_listener_generation
+                        or epoch != self.session.epoch
+                        or tuple(widget._offsets) != geometry_offsets
+                    ):
+                        return False
+                    # Textual removes this mapping when a selection is cleared;
+                    # a different drag replaces it. Do not copy an old snapshot.
+                    try:
+                        if widget.text_selection != selection:
+                            return False
+                    except Exception:
+                        return False
+                    return all(ref is None or "\0completed:" + ref in self._stream_lines for _y, ref, _row in wanted)
+
+                while True:
+                    if not is_current():
+                        finish_copy()
+                        return
+                    missing: tuple[str, int] | None = None
+                    for _y, ref, row in wanted:
+                        if ref is None:
+                            continue
+                        virtual = self._completed_virtuals.get(ref)
+                        if virtual is None or virtual.get("error") is not None:
+                            self._toast("Copy unavailable: completed response page could not be loaded.", severity="warning")
+                            finish_copy()
+                            return
+                        key = (ref, row)
+                        # Saved rows deliberately outlive the 12-page display
+                        # cache for this one explicit copy action only.
+                        if key in saved:
+                            continue
+                        value = virtual["rows"].get(row)
+                        if value is None:
+                            missing = key
+                            break
+                        else:
+                            saved[key] = value
+                    if missing is None:
+                        break
+                    if time.monotonic() >= deadline:
+                        self._toast("Copy unavailable: timed out loading the completed response.", severity="warning")
+                        finish_copy()
+                        return
+                    # One demand at a time keeps selection fetching sequential
+                    # and lets the normal per-block/global pager limits govern
+                    # work already queued by the viewport.
+                    self._need_completed_virtual_row(*missing)
+                    self._toast("Copying selection…", timeout=0.8)
+                    await asyncio.sleep(0.01)
+                if not is_current():
+                    finish_copy()
+                    return
+                rows = [saved[(ref, row)] if ref is not None else widget.render_line(y).text for y, ref, row in wanted]
+                start_x = selection.start.x if selection.start else 0
+                end_x = selection.end.x if selection.end else len(rows[-1])
+                if selection.start and selection.end and (selection.start.y, start_x) > (selection.end.y, end_x):
+                    start_x, end_x = end_x, start_x
+                text = Selection(Offset(start_x, 0), Offset(end_x, len(rows) - 1)).extract("\n".join(rows))
+                if is_current():
+                    self._copy_selected_stream_text(text)
+                finish_copy()
+
+            asyncio.create_task(copy())
+
         def _try_auto_copy_selected_stream_text(self) -> None:
             # Textual 8 keeps arbitrary text selections in `screen.selections`
             # (not on the widget); `Static` has no `selected_text` attribute.
@@ -4406,6 +4743,11 @@ if TEXTUAL_AVAILABLE:
             # Static content. Some Textual versions expose the selection only
             # after refresh, for which the old deferred path remains a fallback.
             try:
+                stream_widget = self.query_one("#stream", TranscriptWidget)
+                # TranscriptWidget owns its deferred selection snapshot. Avoid
+                # the app-level fallback copying a partially loaded virtual drag.
+                if stream_widget in self.screen.selections:
+                    return
                 selected = str(self.screen.get_selected_text() or "")
             except Exception:
                 selected = ""
@@ -6610,9 +6952,10 @@ if TEXTUAL_AVAILABLE:
             if not self._model_picker_models:
                 self._write("No available authenticated models. Use /login first.", "warn")
                 return
-            current = f"{self.session.model.provider}/{self.session.model.id}" if self.session.model else "none"
+            current_model = self.session.model
+            current = f"{rich_escape(current_model.provider)}/{rich_escape(current_model.id)}" if current_model else "none"
             lines = [f"Model picker — current: {current}", "Type a number and press Enter (Ctrl+K cancels):"]
-            lines.extend(f"{i}. {model.provider}/{model.id}" for i, model in enumerate(self._model_picker_models, 1))
+            lines.extend(f"{i}. {rich_escape(model.provider)}/{rich_escape(model.id)}" for i, model in enumerate(self._model_picker_models, 1))
             overlay.update("\n".join(lines))
             overlay.add_class("visible")
             self.query_one("#input", TextArea).focus()
@@ -6632,7 +6975,7 @@ if TEXTUAL_AVAILABLE:
                 await self.session.command(
                     "ui", operation="set_model", payload={"provider": model.provider, "model": model.id}
                 )
-            self._write(f"Model set to {model.provider}/{model.id} (saved as default)", "info")
+            self._write(f"Model set to {rich_escape(model.provider)}/{rich_escape(model.id)} (saved as default)", "info")
             self._refresh_sidebar()
 
         def _dismiss_model_picker(self) -> None:
@@ -6845,6 +7188,12 @@ if TEXTUAL_AVAILABLE:
             if et == "subagent_monitor_invalidated":
                 with self._monitor_dirty_lock:
                     self._monitor_dirty = True
+            elif et == "status_invalidated":
+                # The owner emits this only after its coalesced context refresh.
+                # Queued notifications from a prior session must not request or
+                # apply a snapshot against the current session view.
+                if isinstance(self.session, TuiSessionView) and event.get("epoch") == self.session.epoch:
+                    self._request_status_refresh()
             elif et == "tui_command_error":
                 self._write(f"[{event.get('operation', 'command')}] {event.get('error', 'command failed')}", "error")
             elif et == "mcp_availability":
@@ -6888,6 +7237,22 @@ if TEXTUAL_AVAILABLE:
             elif et == "message_end":
                 msg = event.get("message", {})
                 if msg.get("role", event.get("role")) == "assistant":
+                    completed_ref = event.get("completedRef")
+                    if (
+                        event.get("completed") is True
+                        and isinstance(completed_ref, str)
+                        and isinstance(self.session, TuiSessionView)
+                        and event.get("completedSource") == self.session.session_id
+                    ):
+                        self._open_completed_virtual(completed_ref)
+                        self._assistant_stream = ""
+                        self._assistant_has_live_delta = False
+                        self._assistant_live_start_idx = -1
+                        self._assistant_live_buffer = ""
+                        self._assistant_live_line_count = 0
+                        self._assistant_stream_open = False
+                        self._schedule_stream_render()
+                        return
                     # When the provider suppressed streamed content (tool JSON
                     # detected early), the message_end carries suppressed=True.
                     # Skip creating an assistant block — the tool call events
