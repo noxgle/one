@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +191,30 @@ def _normalize_svg_whitespace_only_lines(content: str) -> str:
     return re.sub(r"(?m)^[ \t]+$", "", content)
 
 
+def _capture_snapshot_mismatch(name: str, golden: str, captured: str) -> Path | None:
+    """Save the exact mismatch outside the checkout for flaky-render diagnosis."""
+    artifact_dir = Path("/tmp/opencode")
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"tui-snapshot-{name}-{os.getpid()}"
+        (artifact_dir / f"{stem}.golden.svg").write_text(golden, encoding="utf-8")
+        (artifact_dir / f"{stem}.captured.svg").write_text(captured, encoding="utf-8")
+        (artifact_dir / f"{stem}.diff").write_text(
+            "".join(
+                unified_diff(
+                    golden.splitlines(keepends=True),
+                    captured.splitlines(keepends=True),
+                    fromfile=f"{name}.golden.svg",
+                    tofile=f"{name}.captured.svg",
+                )
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        return None
+    return artifact_dir / f"{stem}.diff"
+
+
 def _check_snapshot(
     name: str,
     content: str,
@@ -216,10 +241,13 @@ def _check_snapshot(
 
     existing = _normalize_svg_terminal_ids(golden.read_text(encoding="utf-8"))
     if content != existing:
+        artifact = _capture_snapshot_mismatch(name, existing, content)
+        artifact_message = f"\n  exact diff: {artifact}\n" if artifact else ""
         pytest.fail(
             f"Snapshot mismatch for '{name}' ({golden.name}):\n"
             f"  golden bytes: {len(existing.encode('utf-8'))}\n"
             f"  captured bytes: {len(content.encode('utf-8'))}\n"
+            f"{artifact_message}"
             f"Generate with: ONE_UPDATE_SNAPSHOTS=1 pytest -q {__file__}"
         )
 
@@ -354,7 +382,10 @@ async def test_tui_snapshot_overlay() -> None:
 
         for line in _STREAM_LINES:
             app._stream_lines.append(line)
-        app._render_stream()
+        # Exercise the mounted application's deferred render path rather than
+        # bypassing it with a synchronous test-only paint.
+        app._schedule_stream_render()
+        assert "stream frame" in _snapshot_pending_work(app)
         app._refresh_sidebar()
 
         # Show an overlay extension panel.
@@ -367,8 +398,17 @@ async def test_tui_snapshot_overlay() -> None:
             }
         )
         await _settle_snapshot(pilot, app)
+        assert not _snapshot_pending_work(app)
 
         content = _capture_content(app)
+        delayed_captures = [content]
+        for _ in range(2):
+            # Cross later frame boundaries after the asynchronous stream paint;
+            # a settled overlay must export the same strict SVG each time.
+            await pilot.pause(0.04)
+            await _settle_snapshot(pilot, app)
+            delayed_captures.append(_capture_content(app))
+        assert delayed_captures.count(content) == len(delayed_captures)
         _check_snapshot("overlay", content, update=UPDATE)
 
 
@@ -378,12 +418,39 @@ async def test_tui_snapshot_overlay() -> None:
 
 
 async def _settle_snapshot(pilot: Any, app: Any) -> None:
-    """Wait through deferred stream layout before exporting a screenshot."""
-    await pilot.pause()
-    await pilot.wait_for_scheduled_animations()
-    await pilot.pause()
-    assert not app._stream_viewport_callback_pending
-    assert app._deferred_stream_viewport is None
+    """Wait until queued frame, layout, and viewport work has painted."""
+    for _ in range(4):
+        await pilot.pause()
+        await pilot.wait_for_scheduled_animations()
+        await pilot.pause()
+        pending = _snapshot_pending_work(app)
+        if not pending:
+            return
+        # This is a conditional wait for Textual's capped next paint, not a
+        # blind screenshot delay. It permits a queued 30 Hz paint to run.
+        await pilot.pause(0.04)
+    pytest.fail(f"Snapshot did not settle: {', '.join(_snapshot_pending_work(app))}")
+
+
+def _snapshot_pending_work(app: Any) -> list[str]:
+    """Return all observable work that can still change an SVG export."""
+    pending: list[str] = []
+    if app._stream_viewport_callback_pending:
+        pending.append("stream viewport callback")
+    if app._deferred_stream_viewport is not None:
+        pending.append("deferred stream viewport")
+    if app._stream_render_dirty or app._stream_render_timer is not None:
+        pending.append("stream frame")
+    if app._rendered_stream_revision != app._stream_render_revision:
+        pending.append("stream revision")
+    if app._sidebar_refresh_dirty or app._sidebar_refresh_timer is not None:
+        pending.append("sidebar frame")
+    screen = app.screen
+    if screen._compositor._dirty_regions:
+        pending.append("compositor dirty regions")
+    if app._next_callbacks or screen._next_callbacks or screen._callbacks:
+        pending.append("post-refresh callbacks")
+    return pending
 
 
 def _capture_content(app: Any) -> str:

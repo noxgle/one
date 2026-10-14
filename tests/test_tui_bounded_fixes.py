@@ -347,24 +347,35 @@ async def test_virtual_selection_copies_evicted_1800_rows_once_through_facade(tm
     try:
         async with app.run_test(size=(120, 35)) as pilot:
             stream = app.query_one("#stream", TranscriptWidget)
-            width = max(1, stream.region.width)
-            app._completed_virtuals[ref] = {
-                "ref": ref, "total": len(lines), "width": width, "rows": {}, "pages": [],
-                "pending": set(), "queued": set(), "request_generation": 0, "error": None,
-            }
-            app._append_stream_lines(["\0completed:" + ref])
-            app._render_stream()
+            # Enter through the production accepted-completion barrier. The old
+            # fixture constructed a fully populated virtual block at an
+            # uncommitted width, which is not a state the runtime projects.
+            app._handle_session_event(
+                {
+                    "type": "message_end",
+                    "role": "assistant",
+                    "completed": True,
+                    "completedRef": ref,
+                    "completedSource": view.session_id,
+                }
+            )
             for _ in range(100):
                 await pilot.pause(0.01)
                 virtual = app._completed_virtuals[ref]
                 if (
                     virtual["total"] == len(lines)
-                    and virtual["width"] == stream.region.width
+                    and virtual["width"] == stream._width
                     and stream._offsets[-1] == len(lines)
                 ):
                     break
             assert app._completed_virtuals[ref]["total"] == len(lines)
-            assert stream._offsets[-1] == len(lines)
+            assert stream._offsets[-1] == len(lines), (
+                f"dirty={app._stream_render_dirty} timer={app._stream_render_timer is not None} "
+                f"revision={app._stream_render_revision}/{app._rendered_stream_revision} "
+                f"reflow={stream.needs_reflow} width={stream._width}/"
+                f"{app._completed_virtuals[ref]['width']} callbacks="
+                f"{len(app._next_callbacks) + len(app.screen._next_callbacks)}"
+            )
             selection = Selection(Offset(0, 0), Offset(len(lines[-1]), len(lines) - 1))
             app.screen.selections[stream] = selection
             app._copy_to_clipboard = lambda text: (copied.append(text) or ("copied", "test"))  # type: ignore[method-assign]
@@ -378,7 +389,12 @@ async def test_virtual_selection_copies_evicted_1800_rows_once_through_facade(tm
                     break
 
             virtual = app._completed_virtuals[ref]
-            assert copied == ["\n".join(lines)]
+            assert copied == ["\n".join(lines)], (
+                f"pending={len(virtual['pending'])} queued={len(virtual['queued'])} "
+                f"rows={len(virtual['rows'])} calls={len(calls)} error={virtual['error']!r} "
+                f"selection={stream.text_selection == selection} "
+                f"copy_generation={app._selection_copy_generation}"
+            )
             assert len(calls) <= 96  # bounded display-cache/viewport overlap; no unbounded retry loop.
             assert len(virtual["pending"]) <= 2
             assert app._completed_page_inflight <= 4

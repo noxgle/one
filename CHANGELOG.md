@@ -8,6 +8,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+## [0.1.81] - 2026-10-14
+
 ### Added
 
 - **Theme-aware CommandPalette (Ctrl+P) and model overlay (Ctrl+K)** — every built-in
@@ -162,6 +164,15 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   the TUI explicitly confirms that no tool was executed.
 - **Default skill startup** — silently preserve existing lower-precedence skills
   instead of warning on every startup.
+
+- **TUI snapshot render-settlement** — snapshot capture now waits for pending
+  stream/sidebar frames, revisions, viewport updates, and compositor flushes
+  before capturing, eliminating flaky test diffs.
+
+- **TUI completed-assistant scrollbar/reflow geometry race** — a committed
+  wrap-width fix prevents the completed response provisional 1-row / scrollbar
+  width oscillation and ensures geometry stabilises before copy/selection
+  (up to 1800 rows).
 
 ## [0.1.64] - 2026-10-04
 

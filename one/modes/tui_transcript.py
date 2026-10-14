@@ -46,6 +46,7 @@ class TranscriptWidget(Static):
         self._virtual_blocks: dict[int, tuple[dict[int, str], Callable[[int], None]]] = {}
         self._virtual_strips: OrderedDict[tuple[int, int], tuple[Strip, int]] = OrderedDict()
         self._virtual_strip_bytes = 0
+        self._app_size: Size | None = None
 
     @property
     def _width(self) -> int:
@@ -143,8 +144,18 @@ class TranscriptWidget(Static):
         self.refresh(layout=True)
 
     def on_resize(self, event: events.Resize) -> None:
-        """Reflow once when Textual gives this child its actual column width."""
-        if self._line_ids and event.size.width != self._wrap_width:
+        """Reflow only when the initial mounted width becomes available.
+
+        A ``VerticalScroll`` child also receives resize events whenever its
+        scrollbar appears or disappears. Those must not invalidate the
+        committed wrap width: changing a completed virtual block from its
+        provisional height would otherwise make the scrollbar and page width
+        oscillate. The app explicitly invalidates on a terminal resize.
+        """
+        app_size = self.app.size
+        app_resized = app_size != self._app_size
+        self._app_size = app_size
+        if self._line_ids and event.size.width != self._wrap_width and (self._wrap_width <= 1 or app_resized):
             self.invalidate_wrap()
 
     def _reindex(self) -> None:

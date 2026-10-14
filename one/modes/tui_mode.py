@@ -2376,7 +2376,12 @@ if TEXTUAL_AVAILABLE:
                 stream_widget = self.query_one("#stream", TranscriptWidget)
             except Exception:
                 return
-            width = max(1, int(stream_widget.region.width or self._main_width()))
+            # ``region.width`` can oscillate as VerticalScroll adds/removes its
+            # scrollbar while a completed virtual block changes from its
+            # provisional one-row height. Use TranscriptWidget's committed wrap
+            # width so the page geometry and transcript offsets share one
+            # stable width through that layout transition.
+            width = stream_widget._width
             cache_context_changed = width != self._stream_cache_width or self._stream_cache_theme != self._theme.name
             if (
                 tuple(self._stream_lines) == self._rendered_stream_lines
@@ -2491,6 +2496,10 @@ if TEXTUAL_AVAILABLE:
             # must not reinterpret them after a terminal resize.
             self._selection_copy_generation += 1
             if self._stream_lines:
+                try:
+                    self.query_one("#stream", TranscriptWidget).invalidate_wrap()
+                except Exception:
+                    pass
                 self.call_after_refresh(self._render_stream)
 
         def _need_completed_virtual_row(self, ref: str, row: int) -> None:
