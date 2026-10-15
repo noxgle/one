@@ -173,8 +173,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         # llama.cpp chat templates such as Qwen use this template argument to
         # suppress their reasoning block. It is deliberately provider-specific:
         # OpenAI-compatible APIs do not share this extension.
-        if self.name == "llama.cpp" and thinking_level == "off":
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if self.name == "llama.cpp" and thinking_level in {"off", "on"}:
+            payload["chat_template_kwargs"] = {"enable_thinking": thinking_level == "on"}
         # Native tools are opt-in: local/legacy endpoints retain the proven
         # JSON-in-text contract even though they share this adapter.
         if tools and self.supports_native_tools:

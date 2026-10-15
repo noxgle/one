@@ -65,7 +65,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "budget": {"maxTokens": 0, "maxTimeSec": 0},
 }
 
-THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+THINKING_LEVELS = ("off", "on", "minimal", "low", "medium", "high", "xhigh")
 
 
 def _deep_merge(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:

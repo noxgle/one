@@ -272,7 +272,7 @@ def _raw_readline(prompt: str, on_ctrl_a: Callable[[], None]) -> str:
 
 
 class InteractiveMode:
-    _THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"]
+    _THINKING_LEVELS = ["off", "on", "minimal", "low", "medium", "high", "xhigh"]
 
     def __init__(self, runtime_host: Any, options: dict[str, Any] | None = None) -> None:
         self.runtime_host = runtime_host
@@ -751,7 +751,7 @@ class InteractiveMode:
                         {
                             "current": session.thinking_level,
                             "levels": list(self._THINKING_LEVELS),
-                            "usage": "/thinking <off|minimal|low|medium|high|xhigh>",
+                            "usage": "/thinking <off|on|minimal|low|medium|high|xhigh>",
                         },
                         ensure_ascii=False,
                         indent=2,

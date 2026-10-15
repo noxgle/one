@@ -184,6 +184,7 @@ def test_openai_compatible_headers_without_api_key() -> None:
     ("level", "template_kwargs"),
     [
         ("off", {"enable_thinking": False}),
+        ("on", {"enable_thinking": True}),
         ("minimal", None),
         ("low", None),
         ("medium", None),
@@ -305,7 +306,7 @@ def test_openai_compatible_with_base_url_returns_reconfigured_adapter() -> None:
 
 @pytest.mark.parametrize(
     ("level", "effort"),
-    [("off", None), ("minimal", "minimal"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
+    [("off", None), ("on", None), ("minimal", "minimal"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
 )
 def test_openrouter_uses_native_reasoning_object(level: str, effort: str | None) -> None:
     payload = OpenAICompatibleAdapter(
@@ -317,7 +318,7 @@ def test_openrouter_uses_native_reasoning_object(level: str, effort: str | None)
 
 @pytest.mark.parametrize(
     ("level", "think"),
-    [("off", False), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
+    [("off", False), ("on", True), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],
 )
 def test_ollama_cloud_uses_native_think(level: str, think: bool | str) -> None:
     payload = OllamaCloudAdapter("https://ollama.com")._build_payload(

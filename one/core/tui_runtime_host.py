@@ -347,6 +347,12 @@ class TuiRuntimeHost:
                 "cooperation_changed", "provider_request_end", "tool_call_end",
             }:
                 self._schedule_sidebar_refresh(epoch)
+            elif stamped.get("type") == "model_change":
+                # The token estimate is model-independent, but its percentage
+                # is not. Refresh it now while retaining cached session stats.
+                self._refresh_sidebar_context()
+                for listener in tuple(self._listeners):
+                    listener({"type": "status_invalidated", "epoch": epoch})
             # Keep event sessionId (for child/monitor identities) intact while
             # attaching the authoritative owner-session identity separately.
             stamped["epoch"] = epoch
@@ -504,6 +510,14 @@ class TuiRuntimeHost:
             "stats": session.get_session_stats() or {},
         }
 
+    def _refresh_sidebar_context(self) -> None:
+        """Refresh only model-dependent context usage, retaining cached stats."""
+        cache = self._sidebar_expensive or {}
+        self._sidebar_expensive = {
+            "usage": self._session().get_context_usage() or {},
+            "stats": cache.get("stats", {}),
+        }
+
     def _sidebar(self) -> dict[str, Any]:
         session = self._session()
         model = session.model
@@ -536,6 +550,7 @@ class TuiRuntimeHost:
             "subagents": not bool(getattr(session, "subagents_hard_disabled", False))
             and bool(session.settings_manager.get_subagents_enabled()),
             "contextPercent": float(usage.get("percent") or 0),
+            "contextWindow": int(usage["contextWindow"]) if isinstance(usage.get("contextWindow"), int) else None,
             "queueSteer": len(queues.get("steering") or []),
             "queueFollow": len(queues.get("followUp") or []),
             "tokenInput": int(tokens.get("input") or 0),

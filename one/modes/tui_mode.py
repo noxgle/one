@@ -420,7 +420,8 @@ def build_sidebar_snapshot(
             "model": "none", "thinking": "medium", "temperature": 0.5,
             "temperatureMode": "balanced", "cwd": ".", "sessionId": "-",
             "streaming": False, "compacting": False, "retry": "on", "coop": "off",
-            "contextPercent": 0.0, "contextKnown": False, "deliveryMode": "idle",
+            "contextPercent": 0.0, "contextWindow": None, "contextKnown": False,
+            "deliveryMode": "idle",
             "queueSteer": 0, "queueFollow": 0, "queueTotal": 0, "tokenInput": 0,
             "tokenOutput": 0, "tokenCacheRead": 0, "tokenCacheWrite": 0,
             "tokenTotal": 0, "cost": 0.0, "subagents": True, "bashOutput": True,
@@ -486,6 +487,7 @@ def build_sidebar_snapshot(
         "retry": retry_display,
         "coop": "on" if getattr(session, "approval_callback", None) is not None else "off",
         "contextPercent": float(usage.get("percent") or 0.0),
+        "contextWindow": usage.get("contextWindow") if isinstance(usage.get("contextWindow"), int) else None,
         "contextKnown": isinstance(usage.get("percent"), (int, float)),
         "deliveryMode": delivery_mode,
         "queueSteer": steer_count,
@@ -698,13 +700,15 @@ def evaluate_waiting(
     now: float,
     idle_threshold: float = 0.9,
 ) -> bool:
-    """True when a turn is in flight but no assistant text has streamed recently.
+    """True whenever the current turn has non-idle execution.
 
-    Covers: waiting for the first token, thinking between tool calls, tool
-    execution and auto-retry delays. While text deltas arrive the indicator
-    stays hidden (the text itself is the feedback).
+    ``last_delta_ts`` and the legacy threshold remain accepted for compatibility
+    with callers/tests, but prose output must not hide the independent footer:
+    a model can stream arguments before a long tool call, and tools themselves
+    generally emit no deltas.
     """
-    return turn_active and (now - last_delta_ts) >= idle_threshold
+    del last_delta_ts, now, idle_threshold
+    return turn_active
 
 
 def advance_thinking_frame(frame: int) -> int:
@@ -5258,7 +5262,7 @@ if TEXTUAL_AVAILABLE:
                 return
             if cmd == "/thinking":
                 self._write(f"Current thinking: {session.thinking_level}", "info")
-                self._write("Usage: /thinking <off|minimal|low|medium|high|xhigh>", "info")
+                self._write("Usage: /thinking <off|on|minimal|low|medium|high|xhigh>", "info")
                 return
             if cmd.startswith("/thinking "):
                 level = cmd[len("/thinking ") :].strip()

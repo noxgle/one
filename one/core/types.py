@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh"]
+ThinkingLevel = Literal["off", "on", "minimal", "low", "medium", "high", "xhigh"]
 
 
 @dataclass

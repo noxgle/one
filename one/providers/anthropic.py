@@ -21,6 +21,9 @@ from .base import ChatResult, ProviderAdapter, native_tool_replay_pairs
 _IDLE_SSE_TIMEOUT = 120
 
 _THINKING_BUDGET_BY_LEVEL = {
+    # Anthropic requires an explicit valid token budget to enable thinking;
+    # ``on`` therefore selects the smallest documented budget.
+    "on": 1024,
     "minimal": 1024,
     "low": 2048,
     "medium": 4096,

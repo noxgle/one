@@ -8,7 +8,16 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Added
+
+- **Thinking default mode** — `on` is available through settings, CLI, sessions,
+  interactive mode, and TUI controls to request provider/model-default thinking.
+
 ### Fixed
+
+- **TUI execution footer and context gauge** — the lightweight spinner remains
+  active for every running turn (including long tools), and model changes refresh
+  context usage against the newly selected context window immediately.
 
 - **README logo preview** — retained the compact text-logo rendering alongside
   the image so Markdown documentation keeps both visual previews available.

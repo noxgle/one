@@ -20,6 +20,12 @@ def test_default_subagents_has_timeout_sec_1800() -> None:
     assert DEFAULT_SETTINGS["subagents"]["timeoutSec"] == 1800
 
 
+def test_thinking_on_is_valid_and_persisted_default() -> None:
+    settings = SettingsManager.in_memory()
+    settings.set_default_thinking_level("on")
+    assert settings.get_default_thinking_level() == "on"
+
+
 def test_get_subagents_timeout_sec_default() -> None:
     """With default settings, get_subagents_timeout_sec returns 1800."""
     settings = SettingsManager.in_memory()

@@ -479,6 +479,14 @@ def test_parse_args_run_value_flags_before_task():
     assert p.run_task == "task"
 
 
+def test_parse_args_accepts_thinking_on():
+    from one.cli.args import parse_args
+
+    parsed = parse_args(["--thinking", "on"])
+    assert parsed.thinking == "on"
+    assert not parsed.errors
+
+
 def test_parse_args_run_list_models_optional_value():
     from one.cli.args import parse_args
 

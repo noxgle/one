@@ -46,6 +46,7 @@ class OllamaCloudAdapter(ProviderAdapter):
         # not accepted by models such as GPT-OSS.
         return {
             "off": False,
+            "on": True,
             "minimal": "low",
             "low": "low",
             "medium": "medium",

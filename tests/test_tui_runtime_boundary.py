@@ -34,6 +34,23 @@ class _TuiAdapter:
         raise ValueError("invalid TUI runtime command payload")
 
 
+def test_model_context_refresh_replaces_usage_without_discarding_cached_stats() -> None:
+    """A model switch must not retain a percentage from the old context window."""
+    session = SimpleNamespace(get_context_usage=lambda: {
+        "tokens": 200, "contextWindow": 1_000, "percent": 20.0,
+    })
+    host = object.__new__(TuiRuntimeHost)
+    host._session = lambda: session
+    host._sidebar_expensive = {"usage": {"tokens": 200, "contextWindow": 100, "percent": 200.0}, "stats": {"tokens": {"total": 42}}}
+
+    host._refresh_sidebar_context()
+
+    assert host._sidebar_expensive == {
+        "usage": {"tokens": 200, "contextWindow": 1_000, "percent": 20.0},
+        "stats": {"tokens": {"total": 42}},
+    }
+
+
 @pytest.mark.asyncio
 async def test_tui_facade_worker_is_off_ui_thread_and_exposes_no_live_runtime() -> None:
     created: list[_TuiAdapter] = []

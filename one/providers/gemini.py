@@ -21,6 +21,8 @@ from .base import ChatResult, ProviderAdapter, native_tool_replay_pairs
 _IDLE_SSE_TIMEOUT = 120
 
 _THINKING_BUDGET_BY_LEVEL = {
+    # Gemini has no boolean thinking switch.  Use its smallest valid budget.
+    "on": 1024,
     "minimal": 1024,
     "low": 2048,
     "medium": 4096,

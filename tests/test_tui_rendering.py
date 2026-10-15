@@ -664,6 +664,7 @@ async def test_detached_tui_sidebar_normalizes_and_renders_mcp_statuses(tmp_path
     view = TuiSessionView(_Facade())
     await view.refresh()
     snapshot = build_sidebar_snapshot(view)
+    assert snapshot["contextWindow"] is None
     assert [server["name"] for server in snapshot["mcpServers"]] == ["running", "failed"]
     assert [server["available"] for server in snapshot["mcpServers"]] == [True, False]
 
@@ -698,8 +699,8 @@ def test_evaluate_waiting_rule() -> None:
     now = 100.0
     # No active turn -> never waiting.
     assert evaluate_waiting(False, now - 10.0, now) is False
-    # Active turn, deltas streaming recently -> not waiting.
-    assert evaluate_waiting(True, now - 0.2, now) is False
+    # Active turn remains visible even while prose is streaming.
+    assert evaluate_waiting(True, now - 0.2, now) is True
     # Active turn, no deltas for a while -> waiting (first token / between
     # tool calls / tool execution / retry delay).
     assert evaluate_waiting(True, now - 2.0, now) is True

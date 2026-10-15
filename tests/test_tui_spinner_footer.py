@@ -197,6 +197,37 @@ async def test_tui_spinner_stays_active_for_hidden_native_write_arguments(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["write", "bash"])
+async def test_tui_spinner_stays_animated_during_long_tools_after_prose(tmp_path: Path, tool: str) -> None:
+    """Recent prose must not hide the footer while a long tool owns the turn."""
+    from time import monotonic
+
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._handle_session_event({"type": "turn_start"})
+        # This simulates prose immediately before a delayed write/bash call.
+        app._last_delta_ts = monotonic()
+        app._handle_session_event({"type": "tool_call_start", "tool": tool, "displayArgs": "delayed"})
+        start = app._thinking_frame
+        app._tick_waiting()
+        first = app._thinking_frame
+        app._tick_waiting()
+        assert first != start
+        assert app._thinking_frame != first
+        assert "Ctrl+C — abort" in str(app.query_one("#waiting_status", Static).render())
+
+        app._handle_session_event({"type": "turn_end", "ok": True})
+        app._tick_waiting()
+        assert app._thinking_active is False
+        assert str(app.query_one("#waiting_status", Static).render()) == ""
+
+
+@pytest.mark.asyncio
 async def test_tui_finish_summary_has_no_empty_native_carrier_on_restore(tmp_path: Path) -> None:
     """A persisted native tool carrier is context only, not an empty chat panel."""
     from one.modes.tui_mode import _OneTextualApp

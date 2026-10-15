@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from one.config import APP_NAME
 from one.core.temperature import TEMPERATURE_MODES, normalize_temperature
 
-VALID_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
+VALID_THINKING_LEVELS = {"off", "on", "minimal", "low", "medium", "high", "xhigh"}
 VALID_MODES = {"text", "json", "rpc", "tui"}
 
 

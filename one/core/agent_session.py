@@ -2417,6 +2417,7 @@ class AgentSession:
             # global default for a future reasoning-capable model/session.
             self.thinking_level = "off"
             self.session_manager.append_thinking_level_change("off")
+        self._emit({"type": "model_change", "provider": self.model.provider, "model": self.model.id})
 
     def set_thinking_level(self, level: str) -> None:
         if level not in THINKING_LEVELS:
