@@ -59,6 +59,7 @@ class _Runtime:
         self.owner_thread = threading.get_ident()
         self.disposed = False
         self.wait_cancelled = False
+        self.wait_started = asyncio.Event()
         self.cancelled = threading.Event()
         self.calls: list[str] = []
         self.not_a_command = "not callable"
@@ -78,6 +79,7 @@ class _Runtime:
         return "x" * 128
 
     async def wait_forever(self) -> None:
+        self.wait_started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -194,7 +196,10 @@ async def test_correlation_cancellation_coalescing_and_idempotent_close() -> Non
     await facade.start()
 
     waiting = asyncio.create_task(facade.command("wait_forever", correlation_id="cancel-me"))
-    await asyncio.sleep(0)
+    # Ensure the owner-loop coroutine has started before cancelling the caller;
+    # otherwise it may be cancelled while still queued and never exercise
+    # cancellation propagation into the runtime.
+    await asyncio.wait_for(runtime.wait_started.wait(), timeout=1)
     waiting.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiting

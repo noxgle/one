@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **README logo preview** — retained the compact text-logo rendering alongside
+  the image so Markdown documentation keeps both visual previews available.
+- **Runtime cancellation test determinism** — wait for the facade command to
+  enter the owner-loop coroutine before cancelling it, avoiding a scheduling race.
 - **Retry recovery** — enabled retries now use a finite default, unlimited mode
   continues past that cap, observes live retry-mode changes, and keeps backoff
   arithmetic bounded.
