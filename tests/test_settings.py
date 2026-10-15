@@ -90,13 +90,13 @@ def test_default_retry_enabled_is_true() -> None:
     assert settings.get_retry_enabled() is True
 
 
-def test_default_retry_max_retries_is_zero() -> None:
-    """retry.maxRetries defaults to 0 (no retry attempts)."""
+def test_default_retry_max_retries_is_three() -> None:
+    """retry.maxRetries defaults to a finite three retry attempts."""
     from one.core.settings_manager import DEFAULT_SETTINGS
 
-    assert DEFAULT_SETTINGS["retry"]["maxRetries"] == 0
+    assert DEFAULT_SETTINGS["retry"]["maxRetries"] == 3
     settings = SettingsManager.in_memory()
-    assert settings.get_retry_settings()["maxRetries"] == 0
+    assert settings.get_retry_settings()["maxRetries"] == 3
 
 
 def test_default_retry_mode_is_on() -> None:
@@ -374,14 +374,22 @@ def test_default_getters_fall_back_when_nested_settings_are_null() -> None:
 def test_retry_enabled_true_with_max_retries_zero_no_retries() -> None:
     """retry.enabled=True AND maxRetries=0 → get_retry_enabled is True but
     effective retry loop will not retry because attempt(0) < maxRetries(0) is False."""
-    settings = SettingsManager.in_memory()
+    settings = SettingsManager.in_memory({"retry": {"enabled": True, "maxRetries": 0}})
     assert settings.get_retry_enabled() is True
     assert settings.get_retry_settings()["maxRetries"] == 0
-    # Simulate the retry-loop guard: retries_enabled and attempt < max_retries
+    # Explicit zero retains the no-retry compatibility contract.
     retries_enabled = settings.get_retry_settings().get("enabled", True)
     max_retries = settings.get_retry_settings().get("maxRetries", 3)
-    will_retry = retries_enabled and 0 < max_retries  # attempt 0
+    will_retry = retries_enabled and 0 < max_retries
     assert will_retry is False  # 0 < 0 is False
+
+
+def test_explicit_retry_toggle_reenables_legacy_disable_sentinels() -> None:
+    settings = SettingsManager.in_memory({"retry": {"enabled": False, "maxRetries": 0}})
+    assert settings.get_retry_enabled() is False
+    settings.set_retry_enabled(True)
+    assert settings.get_retry_enabled() is True
+    assert settings.get_retry_settings()["maxRetries"] == 3
 
 
 def test_retry_enabled_false_no_retries_even_with_max_retries() -> None:

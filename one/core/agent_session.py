@@ -3165,7 +3165,6 @@ class AgentSession:
         terminal_error = False
         context_recovery_attempted = False
         try:
-            retry_cfg = self.settings_manager.get_retry_settings()
             attempt = 0
             # A format repair is scoped to the post-tool interval. A completed
             # non-terminal tool starts a fresh interval and restores its one
@@ -3594,8 +3593,13 @@ class AgentSession:
                         self._agent_event("agent_end", [user_msg, error_msg])
                         break
                     except Exception as e:
+                        # Read settings at each failure rather than retaining a
+                        # turn-start snapshot: Ctrl+R and /retry must take effect
+                        # for an already-running request.
+                        retry_cfg = self.settings_manager.get_retry_settings()
                         retries_enabled = self.settings_manager.get_retry_enabled()
                         max_retries = int(retry_cfg.get("maxRetries", 3))
+                        retry_mode = self.settings_manager.get_retry_mode()
                         error_text = str(e).strip() or e.__class__.__name__
                         is_ctx_limit = self._is_context_limit_error(error_text)
                         if is_ctx_limit:
@@ -3608,7 +3612,12 @@ class AgentSession:
                             and self.auto_compaction_enabled
                             and not context_recovery_attempted
                         )
-                        generic_retry = retries_enabled and attempt < max_retries
+                        # ``unlimited`` deliberately ignores the finite cap,
+                        # while ``on`` retains the explicit zero=no-retry
+                        # semantics and the finite default from settings.
+                        generic_retry = retries_enabled and self._is_retryable_error(error_text) and (
+                            retry_mode == "unlimited" or attempt < max_retries
+                        )
                         will_retry = recovery_retry or (
                             generic_retry and not (is_ctx_limit and self.auto_compaction_enabled)
                         )
@@ -3655,7 +3664,12 @@ class AgentSession:
                             except Exception:
                                 pass  # compaction failure → fall through to normal retry
                         attempt += 1
-                        delay_ms = min(int(retry_cfg.get("baseDelayMs", 1500)) * (2 ** (attempt - 1)), int(retry_cfg.get("maxDelayMs", 20000)))
+                        # Cap the exponent before computing it.  Unlimited
+                        # retries must not create an enormous intermediate int
+                        # after a long-lived connection outage.
+                        base_delay_ms = max(0, int(retry_cfg.get("baseDelayMs", 1500)))
+                        max_delay_ms = max(0, int(retry_cfg.get("maxDelayMs", 20000)))
+                        delay_ms = min(base_delay_ms * (2 ** min(attempt - 1, 30)), max_delay_ms)
                         self._retrying = True
                         self._emit(
                             {
@@ -3714,6 +3728,35 @@ class AgentSession:
                             )
                             self._agent_event("agent_end", [user_msg, abort_msg])
                             self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
+                            self._retrying = False
+                            break
+                        # Settings can change while the interruptible delay is
+                        # in progress.  Do not launch one more provider request
+                        # after retries have been switched off.
+                        current_retry_cfg = self.settings_manager.get_retry_settings()
+                        current_retry_mode = self.settings_manager.get_retry_mode()
+                        current_max_retries = int(current_retry_cfg.get("maxRetries", 3))
+                        if not recovery_retry and (
+                            not self.settings_manager.get_retry_enabled()
+                            or (current_retry_mode != "unlimited" and attempt > current_max_retries)
+                        ):
+                            terminal_error = True
+                            error_msg = {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": error_text}],
+                                "provider": self.model.provider if self.model else None,
+                                "model": self.model.id if self.model else None,
+                                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                                "stopReason": "error",
+                                "timestamp": int(time.time() * 1000),
+                            }
+                            self.messages.append(error_msg)
+                            self.session_manager.append_message(error_msg)
+                            self._emit({"type": "message_start", "message": error_msg})
+                            self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": error_text}})
+                            self._emit({"type": "message_end", "message": error_msg})
+                            self._agent_event("agent_end", [user_msg, error_msg])
+                            self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": False})
                             self._retrying = False
                             break
                         self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": True, "aborted": False})
@@ -4278,6 +4321,25 @@ class AgentSession:
             or "maximum" in lower and "context" in lower
             or "too many" in lower and "token" in lower
         )
+
+    @staticmethod
+    def _is_retryable_error(error_text: str) -> bool:
+        """Keep unlimited retry for transient failures, not known bad requests.
+
+        Adapters intentionally normalize remote failures to text, so this is a
+        small conservative deny-list rather than adapter-specific exception
+        matching.  Unknown transport/runtime failures preserve the historical
+        retry behavior; invalid credentials and request/model configuration do
+        not spin forever in unlimited mode.
+        """
+        lower = error_text.lower()
+        permanent_markers = (
+            "invalid api key", "invalid_api_key", "authentication", "unauthorized",
+            "forbidden", "permission denied", "model not found", "unknown model",
+            "unsupported model", "invalid request", "bad request", "status 400",
+            "status 401", "status 403", "status 404",
+        )
+        return not any(marker in lower for marker in permanent_markers)
 
     @staticmethod
     def _context_limit_details(error_text: str) -> dict[str, int]:

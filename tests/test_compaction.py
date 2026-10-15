@@ -729,14 +729,19 @@ class _ContextLimitProvider:
 
 
 @pytest.mark.asyncio
-async def test_retry_context_limit_triggers_compaction(tmp_path):
+@pytest.mark.parametrize("retry", [
+    {"enabled": True, "maxRetries": 3, "baseDelayMs": 1, "maxDelayMs": 1},
+    {"enabled": False, "maxRetries": 3, "baseDelayMs": 1, "maxDelayMs": 1},
+    {"enabled": True, "maxRetries": 0, "baseDelayMs": 1, "maxDelayMs": 1},
+])
+async def test_retry_context_limit_triggers_compaction(tmp_path, retry):
     """A context-length error should compact before retrying, not just retry blindly."""
     provider = _ContextLimitProvider()
     agent = _mk_agent(
         tmp_path,
         {
             "compaction": {"summarizeWithModel": False, "recentTokens": 30, "minKeptMessages": 1},
-            "retry": {"enabled": True, "maxRetries": 3, "baseDelayMs": 1, "maxDelayMs": 1},
+            "retry": retry,
             "tools": {"maxSteps": 2, "timeoutSec": 5},
         },
         provider=provider,

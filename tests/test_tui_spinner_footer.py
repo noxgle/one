@@ -175,6 +175,68 @@ async def test_tui_spinner_rendered_screen_contains_exact_label(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_tui_spinner_stays_active_for_hidden_native_write_arguments(tmp_path: Path) -> None:
+    """Non-prose argument deltas must not reset the independent wait footer."""
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._turn_active = True
+        app._last_delta_ts = 0.0
+        app._handle_session_event({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "tool_call_delta", "delta": "x" * 8192},
+        })
+        app._handle_session_event({"type": "tool_call_start", "tool": "write", "displayArgs": "content: <large>"})
+        app._tick_waiting()
+        await pilot.pause()
+        assert "Ctrl+C — abort" in str(app.query_one("#waiting_status", Static).render())
+
+
+@pytest.mark.asyncio
+async def test_tui_finish_summary_has_no_empty_native_carrier_on_restore(tmp_path: Path) -> None:
+    """A persisted native tool carrier is context only, not an empty chat panel."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    session.messages.extend([
+        {"role": "assistant", "content": [{"type": "text", "text": ""}], "_nativeToolCalls": [{"id": "call-1"}]},
+        {"role": "toolResult", "content": '{"ok":true,"outputText":"written"}'},
+        {"role": "assistant", "content": [{"type": "text", "text": "Finished successfully."}], "stopReason": "completed"},
+    ])
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._rebuild_session_transcript()
+        app._render_stream()
+        await pilot.pause()
+        rendered = "\n".join(str(line) for line in app._stream_lines)
+        assert "Finished successfully." in rendered
+        assert "[empty]" not in rendered
+        assert "[empty response]" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_tui_restore_keeps_native_tool_message_prose(tmp_path: Path) -> None:
+    session = _mk_app_session(tmp_path)
+    session.messages.append({
+        "role": "assistant",
+        "content": [{"type": "text", "text": "I will create the requested file."}],
+        "_nativeToolCalls": [{"id": "call-1"}],
+    })
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._rebuild_session_transcript()
+        assert "I will create the requested file." in "\n".join(str(line) for line in app._stream_lines)
+
+
+@pytest.mark.asyncio
 async def test_tui_spinner_footer_theme_applies_to_wrapper_and_footer(
     tmp_path: Path,
 ) -> None:

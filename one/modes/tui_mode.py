@@ -1875,7 +1875,11 @@ if TEXTUAL_AVAILABLE:
                     # Reasoning is useful transcript content, but it must not
                     # suppress the independent waiting/abort footer.  Only
                     # visible assistant prose counts as output activity.
-                    if event.get("type") == "message_update":
+                    if (
+                        event.get("type") == "message_update"
+                        and event.get("assistantMessageEvent", {}).get("type") == "text_delta"
+                        and event.get("assistantMessageEvent", {}).get("delta")
+                    ):
                         self._last_delta_ts = time.monotonic()
                     if self.is_running and not self._ui_flush_wakeup_pending:
                         self._ui_flush_wakeup_pending = True
@@ -2072,6 +2076,16 @@ if TEXTUAL_AVAILABLE:
                     self._write("Previous request was aborted.", "info")
                 if role in {"user", "assistant"}:
                     if not historical_abort:
+                        # Native tool-call carrier messages are durable provider
+                        # context, not user-visible assistant prose.  They often
+                        # have no text and used to render a transient [empty]
+                        # panel before the terminal finish summary on restore.
+                        if (
+                            role == "assistant"
+                            and isinstance(message.get("_nativeToolCalls"), list)
+                            and not str(content).strip()
+                        ):
+                            continue
                         completed_ref = message.get("completedRef")
                         if role == "assistant" and isinstance(completed_ref, str) and isinstance(self.session, TuiSessionView):
                             self._open_completed_virtual(completed_ref)
@@ -3717,6 +3731,12 @@ if TEXTUAL_AVAILABLE:
             # formatted input within the named cap (rather than appending a
             # marker after an 8 KiB prefix).
             live_render_text = self._assistant_live_buffer
+            # Tool/native carrier streams may open a lifecycle block without
+            # any user-visible prose.  They are context/control traffic, not
+            # an empty assistant response.
+            if not live_render_text.strip():
+                self._assistant_live_lines_dirty = False
+                return
             encoded_live = live_render_text.encode("utf-8")
             if len(encoded_live) > _MAX_LIVE_ASSISTANT_RENDER_BYTES:
                 marker = "\n" + _TRUNCATED_ASSISTANT_MARKER
@@ -7291,8 +7311,12 @@ if TEXTUAL_AVAILABLE:
                                     ).strip()
                                 else:
                                     text = str(content).strip()
-                            final_text = text or "[empty response]"
-                            self._write_chat_block("assistant", final_text)
+                            # Empty native/tool carrier messages have no
+                            # user-visible content.  Do not manufacture a
+                            # misleading error-like panel; genuine empty final
+                            # responses are normalized by AgentSession.
+                            if text:
+                                self._write_chat_block("assistant", text)
                     # Always reset live state regardless of suppression.
                     if not self._assistant_live_finalize_pending:
                         self._assistant_stream = ""

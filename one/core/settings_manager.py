@@ -33,7 +33,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "minResultTokens": 2048,
         "marker": "Stale tool output pruned from active context. Re-run the tool if details are required.",
     },
-    "retry": {"enabled": True, "mode": "on", "maxRetries": 0, "baseDelayMs": 1500, "maxDelayMs": 20000},
+    # A normal enabled retry mode has a finite, useful default.  An explicitly
+    # configured zero remains meaningful: it disables generic retries.
+    "retry": {"enabled": True, "mode": "on", "maxRetries": 3, "baseDelayMs": 1500, "maxDelayMs": 20000},
     "image": {"autoResize": True, "blockImages": False},
     "sessionDir": None,
     "theme": "hacker",
@@ -491,12 +493,27 @@ class SettingsManager:
         self._save_global()
 
     def set_retry_enabled(self, enabled: bool) -> None:
-        """Backward-compatible: preserve 'unlimited' when enabling."""
+        """Toggle retry as an explicit user action.
+
+        Legacy ``enabled: false`` and ``maxRetries: 0`` remain respected when
+        loaded from configuration.  A user turning retry back on deliberately
+        clears those disable sentinels and restores the finite default.
+        """
+        self._require_writable_global()
+        retry = dict(self._global.get("retry", {}) or {})
         if enabled:
-            current = self.get_retry_mode()
+            current = str(retry.get("mode", self.get_retry_mode()))
+            retry["enabled"] = True
+            if int(retry.get("maxRetries", DEFAULT_SETTINGS["retry"]["maxRetries"])) <= 0:
+                retry["maxRetries"] = DEFAULT_SETTINGS["retry"]["maxRetries"]
+            self._global["retry"] = retry
+            self._save_global()
             if current != "unlimited":
                 self.set_retry_mode("on")
         else:
+            retry["enabled"] = False
+            self._global["retry"] = retry
+            self._save_global()
             self.set_retry_mode("off")
 
     def set_steering_mode(self, mode: str) -> None:

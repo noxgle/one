@@ -8,6 +8,17 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Fixed
+
+- **Retry recovery** — enabled retries now use a finite default, unlimited mode
+  continues past that cap, observes live retry-mode changes, and keeps backoff
+  arithmetic bounded.
+- **Provider recovery and TUI feedback** — repair-request timeouts can recover
+  without replaying completed tools; the TUI keeps its footer spinner active
+  while hidden/native tool arguments stream or tools execute.
+- **TUI completed tool turns** — native tool-call carrier messages no longer
+  leave `[empty]` / `[empty response]` panels before a successful finish summary.
+
 ## [0.1.81] - 2026-10-14
 
 ### Added
