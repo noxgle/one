@@ -613,7 +613,7 @@ class CodexResponsesAdapter(ProviderAdapter):
     async def list_models_detailed(
         self, api_key: str, headers: dict[str, str] | None = None
     ) -> list[dict[str, Any]] | None:
-        """Non-standard schema: {"models": [{"slug": ...}, ...]}."""
+        """Read the proprietary catalogue, including its optional context metadata."""
         url = f"{BASE_URL}/models?client_version={CLIENT_VERSION}"
         req_headers = self._headers(api_key, extra=headers)
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
@@ -632,9 +632,21 @@ class CodexResponsesAdapter(ProviderAdapter):
             raise RuntimeError(f"chatgpt models endpoint returned unexpected shape: {str(data)[:400]}")
         out: list[dict[str, Any]] = []
         for m in data.get("models", []):
+            if not isinstance(m, dict):
+                continue
             slug = m.get("slug")
-            if slug:
-                out.append({"id": slug, "contextWindow": None})
+            if isinstance(slug, str) and slug:
+                # ``context_window`` is the active catalogue value.  Some
+                # entries additionally advertise a larger maximum, which is
+                # not the currently usable context and must not take priority.
+                window = m.get("context_window")
+                maximum = m.get("max_context_window")
+                if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+                    window = None
+                if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+                    maximum = None
+                out.append({"id": slug, "contextWindow": maximum, "maxContextWindow": maximum,
+                            "defaultContextWindow": window, "defaultInputBudget": window})
         if not out:
             raise RuntimeError(
                 "chatgpt models endpoint returned 0 models — server gates the "

@@ -526,6 +526,7 @@ async def _run(argv: list[str]) -> int:
         "tools": [all_tools[t] for t in tool_names],
         "subagentsHardDisabled": parsed.no_subagents,
         "mcpManager": mcp_manager,
+        "catalogRefresh": os.getenv("ONE_CATALOG_REFRESH", "1").lower() not in {"0", "false", "off"},
     }
 
     runtime = await create_agent_session_runtime(

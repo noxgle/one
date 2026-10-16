@@ -23,6 +23,18 @@ from pathlib import Path
 from typing import Any
 
 from one.core.activity_watchdog import ActivityWatchdog
+from one.core.context_budget import (
+    DEFAULT_OUTPUT_RESERVE as _DEFAULT_OUTPUT_RESERVE,
+)
+from one.core.context_budget import (
+    FALLBACK_CONTEXT_WINDOW as _FALLBACK_CONTEXT_WINDOW,
+)
+from one.core.context_budget import (
+    legacy_models_json_manual_fields,
+    resolve_context_budget,
+    valid_limit,
+)
+from one.core.model_catalog import REFRESH_TTL_SECONDS
 from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.session_manager import SessionManager
@@ -47,9 +59,11 @@ approval_callback_origin: ContextVar[AgentSession | None] = ContextVar("approval
 # Grace period added to the effective tool timeout for the outer asyncio.wait_for backstop.
 _TOOL_TIMEOUT_GRACE_SEC = 5
 
-# Fallback context window used when a model has no known context_window
-# (dynamic models resolved at runtime). Keeps the ctx gauge/compaction working.
-FALLBACK_CONTEXT_WINDOW = 128_000
+# Fallback is an internal estimate only: API/TUI metadata continues to say
+# unknown.  The reserve prevents an unknown-output model from consuming all of
+# a known total window.
+FALLBACK_CONTEXT_WINDOW = _FALLBACK_CONTEXT_WINDOW  # compatibility export
+DEFAULT_OUTPUT_RESERVE = _DEFAULT_OUTPUT_RESERVE  # compatibility export
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +114,13 @@ class _CapabilityErrorCooperative(_CapabilityError):
     """
 
 
-def _with_fallback_context(model: ModelInfo | None) -> ModelInfo | None:
-    """Normalize a model so the ctx gauge/compaction always have a window."""
-    if model is not None and not model.context_window:
-        return replace(model, context_window=FALLBACK_CONTEXT_WINDOW)
-    return model
+def _valid_limit(value: object) -> int | None:
+    return valid_limit(value)
+
+
+def _effective_context_window(model: ModelInfo | None) -> int:
+    """Effective *input* budget, bounded by endpoint ceilings and output reserve."""
+    return resolve_context_budget(model).input_budget
 
 
 class _AbortSignal(Exception):
@@ -145,7 +161,8 @@ class AgentSession:
         self.settings_manager = settings_manager
         self.model_registry = model_registry
         self.resource_loader = resource_loader
-        self.model = _with_fallback_context(model)
+        self.model = model
+        self._effective_context_window = _effective_context_window(model)
         if thinking_level not in THINKING_LEVELS:
             raise ValueError(f"Invalid thinking level: {thinking_level}")
         self.thinking_level = "off" if self.model and not self.model.reasoning else thinking_level
@@ -212,6 +229,10 @@ class AgentSession:
         self._active_turn_id: str | None = None
         self._active_request_id: str | None = None
         self._active_attempt: int | None = None
+        # A model metadata request may yield while another switch is accepted.
+        # Only the newest request may mutate the selected model.
+        self._model_metadata_epoch = 0
+        self._catalog_refresh_task: asyncio.Task[None] | None = None
         self._elapsed_agent_started_at: float | None = None
         self._elapsed_attempt_started_at: dict[int, float] = {}
         self._elapsed_tool_started_at: dict[str, list[float]] = {}
@@ -244,6 +265,18 @@ class AgentSession:
                 self._activity_callback(kind)
             except Exception:
                 pass
+
+    def _context_budget(self, *, request_tokens: int | None = None):
+        """Resolve live settings/metadata; never use a stale cached policy."""
+        return resolve_context_budget(
+            self.model, self.settings_manager.get_context_policy(), request_tokens=request_tokens
+        )
+
+    def _current_request_tokens(self, request: list[dict[str, Any]]) -> int:
+        """Use an exact count only for this exact provider-shaped request."""
+        if self._exact_context_tokens and self._exact_context_signature == self._request_signature(request):
+            return self._exact_context_tokens
+        return self._estimate_request_tokens()
 
     def _restore_plan_from_messages(self, messages: list[dict[str, Any]]) -> None:
         """Restore _plan state from loaded messages and remove plan entries.
@@ -2410,7 +2443,14 @@ class AgentSession:
         self.session_manager.set_session_name(name)
 
     async def set_model(self, model: ModelInfo) -> None:
-        self.model = _with_fallback_context(model)
+        self._model_metadata_epoch += 1
+        metadata_epoch = self._model_metadata_epoch
+        model = self.model_registry.catalog.apply(model)
+        model = await self._enrich_model_context(model)
+        if metadata_epoch != self._model_metadata_epoch:
+            return
+        self.model = model
+        self._effective_context_window = _effective_context_window(model)
         self.session_manager.append_model_change(model.provider, model.id)
         if not model.reasoning and self.thinking_level != "off":
             # This is session state, not a preference change: retain the user's
@@ -2418,6 +2458,115 @@ class AgentSession:
             self.thinking_level = "off"
             self.session_manager.append_thinking_level_change("off")
         self._emit({"type": "model_change", "provider": self.model.provider, "model": self.model.id})
+
+    async def refresh_context_window_metadata(self) -> None:
+        """Enrich the selected model without making unavailable metadata fatal."""
+        if self.model is None:
+            return
+        model = self.model
+        epoch = self._model_metadata_epoch
+        # Catalog supplies capability facts first; a selected endpoint may then
+        # impose a smaller serving ceiling without changing user configuration.
+        enriched = await self._enrich_model_context(self.model_registry.catalog.apply(model))
+        # Startup/background discovery must not overwrite a fast later switch.
+        if self._model_metadata_epoch == epoch and self.model is model:
+            self.model = enriched
+            self._effective_context_window = _effective_context_window(enriched)
+            if enriched != model:
+                self._emit({"type": "model_change", "provider": enriched.provider, "model": enriched.id,
+                            "metadataRefresh": True})
+
+    def start_catalog_refresh(self) -> None:
+        """Refresh asynchronously; startup and prompts never wait for network I/O."""
+        if self._catalog_refresh_task is not None and not self._catalog_refresh_task.done():
+            return
+        async def worker() -> None:
+            # Endpoint facts are useful even if public catalogue is unavailable.
+            while True:
+                await self.refresh_context_window_metadata()
+                await self.model_registry.catalog.refresh()
+                await self.refresh_context_window_metadata()
+                await asyncio.sleep(REFRESH_TTL_SECONDS)
+
+        self._catalog_refresh_task = asyncio.create_task(worker())
+
+    async def _enrich_model_context(self, model: ModelInfo) -> ModelInfo:
+        # llama.cpp's /props is the configured slot size, which overrides a
+        # builtin/persisted training or default value when it is available.
+        if model.provider not in {"llama.cpp", "ollama", "chatgpt"} and isinstance(model.context_window, int) and not isinstance(model.context_window, bool) and model.context_window > 0:
+            return model
+        adapter = self.providers.get(model.provider)
+        if model.base_url:
+            with_base_url = getattr(adapter, "with_base_url", None)
+            if callable(with_base_url):
+                adapter = with_base_url(model.base_url)
+        fetch = getattr(adapter, "get_context_window", None) if model.provider in {"llama.cpp", "ollama"} else None
+        if not callable(fetch):
+            # Codex exposes the active value only in its catalogue endpoint.
+            fetch_models = getattr(adapter, "list_models_detailed", None)
+            if model.provider != "chatgpt" or not callable(fetch_models):
+                return model
+            try:
+                auth = self.model_registry.get_api_key_and_headers(model)
+                if not auth.get("ok"):
+                    return model
+                entries = await fetch_models(auth.get("apiKey", ""), auth.get("headers"))
+            except Exception:
+                return model
+            for entry in entries or []:
+                if isinstance(entry, dict) and entry.get("id") == model.id:
+                    window = entry.get("contextWindow")
+                    maximum = entry.get("maxContextWindow")
+                    default_budget = entry.get("defaultInputBudget")
+                    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+                        self.model_registry.register_models(model.provider, [entry])
+                        manual = set(model.manual_fields)
+                        if not manual:
+                            manual.update(legacy_models_json_manual_fields(
+                                model, ("context_window", "max_context_window")
+                            ))
+                        endpoint = set(model.endpoint_fields)
+                        changes: dict[str, Any] = {"server_context_window": window}
+                        endpoint.add("server_context_window")
+                        if "context_window" not in manual:
+                            changes["context_window"] = window
+                            endpoint.add("context_window")
+                        if _valid_limit(maximum) and "max_context_window" not in manual:
+                            changes["max_context_window"] = maximum
+                            endpoint.add("max_context_window")
+                        return replace(model, **changes,
+                                       default_context_window=entry.get("defaultContextWindow") if _valid_limit(entry.get("defaultContextWindow")) else model.default_context_window,
+                                       default_input_budget=default_budget if _valid_limit(default_budget) else model.default_input_budget,
+                                       manual_fields=frozenset(manual), endpoint_fields=frozenset(endpoint),
+                                        metadata_source="mixed" if manual else "provider endpoint")
+            return model
+        try:
+            auth = self.model_registry.get_api_key_and_headers(model)
+            if not auth.get("ok"):
+                return model
+            window = await fetch(auth.get("apiKey", ""), model.id, auth.get("headers"))
+        except Exception:
+            return model
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            self.model_registry.register_models(model.provider, [{"id": model.id, "contextWindow": window}])
+            # llama.cpp exposes an actual slot; Ollama's model_info is a model
+            # training capability, not the configured server num_ctx.
+            manual = set(model.manual_fields)
+            if not manual:
+                manual.update(legacy_models_json_manual_fields(model, ("context_window",)))
+            endpoint = set(model.endpoint_fields)
+            changes: dict[str, Any] = {}
+            # /props is a serving constraint. Ollama's model_info describes
+            # training capability, so never label it a server limit.
+            if model.provider == "llama.cpp":
+                changes["server_context_window"] = window
+                endpoint.add("server_context_window")
+            if "context_window" not in manual:
+                changes["context_window"] = window
+                endpoint.add("context_window")
+            return replace(model, **changes, manual_fields=frozenset(manual), endpoint_fields=frozenset(endpoint),
+                           metadata_source="mixed" if manual else "provider endpoint")
+        return model
 
     def set_thinking_level(self, level: str) -> None:
         if level not in THINKING_LEVELS:
@@ -2595,6 +2744,13 @@ class AgentSession:
             )
         if images and "images" in sig.parameters:
             chat_kwargs["images"] = images
+        # The resolver is shared with the gauge and compaction.  Do not submit a
+        # dishonest one-token request when this exact request has no room.
+        if "max_tokens" in sig.parameters:
+            budget = self._context_budget(request_tokens=self._current_request_tokens(messages))
+            if budget.selected_context_window and budget.outgoing_max_tokens == 0:
+                raise RuntimeError("Context window has no room for output; compact context before retrying")
+            chat_kwargs["max_tokens"] = budget.outgoing_max_tokens or budget.output_reserve
         # Pass storage_dir so providers can resolve blobs without leaking paths.
         if self._storage_dir and "storage_dir" in sig.parameters:
             chat_kwargs["storage_dir"] = self._storage_dir
@@ -3076,9 +3232,18 @@ class AgentSession:
         if usage and exact_tokens is not None:
             usage = dict(usage)
             usage["tokens"] = exact_tokens
-            usage["percent"] = (exact_tokens / self.model.context_window) * 100
-        if usage and usage["percent"] >= self.settings_manager.get_compaction_threshold_percent():
-            await self.compact(reason="auto_preflight", allow_during_prompt=True)
+            resolved = self._context_budget(request_tokens=exact_tokens)
+            usage["effectivePercent"] = (exact_tokens / resolved.input_budget) * 100 if resolved.input_budget else None
+            usage["percent"] = usage["effectivePercent"]
+            if resolved.selected_context_window:
+                usage["contextPercent"] = (exact_tokens / resolved.selected_context_window) * 100
+        if usage:
+            effective_percent = usage.get("effectivePercent")
+            if not isinstance(effective_percent, (int, float)) or isinstance(effective_percent, bool):
+                input_budget = self._context_budget().input_budget
+                effective_percent = (float(usage.get("tokens") or 0) / input_budget) * 100 if input_budget else float("inf")
+            if effective_percent >= self.settings_manager.get_compaction_threshold_percent():
+                await self.compact(reason="auto_preflight", allow_during_prompt=True)
 
     async def _inject_pending_steering(self) -> None:
         """Make one pending steer visible before the next provider request.
@@ -3820,7 +3985,8 @@ class AgentSession:
         # get a freshly compacted context. Emits the standard compaction events.
         if self.auto_compaction_enabled and not self._is_compacting:
             usage = self.get_context_usage()
-            if usage and usage["percent"] >= self.settings_manager.get_compaction_threshold_percent():
+            effective_percent = usage.get("effectivePercent") if usage else None
+            if isinstance(effective_percent, (int, float)) and not isinstance(effective_percent, bool) and effective_percent >= self.settings_manager.get_compaction_threshold_percent():
                 await self.compact(reason="auto")
 
         # Do not drain queued steering / follow-up messages when:
@@ -4261,15 +4427,38 @@ class AgentSession:
         return None
 
     def get_context_usage(self) -> dict[str, Any] | None:
-        if not self.model or not self.model.context_window:
+        if not self.model:
             return None
         request = self._flatten_messages_for_provider()
         if self._exact_context_signature == self._request_signature(request) and self._exact_context_tokens:
             tokens = self._exact_context_tokens
         else:
             tokens = self._estimate_request_tokens()
-        percent = (tokens / self.model.context_window) * 100
-        return {"tokens": tokens, "contextWindow": self.model.context_window, "percent": percent}
+        resolved = self._context_budget(request_tokens=tokens)
+        trusted = self.model.context_window
+        known = not resolved.estimated
+        effective_percent = (tokens / resolved.input_budget) * 100 if resolved.input_budget else None
+        return {
+            "tokens": tokens,
+            "contextWindow": trusted if known else None,
+            "percent": effective_percent if effective_percent is not None and known else None,
+            "effectiveContextWindow": resolved.input_budget,
+            "effectivePercent": effective_percent,
+            "contextPercent": (tokens / resolved.selected_context_window) * 100 if resolved.selected_context_window else None,
+            "contextPolicy": resolved.policy,
+            "selectedContextWindow": resolved.selected_context_window,
+            "outputReserve": resolved.output_reserve,
+            "budgetReason": resolved.reason,
+            "constraints": list(resolved.constraints),
+            "inputLimit": _valid_limit(self.model.input_limit),
+            "outputLimit": _valid_limit(self.model.output_limit),
+            "maxContextWindow": _valid_limit(self.model.max_context_window),
+            "serverContextWindow": _valid_limit(self.model.server_context_window),
+            "metadataSource": self.model.metadata_source or ("estimate" if not known else "configured"),
+            "metadataUpdatedAt": self.model.metadata_updated_at,
+            "defaultContextWindow": _valid_limit(self.model.default_context_window),
+            "defaultInputBudget": _valid_limit(self.model.default_input_budget),
+        }
 
     def _record_context_usage(self, usage: dict[str, Any], request: list[dict[str, Any]]) -> None:
         """Calibrate future fallback estimates from a completed provider request."""
@@ -4727,6 +4916,12 @@ class AgentSession:
         return result
 
     async def dispose(self) -> None:
+        if self._catalog_refresh_task is not None:
+            self._catalog_refresh_task.cancel()
+            try:
+                await self._catalog_refresh_task
+            except asyncio.CancelledError:
+                pass
         if self._extension_runtime is not None:
             await self._extension_runtime.call_dispose(self._emit_extension_error)
 

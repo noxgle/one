@@ -12,8 +12,21 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 - **Thinking default mode** — `on` is available through settings, CLI, sessions,
   interactive mode, and TUI controls to request provider/model-default thinking.
+- **Model capacity catalogue** — offline models.dev-derived metadata now keeps
+  total context, input/output limits, endpoint ceilings, effective input budget,
+  provenance, and Codex default/maximum values separate.  A validated,
+  privacy-safe cache refreshes in the background when enabled; see
+   `docs/MODEL_CATALOG.md`.
+- **Context budget policy** — `context.policy` now defaults to `endpoint-max`;
+  use `provider-default` to retain a provider's advertised default input budget.
+  Diagnostics distinguish the selected total, reserved output, effective input
+  budget, and internal estimates.
 
 ### Fixed
+
+- **Verified model context windows** — ChatGPT/Codex catalogue metadata and
+  llama.cpp's configured `/props` context are used when available; unknown
+  metadata is shown as unknown rather than as the internal 128k estimate.
 
 - **TUI execution footer and context gauge** — the lightweight spinner remains
   active for every running turn (including long tools), and model changes refresh

@@ -17,6 +17,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "defaultProvider": None,
     "defaultModel": None,
     "defaultThinkingLevel": "medium",
+    "context": {"policy": "endpoint-max"},
     "defaultTemperature": DEFAULT_TEMPERATURE,
     "enabledModels": [],
     "compaction": {
@@ -332,6 +333,11 @@ class SettingsManager:
         settings = self.merged().get("compaction", {})
         return settings if isinstance(settings, dict) else {}
 
+    def get_context_policy(self) -> str:
+        context = self.merged().get("context", {})
+        policy = context.get("policy") if isinstance(context, dict) else None
+        return policy if isinstance(policy, str) and policy in {"endpoint-max", "provider-default"} else "endpoint-max"
+
     def get_compaction_threshold_percent(self) -> float:
         return float(self.get_compaction_settings().get("thresholdPercent", 80))
 
@@ -578,6 +584,8 @@ class SettingsManager:
         parts = [p for p in key.split(".") if p]
         if not parts:
             raise ValueError("Invalid config key")
+        if key == "context.policy" and (not isinstance(value, str) or value not in {"endpoint-max", "provider-default"}):
+            raise ValueError("context.policy must be 'endpoint-max' or 'provider-default'")
         for part in parts:
             if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", part):
                 raise ValueError(f"Invalid config key segment: {part}")

@@ -421,6 +421,7 @@ def build_sidebar_snapshot(
             "temperatureMode": "balanced", "cwd": ".", "sessionId": "-",
             "streaming": False, "compacting": False, "retry": "on", "coop": "off",
             "contextPercent": 0.0, "contextWindow": None, "contextKnown": False,
+            "contextTotalPercent": None,
             "deliveryMode": "idle",
             "queueSteer": 0, "queueFollow": 0, "queueTotal": 0, "tokenInput": 0,
             "tokenOutput": 0, "tokenCacheRead": 0, "tokenCacheWrite": 0,
@@ -487,8 +488,18 @@ def build_sidebar_snapshot(
         "retry": retry_display,
         "coop": "on" if getattr(session, "approval_callback", None) is not None else "off",
         "contextPercent": float(usage.get("percent") or 0.0),
+        "contextTotalPercent": usage.get("contextPercent"),
         "contextWindow": usage.get("contextWindow") if isinstance(usage.get("contextWindow"), int) else None,
-        "contextKnown": isinstance(usage.get("percent"), (int, float)),
+        "contextInputLimit": usage.get("inputLimit"),
+        "contextOutputLimit": usage.get("outputLimit"),
+        "contextMaxWindow": usage.get("maxContextWindow"),
+        "effectiveContextBudget": usage.get("effectiveContextWindow"),
+        "selectedContextWindow": usage.get("selectedContextWindow"),
+        "contextPolicy": usage.get("contextPolicy"),
+        "outputReserve": usage.get("outputReserve"),
+        "contextBudgetReason": usage.get("budgetReason"),
+        "contextSource": usage.get("metadataSource"),
+        "contextKnown": isinstance(usage.get("contextWindow"), int),
         "deliveryMode": delivery_mode,
         "queueSteer": steer_count,
         "queueFollow": follow_count,
@@ -4315,7 +4326,7 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Thinking: {sanitize_display_text(s['thinking'])}\n")
             info_block.append(f"Mode: {sanitize_display_text(s['temperatureMode'])} ({s['temperature']:.1f})\n")
             context = self._context_meter(s["contextPercent"]) if s["contextKnown"] else "unknown"
-            info_block.append(f"Context: {context}\n")
+            info_block.append(f"Input budget: {context}\n")
             info_block.append(f"Retry: {sanitize_display_text(s['retry'])}\n")
             info_block.append(f"Status: {sanitize_display_text(status)}\n")
             info_block.append(f"Delivery: {sanitize_display_text(s['deliveryMode'])}\n")

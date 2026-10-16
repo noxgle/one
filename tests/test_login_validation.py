@@ -443,9 +443,9 @@ async def test_openai_compatible_list_models_detailed_parses_context_length(monk
     adapter = oc.OpenAICompatibleAdapter("openrouter", "https://openrouter.ai/api")
     detailed = await adapter.list_models_detailed("sk-1")
     assert detailed == [
-        {"id": "big", "contextWindow": 1_000_000},
-        {"id": "unknown", "contextWindow": None},
-        {"id": "junk", "contextWindow": None},
+        {"id": "big", "contextWindow": 1_000_000, "outputLimit": None},
+        {"id": "unknown", "contextWindow": None, "outputLimit": None},
+        {"id": "junk", "contextWindow": None, "outputLimit": None},
     ]
 
 
@@ -489,8 +489,8 @@ async def test_gemini_list_models_detailed_parses_input_token_limit(monkeypatch)
     adapter = g.GeminiAdapter()
     detailed = await adapter.list_models_detailed("sk-1")
     assert detailed == [
-        {"id": "gemini-2.5-pro", "contextWindow": 1_048_576},
-        {"id": "gemini-tiny", "contextWindow": None},
+        {"id": "gemini-2.5-pro", "contextWindow": None, "inputLimit": 1_048_576, "outputLimit": None},
+        {"id": "gemini-tiny", "contextWindow": None, "inputLimit": None, "outputLimit": None},
     ]
     # list_models stays a thin wrapper over the detailed form.
     assert await adapter.list_models("sk-1") == ["gemini-2.5-pro", "gemini-tiny"]
@@ -546,6 +546,10 @@ def test_register_and_persist_carry_context_window(tmp_path: Path):
     reg2.register_models("ollama-cloud", [{"id": "no-window", "contextWindow": 131_072}])
     enriched = reg2.find("ollama-cloud", "no-window")
     assert enriched is not None and enriched.context_window == 131_072
+
+    reg2.register_models("ollama-cloud", [{"id": "invalid-window", "contextWindow": True}])
+    invalid = reg2.find("ollama-cloud", "invalid-window")
+    assert invalid is not None and invalid.context_window is None
 
 
 # ---------------------------------------------------------------------------

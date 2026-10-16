@@ -9,6 +9,7 @@ from typing import Any
 
 from one.config import get_models_path
 from one.core.auth_storage import AuthStorage
+from one.core.model_catalog import ModelCatalog
 from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_private_file, load_json_text_safe
 from one.core.types import ModelInfo
 
@@ -28,6 +29,10 @@ def _strict_bool(value: Any) -> bool:
         return False
     # Everything else (str, list, object, etc.) → False
     return False
+
+
+def _positive_limit(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 10_000_000 else None
 
 BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("openai", "gpt-4.1", reasoning=True, context_window=1_000_000, input_image=True),
@@ -106,8 +111,9 @@ def _is_placeholder_key(key: str | None) -> bool:
 class ModelRegistry:
     def __init__(self, auth_storage: AuthStorage, models_path: str | None = None) -> None:
         self._auth = auth_storage
-        self._models: list[ModelInfo] = list(BUILTIN_MODELS)
+        self._models: list[ModelInfo] = [ModelInfo(**vars(model)) for model in BUILTIN_MODELS]
         self._models_path = Path(models_path or get_models_path())
+        self.catalog = ModelCatalog(self._models_path.parent)
         self._errors: list[dict[str, Any]] = []
         # Guard: refuse to overwrite a known-malformed models.json.
         self._models_path_is_locked: bool = False
@@ -142,10 +148,26 @@ class ModelRegistry:
                                     provider=provider,
                                     id=model["id"],
                                     reasoning=model.get("reasoning", True),
-                                    context_window=model.get("contextWindow"),
+                                    context_window=_positive_limit(model.get("contextWindow")),
                                     base_url=model.get("url") or model.get("baseUrl"),
                                     tool_parser=model.get("toolParser"),
                                     input_image=_strict_bool(model.get("inputImage") or model.get("input_image")),
+                                    input_limit=_positive_limit(model.get("inputLimit")),
+                                    output_limit=_positive_limit(model.get("outputLimit")),
+                                    effective_input_budget=_positive_limit(model.get("effectiveInputBudget")),
+                                    max_context_window=_positive_limit(model.get("maxContextWindow")),
+                                    server_context_window=_positive_limit(model.get("serverContextWindow")),
+                                    metadata_source="models.json",
+                                    manual_fields=frozenset(
+                                        attr for key, attr in {
+                                            "contextWindow": "context_window", "inputLimit": "input_limit",
+                                            "outputLimit": "output_limit", "effectiveInputBudget": "effective_input_budget",
+                                            "maxContextWindow": "max_context_window", "serverContextWindow": "server_context_window",
+                                            "defaultContextWindow": "default_context_window", "defaultInputBudget": "default_input_budget",
+                                        }.items() if _positive_limit(model.get(key))
+                                    ),
+                                    default_context_window=_positive_limit(model.get("defaultContextWindow")),
+                                    default_input_budget=_positive_limit(model.get("defaultInputBudget")),
                                 )
                                 )
             else:
@@ -193,24 +215,36 @@ class ModelRegistry:
                         base_url=m.base_url,
                         tool_parser=m.tool_parser,
                         input_image=True,  # preserve builtin vision
+                        input_limit=m.input_limit,
+                        output_limit=m.output_limit,
+                        effective_input_budget=m.effective_input_budget,
+                        max_context_window=m.max_context_window,
+                        server_context_window=m.server_context_window,
+                        metadata_source=m.metadata_source,
+                        metadata_updated_at=m.metadata_updated_at,
+                        manual_fields=m.manual_fields,
+                        catalog_fields=m.catalog_fields,
+                        catalog_baseline=m.catalog_baseline,
+                        catalog_values=m.catalog_values,
+                        endpoint_fields=m.endpoint_fields,
                     )
                 else:
                     out[idx] = m
         return out
 
     def all(self) -> list[ModelInfo]:
-        return list(self._models)
+        return [self.catalog.apply(ModelInfo(**vars(model))) for model in self._models]
 
     def providers(self) -> list[str]:
         return sorted({m.provider for m in self._models})
 
     def models_for_provider(self, provider: str) -> list[ModelInfo]:
-        return [m for m in self._models if m.provider == provider]
+        return [self.catalog.apply(ModelInfo(**vars(m))) for m in self._models if m.provider == provider]
 
     def find(self, provider: str, model_id: str) -> ModelInfo | None:
         for m in self._models:
             if m.provider == provider and m.id == model_id:
-                return m
+                return self.catalog.apply(ModelInfo(**vars(m)))
         return None
 
     def resolve(self, provider: str, model_id: str, *, allow_dynamic: bool = False) -> ModelInfo | None:
@@ -259,7 +293,7 @@ class ModelRegistry:
         return self._has_usable_auth(self._auth, model.provider)
 
     def get_available(self) -> list[ModelInfo]:
-        return [m for m in self._models if self.has_configured_auth(m)]
+        return [self.catalog.apply(ModelInfo(**vars(m))) for m in self._models if self.has_configured_auth(m)]
 
     def select_default(self, default_provider: str | None, default_model: str | None) -> ModelInfo | None:
         """Pick the model to use when none was requested explicitly.
@@ -331,7 +365,7 @@ class ModelRegistry:
         for entry in model_ids:
             if isinstance(entry, dict) and entry.get("id"):
                 window = entry.get("contextWindow")
-                out.append((entry["id"], window if isinstance(window, int) and window > 0 else None))
+                out.append((entry["id"], window if isinstance(window, int) and not isinstance(window, bool) and window > 0 else None))
             elif isinstance(entry, str):
                 out.append((entry, None))
         return out
@@ -347,11 +381,27 @@ class ModelRegistry:
         ``input_image=True``, the builtin capability is preserved.
         """
         added = 0
-        for mid, window in self._normalize_entries(model_ids):
-            existing = self.find(provider, mid)
+        for entry in model_ids:
+            raw = entry if isinstance(entry, dict) else {"id": entry}
+            mid = raw.get("id")
+            if not isinstance(mid, str) or not mid:
+                continue
+            window = _positive_limit(raw.get("contextWindow"))
+            fields = {
+                "input_limit": _positive_limit(raw.get("inputLimit")),
+                "output_limit": _positive_limit(raw.get("outputLimit")),
+                "max_context_window": _positive_limit(raw.get("maxContextWindow")),
+                "default_context_window": _positive_limit(raw.get("defaultContextWindow")),
+                "default_input_budget": _positive_limit(raw.get("defaultInputBudget")),
+                "server_context_window": _positive_limit(raw.get("serverContextWindow")),
+            }
+            existing = next((item for item in self._models if item.provider == provider and item.id == mid), None)
             if existing is not None:
-                if not existing.context_window and window:
+                if not existing.context_window and isinstance(window, int) and not isinstance(window, bool) and window > 0:
                     existing.context_window = window
+                for name, value in fields.items():
+                    if value and not getattr(existing, name):
+                        setattr(existing, name, value)
                 # Preserve builtin vision capability when the id matches.
                 builtin = next(
                     (b for b in BUILTIN_MODELS if b.provider == provider and b.id == mid),
@@ -375,6 +425,12 @@ class ModelRegistry:
                     base_url=None,
                     tool_parser=None,
                     input_image=has_vision,
+                    input_limit=fields["input_limit"],
+                    output_limit=fields["output_limit"],
+                    max_context_window=fields["max_context_window"],
+                    default_context_window=fields["default_context_window"],
+                    default_input_budget=fields["default_input_budget"],
+                    server_context_window=fields["server_context_window"],
                 )
             )
             added += 1
@@ -435,6 +491,15 @@ class ModelRegistry:
             mem_model = self.find(provider, mid)
             if mem_model and mem_model.input_image:
                 entry["inputImage"] = True
+            if mem_model:
+                for attr, key in (("input_limit", "inputLimit"), ("output_limit", "outputLimit"),
+                                   ("max_context_window", "maxContextWindow"),
+                                   ("server_context_window", "serverContextWindow"),
+                                  ("default_context_window", "defaultContextWindow"),
+                                  ("default_input_budget", "defaultInputBudget")):
+                    value = _positive_limit(getattr(mem_model, attr))
+                    if value and key not in entry:
+                        entry[key] = value
         providers[provider] = list(existing.values())
         atomic_write_text(self._models_path, json.dumps(data, indent=2) + "\n")
         # After a successful write the file is known-good again.

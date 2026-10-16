@@ -894,7 +894,11 @@ async def test_codex_list_models_slugs(monkeypatch):
         is_error = False
 
         def json(self) -> dict[str, Any]:
-            return {"models": [{"slug": "gpt-5.3-codex"}, {"slug": "gpt-5.1-codex-mini"}, {}]}
+            return {"models": [
+                {"slug": "gpt-5.3-codex", "context_window": 272_000, "max_context_window": 872_000},
+                {"slug": "gpt-5.1-codex-mini", "max_context_window": 128_000},
+                {"slug": "invalid", "context_window": True, "max_context_window": 0}, {},
+            ]}
 
     def handler(method: str, url: str, kwargs: dict[str, Any]) -> _Resp:
         captured["url"] = url
@@ -905,8 +909,9 @@ async def test_codex_list_models_slugs(monkeypatch):
     _fake_client_factory(monkeypatch, cod_mod, handler)
     detailed = await ad.list_models_detailed("tok")
     assert detailed == [
-        {"id": "gpt-5.3-codex", "contextWindow": None},
-        {"id": "gpt-5.1-codex-mini", "contextWindow": None},
+        {"id": "gpt-5.3-codex", "contextWindow": 872_000, "maxContextWindow": 872_000, "defaultContextWindow": 272_000, "defaultInputBudget": 272_000},
+        {"id": "gpt-5.1-codex-mini", "contextWindow": 128_000, "maxContextWindow": 128_000, "defaultContextWindow": None, "defaultInputBudget": None},
+        {"id": "invalid", "contextWindow": None, "maxContextWindow": None, "defaultContextWindow": None, "defaultInputBudget": None},
     ]
     assert "client_version=" in captured["url"]
 

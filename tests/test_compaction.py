@@ -30,6 +30,7 @@ class _Provider:
         self.responses = responses
         self.calls = 0
         self.last_messages: list[dict[str, Any]] = []
+        self.max_tokens: int | None = None
 
     async def chat(
         self,
@@ -48,6 +49,7 @@ class _Provider:
 
         self.calls += 1
         self.last_messages = messages
+        self.max_tokens = max_tokens
         idx = min(self.calls - 1, len(self.responses) - 1)
         return ChatResult(text=self.responses[idx], raw={}, usage={}, stop_reason="stop")
 
@@ -155,6 +157,23 @@ def test_context_usage_includes_runtime_prompt_and_uses_new_default_threshold(tm
 
 
 @pytest.mark.asyncio
+async def test_live_context_policy_switch_changes_usage_and_outgoing_reserve(tmp_path):
+    model = ModelInfo("openai", "test-model", context_window=872_000,
+                      max_context_window=872_000, default_input_budget=272_000)
+    provider = _Provider(["DONE"])
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}}, provider=provider, model=model)
+    agent.messages = [{"role": "user", "content": "hello"}]
+    endpoint = agent.get_context_usage()
+    assert endpoint is not None and endpoint["effectiveContextWindow"] == 855_616
+    agent.settings_manager.set_config_value("context.policy", "provider-default")
+    default = agent.get_context_usage()
+    assert default is not None and default["effectiveContextWindow"] == 272_000
+    request = agent._flatten_messages_for_provider()
+    await agent._invoke_provider(request)
+    assert provider.max_tokens == 16_384
+
+
+@pytest.mark.asyncio
 async def test_preflight_compacts_before_oversized_provider_request(tmp_path):
     model = ModelInfo(provider="openai", id="test-model", context_window=200)
     provider = _Provider(["DONE"])
@@ -170,7 +189,9 @@ async def test_preflight_compacts_before_oversized_provider_request(tmp_path):
 
     await agent.prompt("continue")
 
-    assert provider.calls >= 1
+    # A tiny selected total can still have no output room after the safe
+    # preflight compaction; it must not be sent as a misleading one-token call.
+    assert provider.calls == 0
     assert any(e["type"] == "compaction_start" and e["reason"] == "auto_preflight" for e in events)
 
 
@@ -637,31 +658,216 @@ def test_build_header_is_date_only(tmp_path):
     assert not re.search(r"\d{2}:\d{2}", first_line), f"first line must not contain HH:MM: {first_line!r}"
 
 
-def test_agent_normalizes_missing_context_window(tmp_path):
-    """Phase 17: a model resolved at runtime without a context window (e.g.
-    fetched via /login) still gets the fallback window so the ctx gauge and
-    compaction work — both via __init__ and set_model."""
+def test_agent_keeps_missing_context_window_unknown(tmp_path):
+    """The internal fallback remains available without becoming UI metadata."""
     from one.core.agent_session import FALLBACK_CONTEXT_WINDOW
     from one.core.types import ModelInfo
 
     model = ModelInfo(provider="ollama-cloud", id="nemotron-3-ultra", context_window=None)
     agent = _mk_agent(tmp_path, {}, model=model)
-    assert agent.model is not None and agent.model.context_window == FALLBACK_CONTEXT_WINDOW
+    assert agent.model is not None and agent.model.context_window is None
 
     usage = agent.get_context_usage()
     assert usage is not None
-    assert usage["contextWindow"] == FALLBACK_CONTEXT_WINDOW
+    assert usage["contextWindow"] is None
+    assert usage["effectiveContextWindow"] == FALLBACK_CONTEXT_WINDOW
+    assert usage["percent"] is None
 
 
 @pytest.mark.asyncio
-async def test_set_model_normalizes_missing_context_window(tmp_path):
+async def test_set_model_keeps_missing_context_window_unknown(tmp_path):
     from one.core.agent_session import FALLBACK_CONTEXT_WINDOW
     from one.core.types import ModelInfo
 
     agent = _mk_agent(tmp_path, {})
     other = ModelInfo(provider="openrouter", id="some/model", context_window=None)
     await agent.set_model(other)
-    assert agent.model is not None and agent.model.context_window == FALLBACK_CONTEXT_WINDOW
+    assert agent.model is not None and agent.model.context_window is None
+    assert agent.get_context_usage()["effectiveContextWindow"] == FALLBACK_CONTEXT_WINDOW
+
+
+@pytest.mark.asyncio
+async def test_set_model_uses_verified_llama_runtime_context(tmp_path):
+    class LlamaProvider:
+        async def get_context_window(self, api_key, model, headers):  # noqa: ANN001
+            assert api_key == ""
+            assert model == "alias/with spaces"
+            assert headers == {}
+            return 16_384
+
+    agent = _mk_agent(tmp_path, {})
+    agent.providers = {"llama.cpp": LlamaProvider()}
+    await agent.set_model(ModelInfo(provider="llama.cpp", id="alias/with spaces", context_window=None,
+                                    metadata_source="models.json"))
+    assert agent.model is not None and agent.model.context_window == 16_384
+    assert agent.model.manual_fields == frozenset()
+    assert agent.model.metadata_source == "provider endpoint"
+    usage = agent.get_context_usage()
+    assert usage is not None and usage["contextWindow"] == 16_384
+    assert usage["effectiveContextWindow"] == 14_336
+
+
+@pytest.mark.asyncio
+async def test_set_model_overrides_builtin_llama_context_with_runtime_props(tmp_path):
+    class LlamaProvider:
+        async def get_context_window(self, api_key, model, headers):  # noqa: ANN001
+            return 65_536
+
+    agent = _mk_agent(tmp_path, {})
+    agent.providers = {"llama.cpp": LlamaProvider()}
+    await agent.set_model(ModelInfo(provider="llama.cpp", id="local", context_window=32_768))
+    assert agent.model is not None and agent.model.context_window == 65_536
+
+
+@pytest.mark.asyncio
+async def test_llama_endpoint_preserves_manual_limits_and_uses_server_constraint(tmp_path):
+    class LlamaProvider:
+        async def get_context_window(self, api_key, model, headers):  # noqa: ANN001
+            return 65_536
+
+    manual = ModelInfo("llama.cpp", "local", context_window=100_000, input_limit=50_000,
+                       metadata_source="models.json", manual_fields=frozenset({"context_window", "input_limit"}))
+    agent = _mk_agent(tmp_path, {}, model=manual)
+    agent.providers = {"llama.cpp": LlamaProvider()}
+    await agent.set_model(manual)
+    assert agent.model is not None
+    assert (agent.model.context_window, agent.model.input_limit, agent.model.server_context_window) == (100_000, 50_000, 65_536)
+    assert agent._effective_context_window == 50_000
+
+
+@pytest.mark.asyncio
+async def test_llama_manual_smaller_context_wins_over_server_constraint(tmp_path):
+    class LlamaProvider:
+        async def get_context_window(self, api_key, model, headers):  # noqa: ANN001
+            return 65_536
+
+    manual = ModelInfo("llama.cpp", "local", context_window=32_768, metadata_source="models.json",
+                       manual_fields=frozenset({"context_window"}))
+    agent = _mk_agent(tmp_path, {}, model=manual)
+    agent.providers = {"llama.cpp": LlamaProvider()}
+    await agent.set_model(manual)
+    assert agent.model is not None and agent.model.context_window == 32_768
+    assert agent.model.server_context_window == 65_536
+    assert agent._effective_context_window == 28_672
+
+
+@pytest.mark.asyncio
+async def test_repeated_catalog_and_endpoint_refresh_preserves_manual_limits(tmp_path):
+    class LlamaProvider:
+        async def get_context_window(self, api_key, model, headers):  # noqa: ANN001
+            return 65_536
+
+    manual = ModelInfo("llama.cpp", "local", context_window=100_000, input_limit=50_000,
+                       metadata_source="models.json", manual_fields=frozenset({"context_window", "input_limit"}))
+    agent = _mk_agent(tmp_path, {}, model=manual)
+    agent.providers = {"llama.cpp": LlamaProvider()}
+    agent.model_registry.catalog.facts = {("llama.cpp", "local"): {"contextWindow": 1_000_000, "inputLimit": 272_000}}
+    await agent.set_model(manual)
+    await agent.refresh_context_window_metadata()
+    assert agent.model is not None
+    assert agent.model.metadata_source == "mixed"
+    assert (agent.model.context_window, agent.model.input_limit, agent.model.server_context_window) == (100_000, 50_000, 65_536)
+
+
+@pytest.mark.asyncio
+async def test_session_refresh_updates_and_removes_catalog_overlays(tmp_path):
+    base = ModelInfo("openai", "catalog-demo", context_window=100_000)
+    agent = _mk_agent(tmp_path, {}, model=base)
+    catalog = agent.model_registry.catalog
+    catalog.facts = {("openai", "catalog-demo"): {"contextWindow": 1_000_000, "inputLimit": 272_000}}
+    await agent.refresh_context_window_metadata()
+    assert agent.model is not None and (agent.model.context_window, agent.model.input_limit) == (1_000_000, 272_000)
+
+    catalog.facts = {("openai", "catalog-demo"): {"contextWindow": 500_000}}
+    await agent.refresh_context_window_metadata()
+    assert agent.model is not None and (agent.model.context_window, agent.model.input_limit) == (500_000, None)
+
+    catalog.facts = {}
+    await agent.refresh_context_window_metadata()
+    assert agent.model is not None and agent.model.context_window == 100_000
+
+
+@pytest.mark.asyncio
+async def test_set_model_keeps_builtin_llama_context_when_props_unavailable(tmp_path):
+    class LlamaProvider:
+        async def get_context_window(self, api_key, model, headers):  # noqa: ANN001
+            return None
+
+    agent = _mk_agent(tmp_path, {})
+    agent.providers = {"llama.cpp": LlamaProvider()}
+    await agent.set_model(ModelInfo(provider="llama.cpp", id="local", context_window=32_768))
+    assert agent.model is not None and agent.model.context_window == 32_768
+
+
+@pytest.mark.asyncio
+async def test_llama_context_uses_model_specific_base_url(tmp_path):
+    class LlamaProvider:
+        def __init__(self, endpoint="global"):
+            self.endpoint = endpoint
+
+        def with_base_url(self, base_url):  # noqa: ANN001
+            return LlamaProvider(base_url)
+
+        async def get_context_window(self, api_key, model, headers):  # noqa: ANN001
+            return 8_192 if self.endpoint == "http://model-server/v1" else None
+
+    agent = _mk_agent(tmp_path, {})
+    agent.providers = {"llama.cpp": LlamaProvider()}
+    await agent.set_model(ModelInfo(provider="llama.cpp", id="local", base_url="http://model-server/v1"))
+    assert agent.model is not None and agent.model.context_window == 8_192
+
+
+@pytest.mark.asyncio
+async def test_set_model_refreshes_stale_chatgpt_catalogue_context(tmp_path):
+    class CodexProvider:
+        async def list_models_detailed(self, api_key, headers):  # noqa: ANN001
+            return [{"id": "gpt-codex", "contextWindow": 272_000}]
+
+    agent = _mk_agent(tmp_path, {})
+    agent.model_registry._auth.set_runtime_api_key("chatgpt", "test")
+    agent.providers = {"chatgpt": CodexProvider()}
+    await agent.set_model(ModelInfo(provider="chatgpt", id="gpt-codex", context_window=128_000))
+    assert agent.model is not None and agent.model.context_window == 272_000
+
+
+@pytest.mark.asyncio
+async def test_endpoint_enriches_empty_models_json_capacity_and_reports_usage(tmp_path):
+    class CodexProvider:
+        async def list_models_detailed(self, api_key, headers):  # noqa: ANN001
+            return [{"id": "gpt-codex", "contextWindow": 872_000, "maxContextWindow": 872_000}]
+
+    model = ModelInfo("chatgpt", "gpt-codex", context_window=None, max_context_window=None,
+                      metadata_source="models.json")
+    agent = _mk_agent(tmp_path, {}, model=model)
+    agent.model_registry._auth.set_runtime_api_key("chatgpt", "test")
+    agent.providers = {"chatgpt": CodexProvider()}
+    agent._exact_context_tokens = 11_169
+    agent._exact_context_signature = agent._request_signature(agent._flatten_messages_for_provider())
+
+    await agent.set_model(model)
+
+    assert agent.model is not None
+    assert (agent.model.context_window, agent.model.max_context_window) == (872_000, 872_000)
+    assert agent.model.manual_fields == frozenset()
+    assert agent.model.metadata_source == "provider endpoint"
+    usage = agent.get_context_usage()
+    assert usage is not None
+    assert usage["contextWindow"] == usage["maxContextWindow"] == 872_000
+    assert usage["effectiveContextWindow"] == 855_616
+    assert usage["percent"] == usage["effectivePercent"] == pytest.approx(11_169 / 855_616 * 100)
+
+
+def test_server_only_context_has_a_known_gauge_without_raw_context_window(tmp_path):
+    model = ModelInfo("llama.cpp", "local", server_context_window=872_000)
+    agent = _mk_agent(tmp_path, {}, model=model)
+    agent._exact_context_tokens = 11_169
+    agent._exact_context_signature = agent._request_signature(agent._flatten_messages_for_provider())
+
+    usage = agent.get_context_usage()
+    assert usage is not None
+    assert usage["contextWindow"] is None
+    assert usage["selectedContextWindow"] == 872_000
+    assert usage["percent"] == usage["effectivePercent"] == pytest.approx(11_169 / 855_616 * 100)
 
 
 @pytest.mark.asyncio

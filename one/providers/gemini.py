@@ -115,9 +115,12 @@ class GeminiAdapter(ProviderAdapter):
             methods = m.get("supportedGenerationMethods") or []
             if name and "generateContent" in methods:
                 limit = m.get("inputTokenLimit")
+                output = m.get("outputTokenLimit")
                 out.append({
                     "id": name.removeprefix("models/"),
-                    "contextWindow": limit if isinstance(limit, int) and limit > 0 else None,
+                    "contextWindow": None,
+                    "inputLimit": limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else None,
+                    "outputLimit": output if isinstance(output, int) and not isinstance(output, bool) and output > 0 else None,
                 })
         return out
 

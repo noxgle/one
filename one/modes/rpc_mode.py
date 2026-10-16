@@ -238,7 +238,7 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                 result = await session.cycle_model()
                 output(success(cid, ctype, None if not result else {"model": {"provider": result.model.provider, "id": result.model.id}, "thinkingLevel": result.thinkingLevel, "isScoped": result.isScoped}))
             elif ctype == "get_available_models":
-                models = [{"provider": m.provider, "id": m.id, "reasoning": m.reasoning, "contextWindow": m.context_window} for m in session.model_registry.get_available()]
+                models = [{"provider": m.provider, "id": m.id, "reasoning": m.reasoning, "contextWindow": m.context_window, "inputLimit": m.input_limit, "outputLimit": m.output_limit, "maxContextWindow": m.max_context_window, "effectiveInputBudget": m.effective_input_budget, "metadataSource": m.metadata_source} for m in session.model_registry.get_available()]
                 output(success(cid, ctype, {"models": models}))
             elif ctype == "set_thinking_level":
                 session.set_thinking_level(cmd.get("level", "medium"))

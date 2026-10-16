@@ -342,8 +342,50 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             if not mid:
                 continue
             ctx = m.get("context_length")
-            out.append({"id": mid, "contextWindow": ctx if isinstance(ctx, int) and ctx > 0 else None})
+            output = m.get("max_completion_tokens") or m.get("top_provider", {}).get("max_completion_tokens") if isinstance(m.get("top_provider"), dict) else m.get("max_completion_tokens")
+            out.append({"id": mid, "contextWindow": ctx if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0 else None,
+                        "outputLimit": output if isinstance(output, int) and not isinstance(output, bool) and output > 0 else None})
         return out
+
+    async def get_context_window(
+        self, api_key: str, model: str, headers: dict[str, str] | None = None,
+    ) -> int | None:
+        """Return llama.cpp's configured slot context, when its /props route exists.
+
+        OpenAI-compatible ``/v1/models`` metadata describes a model's training
+        limit at best.  llama.cpp's ``/props`` reports the actual server slot
+        configuration, so only that value is suitable for compaction/display.
+        """
+        if self.name != "llama.cpp" or not isinstance(model, str) or not model:
+            if self.name != "ollama" or not isinstance(model, str) or not model:
+                return None
+            root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+            try:
+                async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                    response = await client.post(f"{root}/api/show", json={"name": model})
+                    if response.is_error:
+                        return None
+                    info = response.json().get("model_info", {})
+                values = [value for key, value in info.items() if isinstance(key, str) and key.endswith(".context_length")]
+                return next((value for value in values if isinstance(value, int) and not isinstance(value, bool) and value > 0), None)
+            except Exception:
+                return None
+        root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                response = await client.get(
+                    f"{root}/props",
+                    params={"model": model},
+                    headers=self._build_headers(api_key, headers),
+                )
+                if response.is_error:
+                    return None
+                payload = response.json()
+        except Exception:
+            return None
+        settings = payload.get("default_generation_settings") if isinstance(payload, dict) else None
+        window = settings.get("n_ctx") if isinstance(settings, dict) else None
+        return window if isinstance(window, int) and not isinstance(window, bool) and window > 0 else None
 
     async def chat(
         self,

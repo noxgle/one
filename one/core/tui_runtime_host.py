@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -550,7 +551,21 @@ class TuiRuntimeHost:
             "subagents": not bool(getattr(session, "subagents_hard_disabled", False))
             and bool(session.settings_manager.get_subagents_enabled()),
             "contextPercent": float(usage.get("percent") or 0),
-            "contextWindow": int(usage["contextWindow"]) if isinstance(usage.get("contextWindow"), int) else None,
+            "contextTotalPercent": usage.get("contextPercent"),
+            "contextWindow": int(usage["contextWindow"])
+            if isinstance(usage.get("contextWindow"), int)
+            and not isinstance(usage.get("contextWindow"), bool)
+            and usage["contextWindow"] > 0
+            else None,
+            "contextInputLimit": usage.get("inputLimit"),
+            "contextOutputLimit": usage.get("outputLimit"),
+            "contextMaxWindow": usage.get("maxContextWindow"),
+            "effectiveContextBudget": usage.get("effectiveContextWindow"),
+            "selectedContextWindow": usage.get("selectedContextWindow"),
+            "contextPolicy": usage.get("contextPolicy"),
+            "outputReserve": usage.get("outputReserve"),
+            "contextBudgetReason": usage.get("budgetReason"),
+            "contextSource": usage.get("metadataSource"),
             "queueSteer": len(queues.get("steering") or []),
             "queueFollow": len(queues.get("followUp") or []),
             "tokenInput": int(tokens.get("input") or 0),
@@ -564,7 +579,7 @@ class TuiRuntimeHost:
             "followUpMode": str(getattr(session, "follow_up_mode", "queue")),
             "activeTools": list(getattr(session, "active_tools", []) or []),
             "pendingMessageCount": int(getattr(session, "pending_message_count", 0)),
-            "contextKnown": isinstance(usage.get("percent"), (int, float)),
+            "contextKnown": isinstance(usage.get("percent"), (int, float)) and not isinstance(usage.get("percent"), bool),
             "deliveryMode": (
                 "followUp" if getattr(session, "follow_up_mode", "queue") == "follow_up" else "steer"
             ) if session.is_streaming else "idle",
@@ -742,7 +757,7 @@ class TuiRuntimeHost:
         available = registry.get_available() if registry is not None else []
         page = available[offset : offset + limit]
         return self._json({"epoch": self._epoch, "offset": offset, "total": len(available), "models": [
-            {"provider": str(item.provider), "id": str(item.id), "reasoning": bool(item.reasoning), "contextWindow": int(item.context_window or 0)}
+            {"provider": str(item.provider), "id": str(item.id), "reasoning": bool(item.reasoning), "contextWindow": int(item.context_window or 0), "inputLimit": item.input_limit, "outputLimit": item.output_limit, "maxContextWindow": item.max_context_window, "metadataSource": item.metadata_source}
             for item in page
         ], "nextOffset": offset + len(page) if offset + len(page) < len(available) else None})
 
@@ -1488,6 +1503,7 @@ async def create_tui_runtime(bootstrap: TuiBootstrap) -> TuiRuntimeHost:
             "tools": [all_tools[name] for name in tool_names],
             "mcpManager": mcp,
             "subagentsHardDisabled": bootstrap.no_subagents,
+            "catalogRefresh": os.getenv("ONE_CATALOG_REFRESH", "1").lower() not in {"0", "false", "off"},
             "scopedModels": scoped_models,
         }
         runtime_options = {

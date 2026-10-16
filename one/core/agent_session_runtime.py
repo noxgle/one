@@ -167,6 +167,12 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         storage_dir=session_manager.session_dir or "",
         subagents_hard_disabled=bool(bootstrap.get("subagentsHardDisabled", False)),
     )
+    # Snapshot/cache are already loaded synchronously.  Remote refresh is opt-in
+    # at bootstrap so tests and untrusted/offline invocations are network-free.
+    model_registry.catalog.enabled = bool(bootstrap.get("catalogRefresh", False))
+    # Endpoint discovery is always useful (and remains offline/fake-provider
+    # testable); the public catalogue flag controls only its download.
+    session.start_catalog_refresh()
     try:
         await session.bind_extensions()
     except BaseException:

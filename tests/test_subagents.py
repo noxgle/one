@@ -519,12 +519,13 @@ async def test_hard_disabled_subagents_remain_unavailable_after_live_enable(tmp_
 
 
 @pytest.mark.asyncio
-async def test_set_model_fallback_context_window(tmp_path: Path):
-    """set_model must assign a fallback context window for models without one."""
+async def test_set_model_missing_context_window_keeps_metadata_unknown(tmp_path: Path):
+    """The fallback remains internal rather than becoming model metadata."""
     agent = _mk_agent(tmp_path, tools=["finish"])
     dynamic = ModelInfo(provider="openai", id="dynamic-model", context_window=None)
     await agent.set_model(dynamic)
-    assert agent.model.context_window == 128_000
+    assert agent.model.context_window is None
+    assert agent.get_context_usage()["effectiveContextWindow"] == 128_000
 
 
 def test_settings_subagents_and_bash_defaults() -> None:

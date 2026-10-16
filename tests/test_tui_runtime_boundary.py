@@ -17,7 +17,7 @@ from one.core.agent_runtime_facade import AgentRuntimeFacade
 from one.core.session_manager import SessionManager
 from one.core.threaded_agent_runtime import RuntimeBootstrapSpec
 from one.core.tui_runtime_host import TUI_COMMANDS, TuiBootstrap, TuiRuntimeHost, create_tui_runtime
-from one.modes.tui_mode import TuiSessionView
+from one.modes.tui_mode import TuiSessionView, build_sidebar_snapshot
 
 
 class _TuiAdapter:
@@ -49,6 +49,48 @@ def test_model_context_refresh_replaces_usage_without_discarding_cached_stats() 
         "usage": {"tokens": 200, "contextWindow": 1_000, "percent": 20.0},
         "stats": {"tokens": {"total": 42}},
     }
+
+
+def test_detached_sidebar_context_known_follows_context_window() -> None:
+    view = TuiSessionView(SimpleNamespace())
+    view._snapshot["sidebar"] = {"contextWindow": 65_536, "contextKnown": True}
+    assert build_sidebar_snapshot(view)["contextKnown"] is True
+
+    view._snapshot["sidebar"] = {"contextWindow": None, "contextKnown": False}
+    assert build_sidebar_snapshot(view)["contextKnown"] is False
+
+
+def test_host_sidebar_projects_context_known_from_verified_window() -> None:
+    settings = SimpleNamespace(
+        get_bash_show_output=lambda: True,
+        get_theme=lambda: "default",
+        get_tui_info_panel=lambda: "top",
+        get_retry_mode=lambda: "on",
+        get_subagents_enabled=lambda: True,
+        get_tui_tool_result_preview_lines=lambda: 3,
+    )
+    session = SimpleNamespace(
+        model=SimpleNamespace(provider="llama.cpp", id="local"),
+        session_id="s", session_manager=SimpleNamespace(cwd=".", session_dir=""),
+        thinking_level="off", temperature=0.1, is_streaming=False, is_compacting=False,
+        settings_manager=settings, approval_callback=None, subagents_hard_disabled=False,
+        temperature_mode="balanced", _plan=None, session_file="", _storage_dir="",
+        steering_mode="queue", follow_up_mode="queue", active_tools=[], pending_message_count=0,
+        get_pending_queues=lambda: {"steering": [], "followUp": []},
+    )
+    host = object.__new__(TuiRuntimeHost)
+    host._session = lambda: session
+    host._mcp = None
+    host._sidebar_expensive = {"usage": {"contextWindow": 65_536, "percent": 2.0}, "stats": {}}
+    assert host._sidebar()["contextKnown"] is True
+
+    host._sidebar_expensive = {"usage": {"contextWindow": None, "percent": None}, "stats": {}}
+    assert host._sidebar()["contextKnown"] is False
+
+    # A provider-verified server total can power the gauge even when the model
+    # does not advertise a raw contextWindow value.
+    host._sidebar_expensive = {"usage": {"contextWindow": None, "percent": 2.0}, "stats": {}}
+    assert host._sidebar()["contextKnown"] is True
 
 
 @pytest.mark.asyncio
@@ -322,7 +364,7 @@ async def test_real_status_invalidation_refreshes_context_once_before_gated_fini
         assert model is not None
         session = AgentSession(SessionManager.in_memory(str(tmp_path)), SettingsManager.in_memory({"tools": {"maxSteps": 4}}), registry, Loader(), model, "medium", tools=["read", "finish"])
         session.providers = {"openai": provider}  # type: ignore[assignment]
-        session.get_context_usage = lambda: {"percent": 73.0}  # type: ignore[method-assign]
+        session.get_context_usage = lambda: {"contextWindow": 1_000, "percent": 73.0}  # type: ignore[method-assign]
         original = session._execute_tool_by_name
         async def execute(name, arguments, timeout_sec=None):  # noqa: ANN001
             return {"ok": True, "output": "read"} if name == "read" else await original(name, arguments, timeout_sec)

@@ -248,6 +248,35 @@ async def test_llama_cpp_native_token_count_uses_rendered_request_and_falls_back
 
 
 @pytest.mark.asyncio
+async def test_llama_cpp_context_window_uses_props_for_selected_alias(monkeypatch) -> None:
+    from one.providers import openai_compatible as module
+
+    captured: dict[str, Any] = {}
+
+    class Response:
+        is_error = False
+
+        def json(self) -> dict[str, Any]:
+            return {"default_generation_settings": {"n_ctx": 16_384}}
+
+    class Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None: pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args: Any): return False
+        async def get(self, url: str, **kwargs: Any) -> Response:
+            captured.update(url=url, **kwargs)
+            return Response()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", Client)
+    adapter = OpenAICompatibleAdapter("llama.cpp", "http://local/v1", supports_reasoning_effort=False)
+    assert await adapter.get_context_window("token", "org/model:Q4", {"X-Test": "yes"}) == 16_384
+    assert captured["url"] == "http://local/props"
+    assert captured["params"] == {"model": "org/model:Q4"}
+    assert captured["headers"]["Authorization"] == "Bearer token"
+    assert captured["headers"]["X-Test"] == "yes"
+
+
+@pytest.mark.asyncio
 async def test_llama_stream_requests_and_returns_final_usage(monkeypatch) -> None:
     from one.providers import openai_compatible as module
 

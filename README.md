@@ -427,6 +427,14 @@ See [Cooperation and safety](#cooperation-and-safety) and the slash-command
 help for configuration such as `tools.maxSteps` (`0` means unlimited tool steps)
 and optional `toolOutputPruning`.
 
+### Context policy
+
+`context.policy` defaults to `endpoint-max`, using endpoint capacity while
+respecting observed server and manual limits. Set `/config context.policy
+provider-default` to use a provider-advertised default input budget instead.
+Manual smaller limits are retained. Unknown models use an internal estimate only;
+see [model capacity metadata](docs/MODEL_CATALOG.md) for diagnostics and caveats.
+
 ### Subagent timeouts
 
 Subagents use `subagents.idleTimeoutSec` (default `1800`) for time without
