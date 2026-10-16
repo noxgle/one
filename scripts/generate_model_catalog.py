@@ -13,12 +13,7 @@ from typing import Any
 
 import httpx
 
-# This is OpenCode's checked-in models.dev snapshot, pinned by immutable commit.
-# It is deliberately not represented as a live models.dev API response.
-DEFAULT_SOURCE = (
-    "https://raw.githubusercontent.com/anomalyco/opencode/"
-    "1ca34aeee6052f7ba0909ee9fdda6081e25e1351/packages/core/src/models-dev/snapshot.txt"
-)
+DEFAULT_SOURCE = "https://models.dev/api.json"
 PROVIDERS = {
     "openai": "openai", "azure": "azure-openai", "anthropic": "anthropic",
     "google": "gemini", "openrouter": "openrouter", "ollama-cloud": "ollama-cloud",
@@ -85,21 +80,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", help="local pinned source file (network-free)")
     parser.add_argument("--source-url", default=DEFAULT_SOURCE, help="public source URL recorded in output")
-    parser.add_argument("--source-revision", default="1ca34aeee6052f7ba0909ee9fdda6081e25e1351")
+    parser.add_argument("--source-revision", default=None, help="optional revision label (not recorded if omitted)")
     parser.add_argument("--output", default="one/assets/model_catalog.json")
     args = parser.parse_args()
     raw = _read_source(args.source, args.source_url)
     source = json.loads(raw)
     if not isinstance(source, dict):
         raise ValueError("source root is not an object")
-    output = {
+    output: dict[str, Any] = {
         "schemaVersion": 1,
         "sourceUrl": args.source_url,
-        "sourceRevision": args.source_revision,
         "sourceSha256": hashlib.sha256(raw).hexdigest(),
         "retrievedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "providers": compact(source),
     }
+    if args.source_revision is not None:
+        output["sourceRevision"] = args.source_revision
     encoded = json.dumps(output, separators=(",", ":")) + "\n"
     if len(encoded.encode("utf-8")) > 4_000_000:
         raise ValueError("compact snapshot exceeds cache bound")

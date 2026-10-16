@@ -22,12 +22,12 @@ total), plus policy, reserve, reason, and constraints. Catalogue maxima are
 labelled as catalogue metadata, not proof of a live server capacity.
 
 A compact, sanitized capability snapshot ships with the package. Its embedded
-immutable public source URL, revision, SHA-256, and UTC fetch timestamp identify
-the exact upstream input used for the limited supported entries; it is intentionally
-incomplete and unknown models remain unknown. Regenerate it with
-`python scripts/generate_model_catalog.py --source <pinned-snapshot>` (or omit
-`--source` to fetch the recorded pinned URL). It is not a claim that the live
-models.dev API was contacted. An
+public source URL (`https://models.dev/api.json`), SHA-256, and UTC fetch timestamp
+identify the exact upstream input used for the limited supported entries; it is
+intentionally incomplete and unknown models remain unknown. Regenerate it with
+`python scripts/generate_model_catalog.py` (fetches the live `models.dev` API) or
+`python scripts/generate_model_catalog.py --source <pinned-snapshot>` to use a
+local raw snapshot file. An
 optional background refresh uses a five-minute cache in the agent state
 directory, a finite timeout, schema/size/entry validation, and atomic private
 writes.  It never sends prompts or credentials.  Runtime bootstrap enables it

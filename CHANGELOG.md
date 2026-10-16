@@ -8,6 +8,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Changed
+
+- **Model catalog default source** — the packaged catalog snapshot now fetches
+  directly from `https://models.dev/api.json` instead of the OpenCode GitHub
+  pinned snapshot. The `--source-revision` flag is optional and omitted from
+  output when not provided; offline generation via `--source` is unchanged.
+
 ### Added
 
 - **Thinking default mode** — `on` is available through settings, CLI, sessions,
