@@ -493,11 +493,22 @@ async def test_tui_shortcuts_overlay_contains_new_shortcuts(tmp_path: Path):
         await pilot.pause()
         overlay = app.query_one("#shortcuts_overlay")
         content = str(overlay.content)
-        assert "Ctrl+Shift+V" in content
-        assert "paste terminal text (SSH-safe)" in content
-        assert "Ctrl+Alt+V" in content
-        assert "paste image from the system clipboard" in content
-        assert "Ctrl+R" in content
-        assert "cycle retry mode" in content
-        assert "Ctrl+Up / Ctrl+Down" in content
-        assert "navigate input history (50 entries)" in content
+        for shortcut in (
+            "Ctrl+K Select model",
+            "Ctrl+P Commands",
+            "Ctrl+C Abort",
+            "Ctrl+L Clear output",
+            "Ctrl+Q Quit",
+            "Ctrl+Z Toggle cooperation",
+            "Ctrl+S Toggle subagents",
+            "Ctrl+O Toggle details",
+            "Ctrl+V Paste clipboard",
+            "Ctrl+Shift+V Paste terminal",
+            "Ctrl+Alt+V Paste image",
+            "Ctrl+R Retry mode",
+            "Ctrl+← / → Adjust temperature",
+            "Ctrl+↑ / ↓ Input history",
+            "Ctrl+F1 Command help",
+            "Esc Close",
+        ):
+            assert shortcut in content

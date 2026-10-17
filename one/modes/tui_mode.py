@@ -681,22 +681,22 @@ def _sidebar_plan_window(
 # provides many widget/editor bindings, but these are the application-level
 # actions users can rely on in the TUI.
 TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
-    ("Ctrl+K", "provider/model picker"),
-    ("Ctrl+P", "command palette"),
-    ("Ctrl+C", "abort"),
-    ("Ctrl+L", "clear stream"),
-    ("Ctrl+Q", "quit"),
-    ("Ctrl+Z", "toggle cooperation"),
-    ("Ctrl+S", "toggle subagents"),
-    ("Ctrl+O", "toggle details output"),
-    ("Ctrl+V", "paste text from the host/system clipboard"),
-    ("Ctrl+Shift+V", "paste terminal text (SSH-safe)"),
-    ("Ctrl+Alt+V", "paste image from the system clipboard"),
-    ("Ctrl+R", "cycle retry mode"),
-    ("Ctrl+Left / Ctrl+Right", "decrease / increase temperature"),
-    ("Ctrl+Up / Ctrl+Down", "navigate input history (50 entries)"),
-    ("Ctrl+F1", "show slash-command help"),
-    ("Esc", "close the shortcuts panel"),
+    ("Ctrl+K", "Select model"),
+    ("Ctrl+P", "Commands"),
+    ("Ctrl+C", "Abort"),
+    ("Ctrl+L", "Clear output"),
+    ("Ctrl+Q", "Quit"),
+    ("Ctrl+Z", "Toggle cooperation"),
+    ("Ctrl+S", "Toggle subagents"),
+    ("Ctrl+O", "Toggle details"),
+    ("Ctrl+V", "Paste clipboard"),
+    ("Ctrl+Shift+V", "Paste terminal"),
+    ("Ctrl+Alt+V", "Paste image"),
+    ("Ctrl+R", "Retry mode"),
+    ("Ctrl+← / →", "Adjust temperature"),
+    ("Ctrl+↑ / ↓", "Input history"),
+    ("Ctrl+F1", "Command help"),
+    ("Esc", "Close"),
 )
 
 

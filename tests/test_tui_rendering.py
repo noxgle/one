@@ -160,13 +160,26 @@ async def test_tui_theme_applies_sidebar_colors_to_header(tmp_path: Path) -> Non
 def test_tui_shortcuts_are_single_source_of_truth() -> None:
     rendered = format_tui_shortcuts()
 
-    assert ("Ctrl+P", "command palette") in TUI_SHORTCUTS
-    assert ("Ctrl+K", "provider/model picker") in TUI_SHORTCUTS
-    assert "Ctrl+P command palette" in rendered
-    assert "Ctrl+V paste text from the host/system clipboard" in rendered
-    assert "Ctrl+Shift+V paste terminal text (SSH-safe)" in rendered
-    assert "Ctrl+Alt+V paste image from the system clipboard" in rendered
-    assert "Ctrl+F1 show slash-command help" in rendered
+    expected = (
+        ("Ctrl+K", "Select model"),
+        ("Ctrl+P", "Commands"),
+        ("Ctrl+C", "Abort"),
+        ("Ctrl+L", "Clear output"),
+        ("Ctrl+Q", "Quit"),
+        ("Ctrl+Z", "Toggle cooperation"),
+        ("Ctrl+S", "Toggle subagents"),
+        ("Ctrl+O", "Toggle details"),
+        ("Ctrl+V", "Paste clipboard"),
+        ("Ctrl+Shift+V", "Paste terminal"),
+        ("Ctrl+Alt+V", "Paste image"),
+        ("Ctrl+R", "Retry mode"),
+        ("Ctrl+← / →", "Adjust temperature"),
+        ("Ctrl+↑ / ↓", "Input history"),
+        ("Ctrl+F1", "Command help"),
+        ("Esc", "Close"),
+    )
+    assert TUI_SHORTCUTS == expected
+    assert rendered == "\n".join(f"{key} {description}" for key, description in expected)
 
 
 def test_build_sidebar_snapshot_contains_runtime_details() -> None:
