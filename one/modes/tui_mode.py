@@ -4243,7 +4243,7 @@ if TEXTUAL_AVAILABLE:
             temperature_mode = sanitize_display_text(str(snapshot["temperatureMode"]))
             suffix = (
                 f" | Mode: {temperature_mode} ({snapshot['temperature']:.1f})"
-                f" | THINK: {thinking} | COOP: {coop} | STATUS: {runtime_status}"
+                f" | think: {thinking} | coop: {coop.lower()} | status: {runtime_status}"
             )
             prefix = f"v{VERSION} | "
             # Account for main padding, header borders, and header padding.
@@ -4330,7 +4330,7 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Retry: {sanitize_display_text(s['retry'])}\n")
             info_block.append(f"Status: {sanitize_display_text(status)}\n")
             info_block.append(f"Delivery: {sanitize_display_text(s['deliveryMode'])}\n")
-            info_block.append(f"COOP: {'ON' if s['coop'] == 'on' or self._approval_pending is not None else 'OFF'}\n")
+            info_block.append(f"coop: {'on' if s['coop'] == 'on' or self._approval_pending is not None else 'off'}\n")
             running_agents = sum(
                 1 for child in self._monitor_snapshot.get("children", []) if child.get("status") == "running"
             )
@@ -4339,7 +4339,7 @@ if TEXTUAL_AVAILABLE:
             cwd = sanitize_display_text(cwd_key)
             branch = self._cached_git_branch(cwd_key)
             cwd_display = f"{cwd} ({sanitize_display_text(branch)})" if branch else cwd
-            info_block.append(f"CWD: {cwd_display}\n")
+            info_block.append(f"cwd: {cwd_display}\n")
             info_block.append(f"Session: {sanitize_display_text(s['sessionId'])}\n")
 
             plan_block = Text()
