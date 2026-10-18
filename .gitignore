@@ -15,7 +15,7 @@ tests_prompts/
 *.egg-info/
 diagnostic-reports/
 write-tool-reports/
-
+tmp/*
 *.log
 *.tmp
 
