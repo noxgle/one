@@ -921,7 +921,7 @@ async def test_tui_shortcuts_panel_and_palette_theme_use_one_state(tmp_path: Pat
         app.action_show_shortcuts()
         overlay = app.query_one("#shortcuts_overlay")
         assert overlay.has_class("visible")
-        assert "Ctrl+P command palette" in str(overlay.content)
+        assert "Ctrl+P Commands" in str(overlay.content)
 
         await pilot.press("escape")
         assert not overlay.has_class("visible")
