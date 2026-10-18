@@ -313,7 +313,9 @@ class TuiSessionView:
     # These methods are intentionally asynchronous command entry points; they
     # are used by the migrated input/abort path and are safe while the worker is
     # blocked in provider I/O.
-    async def prompt(self, text: str, **_ignored: Any) -> dict[str, Any]:
+    async def prompt(self, text: str, images: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if images:
+            return await self.command("prompt", text=text, images=images)
         return await self.command("prompt", text=text)
 
     async def abort(self) -> dict[str, Any]:

@@ -31,6 +31,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI image attachments** — preserve file and clipboard image references across
+  the detached runtime boundary instead of silently sending text only; accept
+  image-only prompts and validate attachment references before execution.
+
+- **ChatGPT image input** — recognize GPT-6.1 Sol and GPT-6 Luna as vision-capable
+  models, including when older saved model metadata disables image input.
+
 - **Verified model context windows** — ChatGPT/Codex catalogue metadata and
   llama.cpp's configured `/props` context are used when available; unknown
   metadata is shown as unknown rather than as the internal 128k estimate.

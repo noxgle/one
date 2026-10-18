@@ -715,6 +715,47 @@ def test_register_models_new_model_inherits_vision_from_builtin(tmp_path: Path):
     assert model_4o is not None and model_4o.input_image is True
 
 
+@pytest.mark.parametrize("model_id", ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-terra"])
+def test_chatgpt_vision_survives_stale_config_login_and_reload(tmp_path: Path, model_id: str):
+    """Old login metadata must not disable vision for known ChatGPT models."""
+    auth = AuthStorage.in_memory()
+    models_path = tmp_path / "models.json"
+    models_path.write_text(json.dumps({
+        "providers": {"chatgpt": {"models": [{"id": model_id, "inputImage": False}]}},
+    }))
+    reg = ModelRegistry.create(auth, str(models_path))
+    model = reg.find("chatgpt", model_id)
+    assert model is not None and model.input_image is True
+
+    reg.register_models("chatgpt", [model_id])
+    model = reg.find("chatgpt", model_id)
+    assert model is not None and model.input_image is True
+    reg.persist_models("chatgpt", [model_id])
+
+    reloaded = ModelRegistry.create(auth, str(models_path))
+    model = reloaded.find("chatgpt", model_id)
+    assert model is not None and model.input_image is True
+
+
+@pytest.mark.parametrize("model_id", ["gpt-6.1-sol", "gpt-6-luna"])
+def test_chatgpt_vision_available_without_saved_config(tmp_path: Path, model_id: str):
+    reg = ModelRegistry.create(AuthStorage.in_memory(), str(tmp_path / "models.json"))
+    model = reg.resolve("chatgpt", model_id, allow_dynamic=True)
+    assert model is not None and model.input_image is True
+    reg.register_models("chatgpt", [model_id])
+    model = reg.find("chatgpt", model_id)
+    assert model is not None and model.input_image is True
+
+
+def test_unknown_chatgpt_models_remain_text_only(tmp_path: Path):
+    reg = ModelRegistry.create(AuthStorage.in_memory(), str(tmp_path / "models.json"))
+    reg.register_models("chatgpt", ["unknown-future-model"])
+    model = reg.find("chatgpt", "unknown-future-model")
+    assert model is not None and model.input_image is False
+    dynamic = reg.resolve("chatgpt", "another-unknown-model", allow_dynamic=True)
+    assert dynamic is not None and dynamic.input_image is False
+
+
 def test_persist_and_reload_preserves_input_image_true(tmp_path: Path):
     """persist_models + reload preserves input_image=True when the model
     supports vision."""

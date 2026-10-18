@@ -454,8 +454,8 @@ class TuiRuntimeHost:
             return self.status_snapshot()
         if command == "monitor_snapshot" and not payload:
             return self.monitor_snapshot()
-        if command == "prompt" and set(payload) == {"text"}:
-            return await self.prompt(payload["text"])
+        if command == "prompt" and set(payload) in ({"text"}, {"text", "images"}):
+            return await self.prompt(payload["text"], images=payload.get("images"))
         if command == "abort" and not payload:
             return await self.abort()
         if command == "models_page" and set(payload) == {"offset", "limit"}:
@@ -727,10 +727,28 @@ class TuiRuntimeHost:
     async def snapshot(self) -> dict[str, Any]:
         return self._snapshot()
 
-    async def prompt(self, text: str) -> dict[str, Any]:
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("prompt text is required")
-        images = None
+    async def prompt(self, text: str, images: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        from one.core.attachments import AttachmentValidationError, read_blob_bytes, validate_image_count
+
+        if images is not None and not isinstance(images, list):
+            raise AttachmentValidationError("images must be a list of blob references")
+        validate_image_count(0, api_count=len(images or []) + len(self._initial_image_paths))
+        validated = []
+        storage_dir = str(getattr(self._session(), "_storage_dir", "") or "")
+        for image in images or []:
+            if not isinstance(image, dict) or set(image) - {"blob_hash", "mime", "size", "width", "height"}:
+                raise AttachmentValidationError("Invalid image reference")
+            blob_hash = image.get("blob_hash")
+            if (not isinstance(blob_hash, str) or len(blob_hash) != 64
+                    or any(c not in "0123456789abcdef" for c in blob_hash)
+                    or image.get("mime") not in {"image/png", "image/jpeg", "image/webp"}):
+                raise AttachmentValidationError("Invalid image reference")
+            if not storage_dir or read_blob_bytes(storage_dir, blob_hash) is None:
+                raise AttachmentValidationError("Image blob is missing or corrupt")
+            validated.append(dict(image))
+        images = validated or None
+        if not isinstance(text, str) or (not text.strip() and not images and not self._initial_image_paths):
+            raise ValueError("prompt text or images are required")
         if self._initial_image_paths:
             from one.core.attachments import AttachmentInput, count_attachments, import_image
 
@@ -739,7 +757,7 @@ class TuiRuntimeHost:
             # reported rather than silently disappearing from the next prompt.
             count_attachments([AttachmentInput(path=path) for path in paths])
             storage_dir = str(getattr(self._session(), "_storage_dir", "") or "")
-            images = [import_image(storage_dir, path).__dict__ for path in paths]
+            images = (images or []) + [import_image(storage_dir, path).__dict__ for path in paths]
             self._initial_image_paths = ()
         await self._session().prompt(text, images=images)
         return self._snapshot()

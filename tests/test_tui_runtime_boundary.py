@@ -1782,3 +1782,94 @@ async def test_tui_worker_bootstrap_attempts_all_cleanup_after_disposer_failure(
         await create_tui_runtime(_bootstrap())
 
     assert closed == ["runtime", "mcp", "loader"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["path", "clipboard", "image_only"])
+async def test_tui_images_reach_provider_through_runtime(tmp_path, source) -> None:
+    """Actual input -> detached view -> owner runtime -> provider keeps the image."""
+    from textual.events import Paste
+
+    from one.core.agent_session import AgentSession
+    from one.core.attachments import read_blob_bytes
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.settings_manager import SettingsManager
+    from one.modes.tui_mode import _OneTextualApp
+    from one.providers.base import ChatResult
+    from tests.test_read_image_tool import _make_png
+
+    image_path = tmp_path / "sample.png"
+    image_path.write_bytes(_make_png())
+    raw = image_path.read_bytes()
+    captured = []
+    done = threading.Event()
+
+    class Loader:
+        cwd = str(tmp_path)
+
+        def get_system_prompt(self, selected_tools=None):
+            return "Test agent."
+
+    class Provider:
+        async def chat(self, api_key, model, messages, thinking_level, images=None, storage_dir="", **kwargs):
+            captured.append((images, storage_dir))
+            done.set()
+            return ChatResult(
+                text='{"tool":"finish","args":{"summary":"image received","goal_success":true}}',
+                raw={}, usage={}, stop_reason="stop",
+            )
+
+    async def factory(_spec):
+        auth = AuthStorage.in_memory()
+        auth.set_runtime_api_key("chatgpt", "test-key")
+        registry = ModelRegistry.create(auth, str(tmp_path / "models.json"))
+        session = AgentSession(
+            SessionManager.create(str(tmp_path), str(tmp_path / "sessions")),
+            SettingsManager.in_memory({"tools": {"maxSteps": 2}}),
+            registry, Loader(), registry.find("chatgpt", "gpt-6.1-sol"), "medium", tools=["finish"],
+        )
+        session.providers = {"chatgpt": Provider()}
+        return TuiRuntimeHost(SimpleNamespace(session=session, dispose=session.dispose), None)
+
+    facade = AgentRuntimeFacade(
+        RuntimeBootstrapSpec(cwd=str(tmp_path), agent_dir=str(tmp_path / "agent")), factory,
+        command_allowlist=TUI_COMMANDS,
+    )
+    await facade.start()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    try:
+        async with app.run_test() as pilot:
+            if source == "clipboard":
+                app._pending_clipboard_image_bytes = raw
+                text = "describe image"
+            else:
+                text = f'"{image_path}"' + (" describe image" if source == "path" else "")
+            app.query_one("#input").post_message(Paste(text))
+            await pilot.pause()
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause(0.02)
+                if done.is_set():
+                    break
+            assert done.is_set(), "Prompt did not reach provider"
+            images, storage_dir = captured[0]
+            assert images is not None and len(images) == 1
+            assert read_blob_bytes(storage_dir, images[0]["blob_hash"]) == raw
+    finally:
+        await facade.close()
+        assert facade.finalize()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("images", ["bad", [{}], [{"blob_hash": "../bad", "mime": "image/png"}], [{"blob_hash": "a" * 64, "mime": "image/png"}], [{"blob_hash": "a" * 64, "mime": "image/png", "path": "/tmp/private"}], [{}] * 5])
+async def test_runtime_rejects_invalid_image_references(tmp_path, images) -> None:
+    from one.core.attachments import AttachmentValidationError
+
+    host = object.__new__(TuiRuntimeHost)
+    host._initial_image_paths = ()
+    host._session = lambda: SimpleNamespace(_storage_dir=str(tmp_path))
+    with pytest.raises(AttachmentValidationError):
+        await host.dispatch("prompt", {"text": "describe", "images": images})

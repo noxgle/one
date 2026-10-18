@@ -76,14 +76,16 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("mistral", "mistral-large-latest", reasoning=True, context_window=128_000),
     ModelInfo("groq", "llama-3.3-70b-versatile", reasoning=False, context_window=128_000),
     # ChatGPT/Codex subscription backend (Responses API); the real slug list
-    # is fetched live from /models after login. Current generation as of 2026-08;
+    # is fetched live from /models after login. Known vision models as of 2026-10;
     # catalog volatile — windows unpublished for Codex backend, gauge falls back.
-    # All three slugs support image input via the Responses API (input_image
+    # These slugs support image input via the Responses API (input_image
     # content parts); built-in vision capability is preserved by
     # register_models when a persisted entry tries to downgrade it.
     ModelInfo("chatgpt", "gpt-5.6-sol", reasoning=True, context_window=None, input_image=True),
     ModelInfo("chatgpt", "gpt-5.6-terra", reasoning=True, context_window=None, input_image=True),
     ModelInfo("chatgpt", "gpt-5.6-luna", reasoning=True, context_window=None, input_image=True),
+    ModelInfo("chatgpt", "gpt-6.1-sol", reasoning=True, context_window=None, input_image=True),
+    ModelInfo("chatgpt", "gpt-6-luna", reasoning=True, context_window=None, input_image=True),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp", "ollama"}
