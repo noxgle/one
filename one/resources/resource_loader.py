@@ -234,7 +234,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
 }
 
 # Injected via replace() (not str.format) because the text contains literal JSON braces.
-_BASE_PROMPT = """You are an autonomous terminal agent. Solve the task via shell/file ops.
+_BASE_PROMPT = """You are ONE an autonomous terminal agent. Solve the task via shell/file ops.
 
 REASONING & ADAPTATION
 - Perform internal reasoning BEFORE generating actions
