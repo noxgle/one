@@ -23,98 +23,90 @@ _UPDATE = "*** Update File:"
 _MOVE = "*** Move to:"
 
 # ---------------------------------------------------------------------------
-# Hunk parser (preserved from original - preserves @@ syntax and .. paths)
+# Ordered OpenCode hunks (not a standard unified-diff line-number format)
 # ---------------------------------------------------------------------------
 
+Hunk = tuple[str, list[tuple[str, str]]]
 
-def _parse_hunks(raw_lines: list[str]) -> list[tuple[str, list[str], list[str], list[str]]]:
-    """Parse unified-diff hunks from raw section lines.
 
-    Returns a list of (hunk_header_str, removed_lines, added_lines, context_lines) per hunk.
-    """
-    hunks: list[tuple[str, list[str], list[str], list[str]]] = []
-    current_header: str | None = None
-    current_removed: list[str] = []
-    current_added: list[str] = []
-    current_context: list[str] = []
-
-    def _flush() -> None:
-        nonlocal current_header, current_removed, current_added, current_context
-        if current_header is not None:
-            hunks.append((current_header, current_removed, current_added, current_context))
-        current_header = None
-        current_removed = []
-        current_added = []
-        current_context = []
-
+def _parse_hunks(raw_lines: list[str]) -> list[Hunk]:
+    """Retain the order of context, removals and additions within each hunk."""
+    hunks: list[Hunk] = []
+    header: str | None = None
+    operations: list[tuple[str, str]] = []
     for line in raw_lines:
         if line.startswith("@@"):
-            _flush()
-            current_header = line
-            continue
-        if not line:
-            current_context.append("")
-            continue
-        prefix = line[0] if line else ""
-        if prefix == "-":
-            current_removed.append(line[1:])
-        elif prefix == "+":
-            current_added.append(line[1:])
-        elif prefix == " ":
-            current_context.append(line[1:])
-        else:
-            current_context.append(line)
-
-    _flush()
+            if header is not None:
+                hunks.append((header, operations))
+            header, operations = line, []
+        elif header is not None:
+            if line and line[0] in " +-":
+                operations.append((line[0], line[1:]))
+            elif line == "":  # legacy unprefixed empty context line
+                operations.append((" ", ""))
+            else:
+                raise ValueError("apply_patch verification failed: invalid hunk line prefix")
+    if header is not None:
+        hunks.append((header, operations))
     return hunks
 
 
-def _validate_hunks(
-    hunks: list[tuple[str, list[str], list[str], list[str]]],
-    file_content: str,
-) -> str:
-    """Apply hunks to file_content with exact context matching.
-
-    Returns the new content string, or raises ValueError on mismatch.
-    """
+def _validate_hunks(hunks: list[Hunk], file_content: str, path: str = "<file>") -> str:
+    """Locate ordered exact hunks in the original file; reject ambiguous matches."""
     lines = file_content.split("\n")
     out: list[str] = []
     pos = 0
 
-    for header, removed, added, context in hunks:
-        if not context and removed:
-            anchor = removed[0]
-            found = False
-            for j in range(pos, len(lines)):
-                if lines[j] == anchor:
-                    for k in range(pos, j):
-                        out.append(lines[k])
-                    pos = j
-                    found = True
-                    break
-            if not found:
-                raise ValueError(
-                    "apply_patch verification failed: hunk anchor not found in file"
-                )
+    for number, (header, operations) in enumerate(hunks, start=1):
+        label = f"apply_patch verification failed: {path} hunk {number}"
+        if not operations:
+            raise ValueError(f"{label}: empty hunk; read the file and rebuild the patch")
+        before = [value for kind, value in operations if kind != "+"]
+        if not before:
+            raise ValueError(f"{label}: insertion needs context; read the file and rebuild the patch")
 
-        for ctx_line in context:
-            if pos >= len(lines):
-                raise ValueError("apply_patch verification failed: hunk context exhausted too early")
-            if lines[pos] != ctx_line:
-                raise ValueError("apply_patch verification failed: hunk context mismatch")
-            out.append(lines[pos])
-            pos += 1
+        def matches(index: int) -> bool:
+            return lines[index:index + len(before)] == before
 
-        for removed_line in removed:
-            if pos >= len(lines):
-                raise ValueError("apply_patch verification failed: hunk removal ran off end")
-            if lines[pos] != removed_line:
-                raise ValueError(
-                    "apply_patch verification failed: hunk removal mismatch"
-                )
-            pos += 1
+        candidates = [index for index in range(pos, len(lines) - len(before) + 1) if matches(index)]
+        hint = header[2:].strip()
+        if hint and len(candidates) > 1:
+            # An exact, unique @@ line can disambiguate repeated blocks, but
+            # never overrides a complete match. It may precede or lie inside
+            # the matching block (for example, its second context line).
+            anchors = [i for i in range(pos, len(lines)) if lines[i] == hint]
+            if len(anchors) == 1:
+                candidates = [i for i in candidates if i + len(before) > anchors[0]]
 
-        out.extend(added)
+        if len(candidates) > 1:
+            raise ValueError(f"{label}: ambiguous hunk ({len(candidates)} matches); read the file and add unique context")
+        if not candidates:
+            # Diagnose the first plausible position, but never apply a partial match.
+            start = next((i for i in range(pos, len(lines)) if lines[i] == hint), pos) if hint else pos
+            for offset, (kind, expected) in enumerate(op for op in operations if op[0] != "+"):
+                actual = lines[start + offset] if start + offset < len(lines) else "<end of file>"
+                if actual != expected:
+                    reason = "hunk context mismatch" if kind == " " else "hunk removal mismatch"
+                    if kind == "-" and not any(line == expected for line in lines[pos:]):
+                        reason = "hunk anchor not found in file" if not any(k == " " for k, _ in operations) else reason
+                    # Keep diagnostics bounded: file content may contain secrets.
+                    raise ValueError(f"{label}: {reason} at line {start + offset + 1}; "
+                                     f"expected {expected[:80]!r}, found {actual[:80]!r}; "
+                                     "read the file and rebuild the patch")
+            raise ValueError(f"{label}: hunk context mismatch; read the file and rebuild the patch")
+
+        start = candidates[0]
+        out.extend(lines[pos:start])
+        cursor = start
+        for kind, value in operations:
+            if kind == " ":
+                out.append(lines[cursor])
+                cursor += 1
+            elif kind == "-":
+                cursor += 1
+            else:
+                out.append(value)
+        pos = cursor
 
     out.extend(lines[pos:])
     return "\n".join(out)
@@ -707,7 +699,7 @@ def apply_patch_tool(cwd: str, patchText: str) -> dict[str, Any]:
             file_content = file_content.replace("\r\n", "\n").replace("\r", "\n")
             old_contents[idx] = file_content
             hunks = sections[idx][3]
-            new_content = _validate_hunks(hunks, file_content)
+            new_content = _validate_hunks(hunks, file_content, path_str)
             src_mode = stat.S_IMODE(src_st_before.st_mode)
             # Snapshot stores RAW bytes for post-hook revalidation
             snapshot = _SourceSnapshot(

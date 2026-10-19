@@ -1493,3 +1493,154 @@ def test_delete_nested_symlink_ancestor_rejected(tmp_path: Path):
         apply_patch_tool(cwd, patch)
     # referent untouched
     assert (real_dir / "target.txt").read_bytes() == b"target\n"
+
+
+@pytest.mark.parametrize("body,expected", [
+    (" a\n-b\n+B\n c\n", "a\nB\nc\nd\n"),
+    ("-b\n+B\n c\n", "a\nB\nc\nd\n"),
+    (" a\n-b\n+B\n c\n-d\n+D\n", "a\nB\nc\nD\n"),
+])
+def test_ordered_hunk_matches_context_in_place(tmp_path: Path, body: str, expected: str) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("a\nb\nc\nd\n", encoding="utf-8")
+    patch = f"*** Begin Patch\n*** Update File: code.txt\n@@\n{body}*** End Patch\n"
+
+    apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == expected
+
+
+def test_hunk_context_after_prefix_and_multiple_hunks(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("prefix\nfirst\nold\nmid\nsecond\nold2\nend\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n"
+             "@@\n first\n-old\n+new\n mid\n"
+             "@@\n second\n-old2\n+new2\n end\n*** End Patch\n")
+
+    apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "prefix\nfirst\nnew\nmid\nsecond\nnew2\nend\n"
+
+
+def test_repeated_first_line_requires_full_unique_sequence(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("old\nwrong\nold\nright\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n@@\n"
+             "-old\n+new\n right\n*** End Patch\n")
+
+    apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "old\nwrong\nnew\nright\n"
+
+
+def test_ambiguous_hunk_rejected_without_writes(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("old\nkeep\nold\nkeep\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n@@\n"
+             "-old\n+new\n keep\n*** End Patch\n")
+
+    with pytest.raises(ValueError, match=r"code.txt hunk 1: ambiguous hunk"):
+        apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "old\nkeep\nold\nkeep\n"
+    _no_stage_backup_artifacts(tmp_path)
+
+
+def test_unique_section_hint_disambiguates_but_still_checks_content(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("old\nkeep\nsection\nold\nkeep\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n@@ section\n"
+             "-old\n+new\n keep\n*** End Patch\n")
+
+    apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "old\nkeep\nsection\nnew\nkeep\n"
+
+
+def test_stale_context_diagnostic_and_multifile_atomicity(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("old\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("header\nactual\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n"
+             "*** Update File: b.txt\n@@ header\n header\n-stale\n+changed\n"
+             "*** End Patch\n")
+
+    with pytest.raises(ValueError, match=r"b.txt hunk 1: hunk removal mismatch at line 2.*read the file"):
+        apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "old\n"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "header\nactual\n"
+    _no_stage_backup_artifacts(tmp_path)
+
+
+def test_mismatch_diagnostic_is_bounded(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("actual" + "x" * 200 + "\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n@@\n"
+             "-expected" + "y" * 200 + "\n+new\n*** End Patch\n")
+
+    with pytest.raises(ValueError) as exc:
+        apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert "code.txt hunk 1" in str(exc.value)
+    assert "at line 1" in str(exc.value)
+    assert "x" * 100 not in str(exc.value)
+    assert "y" * 100 not in str(exc.value)
+    assert target.read_text(encoding="utf-8").startswith("actual")
+
+
+def test_context_insert_without_removal(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("prefix\nanchor\nrest\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n@@\n"
+             " anchor\n+insert\n rest\n*** End Patch\n")
+
+    apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "prefix\nanchor\ninsert\nrest\n"
+
+
+def test_section_hint_cannot_bypass_stale_removal(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("section\nactual\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n"
+             "@@ section\n-stale\n+replacement\n*** End Patch\n")
+
+    with pytest.raises(ValueError, match=r"code.txt hunk 1.*read the file"):
+        apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "section\nactual\n"
+
+
+def test_repeated_section_hint_keeps_ambiguous_hunk_rejected(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("section\nold\nsection\nold\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n"
+             "@@ section\n-old\n+new\n*** End Patch\n")
+
+    with pytest.raises(ValueError, match="ambiguous hunk"):
+        apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "section\nold\nsection\nold\n"
+
+
+def test_section_hint_inside_context_disambiguates_repeated_blocks(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("old\nkeep\nold\nsection\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n@@ section\n"
+             "-old\n+new\n section\n*** End Patch\n")
+
+    apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "old\nkeep\nnew\nsection\n"
+
+
+def test_unprefixed_nonempty_hunk_line_rejected_without_writes(tmp_path: Path) -> None:
+    target = tmp_path / "code.txt"
+    target.write_text("actual\n", encoding="utf-8")
+    patch = ("*** Begin Patch\n*** Update File: code.txt\n@@\n"
+             "actual\n+new\n*** End Patch\n")
+
+    with pytest.raises(ValueError, match="invalid hunk line prefix"):
+        apply_patch_tool(_cwd(tmp_path), patch)
+
+    assert target.read_text(encoding="utf-8") == "actual\n"

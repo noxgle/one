@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Patch matching** — `apply_patch` now preserves context/change order, finds
+  exact hunks beyond the start of a file, rejects ambiguous matches and reports
+  actionable mismatch locations without partially writing files.
+
 - **Targeted edits** — `edit` accepts an empty replacement to delete a matched
   block. Guidance favors short, unique matches and `apply_patch` over rewriting
   entire files when JSON escaping becomes cumbersome.

@@ -276,3 +276,11 @@ class TestUserPrivileges:
 
         with patch.object(resource_loader.subprocess, "run", side_effect=_fake_run):
             assert resource_loader._user_privileges() == "user"
+
+
+def test_apply_patch_prompt_explains_context_and_mismatch_recovery() -> None:
+    loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent")
+    prompt = loader.get_system_prompt(selected_tools=["apply_patch"])
+    assert "prefix unchanged context lines with a space" in prompt
+    assert "ambiguous hunks fail" in prompt
+    assert "On mismatch re-read and rebuild the patch" in prompt
