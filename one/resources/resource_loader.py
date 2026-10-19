@@ -218,7 +218,8 @@ def _build_header(cwd: str) -> str:
 TOOL_ARG_SCHEMAS: dict[str, str] = {
     "read": "{path, offset?, limit?} # Read text; offset=1-based line. May truncate. Images: read_image.",
     "bash": "{command, timeout?}  # timeout in seconds; default if omitted",
-    "edit": "{path, edits: [{oldString, newString}]}  # path is TOP-LEVEL (never inside edits); oldString must be unique in the file",
+    "edit": "{path, edits: [{oldString, newString}]}  # path is TOP-LEVEL; match a short, non-empty, unique oldString; newString may be empty to delete. In literal JSON escape newlines, quotes and backslashes according to JSON rules. For long/hard-to-escape edits prefer apply_patch over overwriting the whole file with write."
+            r' Example JSON: {"path":"a.txt","edits":[{"oldString":"a\n","newString":"b\n"}]}',
     "write": "{path, content}  # content must be an explicit string; overwrites the entire file and content:'' deliberately empties it. Never use writeContentOmitted or '[omitted from model context]' history metadata as arguments. Prefer write for complete files; use edit/apply_patch for localized changes when available. If bash is available and JSON serialization is difficult, use <<'ONE_EOF' with a delimiter absent as a standalone body line, quote the destination, preserve literal $/backticks/backslashes, and verify the resulting file (the JSON command string must still be valid).",
     "grep": "{pattern, path?}",
     "find": "{pattern?, path?}",

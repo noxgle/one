@@ -150,7 +150,10 @@ def test_prompt_includes_all_schemas_regression():
     # Regression guards for existing schemas
     assert "- read {path, offset?, limit?}" in prompt
     assert "- bash {command, timeout?}" in prompt
-    assert '- edit {path, edits: [{oldString, newString}]}  # path is TOP-LEVEL (never inside edits); oldString must be unique in the file' in prompt
+    assert '- edit {path, edits: [{oldString, newString}]}  # path is TOP-LEVEL' in prompt
+    assert 'newString may be empty to delete' in prompt
+    assert 'prefer apply_patch over overwriting the whole file with write' in prompt
+    assert r'Example JSON: {"path":"a.txt","edits":[{"oldString":"a\n","newString":"b\n"}]}' in prompt
     assert "- write {path, content}" in prompt
     assert "- grep {pattern, path?}" in prompt
     assert "- find {pattern?, path?}" in prompt
@@ -195,7 +198,10 @@ def test_get_system_prompt_default_tools():
     prompt = loader.get_system_prompt()  # defaults to ["read", "bash", "edit", "write"]
     assert "- read {path, offset?, limit?}" in prompt
     assert "- bash {command, timeout?}" in prompt
-    assert '- edit {path, edits: [{oldString, newString}]}  # path is TOP-LEVEL (never inside edits); oldString must be unique in the file' in prompt
+    assert '- edit {path, edits: [{oldString, newString}]}  # path is TOP-LEVEL' in prompt
+    assert 'newString may be empty to delete' in prompt
+    assert 'prefer apply_patch over overwriting the whole file with write' in prompt
+    assert r'Example JSON: {"path":"a.txt","edits":[{"oldString":"a\n","newString":"b\n"}]}' in prompt
 
 
 def test_prompt_reflects_actual_default_timeout():

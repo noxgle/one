@@ -50,13 +50,15 @@ def edit_tool(cwd: str, path: str, edits: list[dict[str, str]]) -> dict:
     resolved: list[tuple[int, str, str]] = []  # (start_in_old, old_text, new_text)
     for e in edits:
         # Accept both documented keys (oldString/newString) and legacy keys (oldText/newText).
-        old_text: str | None = e.get("oldString") or e.get("oldText")
-        new_text: str | None = e.get("newString") or e.get("newText")
+        old_text: str | None = e.get("oldString") if "oldString" in e else e.get("oldText")
+        new_text: str | None = e.get("newString") if "newString" in e else e.get("newText")
         if old_text is None or new_text is None:
             raise ValueError(
                 "Edit tool input is invalid. "
                 "Each edit needs 'oldString'/'newString' (or legacy 'oldText'/'newText')."
             )
+        if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
+            raise ValueError("Edit tool input is invalid. oldString must be non-empty and newString must be a string.")
         idx = old.find(old_text)
         if idx < 0:
             raise ValueError("oldString block not found")

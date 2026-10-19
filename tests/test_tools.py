@@ -88,6 +88,30 @@ def test_edit_with_oldString_newString_keys(tmp_path: Path):
     assert "hello" not in after["content"][0]["text"]
 
 
+@pytest.mark.parametrize("old_key,new_key", [("oldString", "newString"), ("oldText", "newText")])
+def test_edit_empty_replacement_deletes_only_matched_block(
+    tmp_path: Path, old_key: str, new_key: str,
+) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("keep\nremove\nkeep again\n", encoding="utf-8")
+
+    result = edit_tool(str(tmp_path), "a.txt", [{old_key: "remove\n", new_key: ""}])
+
+    assert target.read_text(encoding="utf-8") == "keep\nkeep again\n"
+    assert "-remove" in result["details"]["diff"]
+
+
+@pytest.mark.parametrize("old", ["", None, 4])
+def test_edit_rejects_empty_or_invalid_old_text(tmp_path: Path, old: object) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("keep\n", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        edit_tool(str(tmp_path), "a.txt", [{"oldString": old, "newString": ""}])  # type: ignore[list-item]
+
+    assert target.read_text(encoding="utf-8") == "keep\n"
+
+
 def test_edit_multi_collision_no_sequential_corruption(tmp_path: Path):
     """When an earlier replacement creates text matching a later oldText, the later
     edit must still match the ORIGINAL text, not the mutated intermediate result.

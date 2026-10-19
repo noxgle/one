@@ -8,6 +8,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Fixed
+
+- **Targeted edits** — `edit` accepts an empty replacement to delete a matched
+  block. Guidance favors short, unique matches and `apply_patch` over rewriting
+  entire files when JSON escaping becomes cumbersome.
+
 ### Changed
 
 - **Model catalog default source** — the packaged catalog snapshot now fetches
