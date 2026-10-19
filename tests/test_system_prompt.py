@@ -34,7 +34,7 @@ async def test_system_prompt_includes_header_tools_and_project_context(tmp_path:
     assert "user_privileges=" in prompt
 
     # Adapted base prompt.
-    assert "You are an autonomous terminal agent." in prompt
+    assert "You are ONE an autonomous terminal agent." in prompt
     assert 'Return exactly ONE dict per response:' in prompt
 
     # Tools listed with arg schemas.

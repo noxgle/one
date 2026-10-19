@@ -641,7 +641,7 @@ def test_stable_prompt_prefix_across_clock_tick(tmp_path):
     # must be identical regardless of clock tick.
     stable = prompt.split("user_privileges=", 1)[1]
     # Contains the base prompt's opening.
-    assert "You are an autonomous terminal agent." in stable
+    assert "You are ONE an autonomous terminal agent." in stable
 
 
 def test_build_header_is_date_only(tmp_path):
