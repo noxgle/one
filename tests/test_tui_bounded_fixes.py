@@ -437,7 +437,7 @@ async def test_virtual_selection_clear_or_epoch_change_cancels_waiting_copy(tmp_
     async with app.run_test() as pilot:
         stream = app.query_one("#stream", TranscriptWidget)
         app._completed_virtuals["a:1"] = {
-            "ref": "a:1", "total": 1, "width": max(1, stream.region.width), "rows": {}, "pages": [],
+            "ref": "a:1", "total": 1, "width": stream._width, "rows": {}, "pages": [],
             "pending": set(), "queued": set(), "request_generation": 0, "error": None,
         }
         app._append_stream_lines(["\0completed:a:1"])
@@ -497,7 +497,7 @@ async def test_virtual_selection_page_error_is_finite_and_never_copies_partial(t
     async with app.run_test() as pilot:
         stream = app.query_one("#stream", TranscriptWidget)
         app._completed_virtuals["a:1"] = {
-            "ref": "a:1", "total": 2, "width": max(1, stream.region.width), "rows": {}, "pages": [],
+            "ref": "a:1", "total": 2, "width": stream._width, "rows": {}, "pages": [],
             "pending": set(), "queued": set(), "request_generation": 0, "error": None,
         }
         app._append_stream_lines(["\0completed:a:1"])
@@ -543,7 +543,7 @@ async def test_virtual_selection_beyond_provisional_geometry_never_copies_partia
     async with app.run_test() as pilot:
         stream = app.query_one("#stream", TranscriptWidget)
         app._completed_virtuals["a:1"] = {
-            "ref": "a:1", "total": 1, "width": max(1, stream.region.width), "rows": {}, "pages": [],
+            "ref": "a:1", "total": 1, "width": stream._width, "rows": {}, "pages": [],
             "pending": set(), "queued": set(), "request_generation": 0, "error": None, "geometry_loaded": False,
         }
         app._append_stream_lines(["\0completed:a:1"])

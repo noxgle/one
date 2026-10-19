@@ -46,7 +46,6 @@ class TranscriptWidget(Static):
         self._virtual_blocks: dict[int, tuple[dict[int, str], Callable[[int], None]]] = {}
         self._virtual_strips: OrderedDict[tuple[int, int], tuple[Strip, int]] = OrderedDict()
         self._virtual_strip_bytes = 0
-        self._app_size: Size | None = None
 
     @property
     def _width(self) -> int:
@@ -54,7 +53,8 @@ class TranscriptWidget(Static):
         # its scrollbar during layout. Explicit resize invalidation resets it.
         if self._wrap_width > 1:
             return self._wrap_width
-        return max(1, self.region.width or self.size.width)
+        # Strips are painted inside CSS padding, not across the full region.
+        return max(1, self.content_size.width)
 
     def set_transcript(
         self,
@@ -134,6 +134,8 @@ class TranscriptWidget(Static):
     def invalidate_wrap(self) -> None:
         """Invalidate rows after a width/theme change; reflow remains demand-led."""
         self._line_rows.clear()
+        self._virtual_strips.clear()
+        self._virtual_strip_bytes = 0
         self._wrap_width = -1
         self._wrap_width = self._width
         self._line_heights = [
@@ -144,19 +146,14 @@ class TranscriptWidget(Static):
         self.refresh(layout=True)
 
     def on_resize(self, event: events.Resize) -> None:
-        """Reflow only when the initial mounted width becomes available.
+        """Reflow after layout commits a new content width.
 
-        A ``VerticalScroll`` child also receives resize events whenever its
-        scrollbar appears or disappears. Those must not invalidate the
-        committed wrap width: changing a completed virtual block from its
-        provisional height would otherwise make the scrollbar and page width
-        oscillate. The app explicitly invalidates on a terminal resize.
+        The parent reserves a stable scrollbar gutter, so completed page heights
+        cannot oscillate the available width as the scrollbar appears.
         """
-        app_size = self.app.size
-        app_resized = app_size != self._app_size
-        self._app_size = app_size
-        if self._line_ids and event.size.width != self._wrap_width and (self._wrap_width <= 1 or app_resized):
+        if self._line_ids and self.content_size.width != self._wrap_width:
             self.invalidate_wrap()
+            self.call_after_refresh(lambda: self.app._render_stream())
 
     def _reindex(self) -> None:
         total = 0

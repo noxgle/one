@@ -31,6 +31,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI transcript clipping** — wrap live and completed responses within the
+  padded content area and reserve a stable scrollbar gutter so text is not
+  hidden at the right edge when scrolling becomes necessary.
+
 - **TUI image attachments** — preserve file and clipboard image references across
   the detached runtime boundary instead of silently sending text only; accept
   image-only prompts and validate attachment references before execution.

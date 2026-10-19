@@ -1365,6 +1365,7 @@ if TEXTUAL_AVAILABLE:
             height: 1fr;
             background: transparent;
             overflow-y: auto;
+            scrollbar-gutter: stable;
         }
 
         #logo {
