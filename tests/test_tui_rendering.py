@@ -264,14 +264,14 @@ async def test_tui_sidebar_includes_attached_branch_only_when_available(tmp_path
         await pilot.pause()
         await asyncio.sleep(0.01)
         await pilot.pause()
-        assert "cwd: /safe/project (feature/test)" in app.query_one("#sidebar", Static).content
+        assert "Cwd: /safe/project (feature/test)" in app.query_one("#sidebar", Static).content
 
         monkeypatch.setattr(tui_mode, "get_git_branch", lambda cwd: None)
         app._git_branch_cache.clear()
         app._refresh_sidebar()
         await asyncio.sleep(0.01)
         await pilot.pause()
-        assert "cwd: /safe/project\n" in app.query_one("#sidebar", Static).content
+        assert "Cwd: /safe/project\n" in app.query_one("#sidebar", Static).content
 
 
 @pytest.mark.asyncio
@@ -319,7 +319,7 @@ async def test_tui_sidebar_git_probe_is_worker_cached_and_never_blocks_input(
             await asyncio.sleep(0.01)
             if "feature/async" in str(app.query_one("#sidebar", Static).content):
                 break
-        assert "cwd: /slow/project (feature/async)" in app.query_one("#sidebar", Static).content
+        assert "Cwd: /slow/project (feature/async)" in app.query_one("#sidebar", Static).content
         app._refresh_sidebar()
         assert len(calls) == 1
 
@@ -363,7 +363,7 @@ async def test_tui_sidebar_git_probe_does_not_repaint_after_session_cwd_change(
             if "new-branch" in content:
                 break
         content = str(app.query_one("#sidebar", Static).content)
-        assert "cwd: /new/project (new-branch)" in content
+        assert "Cwd: /new/project (new-branch)" in content
         assert "old-branch" not in content
 
 
@@ -405,9 +405,9 @@ async def test_tui_temperature_mode_renders_in_compact_header_and_wide_sidebar(t
         await pilot.pause()
         header = str(compact.query_one("#header", Static).content)
         assert "Mode: balanced (0.5)" in header
-        assert "think: medium" in header
-        assert "coop: off" in header
-        assert "status: ready" in header
+        assert "Think: medium" in header
+        assert "Coop: off" in header
+        assert "Status: ready" in header
 
     wide = _OneTextualApp(_mk_app_session(tmp_path, settings_override={"tui": {"infoPanel": "sidebar"}}))
     async with wide.run_test() as pilot:
@@ -1297,9 +1297,9 @@ async def test_tui_welcome_logo_is_a_dedicated_non_transcript_widget(tmp_path: P
         assert header.splitlines() == [header]
         assert "v" in header
         assert "openai/" in header
-        assert "think: medium" in header
-        assert "coop: off" in header
-        assert "status: ready" in header
+        assert "Think: medium" in header
+        assert "Coop: off" in header
+        assert "Status: ready" in header
 
         # Initial conversation rendering follows the shared stream container;
         # startup art is not a permanently fixed header.

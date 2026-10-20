@@ -26,15 +26,15 @@ async def test_tui_ctrl_z_toggles_cooperation(tmp_path: Path):
         input_widget = app.query_one("#input")
         assert input_widget.has_focus
         header = app.query_one("#header", Static)
-        assert "coop: off" in str(header.content)
+        assert "Coop: off" in str(header.content)
         await pilot.press("ctrl+z")
         assert session.approval_callback is not None
         assert session.settings_manager.get_tool_approval() is True
-        assert "coop: on" in str(header.content)
+        assert "Coop: on" in str(header.content)
         await pilot.press("ctrl+z")
         assert session.approval_callback is None
         assert session.settings_manager.get_tool_approval() is False
-        assert "coop: off" in str(header.content)
+        assert "Coop: off" in str(header.content)
 
 
 @pytest.mark.asyncio
@@ -163,7 +163,7 @@ async def test_tui_approval_prompt_toasts(tmp_path: Path):
         assert len(notified) >= 1
         assert any("Approve: bash" in n for n, _ in notified)
         header = app.query_one("#header", Static)
-        assert "coop: on (pending)" in str(header.content)
+        assert "Coop: on (pending)" in str(header.content)
         assert "awaiting approval" in str(header.content)
         # Verify timeout=8.0 is passed.
         # Find the actual call with the "Approve:" message
