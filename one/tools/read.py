@@ -33,7 +33,11 @@ def read_tool(cwd: str, path: str, offset: int | None = None, limit: int | None 
         raise ValueError(f"Offset {offset} is beyond end of file ({len(lines)} lines total)")
 
     selected = lines[start : start + limit] if limit is not None else lines[start:]
-    selected_text = "\n".join(selected)
+    # Prefixes are presentation metadata, not part of the file contents.
+    # Number before truncating so prefixes count towards output limits.
+    selected_text = "\n".join(
+        f"{number}: {line}" for number, line in enumerate(selected, start=start + 1)
+    ) if content else ""
     trunc = truncate_head(selected_text)
     output = trunc["content"]
 

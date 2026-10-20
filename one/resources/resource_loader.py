@@ -216,7 +216,7 @@ def _build_header(cwd: str) -> str:
 
 
 TOOL_ARG_SCHEMAS: dict[str, str] = {
-    "read": "{path, offset?, limit?} # Read text; offset=1-based line. May truncate. Images: read_image.",
+    "read": "{path, offset?, limit?} # Read text with original 1-based line numbers; offset=1-based line. 'N: ' prefixes are not file content; omit them from edits. May truncate. Images: read_image.",
     "bash": "{command, timeout?}  # timeout in seconds; default if omitted",
     "edit": "{path, edits: [{oldString, newString}]}  # path is TOP-LEVEL; match a short, non-empty, unique oldString; newString may be empty to delete. In literal JSON escape newlines, quotes and backslashes according to JSON rules. For long/hard-to-escape edits prefer apply_patch over overwriting the whole file with write."
             r' Example JSON: {"path":"a.txt","edits":[{"oldString":"a\n","newString":"b\n"}]}',

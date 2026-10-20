@@ -27,6 +27,59 @@ def test_write_and_read_basic(tmp_path: Path):
     assert "Use offset=3 to continue." in out["content"][0]["text"]
 
 
+@pytest.mark.parametrize(("source", "expected"), [
+    ("alpha\nbeta", "1: alpha\n2: beta"),
+    ("alpha\n\n  beta\n", "1: alpha\n2: \n3:   beta\n4: "),
+    ("żółć\n\t日本語", "1: żółć\n2: \t日本語"),
+    ("", ""),
+])
+def test_read_numbers_lines_without_changing_file(tmp_path: Path, source: str, expected: str) -> None:
+    target = tmp_path / "numbered.txt"
+    target.write_text(source, encoding="utf-8")
+
+    result = read_tool(str(tmp_path), target.name)
+
+    assert result["content"][0]["text"] == expected
+    assert result["details"]["truncation"] is None
+    assert target.read_text(encoding="utf-8") == source
+
+
+def test_read_range_keeps_original_line_numbers(tmp_path: Path) -> None:
+    (tmp_path / "range.txt").write_text("one\ntwo\nthree\nfour", encoding="utf-8")
+
+    result = read_tool(str(tmp_path), "range.txt", offset=2, limit=2)
+
+    assert result["content"][0]["text"] == (
+        "2: two\n3: three\n\n[1 more lines in file. Use offset=4 to continue.]"
+    )
+    assert read_tool(str(tmp_path), "range.txt", offset=4)["content"][0]["text"] == "4: four"
+
+
+def test_read_numbered_truncation_and_continuation(tmp_path: Path) -> None:
+    (tmp_path / "long.txt").write_text("\n".join(["x"] * 2003), encoding="utf-8")
+
+    result = read_tool(str(tmp_path), "long.txt", offset=3)
+    text = result["content"][0]["text"]
+
+    assert text.startswith("3: x\n4: x\n")
+    assert text.endswith("2002: x\n\n[Showing lines 3-2002 of 2003. Use offset=2003 to continue.]")
+    assert result["details"]["truncation"]["outputLines"] == 2000
+    assert read_tool(str(tmp_path), "long.txt", offset=2003)["content"][0]["text"] == "2003: x"
+
+
+def test_read_byte_limit_counts_line_number_prefix(tmp_path: Path) -> None:
+    from one.tools.common import DEFAULT_MAX_BYTES
+
+    (tmp_path / "bytes.txt").write_text("x" * DEFAULT_MAX_BYTES, encoding="utf-8")
+
+    result = read_tool(str(tmp_path), "bytes.txt")
+    truncation = result["details"]["truncation"]
+
+    assert truncation["truncatedBy"] == "bytes"
+    assert truncation["content"] == "1: " + "x" * (DEFAULT_MAX_BYTES - 3)
+    assert truncation["outputBytes"] == DEFAULT_MAX_BYTES
+
+
 def test_quoted_posix_heredoc_preserves_literal_shell_characters(tmp_path: Path) -> None:
     if shutil.which("bash") is None:
         pytest.skip("bash is unavailable")
@@ -130,9 +183,7 @@ def test_edit_multi_collision_no_sequential_corruption(tmp_path: Path):
     ]
     edit_tool(str(tmp_path), "a.txt", edits)
     after = read_tool(str(tmp_path), "a.txt")
-    assert after["content"][0]["text"] == "bar X\nY\n", (
-        f"Expected 'bar X\\nY\\n', got {after['content'][0]['text']!r}"
-    )
+    assert after["content"][0]["text"] == "1: bar X\n2: Y\n3: "
 
 
 def test_edit_missing_keys_raises_value_error(tmp_path: Path):

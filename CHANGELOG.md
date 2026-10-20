@@ -27,6 +27,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Read line numbers** — text returned by `read` now includes original 1-based
+  line numbers, including when reading a range. Number prefixes are presentation
+  metadata, not file content, and must be omitted from edits.
+
 - **Thinking default mode** — `on` is available through settings, CLI, sessions,
   interactive mode, and TUI controls to request provider/model-default thinking.
 - **Model capacity catalogue** — offline models.dev-derived metadata now keeps

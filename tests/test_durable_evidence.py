@@ -46,6 +46,20 @@ def _agent(manager: SessionManager, tmp_path: Path) -> AgentSession:
 
 
 @pytest.mark.asyncio
+async def test_read_line_numbers_reach_provider_context(tmp_path: Path) -> None:
+    (tmp_path / "numbered.txt").write_text("alpha\nbeta\ngamma", encoding="utf-8")
+    agent = _agent(SessionManager.in_memory(str(tmp_path)), tmp_path)
+
+    result = await agent._run_tool_call("read", {"path": "numbered.txt", "offset": 2})
+
+    assert result["ok"] is True
+    message = json.loads(agent.messages[-1]["content"])
+    assert message["result"] == "2: beta\n3: gamma"
+    provider_content = agent._flatten_messages_for_provider()[-1]["content"]
+    assert json.dumps(message["result"]) in provider_content
+
+
+@pytest.mark.asyncio
 async def test_large_unicode_evidence_survives_reload_and_is_chunked(tmp_path: Path) -> None:
     source = tmp_path / "large.txt"
     source.write_text("ą" * 13_000, encoding="utf-8")
