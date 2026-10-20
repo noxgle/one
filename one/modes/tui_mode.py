@@ -2493,7 +2493,7 @@ if TEXTUAL_AVAILABLE:
                 if virtual is not None:
                     if virtual["width"] != width:
                         virtual["request_generation"] += 1
-                        virtual.update({"total": 1, "rows": {}, "pages": [], "pending": set(), "queued": set(), "error": None, "geometry_loaded": False})
+                        virtual.update({"total": 1, "rows": {}, "pages": [], "page_ends": {}, "pending": set(), "queued": set(), "error": None, "geometry_loaded": False})
                         virtual["width"] = width
                         # A completed placeholder can be outside the current
                         # viewport, so paint may never ask it for row zero.
@@ -2547,6 +2547,7 @@ if TEXTUAL_AVAILABLE:
             virtual = self._completed_virtuals.get(ref)
             if virtual is None or virtual.get("error") is not None:
                 return
+            virtual["queued"].difference_update(virtual["rows"])
             while virtual["queued"] and len(virtual["pending"]) < 2 and self._completed_page_inflight < 4:
                 # A single request consumes nearby demands through nextOffset;
                 # rows stay queued until the returned range proves they arrived.
@@ -2591,11 +2592,21 @@ if TEXTUAL_AVAILABLE:
                 next_offset = page.get("nextOffset")
                 loaded_end = int(next_offset) if isinstance(next_offset, int) else offset + len(rows)
                 current["queued"] = {row for row in current["queued"] if not offset <= row < loaded_end}
+                # Arbitrary demand offsets produce overlapping pages. Keep
+                # their actual ranges and remove only unowned rows on eviction;
+                # deleting old+96 blindly can erase the freshly loaded viewport
+                # and sustain a fetch/blank/repaint loop even while idle.
+                page_ends = current.setdefault("page_ends", {})
+                page_ends[offset] = offset + len(rows)
+                if offset in current["pages"]:
+                    current["pages"].remove(offset)
                 current["pages"].append(offset)
                 while len(current["pages"]) > 12:
                     old = current["pages"].pop(0)
-                    for row in range(old, old + 96):
-                        current["rows"].pop(row, None)
+                    old_end = page_ends.pop(old)
+                    for row in range(old, old_end):
+                        if not any(start <= row < end for start, end in page_ends.items()):
+                            current["rows"].pop(row, None)
                 # An explicit long copy owns a stable source snapshot. Do not
                 # repaint each fetched page (which would demand viewport rows
                 # again and churn the bounded display cache beneath the copy).
@@ -2621,7 +2632,7 @@ if TEXTUAL_AVAILABLE:
             self._discard_live_assistant_block()
             width = max(1, min(512, int(self._main_width())))
             self._completed_virtuals[ref] = {
-                "ref": ref, "total": 1, "width": width, "rows": {}, "pages": [], "pending": set(), "queued": set(), "request_generation": 0, "error": None, "geometry_loaded": False,
+                "ref": ref, "total": 1, "width": width, "rows": {}, "pages": [], "page_ends": {}, "pending": set(), "queued": set(), "request_generation": 0, "error": None, "geometry_loaded": False,
             }
             self._append_stream_lines(["\0completed:" + ref])
             # Do this before the next frame as the completed block may be

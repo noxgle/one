@@ -275,6 +275,83 @@ async def test_completed_page_queue_is_bounded_and_retains_rapid_scroll_rows(tmp
 
 
 @pytest.mark.asyncio
+async def test_completed_idle_tail_settles_after_overlapping_backward_pages(tmp_path: Path) -> None:
+    """Evicting old overlapping pages must not erase the stationary viewport."""
+    from one.modes.tui_mode import TuiSessionView
+
+    calls: list[int] = []
+
+    class Facade:
+        async def command(self, name, payload=None):
+            if name == "snapshot":
+                return {"result": {"epoch": 0, "sidebar": {"theme": "default"}, "messages": []}}
+            offset = payload["offset"]
+            calls.append(offset)
+            end = min(108, offset + 96)
+            return {"result": {
+                "epoch": 0, "width": 20, "totalRows": 108,
+                "rows": [f"row-{row}" for row in range(offset, end)],
+                "nextOffset": end if end < 108 else None,
+            }}
+
+        def subscribe(self, _listener):
+            return lambda: None
+
+    view = TuiSessionView(Facade())
+    await view.refresh()
+    app = _OneTextualApp(view)
+    virtual = {
+        "ref": "a:1", "total": 108, "width": 20, "rows": {}, "pages": [],
+        "pending": set(), "queued": set(), "request_generation": 0, "error": None,
+    }
+    app._completed_virtuals["a:1"] = virtual
+
+    async def drain():
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if not virtual["pending"] and not virtual["queued"]:
+                return
+        pytest.fail("completed-page work did not drain")
+
+    for row in range(11, -1, -1):
+        app._need_completed_virtual_row("a:1", row)
+        await drain()
+
+    # Paint the same idle bottom viewport repeatedly, without new agent output.
+    for _ in range(20):
+        for row in range(88, 108):
+            app._need_completed_virtual_row("a:1", row)
+        await drain()
+        if all(row in virtual["rows"] for row in range(88, 108)):
+            break
+    assert all(row in virtual["rows"] for row in range(88, 108)), calls
+    assert len(calls) <= 26, calls  # bounded refill, not an endless idle loop
+    assert len(virtual["pages"]) <= 12
+    assert len(virtual["rows"]) <= 12 * 96
+    settled = (len(calls), app._stream_render_revision)
+    for _ in range(5):
+        for row in range(88, 108):
+            app._need_completed_virtual_row("a:1", row)
+        await drain()
+    assert (len(calls), app._stream_render_revision) == settled
+
+    # Refreshing an existing offset updates its ownership instead of inserting
+    # another FIFO entry that can later evict the replacement page itself.
+    await app._fetch_completed_virtual_page("a:1", 88, 0)
+    await app._fetch_completed_virtual_page("a:1", 88, 0)
+    assert virtual["pages"].count(88) == 1
+    assert virtual["page_ends"][88] == 108
+    assert all(row in virtual["rows"] for row in range(88, 108))
+    settled = (len(calls), app._stream_render_revision)
+
+    # A satisfied queued demand must not create a redundant RPC either.
+    virtual["queued"].add(100)
+    app._start_completed_page_requests("a:1")
+    await drain()
+    assert (len(calls), app._stream_render_revision) == settled
+
+
+@pytest.mark.asyncio
 async def test_completed_page_old_width_reply_cannot_replace_resized_rows(tmp_path: Path) -> None:
     """An in-flight old-width response is rejected after the virtual reflows."""
     from one.modes.tui_mode import TuiSessionView

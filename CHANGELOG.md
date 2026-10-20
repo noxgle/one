@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Idle TUI flicker** — evicting completed-response pages preserves rows shared
+  with retained pages, preventing repeated blanking and refetching at the bottom
+  of the transcript. Already-loaded queued rows no longer trigger extra requests.
+
 - **Patch matching** — `apply_patch` now preserves context/change order, finds
   exact hunks beyond the start of a file, rejects ambiguous matches and reports
   actionable mismatch locations without partially writing files.
