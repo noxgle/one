@@ -8,6 +8,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+## [0.1.93] - 2026-10-21
+
+### Fixed
+
+- **Release verification** — regenerate all TUI golden snapshots for the current
+  package version, fixing the snapshot mismatches that blocked the 0.1.92 release.
+
 ## [0.1.92] - 2026-10-21
 
 ### Fixed
