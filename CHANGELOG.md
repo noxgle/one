@@ -8,6 +8,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+## [0.1.92] - 2026-10-21
+
 ### Fixed
 
 - **Idle TUI flicker** — evicting completed-response pages preserves rows shared
