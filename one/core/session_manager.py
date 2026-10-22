@@ -268,6 +268,10 @@ class SessionManager:
             }
         )
 
+    def append_preset_state(self, state: dict[str, Any]) -> str:
+        """Append a versioned effective preset snapshot to this branch."""
+        return self._append({"type": "preset_state", "id": _id(), "parentId": self._leaf_id, "timestamp": _now_iso(), "state": state})
+
     def append_timing(
         self,
         scope: str,
@@ -652,6 +656,8 @@ class SessionManager:
         temperature = None
         model = None
         compaction = None
+        preset_state = None
+        preset_state_present = False
 
         for e in path:
             t = e.get("type")
@@ -667,6 +673,9 @@ class SessionManager:
                     model = {"provider": m.get("provider"), "modelId": m.get("model")}
             elif t == "compaction":
                 compaction = e
+            elif t == "preset_state":
+                preset_state_present = True
+                preset_state = e.get("state")
 
         def append_entry(ent: dict[str, Any]) -> None:
             t = ent.get("type")
@@ -723,6 +732,8 @@ class SessionManager:
             "thinkingLevel": thinking_level,
             "temperature": temperature,
             "model": model,
+            "presetState": preset_state,
+            "presetStatePresent": preset_state_present,
         }
 
     def create_branched_session(self, leaf_id: str) -> str | None:

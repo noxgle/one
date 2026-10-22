@@ -161,6 +161,21 @@ async def _run(argv: list[str]) -> int:
     os.environ[ENV_AGENT_DIR] = str(agent_dir_path)
     agent_dir = str(agent_dir_path)
 
+    # Fail command-line selection before creating providers, sessions, or a TUI
+    # worker. Runtime callers still validate again for non-CLI entry points.
+    if parsed.preset:
+        from one.core.presets import PresetError, discover_presets
+
+        try:
+            preset = discover_presets(agent_dir).get(parsed.preset)
+            if preset is None:
+                raise PresetError(f"Unknown preset: {parsed.preset}")
+            if preset.sandboxes:
+                raise PresetError("Preset requests unsupported sandboxes")
+        except PresetError as exc:
+            print(f"Invalid preset: {exc}")
+            return 2
+
     # TUI is a separate application boundary: do not create settings, auth,
     # registry, resources, MCP, a session, or a runtime on Textual's loop.
     # Commands which are inherently CLI-only (model listing/export/etc.) retain
@@ -216,6 +231,7 @@ async def _run(argv: list[str]) -> int:
             no_themes=parsed.no_themes,
             system_prompt=parsed.system_prompt,
             append_system_prompt=parsed.append_system_prompt,
+            preset=parsed.preset,
             initial_image_paths=tuple(parsed.image_paths),
         )
         facade = AgentRuntimeFacade(
@@ -415,7 +431,7 @@ async def _run(argv: list[str]) -> int:
         additional_skill_paths=parsed.skills,
         additional_prompt_template_paths=parsed.prompt_templates,
         additional_theme_paths=parsed.themes,
-        no_extensions=parsed.no_extensions,
+        no_extensions=parsed.no_extensions or parsed.preset == "readonly",
         no_skills=parsed.no_skills,
         no_prompt_templates=parsed.no_prompt_templates,
         no_themes=parsed.no_themes,
@@ -517,26 +533,37 @@ async def _run(argv: list[str]) -> int:
         "modelRegistry": registry,
         "settingsManager": settings,
         "resourceLoader": loader,
-        "model": model,
-        "thinkingLevel": parsed.thinking or settings.get_default_thinking_level(),
-        "temperature": parsed.temperature if parsed.temperature is not None else (
-            temperature_for_mode(parsed.temperature_mode) if parsed.temperature_mode else settings.get_default_temperature()
-        ),
+        # Defaults must remain distinguishable from command-line overrides so a
+        # selected preset can supply omitted settings.
+        "model": model if parsed.model else None,
+        "provider": parsed.provider,
+        "thinkingLevel": parsed.thinking,
+        "temperature": parsed.temperature if parsed.temperature is not None else (temperature_for_mode(parsed.temperature_mode) if parsed.temperature_mode else None),
+        "explicitModel": bool(parsed.model or parsed.provider),
+        "explicitThinking": parsed.thinking is not None,
+        "explicitTemperature": parsed.temperature is not None or parsed.temperature_mode is not None,
         "scopedModels": scoped_models,
         "tools": [all_tools[t] for t in tool_names],
         "subagentsHardDisabled": parsed.no_subagents,
         "mcpManager": mcp_manager,
         "catalogRefresh": os.getenv("ONE_CATALOG_REFRESH", "1").lower() not in {"0", "false", "off"},
+        "preset": parsed.preset,
     }
 
-    runtime = await create_agent_session_runtime(
-        bootstrap,
-        {
-            "cwd": session_manager.cwd,
-            "sessionManager": session_manager,
-            "resourceLoader": loader,
-        },
-    )
+    try:
+        runtime = await create_agent_session_runtime(
+            bootstrap,
+            {
+                "cwd": session_manager.cwd,
+                "sessionManager": session_manager,
+                "resourceLoader": loader,
+            },
+        )
+    except ValueError as exc:
+        print(str(exc))
+        if mcp_manager is not None:
+            await mcp_manager.close()
+        return 2
     host = AgentSessionRuntimeHost(bootstrap, runtime)
 
     # ── Import image paths into content-addressed blobs ──────────────────────

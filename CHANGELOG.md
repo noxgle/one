@@ -8,6 +8,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Added
+
+- **Named presets** — packaged Default and Readonly single-file YAML-frontmatter presets,
+  strict user preset validation, CLI selection, and runtime Readonly tool enforcement.
+
 ## [0.1.93] - 2026-10-21
 
 ### Fixed

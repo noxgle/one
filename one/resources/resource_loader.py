@@ -227,7 +227,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "evidence_read": "{evidenceId, offset?, maxChars?}  # retrieve a bounded chunk of prior durable tool evidence; use nextOffset to continue",
     "finish": "{summary, goal_success}  # terminal task result with full summary or answer; do not use summary to ask for missing information when ask_user is available",
     "plan": "{plan: [{step, status}]}  # status is pending|in_progress|completed|blocked; send the complete plan on every update",
-    "spawn_subagent": "{task, tasks?, model?, tools?, temperature?, temperatureMode?, timeout?}  # For smaller/less capable models, prefer one child with exactly one non-empty task string. Use tasks as a non-empty list only when multiple independent parallel subtasks are explicitly requested. Provide exactly one of task or tasks; never both. Examples: {\"task\":\"inspect X\"}; {\"tasks\":[\"inspect X\",\"inspect Y\"]}. timeout overrides child idle timeout; numeric temperature overrides temperatureMode, otherwise inherits parent",
+    "spawn_subagent": "{task, tasks?, model?, tools?, preset?, temperature?, temperatureMode?, timeout?}  # For smaller/less capable models, prefer one child with exactly one non-empty task string. Use tasks as a non-empty list only when multiple independent parallel subtasks are explicitly requested. Provide exactly one of task or tasks; never both. Examples: {\"task\":\"inspect X\"}; {\"tasks\":[\"inspect X\",\"inspect Y\"]}. A preset supplies child configuration; model and temperature overrides take precedence. timeout overrides child idle timeout; numeric temperature overrides temperatureMode, otherwise inherits parent",
     "ask_user": "{question, timeoutSec?}  # for necessary preferences, materially ambiguous requirements, or unapproved destructive/security/account decisions; waits for one human answer, then continue the same task",
     "apply_patch": "{patchText}  # non-empty string in OpenCode patch format, NOT ---/+++ unified diff. Exact Update example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch. For updates, prefix unchanged context lines with a space; read the current file first. Matches are exact; ambiguous hunks fail and there is no fuzzy matching. On mismatch re-read and rebuild the patch. Supports Add/Update/Delete/Move; Add/Move targets must be absent; conflicts and symlinks rejected; staged backup/rollback-protected",
     "read_image": "{path}  # read an image file and return its content as a base64-encoded blob with metadata",
@@ -316,6 +316,21 @@ RULES:
 - Each response must be a single valid tool call.
 - No extra fields.
 - No text outside JSON.
+"""
+
+# A replacement preset supplies the role, not the execution contract.  Keep
+# this deliberately narrower than _BASE_PROMPT: default goals/planning are not
+# reintroduced, while JSON invocation, completion, evidence and safety rules
+# remain invariant for every model-facing role.
+_PRESET_TOOL_PROTOCOL = """# Tool Protocol
+Available tools (JSON arguments):
+__TOOLS__
+Use only listed tools. Default timeout is __DEFAULT_TOOL_TIMEOUT__ seconds.
+Return ONLY one JSON dict per response: {"tool":"<name>","args":{...}}.
+For a final answer use {"tool":"finish","args":{"summary":"<answer text>","goal_success":true}}; finish is terminal and must not ask for missing information.
+Do not output prose, reasoning, extra fields, or text outside that JSON call.
+Inspect tool results before claiming success; preserve evidence/result safety and do not invent verification.
+Never retry identical failing commands; no interactive tools, background daemons, or infinite loops.
 """
 
 
@@ -588,40 +603,39 @@ class DefaultResourceLoader:
     def get_agents_files(self) -> dict[str, Any]:
         return {"agentsFiles": self._agents_files}
 
-    def get_system_prompt(self, selected_tools: list[str] | None = None) -> str:
+    def get_system_prompt(self, selected_tools: list[str] | None = None, base_role: str | None = None) -> str:
         tools = selected_tools if selected_tools is not None else ["read", "bash", "edit", "write"]
 
-        if self.system_prompt:
-            prompt = f"{_build_header(self.cwd)}\n\n{self.system_prompt}"
-        else:
-            tools_list = "\n".join(f"- {t} {TOOL_ARG_SCHEMAS.get(t, '{}')}" for t in tools) if tools else "(none)"
-            default_timeout = getattr(self.settings_manager, "get_tool_timeout_sec", lambda: 30)()
-            prompt = _build_header(self.cwd) + _BASE_PROMPT.replace("__TOOLS__", tools_list).replace(
-                "__DEFAULT_TOOL_TIMEOUT__", str(default_timeout)
-            )
-
-            agents_files = self.get_agents_files().get("agentsFiles", [])
-            if agents_files:
-                prompt += "\n# Project Context\n\n"
-                for entry in agents_files:
-                    p = entry.get("path", "")
-                    c = (entry.get("content", "") or "").strip()
-                    if not c:
-                        continue
+        tools_list = "\n".join(f"- {t} {TOOL_ARG_SCHEMAS.get(t, '{}')}" for t in tools) if tools else "(none)"
+        default_timeout = getattr(self.settings_manager, "get_tool_timeout_sec", lambda: 30)()
+        role = base_role if base_role is not None else self.system_prompt
+        custom_preset_role = base_role is not None
+        prompt = f"{_build_header(self.cwd)}\n\n{role}" if role else _build_header(self.cwd) + _BASE_PROMPT.replace("__TOOLS__", tools_list).replace("__DEFAULT_TOOL_TIMEOUT__", str(default_timeout))
+        if custom_preset_role:
+            prompt += "\n\n" + _PRESET_TOOL_PROTOCOL.replace("__TOOLS__", tools_list).replace("__DEFAULT_TOOL_TIMEOUT__", str(default_timeout))
+        # Preserve the historical --system-prompt branch byte-for-byte: it did
+        # not append project/skill context. Preset roles intentionally retain
+        # the invariant context below.
+        agents_files = self.get_agents_files().get("agentsFiles", []) if (not self.system_prompt or custom_preset_role) else []
+        if agents_files:
+            prompt += "\n# Project Context\n\n"
+            for entry in agents_files:
+                p = entry.get("path", "")
+                c = (entry.get("content", "") or "").strip()
+                if c:
                     prompt += f"## {p}\n\n{c}\n\n"
-
-            if "read" in tools:
-                skills = self.get_skills().get("skills", [])
-                if skills:
-                    prompt += "\n# Skills\n\n"
-                    prompt += (
+        if "read" in tools and (not self.system_prompt or custom_preset_role):
+            skills = self.get_skills().get("skills", [])
+            if skills:
+                prompt += "\n# Skills\n\n"
+                prompt += (
                         "Available skills (metadata only — full skill loaded on demand via `/skill:<name>`):\n"
-                    )
-                    for skill in skills:
-                        name = skill.get("name") or "unknown"
-                        desc = skill.get("description", "")
-                        prompt += f"- **{name}**: {desc} (filePath: {skill.get('filePath', '')})\n"
-                    prompt += (
+                )
+                for skill in skills:
+                    name = skill.get("name") or "unknown"
+                    desc = skill.get("description", "")
+                    prompt += f"- **{name}**: {desc} (filePath: {skill.get('filePath', '')})\n"
+                prompt += (
                         "\n"
                         "**Skill invocation syntax — read carefully:**\n"
                         "- `/skill:<name> [args]` is a **TUI/interactive UI command** typed by the user. "
@@ -635,7 +649,7 @@ class DefaultResourceLoader:
                         "the agent will return a diagnostic explaining the syntax and providing the correct filePath.\n"
                         "- This rule preserves the existing progressive-disclosure flow: skills are listed in metadata "
                         "only, and full bodies are loaded on demand via the explicit `filePath`.\n"
-                    )
+                )
 
         if self.append_system_prompt:
             prompt = f"{prompt}\n\n{self.append_system_prompt}"

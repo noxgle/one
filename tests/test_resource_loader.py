@@ -24,12 +24,13 @@ def test_prompt_includes_spawn_subagent_schema():
     loader = _make_loader(cwd="/tmp/fake", agent_dir="/tmp/fake_agent", settings=settings)
     tools = ["read", "bash", "spawn_subagent", "ask_user", "edit", "write", "grep", "find", "ls", "finish", "plan"]
     prompt = loader.get_system_prompt(selected_tools=tools)
-    assert "- spawn_subagent {task, tasks?, model?, tools?, temperature?, temperatureMode?, timeout?}" in prompt
+    assert "- spawn_subagent {task, tasks?, model?, tools?, preset?, temperature?, temperatureMode?, timeout?}" in prompt
     assert "For smaller/less capable models, prefer one child with exactly one non-empty task string." in prompt
     assert "Use tasks as a non-empty list only when multiple independent parallel subtasks are explicitly requested." in prompt
     assert "Provide exactly one of task or tasks; never both." in prompt
     assert '{"task":"inspect X"}' in prompt
     assert '{"tasks":["inspect X","inspect Y"]}' in prompt
+    assert "A preset supplies child configuration; model and temperature overrides take precedence." in prompt
     assert "- ask_user {question, timeoutSec?}" in prompt
 
 

@@ -24,6 +24,7 @@ class ParsedArgs:
     ollama_url: str | None = None
     system_prompt: str | None = None
     append_system_prompt: str | None = None
+    preset: str | None = None
     thinking: str | None = None
     temperature: float | None = None
     temperature_mode: str | None = None
@@ -84,7 +85,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
             # (this mirrors argparse's nargs="?" behaviour for --list-models).
             _VALUE_FLAGS = {
                 "--provider", "--model", "--api-key", "--llama-cpp-url", "--ollama-url",
-                "--system-prompt", "--append-system-prompt", "--thinking", "--temperature", "--temperature-mode", "--mode",
+                "--system-prompt", "--append-system-prompt", "--preset", "--thinking", "--temperature", "--temperature-mode", "--mode",
                 "--session", "--session-dir", "--models", "--tools", "--export",
                 "--export-format", "--theme", "--prompt-template", "--skill",
                 "--extension", "-e", "--list-models", "--answer-file", "--steer-file",
@@ -126,6 +127,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     parser.add_argument("--ollama-url")
     parser.add_argument("--system-prompt")
     parser.add_argument("--append-system-prompt")
+    parser.add_argument("--preset")
     parser.add_argument("--thinking")
     parser.add_argument("--temperature")
     parser.add_argument("--temperature-mode")
@@ -198,6 +200,8 @@ def parse_args(argv: list[str]) -> ParsedArgs:
 
     if ns.print_mode and mode == "rpc":
         errors.append("--print cannot be combined with --mode rpc")
+    if ns.preset and ns.system_prompt:
+        errors.append("--preset cannot be combined with --system-prompt")
 
     if ns.no_session and (ns.session or ns.continue_session or ns.resume or ns.fork):
         errors.append("--no-session cannot be combined with --session/--continue/--resume/--fork")
@@ -225,6 +229,7 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         ollama_url=ns.ollama_url,
         system_prompt=ns.system_prompt,
         append_system_prompt=ns.append_system_prompt,
+        preset=ns.preset,
         thinking=thinking,
         temperature=temperature,
         temperature_mode=temperature_mode,
@@ -282,9 +287,10 @@ Options:
   --model <pattern>
   --api-key <key>
   --llama-cpp-url <url>
-  --ollama-url <url>
-  --system-prompt <text>
-   --append-system-prompt <text>
+   --ollama-url <url>
+   --system-prompt <text>
+   --preset <id>              Select a named preset
+    --append-system-prompt <text>
    --temperature <0.0..1.2>
    --temperature-mode <coder|balanced|creative|experimental>
   --mode <text|json|rpc|tui>

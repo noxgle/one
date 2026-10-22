@@ -265,6 +265,23 @@ class TuiSessionView:
         return str(self._snapshot["sidebar"].get("temperatureMode", "balanced"))
 
     @property
+    def preset_id(self) -> str:
+        return str(self._snapshot["sidebar"].get("preset", "default"))
+
+    @property
+    def preset_name(self) -> str:
+        return str(self._snapshot["sidebar"].get("presetName", "Default"))
+
+    @property
+    def preset_modified(self) -> bool:
+        return bool(self._snapshot["sidebar"].get("presetModified", False))
+
+    @property
+    def preset_effective_settings(self) -> dict[str, Any]:
+        value = self._snapshot["sidebar"].get("presetEffective", {})
+        return dict(value) if isinstance(value, dict) else {}
+
+    @property
     def pending_message_count(self) -> int:
         return int(self._snapshot["sidebar"].get("pendingMessageCount", 0))
 
@@ -420,6 +437,8 @@ def build_sidebar_snapshot(
         sidebar = session.sidebar
         defaults = {
             "model": "none", "thinking": "medium", "temperature": 0.5,
+            "preset": "default", "presetName": "Default", "presetModified": False,
+            "presetEffective": {},
             "temperatureMode": "balanced", "cwd": ".", "sessionId": "-",
             "streaming": False, "compacting": False, "retry": "on", "coop": "off",
             "contextPercent": 0.0, "contextWindow": None, "contextKnown": False,
@@ -483,6 +502,10 @@ def build_sidebar_snapshot(
         "thinking": getattr(session, "thinking_level", "medium"),
         "temperature": float(getattr(session, "temperature", 0.5)),
         "temperatureMode": getattr(session, "temperature_mode", "balanced"),
+        "preset": getattr(session, "preset_id", "default"),
+        "presetName": getattr(session, "preset_name", "Default"),
+        "presetModified": bool(getattr(session, "preset_modified", False)),
+        "presetEffective": getattr(session, "preset_effective_settings", {}),
         "cwd": getattr(getattr(session, "session_manager", None), "cwd", "."),
         "sessionId": getattr(session, "session_id", "-"),
         "streaming": bool(getattr(session, "is_streaming", False)),
@@ -961,6 +984,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/thinking",
     "/thinking-cycle",
     "/temperature",
+    "/preset",
     "/theme",
     "/steer",
     "/follow",
@@ -1778,6 +1802,7 @@ if TEXTUAL_AVAILABLE:
             commands: list[tuple[str, str, Any, bool]] = [
                 ("Show one keyboard shortcuts", "Show the current one TUI shortcuts", self.action_show_shortcuts, True),
                 ("Show one slash-command help", "Show the current slash-command reference", self.action_help, True),
+                ("List named presets", "Show available named session presets", lambda: asyncio.create_task(self._handle_command("/preset")), True),
                 ("Clear conversation stream", "Clear the visible conversation stream", self.action_clear_stream, True),
                 ("Toggle cooperation", "Require approval for mutating tools", self.action_toggle_cooperation, True),
                 ("Toggle subagents", "Enable or disable subagent tools", self.action_toggle_subagents, True),
@@ -4254,9 +4279,10 @@ if TEXTUAL_AVAILABLE:
                 coop += " (PENDING)"
             thinking = sanitize_display_text(str(snapshot["thinking"]))
             runtime_status = self._runtime_status(snapshot)
-            temperature_mode = sanitize_display_text(str(snapshot["temperatureMode"]))
+            preset = sanitize_display_text(str(snapshot.get("presetName", snapshot.get("preset", "Default"))))
+            modified = " (modified)" if snapshot.get("presetModified") else ""
             suffix = (
-                f" | Mode: {temperature_mode} ({snapshot['temperature']:.1f})"
+                f" | Preset: {preset}{modified} | Temp: {snapshot['temperature']:.1f}"
                 f" | Think: {thinking} | Coop: {coop.lower()} | Status: {runtime_status}"
             )
             prefix = f"v{VERSION} | "
@@ -4338,7 +4364,8 @@ if TEXTUAL_AVAILABLE:
             info_block.append(f"Model: {sanitize_display_text(s['model'])}\n")
             info_block.append(f"Theme: {sanitize_display_text(self._theme.name)}\n")
             info_block.append(f"Thinking: {sanitize_display_text(s['thinking'])}\n")
-            info_block.append(f"Mode: {sanitize_display_text(s['temperatureMode'])} ({s['temperature']:.1f})\n")
+            info_block.append(f"Preset: {sanitize_display_text(str(s.get('presetName', s.get('preset', 'Default'))))}{' (modified)' if s.get('presetModified') else ''}\n")
+            info_block.append(f"Temperature: {s['temperature']:.1f}\n")
             context = self._context_meter(s["contextPercent"]) if s["contextKnown"] else "unknown"
             info_block.append(f"Input budget: {context}\n")
             info_block.append(f"Retry: {sanitize_display_text(s['retry'])}\n")
@@ -4885,6 +4912,7 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write("/inspect-timeout", "info")
+                self._write("/preset [id] (list or apply an idle-time named preset)", "info")
                 self._write("/layout <compact|wide|focus>", "info")
                 self._write("  compact: header visible; sidebar hidden", "info")
                 self._write("  wide: header hidden; sidebar visible", "info")
@@ -5310,6 +5338,33 @@ if TEXTUAL_AVAILABLE:
             if cmd == "/temperature":
                 self._write(f"Temperature: {session.temperature_mode} ({session.temperature:.1f})", "info")
                 self._write("Usage: /temperature <0.0..1.2|coder|balanced|creative|experimental>", "info")
+                return
+            if cmd == "/preset":
+                try:
+                    if isinstance(session, TuiSessionView):
+                        result = await session.command("ui", operation="preset_list", payload={})
+                    else:
+                        from one.core.presets import discover_presets
+                        result = {"presets": [{"id": p.id, "name": p.name, "description": p.description or ""} for p in discover_presets(getattr(session.resource_loader, "agent_dir", None)).values()]}
+                    for preset in result["presets"]:
+                        current = " (current)" if preset["id"] == session.preset_id else ""
+                        self._write(f"{preset['id']}: {preset['name']} — {preset['description']}{current}", "info")
+                except Exception as exc:
+                    self._write(str(exc), "error")
+                return
+            if cmd.startswith("/preset "):
+                ident = cmd[len("/preset "):].strip()
+                try:
+                    if not ident:
+                        raise ValueError("Usage: /preset [id]")
+                    if isinstance(session, TuiSessionView):
+                        await session.command("ui", operation="set_preset", payload={"id": ident})
+                    else:
+                        session.activate_preset(ident, getattr(session.resource_loader, "agent_dir", None))
+                    self._write(f"Preset set to {session.preset_name}", "info")
+                    self._refresh_sidebar()
+                except Exception as exc:
+                    self._write(str(exc), "error")
                 return
             if cmd.startswith("/temperature "):
                 value = cmd[len("/temperature ") :].strip()
@@ -7190,7 +7245,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /agents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /preset [id] /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /agents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 

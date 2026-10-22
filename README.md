@@ -412,6 +412,9 @@ does not revoke a provider account token or remove environment credentials.
 
 ## Sessions and configuration
 
+Named agent presets are documented in [docs/PRESETS.md](docs/PRESETS.md). Use
+`one --preset readonly` for app-enforced read-only inspection (not OS sandboxing).
+
 By default state is private under `~/.config/one` (override with
 `ONE_CODING_AGENT_DIR`): `auth.json`, `models.json`, `settings.json`, sessions,
 and reports. A project `.one/` directory supplies per-project MCP and extension

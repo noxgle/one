@@ -98,6 +98,7 @@ More copy-and-paste prompts are in [EXAMPLES.md](EXAMPLES.md).
 | Force a context summary | `/compact` |
 | Paste an image | `Ctrl+Alt+V` or `/paste-image` |
 | Run one task from a script | `one run "..." --json` |
+| Inspect safely | `one --preset readonly` or `/preset readonly` |
 
 ## Safety baseline
 
@@ -112,3 +113,7 @@ Run through the checklist in [FAQ.md](FAQ.md), starting with provider, model,
 authentication, and network access. When reporting a problem, include the
 sanitized command, provider/model, operating system, and relevant error text;
 never include API keys or session files.
+## Named presets
+
+Use `one --preset readonly` to start an app-enforced read-only inspection session.
+See [PRESETS.md](PRESETS.md) for the strict one-file format and limitations.

@@ -404,7 +404,8 @@ async def test_tui_temperature_mode_renders_in_compact_header_and_wide_sidebar(t
     async with compact.run_test() as pilot:
         await pilot.pause()
         header = str(compact.query_one("#header", Static).content)
-        assert "Mode: balanced (0.5)" in header
+        assert "Preset: Default" in header
+        assert "Temp: 0.5" in header
         assert "Think: medium" in header
         assert "Coop: off" in header
         assert "Status: ready" in header
@@ -413,9 +414,9 @@ async def test_tui_temperature_mode_renders_in_compact_header_and_wide_sidebar(t
     async with wide.run_test() as pilot:
         await pilot.pause()
         sidebar = str(wide.query_one("#sidebar", Static).content)
-        assert "Mode: balanced (0.5)" in sidebar
+        assert "Preset: Default" in sidebar
+        assert "Temperature: 0.5" in sidebar
         assert "Mode: balanced\n" not in sidebar
-        assert "Temperature:" not in sidebar
         assert "Retry:" in sidebar
         assert "Status:" in sidebar
         assert "Delivery:" in sidebar

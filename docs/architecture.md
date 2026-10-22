@@ -359,6 +359,11 @@ the system prompt; full content is loaded on demand via `/skill:<name>` or RPC.
 
 ### 7.3 Resource loader
 
+Named preset definitions are strict Markdown/YAML data under `resources/presets`
+and the configured agent directory. Their replacement role is composed before the
+invariant runtime/project/skill sections; runtime dispatch separately enforces any
+tool policy. See [PRESETS.md](PRESETS.md).
+
 `one/resources/resource_loader.py` handles discovery, parsing, validation, and
 reload of all resource types (extensions, skills, prompts, themes).
 

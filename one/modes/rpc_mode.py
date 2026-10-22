@@ -224,9 +224,22 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                             "activeTools": session.active_tools,
                             "autoRetryEnabled": session.auto_retry_enabled,
                             "lastSubagentTimeout": session.inspect_subagent_timeout(),
+                            "preset": {"id": session.preset_id, "name": session.preset_name, "modified": session.preset_modified, "effective": session.preset_effective_settings},
                         },
                     )
                 )
+            elif ctype == "list_presets":
+                from one.core.presets import discover_presets
+                presets = discover_presets(getattr(session.resource_loader, "agent_dir", None))
+                output(success(cid, ctype, {"presets": [{"id": p.id, "name": p.name, "description": p.description or "", "current": p.id == session.preset_id} for p in presets.values()]}))
+            elif ctype == "set_preset":
+                # ``id`` is the RPC correlation key.  Keep the selected preset
+                # separate so numeric/string request ids cannot select it.
+                ident = cmd.get("presetId", cmd.get("preset"))
+                if not isinstance(ident, str) or not ident:
+                    raise ValueError("presetId (or preset) is required")
+                session.activate_preset(ident, getattr(session.resource_loader, "agent_dir", None))
+                output(success(cid, ctype, {"id": session.preset_id, "name": session.preset_name, "modified": session.preset_modified, "effective": session.preset_effective_settings}))
             elif ctype == "set_model":
                 model = session.model_registry.find(cmd.get("provider"), cmd.get("modelId"))
                 if not model:

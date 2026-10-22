@@ -481,7 +481,7 @@ class InteractiveMode:
                 f"[{model_label} | thinking:{session.thinking_level}{usage_text} | tokens:{tokens_total} | retry:{retry_state} | coop:{cooperation_state} | cwd:{cwd_label} | queue:s{len(queues['steering'])}/f{len(queues['followUp'])}]"
             )
             print(
-                "[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /theme [name] | /abort | /exit]"
+                "[/help | /status | /queue [clear] | /model [provider/model] | /thinking [level] | /preset [id] | /theme [name] | /abort | /exit]"
             )
             print("Ctrl+A toggles cooperation mode (ask before running mutating tools: bash/write/edit).")
             try:
@@ -550,6 +550,7 @@ class InteractiveMode:
                 print(
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort | /new\n"
                     "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]\n"
+                    "/preset [id] (list or apply an idle-time named preset)\n"
                     "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>\n"
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /subagents [on|off] | /details-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
@@ -577,11 +578,25 @@ class InteractiveMode:
                             ),
                             "sessionId": session.session_id,
                             "sessionFile": session.session_file,
+                            "preset": {"id": getattr(session, "preset_id", "default"), "name": getattr(session, "preset_name", "Default"), "modified": bool(getattr(session, "preset_modified", False)), "effective": getattr(session, "preset_effective_settings", {})},
                         },
                         ensure_ascii=False,
                         indent=2,
                     )
                 )
+                continue
+            if line.strip() == "/preset":
+                from one.core.presets import discover_presets
+                for preset in discover_presets(getattr(session.resource_loader, "agent_dir", None)).values():
+                    current = " (current)" if preset.id == session.preset_id else ""
+                    print(f"{preset.id}: {preset.name} — {preset.description or ''}{current}")
+                continue
+            if line.startswith("/preset "):
+                try:
+                    session.activate_preset(line[len("/preset ") :].strip(), getattr(session.resource_loader, "agent_dir", None))
+                    print(f"Preset set to {session.preset_name}")
+                except Exception as exc:
+                    print(str(exc))
                 continue
             if line.strip() == "/queue":
                 print(json.dumps(session.get_pending_queues(), ensure_ascii=False, indent=2))

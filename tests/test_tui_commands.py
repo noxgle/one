@@ -122,6 +122,20 @@ class _FakeMcpManager:
         return []
 
 
+@pytest.mark.asyncio
+async def test_tui_pilot_applies_preset_through_real_input(tmp_path: Path) -> None:
+    """Exercise slash parsing via Textual keyboard submission, not an action call."""
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/preset readonly")
+        await pilot.pause()
+    assert session.preset_name == "Readonly"
+    assert "bash" not in session.active_tools
+    assert "Preset set to Readonly" in "\n".join(app._stream_lines)
+
+
 def _mk_providers_session(tmp_path: Path):
     """Session whose registry has one keyed provider with two models."""
     session = _mk_app_session(tmp_path)

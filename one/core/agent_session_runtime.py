@@ -12,6 +12,7 @@ from one.config import get_agent_dir
 from one.core.agent_session import AgentSession
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
+from one.core.presets import PresetError, discover_presets
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
 from one.core.temperature import normalize_temperature
@@ -112,14 +113,19 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
             model = restored_candidate
     if not model:
         avail = model_registry.get_available()
+        requested_provider = bootstrap.get("provider")
+        if requested_provider:
+            model = next((m for m in avail if m.provider == requested_provider), None)
         if avail:
             default_provider = settings_manager.get_default_provider()
             default_model = settings_manager.get_default_model()
-            model = next((m for m in avail if m.provider == default_provider and m.id == default_model), None) or avail[0]
+            model = model or next((m for m in avail if m.provider == default_provider and m.id == default_model), None) or avail[0]
 
     if not model:
         all_models = model_registry.all()
-        model = all_models[0] if all_models else None
+        requested_provider = bootstrap.get("provider")
+        model = next((m for m in all_models if m.provider == requested_provider), None) if requested_provider else None
+        model = model or (all_models[0] if all_models else None)
 
     model_fallback_message = None
     if model and not model_registry.has_configured_auth(model):
@@ -138,7 +144,9 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
     if model and not model.reasoning:
         thinking_level = "off"
 
-    temperature = bootstrap.get("temperature", settings_manager.get_default_temperature())
+    temperature = bootstrap.get("temperature")
+    if temperature is None:
+        temperature = settings_manager.get_default_temperature()
     if not options.get("freshSession") and restored.get("temperature") is not None:
         try:
             temperature = normalize_temperature(restored["temperature"])
@@ -152,6 +160,28 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         tool_names = [t.name if hasattr(t, "name") else str(t) for t in tools]
     else:
         tool_names = list(DEFAULT_TOOL_NAMES)
+    preset = None
+    preset_id = bootstrap.get("preset")
+    # A durable snapshot is authoritative on resume/fork.  Do not make a
+    # deleted, edited, or malformed current definition prevent historical
+    # session recovery merely because old bootstrap metadata mentions it.
+    if preset_id and not restored.get("presetStatePresent"):
+        try:
+            preset = discover_presets(agent_dir)[str(preset_id)]
+        except (KeyError, PresetError) as exc:
+            raise ValueError(f"Invalid preset: {preset_id}") from exc
+        if preset.sandboxes:
+            raise ValueError("Preset requests unsupported sandboxes")
+        # Explicit bootstrap settings win over preset values.
+        if not bootstrap.get("explicitModel", bootstrap.get("model") is not None) and preset.model:
+            provider, model_id = preset.model.split("/", 1)
+            model = model_registry.resolve(provider, model_id)
+            if model is None:
+                raise ValueError(f"Preset model is unavailable: {preset.model}")
+        if not bootstrap.get("explicitTemperature", bootstrap.get("temperature") is not None) and preset.temperature is not None:
+            temperature = preset.temperature
+        if not bootstrap.get("explicitThinking", bootstrap.get("thinkingLevel") is not None) and preset.thinking:
+            thinking_level = preset.thinking
 
     session = AgentSession(
         session_manager=session_manager,
@@ -166,7 +196,13 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
         mcp_manager=bootstrap.get("mcpManager"),
         storage_dir=session_manager.session_dir or "",
         subagents_hard_disabled=bool(bootstrap.get("subagentsHardDisabled", False)),
+        preset=preset,
     )
+    saved_preset = restored.get("presetState")
+    if restored.get("presetStatePresent"):
+        # Do not reload a mutable definition file while resuming: effective
+        # authority and prompt are historical session state.
+        session.restore_preset_state(saved_preset)
     # Snapshot/cache are already loaded synchronously.  Remote refresh is opt-in
     # at bootstrap so tests and untrusted/offline invocations are network-free.
     model_registry.catalog.enabled = bool(bootstrap.get("catalogRefresh", False))

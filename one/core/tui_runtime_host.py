@@ -258,6 +258,7 @@ class TuiBootstrap:
     no_themes: bool = False
     system_prompt: str | None = None
     append_system_prompt: str | None = None
+    preset: str | None = None
     # CLI image paths are intentionally imported by the owner loop when the
     # first TUI prompt is sent.  They must not be imported on Textual's loop.
     initial_image_paths: tuple[str, ...] = ()
@@ -539,6 +540,10 @@ class TuiRuntimeHost:
             "model": f"{model.provider}/{model.id}" if model else "none",
             "thinking": str(session.thinking_level),
             "temperature": float(session.temperature),
+            "preset": str(getattr(session, "preset_id", "default")),
+            "presetName": str(getattr(session, "preset_name", "Default")),
+            "presetModified": bool(getattr(session, "preset_modified", False)),
+            "presetEffective": getattr(session, "preset_effective_settings", {}),
             "streaming": bool(session.is_streaming),
             "compacting": bool(getattr(session, "is_compacting", False)),
             "bashOutput": bool(session.settings_manager.get_bash_show_output()),
@@ -976,6 +981,8 @@ class TuiRuntimeHost:
             "config_get": {"key"},
             "config_set": {"key", "value"},
             "cooperation_status": set(),
+            "preset_list": set(),
+            "set_preset": {"id"},
         }
         if operation not in schemas or set(payload) != schemas[operation]:
             raise ValueError(f"invalid TUI operation payload: {operation}")
@@ -987,6 +994,7 @@ class TuiRuntimeHost:
             "follow": {"text"},
             "invoke_skill": {"name", "args"},
             "fork": {"entryId"},
+            "set_preset": {"id"},
             "delete_session": {"path"},
             "rename_session": {"path", "name"},
             "navigate": {"entryId"},
@@ -1026,6 +1034,10 @@ class TuiRuntimeHost:
                         "activeTools",
                         "sessionId",
                         "sessionFile",
+                        "preset",
+                        "presetName",
+                        "presetModified",
+                        "presetEffective",
                     )
                 }
             )
@@ -1037,6 +1049,13 @@ class TuiRuntimeHost:
             return self._json(getattr(session, "inspect_subagent_timeout", lambda: None)() or {})
         if operation == "skills":
             return self._json(session.resource_loader.get_skills())
+        if operation == "preset_list":
+            from one.core.presets import discover_presets
+            presets = discover_presets(getattr(session.resource_loader, "agent_dir", None))
+            return {"presets": [{"id": p.id, "name": p.name, "description": p.description or ""} for p in presets.values()]}
+        if operation == "set_preset":
+            session.activate_preset(str(payload["id"]), getattr(session.resource_loader, "agent_dir", None))
+            return self._snapshot()
         if operation == "execute_bash":
             return self._json(await session.execute_tui_command(str(payload["command"])))
         if operation == "extension_state":
@@ -1440,7 +1459,7 @@ async def create_tui_runtime(bootstrap: TuiBootstrap) -> TuiRuntimeHost:
         additional_skill_paths=list(bootstrap.skills),
         additional_prompt_template_paths=list(bootstrap.prompt_templates),
         additional_theme_paths=list(bootstrap.themes),
-        no_extensions=bootstrap.no_extensions,
+        no_extensions=bootstrap.no_extensions or bootstrap.preset == "readonly",
         no_skills=bootstrap.no_skills,
         no_prompt_templates=bootstrap.no_prompt_templates,
         no_themes=bootstrap.no_themes,
@@ -1507,22 +1526,21 @@ async def create_tui_runtime(bootstrap: TuiBootstrap) -> TuiRuntimeHost:
             "settingsManager": settings,
             "resourceLoader": loader,
             "resourceLoaderAlreadyLoaded": True,
+            # Preserve the worker-resolved default model for the runtime; it is
+            # not merely an explicit CLI selection.
             "model": model,
-            "thinkingLevel": bootstrap.thinking or settings.get_default_thinking_level(),
-            "temperature": (
-                bootstrap.temperature
-                if bootstrap.temperature is not None
-                else (
-                    temperature_for_mode(bootstrap.temperature_mode)
-                    if bootstrap.temperature_mode
-                    else settings.get_default_temperature()
-                )
-            ),
+            "provider": bootstrap.provider,
+            "thinkingLevel": bootstrap.thinking,
+            "temperature": bootstrap.temperature if bootstrap.temperature is not None else (temperature_for_mode(bootstrap.temperature_mode) if bootstrap.temperature_mode else None),
+            "explicitModel": bool(bootstrap.model or bootstrap.provider),
+            "explicitThinking": bootstrap.thinking is not None,
+            "explicitTemperature": bootstrap.temperature is not None or bootstrap.temperature_mode is not None,
             "tools": [all_tools[name] for name in tool_names],
             "mcpManager": mcp,
             "subagentsHardDisabled": bootstrap.no_subagents,
             "catalogRefresh": os.getenv("ONE_CATALOG_REFRESH", "1").lower() not in {"0", "false", "off"},
             "scopedModels": scoped_models,
+            "preset": bootstrap.preset,
         }
         runtime_options = {
             "cwd": manager.cwd,

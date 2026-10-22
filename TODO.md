@@ -6,9 +6,10 @@ Replace the temperature-derived `Mode` display with named, reusable presets cont
 configuration and a replacement system prompt in one file. Support built-in Default
 and enforced Readonly presets and explicit preset selection for subagents.
 
-**Status:** Architecture and planning approved by the user; implementation not started.
-This project is additive to the existing roadmap retained below. Sandbox implementation
-remains deferred. All paths listed as affected files are future implementation targets.
+**Status:** Complete and verified; READY for user-authorized local integration. All
+implementation, regression, review and packaging gates passed on 2026-10-22. This project
+is additive to the existing roadmap retained below. Sandbox implementation remains deferred
+and out of scope.
 
 ## Context
 
@@ -182,7 +183,7 @@ need schema/version handling; edited definitions require explicit reapplication.
 **Expected outcome:** Validated discovery/resolution and installed built-in resources.
 **Estimated effort:** 1–2 working days. **Confidence:** High.
 
-- [ ] **Task P1: Define and validate the preset contract**
+- [x] **Task P1: Define and validate the preset contract**
   - **Description:** Add definition/resolution types and strict YAML/body parsing;
     implement discovery, collision/path/size rules and configuration precedence. Audit
     replacement-prompt CLI compatibility. Package only Default and Readonly initially;
@@ -208,7 +209,7 @@ need schema/version handling; edited definitions require explicit reapplication.
 **Expected outcome:** Default-compatible prompts and non-bypassable application tool policy.
 **Estimated effort:** 3–5 working days. **Confidence:** Medium.
 
-- [ ] **Task P2a: Separate prompt components and apply resolved configuration**
+- [x] **Task P2a: Separate prompt components and apply resolved configuration**
   - **Description:** Refactor base-role replacement independently of tool/runtime/project/
     skills/safety sections; preserve implicit Default output. Add owner-loop activation
     transaction with full prevalidation, effective-settings snapshot and modified flag;
@@ -226,7 +227,7 @@ need schema/version handling; edited definitions require explicit reapplication.
     prompt equivalence fixtures, capability mismatches, busy/approval/child races and
     prevalidation failure injection; assert global settings and sibling state unchanged.
 
-- [ ] **Task P2b: Enforce Readonly at execution boundaries**
+- [x] **Task P2b: Enforce Readonly at execution boundaries**
   - **Description:** Introduce policy intersection and mandatory authorization shared by
     tool advertisement, dispatch and MCP refresh. Audit native/JSON/parallel execution,
     extension hooks, direct app shell actions, resource reload and built-in tool side
@@ -251,7 +252,7 @@ need schema/version handling; edited definitions require explicit reapplication.
 **Expected outcome:** No inheritance leaks or security downgrade from reloaded files.
 **Estimated effort:** 2–3 working days. **Confidence:** Medium.
 
-- [ ] **Task P3a: Persist and restore effective preset snapshots**
+- [x] **Task P3a: Persist and restore effective preset snapshots**
   - **Description:** Add versioned additive session entries/state for effective prompt,
     configuration, provenance and restriction ceiling. Restore at the correct branch
     point on fork; load legacy sessions as their existing Default-compatible state.
@@ -267,7 +268,7 @@ need schema/version handling; edited definitions require explicit reapplication.
     round trips, changed/missing files, invalid versions, multiple preset changes and
     fork-before/after-change fixtures; inspect export for intentional sensitive content.
 
-- [ ] **Task P3b: Resolve subagent presets without escalating permissions**
+- [x] **Task P3b: Resolve subagent presets without escalating permissions**
   - **Description:** Add optional `preset` to spawn schema, descriptions and dispatch.
     Resolve before child/session creation; explicit config overrides beat preset values,
     but policy intersects the parent ceiling and existing CLI restrictions. Preserve
@@ -293,7 +294,7 @@ need schema/version handling; edited definitions require explicit reapplication.
 **Expected outcome:** Consistent CLI/TUI/interactive selection and honest status.
 **Estimated effort:** 2–3 working days. **Confidence:** Medium.
 
-- [ ] **Task P4: Add preset selection and replace Mode presentation**
+- [x] **Task P4: Add preset selection and replace Mode presentation**
   - **Description:** Wire `--preset <id>` through shared bootstrap for applicable CLI
     modes including headless execution. Add `/preset` listing and `/preset <id>` in
     TUI/interactive, completion/help and palette entry. Publish preset name/modified
@@ -323,7 +324,7 @@ need schema/version handling; edited definitions require explicit reapplication.
 **Expected outcome:** Reviewed implementation ready for user-authorized integration.
 **Estimated effort:** 1–2 working days. **Confidence:** High.
 
-- [ ] **Task P5: Document, version and independently verify presets**
+- [x] **Task P5: Document, version and independently verify presets**
   - **Description:** Document schema/sample files, config paths, precedence, Default
     compatibility, Readonly limits/extensions/manual-shell policy, child selection,
     persistence, malformed definitions and unsupported sandboxes. Add Unreleased entry,
@@ -382,25 +383,43 @@ host access. No claim that Readonly prevents provider requests or internal persi
 
 ## Project Acceptance Criteria
 
-- [ ] Every preset is a single file with distinct configuration and prompt sections.
-- [ ] User discovery respects configured agent directory; installed built-ins are available.
-- [ ] Default preserves current system-prompt behavior and current setting inheritance.
-- [ ] Custom prompt replaces base role without removing invariant runtime instructions.
-- [ ] Readonly denies prohibited execution across all app-mediated paths and delegation.
-- [ ] Main and child configuration remain isolated; parent restrictions cannot be weakened.
-- [ ] Invalid/unsupported presets leave current state unchanged; sandbox references fail closed.
-- [ ] Resume/fork preserves effective prompt/configuration/policy after file edits/deletion.
-- [ ] UI says Preset, shows effective settings and marks overrides accurately.
-- [ ] Offline tests, independent review, snapshots, lint and packaging gates pass.
-- [ ] Sandbox implementation and unrelated existing roadmap work remain out of scope.
+- [x] Every preset is a single file with distinct configuration and prompt sections.
+- [x] User discovery respects configured agent directory; installed built-ins are available.
+- [x] Default preserves current system-prompt behavior and current setting inheritance.
+- [x] Custom prompt replaces base role without removing invariant runtime instructions.
+- [x] Readonly denies prohibited execution across all app-mediated paths and delegation.
+- [x] Main and child configuration remain isolated; parent restrictions cannot be weakened.
+- [x] Invalid/unsupported presets leave current state unchanged; sandbox references fail closed.
+- [x] Resume/fork preserves effective prompt/configuration/policy after file edits/deletion.
+- [x] UI says Preset, shows effective settings and marks overrides accurately.
+- [x] Offline tests, independent review, snapshots, lint and packaging gates pass.
+- [x] Sandbox implementation and unrelated existing roadmap work remain out of scope.
 
 ## Estimated Timeline
 
 Approximately 9–15 implementer working days: format → prompt/policy → persistence and
 children → interfaces → independent review. Overall confidence Medium; runtime dispatch,
 extension lifecycle and legacy prompt compatibility are the main uncertainty drivers.
-All verification commands above are instructions for a future implementer, not commands
-executed during planning. Planning modified only this repository-root `TODO.md`.
+
+## Historical planning and current verification
+
+The verification commands above originated as planning guidance. Current implementation
+verification is recorded here without changing the retained active roadmap below.
+
+- 2026-10-22: latest independent full regression passed after the shared validation and
+  MCP-contract fix: `.venv/bin/python -m pytest -q` — 2178 passed, 2 skipped (590.15s).
+  `.venv/bin/ruff check .` and `git diff --check` then passed.
+- 2026-10-22: independent review of the current patch, including the original feature and
+  focused hooks/MCP/child/fork paths, passed with no blockers.
+- 2026-10-22: packaging verification in
+  `/tmp/opencode/one-presets-mcp-verify-Ug5xGn` built and Twine-checked the wheel and
+  sdist, rebuilt a wheel from the sdist, and compared all 83 `one/` source files exactly
+  across the working tree, wheel, sdist and rebuilt wheel. A clean installed-wheel check
+  confirmed package origins, `one --version` 0.1.94, `--help` support for `--preset`,
+  installed Default/Readonly discovery, and readonly denial with fake remote MCP tools.
+
+Source version is 0.1.94. No release, publication, deployment, tag, or remote push is
+implied by this local integration readiness.
 
 ---
 
