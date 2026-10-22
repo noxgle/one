@@ -706,6 +706,7 @@ def _sidebar_plan_window(
 # provides many widget/editor bindings, but these are the application-level
 # actions users can rely on in the TUI.
 TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
+    ("Shift+Tab", "Next preset"),
     ("Ctrl+K", "Select model"),
     ("Ctrl+P", "Commands"),
     ("Ctrl+C", "Abort"),
@@ -1145,6 +1146,16 @@ if TEXTUAL_AVAILABLE:
         ]
 
         async def _on_key(self, event: events.Key) -> None:
+            if (
+                event.key == "shift+tab"
+                and len(self.app.screen_stack) == 1
+                and not self.app.query(".visible")
+                and not self.app._model_picker_models
+            ):
+                event.stop()
+                event.prevent_default()
+                await self.app._cycle_preset()
+                return
             # TextArea._on_key swallows Enter (inserts "\n") before widget
             # BINDINGS are ever consulted, so Enter-to-submit must be handled
             # here, ahead of the superclass. Shift+Enter stays a newline.
@@ -7138,6 +7149,30 @@ if TEXTUAL_AVAILABLE:
                 self.session.settings_manager.set_bash_show_output(not state)
             self._write(f"Bash output: {'on' if not state else 'off'}.", "info")
             self._refresh_sidebar()
+
+        async def _cycle_preset(self) -> None:
+            """Cycle presets through the same idle-only path as /preset."""
+            session = self.session
+            epoch = session.epoch if isinstance(session, TuiSessionView) else None
+            try:
+                if isinstance(session, TuiSessionView):
+                    result = await session.command("ui", operation="preset_list", payload={})
+                    ids = [preset["id"] for preset in result["presets"]]
+                else:
+                    from one.core.presets import discover_presets
+
+                    ids = list(discover_presets(getattr(session.resource_loader, "agent_dir", None)))
+                # Discovery must not change a newly switched session.
+                if session is not self.session or (
+                    isinstance(session, TuiSessionView) and session.epoch != epoch
+                ):
+                    return
+                if not ids:
+                    return
+                index = ids.index(session.preset_id) if session.preset_id in ids else -1
+                await self._handle_command(f"/preset {ids[(index + 1) % len(ids)]}")
+            except Exception as exc:
+                self._write(str(exc), "error")
 
         def action_cycle_retry_mode(self) -> None:
             asyncio.create_task(self._cycle_retry_mode())

@@ -46,6 +46,12 @@ use `{"type":"set_preset","id":"request-7","presetId":"readonly"}`
 over configuration, while parent and CLI capability ceilings always intersect.
 Preset files are data, not templates.
 
+In the TUI main input, **Shift+Tab** cycles through the `/preset` discovery order
+and wraps from the last preset to the first. It preserves the draft and cursor,
+updates the sidebar, and uses the same idle-only activation checks as `/preset`.
+If activation fails, the error is displayed and the current preset is retained.
+Dialogs and open overlays keep their normal Shift+Tab focus navigation.
+
 For a new session the order is explicit CLI provider/model, temperature mode or
 temperature, and thinking setting; then preset fields; then the existing resolved
 settings. A resumed or forked session restores its saved effective preset snapshot

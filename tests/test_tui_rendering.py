@@ -161,6 +161,7 @@ def test_tui_shortcuts_are_single_source_of_truth() -> None:
     rendered = format_tui_shortcuts()
 
     expected = (
+        ("Shift+Tab", "Next preset"),
         ("Ctrl+K", "Select model"),
         ("Ctrl+P", "Commands"),
         ("Ctrl+C", "Abort"),

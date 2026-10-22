@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Preset shortcut** — Shift+Tab cycles named presets from the TUI main input
+  while idle, preserving the draft and normal dialog focus navigation.
+
 - **Named presets** — packaged Default and Readonly single-file YAML-frontmatter presets,
   strict user preset validation, CLI selection, and runtime Readonly tool enforcement.
 

@@ -209,6 +209,7 @@ Current application shortcuts are:
 | --- | --- |
 | `Ctrl+P` | Command palette |
 | `Ctrl+K` | Provider/model picker |
+| `Shift+Tab` | Next preset (main input, idle only; wraps to the first preset) |
 | `Ctrl+C` | Abort turn |
 | `Ctrl+L` | Clear stream |
 | `Ctrl+Q` | Quit |
