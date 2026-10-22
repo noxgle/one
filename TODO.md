@@ -1,3 +1,409 @@
+# Project: Named presets for main agents and subagents
+
+## Goal
+
+Replace the temperature-derived `Mode` display with named, reusable presets containing
+configuration and a replacement system prompt in one file. Support built-in Default
+and enforced Readonly presets and explicit preset selection for subagents.
+
+**Status:** Architecture and planning approved by the user; implementation not started.
+This project is additive to the existing roadmap retained below. Sandbox implementation
+remains deferred. All paths listed as affected files are future implementation targets.
+
+## Context
+
+- `one/core/temperature.py` currently maps temperatures to coder/balanced/creative/
+  experimental labels; `one/modes/tui_mode.py` displays these as `Mode`.
+- `one/resources/resource_loader.py:get_system_prompt` composes the current base
+  prompt, tool instructions, project context and skills. Its skill frontmatter parser
+  silently tolerates malformed YAML and must not be used unchanged for presets.
+- `one/core/agent_session.py` owns prompt composition, tool dispatch, MCP tool refresh
+  and child creation. Children currently share settings/resources and inherit model,
+  thinking and temperature unless supported explicit overrides are supplied.
+- TUI mutations are dispatched by `one/core/tui_runtime_host.py:ui_operation` on the
+  independently owned runtime. UI must not mutate live session state directly.
+- Research compared YAML/TOML frontmatter and centralized resolution versus scattered
+  setters. The first research attempt failed with `Loading model`; a second completed.
+  Its recommendations were reviewed against source. Unsafe Default fallbacks, ignored
+  sandbox requirements and reliance on tool visibility alone were rejected. TOML needs
+  no added dependency on Python 3.12 (`tomllib`), contrary to the research report.
+
+## Scope
+
+### In Scope
+
+- One Markdown file per preset: YAML configuration frontmatter followed by prompt body.
+- User discovery under `get_agent_dir()/presets`, respecting XDG and
+  `ONE_CODING_AGENT_DIR`; built-ins packaged with the application.
+- Provider/model, temperature, thinking, purpose/description and future sandbox list.
+- Built-in Default preserving current behavior and Readonly enforcing tool restrictions.
+- CLI `--preset`, TUI/interactive `/preset`, explicit optional subagent `preset`.
+- Atomic idle-time activation, modified-state display, durable resume/fork semantics,
+  offline security tests and documentation.
+
+### Non-Goals
+
+- OS sandboxing, process workers, network/filesystem confinement or sandbox grants.
+- Automatic task-based preset selection, preset inheritance chains, prompt templating
+  languages, marketplace/import/download support or a graphical preset editor.
+- Removing legacy temperature aliases, changing execution-mode names (TUI/RPC/run),
+  bypassing approvals or changing cooperative execution semantics.
+- Constraining arbitrary third-party code already executing inside the application.
+
+## Assumptions
+
+- Users create/edit their own preset files with an editor; selection/listing is provided
+  in the app. No preset CRUD tool is exposed to the model in this project.
+- Default/Readonly are reserved IDs; user collisions are errors, not silent overrides.
+- Omitted model/temperature/thinking use current resolved session settings. Applying
+  Default does not unexpectedly reset model settings to hard-coded values.
+- Readonly blocks model-driven and app-mediated manual shell execution while active;
+  normal session/evidence/config persistence remains allowed and documented.
+- Active Readonly sessions disable extension execution hooks before binding; switching
+  from a session that has already executed extensions cannot make those extensions
+  sandboxed. Require a clean extension-disabled session to enter Readonly in that case.
+- Main-session users may explicitly leave Readonly when idle. A child cannot lift the
+  immutable restriction ceiling inherited at creation, even by selecting Default.
+
+## Open Questions
+
+- No blocking product questions remain. Confirm wording of modified-preset display and
+  diagnostics during UI review; proposed label is `Preset: <name> (modified)`.
+- Existing `--system-prompt` interactions need an explicit compatibility audit in P1:
+  retain existing behavior for implicit Default; reject ambiguous simultaneous explicit
+  replacement-prompt sources rather than silently choosing one.
+
+## Tech Stack
+
+- **Python 3.12+ / dataclasses:** immutable definitions and resolved session snapshots.
+- **PyYAML (existing dependency):** safe, bounded frontmatter parsing with strict schema.
+- **Textual / runtime facade:** selection and detached sidebar projections.
+- **pytest / Ruff:** offline fixtures, policy regression tests and reviewed snapshots.
+
+## Constraints
+
+- No new dependency is expected. Never inspect real user configuration/auth/session data
+  for tests; use scratch `ONE_CODING_AGENT_DIR`, fake providers and stub MCP managers.
+- Preserve runtime ownership, existing lifecycle event contracts and provider normalization.
+- CLI hard restrictions and parent policy ceilings always win over preset requests.
+- Nonempty future `sandboxes` rejects activation; unsupported security requirements
+  must never be ignored or represented as enforced.
+
+## Architecture
+
+Discover `*.md` definitions in packaged `one/resources/presets/` and the user preset
+directory. A strict loader produces an immutable definition; a resolver combines it
+with explicit inputs, existing settings and the session's non-escalatable policy ceiling.
+The runtime owns the resulting snapshot. A policy component controls both advertised
+tools and actual execution; changing `_active_tools` once is not a security boundary.
+
+File contract: frontmatter fields `version: 1`, `id`, `name`, optional `model` in
+`provider/model` form, `temperature`, `thinking`, `description`, `tools`, and `sandboxes`.
+`thinking` uses existing string levels, including `on`/`off`, not YAML booleans or a
+new integer scheme. `tools` is an optional narrowing allowlist; it cannot grant a
+capability excluded by CLI settings or inherited policy. `sandboxes` is a list of
+identifiers, defaulting to empty. IDs are safe lowercase slugs matching filenames;
+missing optional fields mean inherit, not zero/off. Unknown keys/schema versions,
+duplicate keys/IDs, malformed metadata, invalid types, nonfinite temperatures and
+unresolvable models produce actionable errors. Bound file/header sizes and reject
+unsafe aliases/tags and paths escaping the configured preset roots.
+
+The body is a replacement role/system prompt, not an automatically submitted user
+task. Description advertises the intended task class; the actual task remains the
+user's message or parent's spawn task. Compose body separately from invariant tool
+protocol, runtime header/context, project guidance, skills, cooperation and output
+safety instructions. Default must preserve the existing composed prompt behavior,
+including dynamic tool schemas and timeout values; do not freeze a generated prompt
+in a static file or discard project/skill context when replacing the base role.
+
+Readonly uses a built-in immutable policy ceiling: read/read_image/grep/find/ls,
+session-scoped evidence_read, finish and existing cooperation-gated ask_user; delegation
+is allowed only to equivalently restricted children. Exclude write/edit/apply_patch,
+arbitrary Bash, unclassified MCP/custom tools and extension execution. Internal
+persistence is distinct from model-accessible mutation. Shared dispatch checks must
+hold after MCP refresh, extension processing, native/JSON calls and parallel batches.
+
+Activation validates all fields/model capabilities and prepares the next snapshot
+before committing any state on the owner loop. Reject activation while the parent or
+its direct children/approval waits are active; do not queue a hidden mid-turn change.
+Presets do not write their settings back into shared global defaults. Manual setting
+changes retain the selected preset ID plus effective overrides/modified status.
+
+For children: explicit arguments override preset configuration, which overrides current
+inherited settings; restrictions always intersect. Without `preset`, preserve current
+configuration/prompt inheritance and explicit override behavior. Changing a child's
+configuration must not mutate the parent, siblings or global settings.
+
+Persist versioned effective preset state (ID, provenance/content hash, body, effective
+configuration and policy ceiling) in session storage, using existing private persistence
+primitives. Resume/fork uses the stored snapshot, not whatever a same-named file now
+contains. Missing/changed files may produce a warning but never weaken saved restrictions.
+Unsupported saved state fails closed. Explicit reapplication is needed to adopt edits.
+
+## Architecture Decisions
+
+### ADR-P01: Markdown with YAML frontmatter
+
+**Decision:** Configuration and prompt are two parts of one `.md` file.
+**Alternatives:** TOML frontmatter using stdlib `tomllib`; JSON header or sidecars.
+**Rationale:** Matches existing skills authoring conventions and uses existing PyYAML.
+**Trade-offs:** YAML coercion and duplicate keys require strict validation; the permissive
+skill parser is not a sufficient preset parser.
+**Consequences:** No sidecar prompt files, added dependencies or executable interpolation.
+
+### ADR-P02: Centralized resolution and mandatory execution policy
+
+**Decision:** Immutable resolved snapshots, owner-loop transaction and a shared runtime
+authorization gate; restrictions survive tool refresh and delegation.
+**Alternatives:** Sequential calls to current setters; prompt-only Readonly; visibility-only
+filtering; restart-only selection.
+**Rationale:** Prevents partial application, global setting leaks and delegation bypass.
+**Trade-offs:** Requires coordinated prompt, storage and tool-dispatch changes.
+**Consequences:** Idle-time switching is supported; no OS sandbox claim and no claim that
+already-loaded arbitrary extension code becomes confined.
+
+### ADR-P03: Snapshot persistence and fail-closed activation
+
+**Decision:** Persist effective configuration/prompt/policy, reserve built-in IDs and reject
+invalid or unsupported presets without changing the current state.
+**Alternatives:** Save only ID and reload from disk; silently fall back to Default; allow
+user definitions to shadow Readonly; ignore future sandbox configuration.
+**Rationale:** Resume and file edits must not silently change authority or permissions.
+**Trade-offs:** Session files contain additional potentially sensitive prompt content and
+need schema/version handling; edited definitions require explicit reapplication.
+**Consequences:** Preserve private-file permissions and sanitized diagnostics.
+
+## Phases
+
+### Phase P1: Strict preset format and packaged built-ins
+
+**Objective:** Load one-file definitions deterministically without executing prompts.
+**Prerequisites:** Approved architecture; existing roadmap remains untouched.
+**Expected outcome:** Validated discovery/resolution and installed built-in resources.
+**Estimated effort:** 1–2 working days. **Confidence:** High.
+
+- [ ] **Task P1: Define and validate the preset contract**
+  - **Description:** Add definition/resolution types and strict YAML/body parsing;
+    implement discovery, collision/path/size rules and configuration precedence. Audit
+    replacement-prompt CLI compatibility. Package only Default and Readonly initially;
+    optional model fields inherit current settings. Arrange Default's body/template so
+    the next phase preserves existing dynamic composition without duplicated prompts.
+  - **Files:** Proposed `one/core/presets.py`, `one/resources/presets/default.md`,
+    `one/resources/presets/readonly.md`, `tests/test_presets.py`;
+    `one/config.py`, `one/resources/resource_loader.py`, `pyproject.toml`.
+  - **Dependencies:** None.
+  - **Acceptance Criteria:** Single-file YAML/body format; correct config-dir overrides;
+    no new dependencies; reserved built-ins cannot be shadowed; invalid definitions
+    cannot activate; `thinking: on` is handled as the existing string enum, not a bool;
+    nonempty sandboxes fail activation; wheel contains both built-ins.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_presets.py` with scratch
+    roots, malformed/duplicate YAML, explicit boolean thinking, valid string levels,
+    unknown fields, traversal/symlink escape, oversized files, absent fields, collisions
+    and provider/model validation. Later inspect built wheel resource contents.
+
+### Phase P2: Atomic runtime configuration and enforced Readonly
+
+**Objective:** Apply prompt/configuration and permissions consistently in every call path.
+**Prerequisites:** P1.
+**Expected outcome:** Default-compatible prompts and non-bypassable application tool policy.
+**Estimated effort:** 3–5 working days. **Confidence:** Medium.
+
+- [ ] **Task P2a: Separate prompt components and apply resolved configuration**
+  - **Description:** Refactor base-role replacement independently of tool/runtime/project/
+    skills/safety sections; preserve implicit Default output. Add owner-loop activation
+    transaction with full prevalidation, effective-settings snapshot and modified flag;
+    reject busy/active-child changes, preserve old state on validation failure and avoid
+    global settings writes. Use existing provider/model capability normalization and
+    show unsupported effective thinking/temperature honestly rather than pretending.
+  - **Files:** `one/resources/resource_loader.py`, `one/core/agent_session.py`,
+    `one/core/agent_session_runtime.py`, `one/core/tui_runtime_host.py`,
+    proposed `tests/test_preset_runtime.py`; `tests/test_threaded_agent_runtime.py`.
+  - **Dependencies:** P1.
+  - **Acceptance Criteria:** Default preserves legacy dynamic prompt/context behavior;
+    custom body replaces base role exactly once; invariant sections remain; failed or
+    busy activation leaves model/prompt/tools/settings unchanged; UI gets detached state.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_preset_runtime.py tests/test_threaded_agent_runtime.py`;
+    prompt equivalence fixtures, capability mismatches, busy/approval/child races and
+    prevalidation failure injection; assert global settings and sibling state unchanged.
+
+- [ ] **Task P2b: Enforce Readonly at execution boundaries**
+  - **Description:** Introduce policy intersection and mandatory authorization shared by
+    tool advertisement, dispatch and MCP refresh. Audit native/JSON/parallel execution,
+    extension hooks, direct app shell actions, resource reload and built-in tool side
+    effects. Disable extensions for clean Readonly startup; reject unsafe in-place entry
+    after extension execution. Keep normal storage functioning and retain finish path.
+  - **Files:** Proposed `one/core/tool_policy.py`, `tests/test_readonly_policy.py`;
+    `one/core/agent_session.py`, `one/core/tui_runtime_host.py`, `one/tools/index.py`,
+    `one/resources/resource_loader.py`, `one/cli/main.py`.
+  - **Dependencies:** P2a.
+  - **Acceptance Criteria:** Prohibited tool bodies/hooks/shells never run; MCP enable/
+    refresh cannot add capabilities; approvals cannot authorize a forbidden action;
+    restrictions cannot be changed through model-controlled inputs; no sandbox claim.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_readonly_policy.py`;
+    spy counters assert zero forbidden execution for direct/JSON/native/parallel calls,
+    mutation attempts after reload, unknown MCP tools, shell operations and extension
+    activation; scratch history/evidence still persists normally.
+
+### Phase P3: Durable session identity and explicit child selection
+
+**Objective:** Preserve effective presets across child creation, resume and fork.
+**Prerequisites:** P2a–P2b.
+**Expected outcome:** No inheritance leaks or security downgrade from reloaded files.
+**Estimated effort:** 2–3 working days. **Confidence:** Medium.
+
+- [ ] **Task P3a: Persist and restore effective preset snapshots**
+  - **Description:** Add versioned additive session entries/state for effective prompt,
+    configuration, provenance and restriction ceiling. Restore at the correct branch
+    point on fork; load legacy sessions as their existing Default-compatible state.
+    Detect unsupported/corrupt snapshots without silently relaxing restrictions.
+  - **Files:** `one/core/session_manager.py`, `one/core/agent_session_runtime.py`,
+    `one/core/agent_session.py`, proposed `tests/test_preset_sessions.py`;
+    `tests/test_session_branching_export.py`.
+  - **Dependencies:** P2a–P2b.
+  - **Acceptance Criteria:** Resume/fork works after definition edits/deletion; historical
+    branch selection restores its own effective snapshot; legacy sessions still load;
+    failures preserve current state and private persistence contracts.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_preset_sessions.py tests/test_session_branching_export.py`;
+    round trips, changed/missing files, invalid versions, multiple preset changes and
+    fork-before/after-change fixtures; inspect export for intentional sensitive content.
+
+- [ ] **Task P3b: Resolve subagent presets without escalating permissions**
+  - **Description:** Add optional `preset` to spawn schema, descriptions and dispatch.
+    Resolve before child/session creation; explicit config overrides beat preset values,
+    but policy intersects the parent ceiling and existing CLI restrictions. Preserve
+    omission semantics, parallel task behavior, monitor identities and child watchdogs.
+    Advertise concise preset metadata/purposes, not every prompt body, for model selection.
+  - **Files:** `one/tools/index.py`, `one/tools/spawn_subagent.py`,
+    `one/core/agent_session.py`, `one/resources/resource_loader.py`,
+    proposed `tests/test_subagent_presets.py`; `tests/test_subagents.py`,
+    `tests/test_spawn_subagent_errors.py`.
+  - **Dependencies:** P3a.
+  - **Acceptance Criteria:** Explicit child preset works for single/parallel spawn;
+    omission preserves prior behavior; child Default/custom tool lists cannot escape
+    parent Readonly; `--no-subagents` always wins; parent/sibling/global state unchanged;
+    invalid preset creates no partially configured child.
+  - **Verification:** `.venv/bin/python -m pytest -q tests/test_subagent_presets.py tests/test_subagents.py tests/test_spawn_subagent_errors.py`;
+    parent Readonly → child Default/custom/MCP/Bash attempts, nested delegation, explicit
+    model override precedence, parallel isolation and cancellation/monitor regressions.
+
+### Phase P4: User-facing selection and compatibility
+
+**Objective:** Expose presets without conflating temperature aliases or execution modes.
+**Prerequisites:** P3a–P3b.
+**Expected outcome:** Consistent CLI/TUI/interactive selection and honest status.
+**Estimated effort:** 2–3 working days. **Confidence:** Medium.
+
+- [ ] **Task P4: Add preset selection and replace Mode presentation**
+  - **Description:** Wire `--preset <id>` through shared bootstrap for applicable CLI
+    modes including headless execution. Add `/preset` listing and `/preset <id>` in
+    TUI/interactive, completion/help and palette entry. Publish preset name/modified
+    state through detached sidebar projections; display temperature separately. Keep
+    temperature aliases and shortcuts compatible; document RPC state/selection support
+    using its existing validated operation conventions, not a separate resolver.
+  - **Files:** `one/cli/main.py`, `one/modes/tui_mode.py`,
+    `one/modes/interactive_mode.py`, `one/modes/rpc_mode.py`,
+    `one/core/tui_runtime_host.py`, `one/core/agent_runtime_facade.py`,
+    `tests/test_tui_commands.py`, `tests/test_interactive_mode.py`,
+    `tests/test_rpc_mode.py`, `tests/test_run_mode.py`,
+    proposed `tests/test_cli_presets.py`.
+  - **Dependencies:** P3a–P3b.
+  - **Acceptance Criteria:** Mode no longer means temperature in UI; active preset and
+    effective temperature/thinking/model are visible; modified status is accurate;
+    CLI explicit config > preset > existing defaults, security restrictions always win;
+    unknown/invalid selections produce contractual exit codes or nonmutating UI errors.
+  - **Verification:** Focused pytest for listed test files; real Textual pilot selection,
+    busy rejection, reload, manual edits, session rebind, narrow terminal rendering and
+    Readonly shell rejection. CLI subprocess fixtures use scratch config/PYTHONPATH;
+    RPC and headless fixtures use fake providers only.
+
+### Phase P5: Release gates and independent policy review
+
+**Objective:** Ship documented one-file presets with audited fail-closed behavior.
+**Prerequisites:** P4.
+**Expected outcome:** Reviewed implementation ready for user-authorized integration.
+**Estimated effort:** 1–2 working days. **Confidence:** High.
+
+- [ ] **Task P5: Document, version and independently verify presets**
+  - **Description:** Document schema/sample files, config paths, precedence, Default
+    compatibility, Readonly limits/extensions/manual-shell policy, child selection,
+    persistence, malformed definitions and unsupported sandboxes. Add Unreleased entry,
+    bump then-current version, regenerate/review snapshots and verify packaged resources.
+    Obtain independent review of authorization, prompt separation and ownership paths.
+  - **Files:** `README.md`, `docs/QUICKSTART.md`, `docs/architecture.md`,
+    proposed `docs/PRESETS.md`; `CHANGELOG.md`, `one/config.py`,
+    `tests/test_tui_snapshots.py`, `tests/snapshots/tui/*.txt`; P1–P4 files for review fixes.
+  - **Dependencies:** P4.
+  - **Acceptance Criteria:** No unresolved policy bypass or downgrade; docs make no OS
+    sandbox guarantee; Default compatibility verified; only intended snapshot changes;
+    installed distribution discovers built-ins; full regression gates pass.
+  - **Verification:** Future implementer runs snapshot regeneration with
+    `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py`
+    and reviews diffs, then `.venv/bin/python -m pytest -q`,
+    `.venv/bin/ruff check .`, `git diff --check` in order. Use existing release build/
+    wheel checks to inspect packaged presets. No real provider or MCP traffic.
+
+## Rollout & Rollback
+
+Implement on a feature branch only when execution is authorized; no automatic commit,
+merge, release or deployment. No preset flag means implicit Default with prior behavior.
+New state entries are additive. Before rollback, close active agents; verify the target
+version understands saved restrictions. Never resume a Readonly snapshot in an older
+version that ignores its policy; retain a backup and require a supported reader instead.
+Do not delete user preset files or rewrite historical sessions as a rollback shortcut.
+
+## Observability
+
+Expose preset ID/name, modified flag, source kind, snapshot version and effective
+restriction status in existing state/status projections. Add metadata-only change/error
+diagnostics without raw prompts, credentials or full configuration payloads. Existing
+event contracts remain stable; any new preset events are additive and bounded.
+
+## Security Considerations
+
+Presets are data, not executable templates. Safe YAML loading alone is not sufficient:
+validate types, duplicate keys, resource bounds and allowed roots. Render names/purposes
+literally in the terminal. Do not log prompt bodies. Reserve Readonly identity and enforce
+restrictions independently of its wording. Extensions/MCP processes remain privileged
+external code; this feature denies app-mediated capability use, not arbitrary same-user
+host access. No claim that Readonly prevents provider requests or internal persistence.
+
+## Risks & Mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| YAML coercion or permissive skill parser | Wrong configuration / silent fallback | High | Strict versioned parser, enum tests and duplicate-key rejection |
+| MCP refresh / native / parallel / child bypass | Unauthorized mutation | High | Central execution gate, policy intersection and forbidden-body spies |
+| Extension or manual shell escape | Misleading Readonly guarantee | High | Clean extension-disabled startup, reject unsafe transition, shell gate and explicit boundaries |
+| Replacement loses tool/project/skill context | Broken protocol or behavior regression | Medium | Separate prompt components and Default equivalence fixtures |
+| Setters mutate shared defaults or partial state | Parent/sibling corruption | Medium | Immutable resolution, prevalidation and owner-loop transaction |
+| Resume reloads weaker edited/missing preset | Security downgrade | Medium | Persist effective snapshot, fail closed, no automatic Default fallback |
+| Future sandbox list looks enforced | False security expectation | Medium | Reject nonempty list until supported; keep sandbox roadmap deferred |
+| Snapshot stores sensitive prompt content | Local disclosure | Medium | Existing private persistence, safe diagnostics and documented export behavior |
+
+## Project Acceptance Criteria
+
+- [ ] Every preset is a single file with distinct configuration and prompt sections.
+- [ ] User discovery respects configured agent directory; installed built-ins are available.
+- [ ] Default preserves current system-prompt behavior and current setting inheritance.
+- [ ] Custom prompt replaces base role without removing invariant runtime instructions.
+- [ ] Readonly denies prohibited execution across all app-mediated paths and delegation.
+- [ ] Main and child configuration remain isolated; parent restrictions cannot be weakened.
+- [ ] Invalid/unsupported presets leave current state unchanged; sandbox references fail closed.
+- [ ] Resume/fork preserves effective prompt/configuration/policy after file edits/deletion.
+- [ ] UI says Preset, shows effective settings and marks overrides accurately.
+- [ ] Offline tests, independent review, snapshots, lint and packaging gates pass.
+- [ ] Sandbox implementation and unrelated existing roadmap work remain out of scope.
+
+## Estimated Timeline
+
+Approximately 9–15 implementer working days: format → prompt/policy → persistence and
+children → interfaces → independent review. Overall confidence Medium; runtime dispatch,
+extension lifecycle and legacy prompt compatibility are the main uncertainty drivers.
+All verification commands above are instructions for a future implementer, not commands
+executed during planning. Planning modified only this repository-root `TODO.md`.
+
+---
+
 # Active roadmap for `one`
 
 This file contains only current, verified work. Completed implementation history
