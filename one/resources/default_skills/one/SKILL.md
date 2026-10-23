@@ -7,11 +7,11 @@ description: Information about the 'one' autonomous terminal agent (noxgle/one).
 
 ## Overview
 
-**one** is an autonomous Python terminal agent that executes assigned tasks on its own (shell / files / code) — plan, run tools, verify, report — and can optionally work in a cooperation mode where a human approves mutating tools, steers or aborts mid-task, and answers agent questions.
+**one** is an autonomous Python terminal agent that executes assigned tasks on its own (shell / files / code) — plan, run tools, verify, report — and can optionally work in a cooperation mode where a human approves mutating tools, steers or aborts mid-task, and answers agent questions. Read the installed version's `one --help` for current CLI options; details here may vary between releases.
 
 - **Repository:** https://github.com/noxgle/one
 - **Language:** Python
-- **Maturity:** Alpha (0.1.x). Public APIs, tool contracts, and storage formats may change in 0.1 releases.
+- **Maturity:** Alpha (0.1.x). Public APIs, tool contracts, and storage formats may change in 0.1 releases. Requires Python 3.12 or newer.
 - **Distribution name:** `one-agent` (PyPI); import and console-script name: `one`
 
 ## Installation
@@ -58,7 +58,7 @@ python -m pip install -e '.[dev]'
 | `--mode rpc` | Yes (protocol-driven) | One JSON per stdin line | JSON event per stdout line | Orchestrators and UI clients |
 | `one run <task>` | No | Required task argument | Summary or result JSON | Autonomous CI/headless tasks |
 
-Default mode is **TUI**.
+The default mode is configurable and currently falls back to **TUI** when unset. Use `one --help` to check supported modes and options.
 
 ## Quick Start
 
@@ -78,22 +78,9 @@ Authenticate interactively in TUI:
 /login status
 ```
 
-## 14 Built-in Tools
+## Built-in Tools
 
-1. **read** — Read file contents
-2. **read_image** — Read image files (base64-encoded blob with metadata)
-3. **bash** — Execute shell commands
-4. **edit** — Edit files with targeted replacements
-5. **write** — Overwrite entire files
-6. **grep** — Search files with patterns
-7. **find** — Find files by pattern
-8. **ls** — List directory contents
-9. **evidence_read** — Retrieve durable tool evidence in bounded chunks
-10. **finish** — Terminal task result (summary + goal_success)
-11. **plan** — Create and manage execution plans
-12. **spawn_subagent** — Spawn subagent tasks
-13. **ask_user** — Ask the user for preferences or clarification
-14. **apply_patch** — Apply non-unified diff patches with backup/rollback
+The built-in tool set includes file and shell operations, search, planning, subagents, user interaction, patching, and durable evidence retrieval. Availability depends on the active mode, configuration, and preset; consult `one --help` and the active session's tool listing rather than relying on a fixed tool count. Tool results may be shortened in provider context; when an evidence ID is supplied, use `evidence_read` with bounded offsets to retrieve the complete sanitized result in chunks.
 
 ## Key Features
 
@@ -109,9 +96,10 @@ Authenticate interactively in TUI:
 
 ### Sessions & Configuration
 - Sessions are retained across runs
-- Config stored in `~/.config/one` (or `ONE_CODING_AGENT_DIR`)
+- Runtime state defaults to `~/.config/one`; `XDG_CONFIG_HOME` changes the config root, and `ONE_CODING_AGENT_DIR` can override the agent state directory
 - Project config: `.one/settings.json`
 - Global config: `settings.json`
+- In the TUI, `/sessions` lists sessions; `/sessions rename &lt;number|full exact name&gt; &lt;new name&gt;` renames one, and `/sessions delete &lt;number|full exact name&gt;` requests explicit confirmation before deletion
 
 ### Images
 - TUI supports image input via `--image`, pasted/path images, and `read_image`
@@ -135,6 +123,7 @@ Authenticate interactively in TUI:
 - `/sidebar` — Show/hide sidebar
 - `/paste-image` — Paste image from clipboard
 - `/reload` — Reload skills during active session
+- `/sessions` — List/select sessions; supports `rename` and confirmed `delete` subcommands
 
 ### TUI Keyboard Shortcuts
 | Shortcut | Action |
@@ -189,9 +178,16 @@ Authenticate interactively in TUI:
 
 - Cooperation mode provides approval gates for mutating operations
 - Bash mode can be restricted to read-only profiles
+- The `readonly` preset is enforced by the application; it is not an operating-system sandbox and does not confine already-running extension code
+- Extensions and MCP servers execute with the agent's permissions and are not sandboxed. For an untrusted repository, start with `--no-extensions --no-mcp`
 - Skills should be reviewed before granting project trust
 - Malformed `SKILL.md` files produce warnings rather than stopping startup
 - Name collisions keep the first discovered skill with a warning
+- Sessions and authentication state may contain sensitive information. Do not copy, publish, or inspect real state directories unnecessarily
+
+## Presets and tool policy
+
+Named presets request a set of capabilities, but requested capabilities are intersected with CLI and parent-agent ceilings and enforced at tool execution, not only during tool discovery. Child agents and refreshed MCP tools cannot exceed those ceilings. Readonly is application policy, not process isolation. Resuming or forking a session restores its saved effective preset snapshot; reapply a preset explicitly to adopt changes to its file. See `docs/PRESETS.md` for preset format and behavior.
 
 ## FAQ
 
