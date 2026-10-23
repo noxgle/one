@@ -38,3 +38,33 @@ Each catalog-applied field records its original baseline, so an authoritative
 refresh can remove a field or an entire model without retaining a stale overlay.
 The last successful cache is authoritative (including removals); the bundled
 snapshot is used only before a cache exists or when refresh fails.
+
+## Generation limit and truncated responses
+
+`generation.maxOutputTokens` is a positive integer (default: `16384`). For example:
+
+```sh
+one config generation.maxOutputTokens 65536
+```
+
+This requests a larger per-response generation budget; it is not the model's
+advertised `outputLimit`. The shared context resolver clamps it to that limit
+and available total context. The reserved output and effective input budget used
+by the gauge and compaction reflect the selected generation budget. The default
+retains the conservative small-context reserve (at most one eighth of total);
+non-default budgets can reserve more, up to the total context. No total-context
+estimate can guarantee backend acceptance when capacity metadata is unknown.
+
+Reasoning tokens can consume the output budget even when visible text is short.
+Larger limits may increase latency and subscription/API consumption. Lower thinking
+or smaller tasks can also help. Changes apply to subsequent requests; no private
+settings are modified by the implementation.
+
+ChatGPT `max_output_tokens` completion preserves partial text and usage. Durable
+assistant `outputTruncation` metadata records the reason, actual requested limit
+and reported output tokens. An additive `warning` event with
+`warning: output_truncated` carries the same diagnostics. TUI displays the warning;
+the saved response also includes an actionable notice. `turn_end.ok` is false with
+reason `max_output_tokens`, not a successful complete answer. No automatic retry,
+format repair, nudge or tools from that response run. Even finalized native calls
+are discarded conservatively. Other incomplete reasons still raise errors.

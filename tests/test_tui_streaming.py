@@ -2281,3 +2281,16 @@ async def test_tui_trim_eats_whole_live_block_no_corruption(tmp_path: Path):
         await pilot.pause()
         stream2 = "\n".join(app._stream_lines)
         assert "post-trim content" in stream2
+
+
+@pytest.mark.asyncio
+async def test_tui_output_truncation_warning_is_visible(tmp_path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._handle_session_event({"type": "warning", "warning": "output_truncated",
+                                   "message": "Output token limit reached (requested: 65536)."})
+        await pilot.pause()
+        assert "Output token limit reached" in "\n".join(app._stream_lines)

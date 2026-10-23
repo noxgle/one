@@ -366,6 +366,7 @@ class CodexResponsesAdapter(ProviderAdapter):
         had_thinking = False
         usage: dict[str, Any] = {}
         stop_reason: str | None = None
+        output_truncated = False
         raw_last: dict[str, Any] = {}
         summary_delta_keys: set[tuple[Any, ...]] = set()
         # Responses identifies a streamed output item by item.id/item_id.  A
@@ -582,11 +583,16 @@ class CodexResponsesAdapter(ProviderAdapter):
                         status = response_obj.get("status")
                         stop_reason = status if isinstance(status, str) else None
                         raw_last = response_obj or chunk
-                        ingest_completed_calls(response_obj)
                         if stop_reason == "failed":
                             raise RuntimeError(f"chatgpt responses failed: {response_obj.get('error')}")
                         if stop_reason == "incomplete":
-                            raise self._incomplete_error(response_obj)
+                            details = response_obj.get("incomplete_details")
+                            if not isinstance(details, dict) or details.get("reason") != "max_output_tokens":
+                                raise self._incomplete_error(response_obj)
+                            output_truncated = True
+                            stop_reason = "max_output_tokens"
+                        else:
+                            ingest_completed_calls(response_obj)
                         break
                     elif ctype == "response.failed":
                         response_obj = chunk.get("response")
@@ -595,13 +601,30 @@ class CodexResponsesAdapter(ProviderAdapter):
                         ) or chunk.get("error")
                         raise RuntimeError(f"chatgpt responses failed: {err}")
                     elif ctype == "response.incomplete":
-                        raise self._incomplete_error(chunk.get("response") or chunk)
+                        response_obj = chunk.get("response") or chunk
+                        if not isinstance(response_obj, dict):
+                            raise self._incomplete_error(response_obj)
+                        details = response_obj.get("incomplete_details")
+                        if not isinstance(details, dict) or details.get("reason") != "max_output_tokens":
+                            raise self._incomplete_error(response_obj)
+                        u = response_obj.get("usage")
+                        if isinstance(u, dict):
+                            usage.update(u)
+                        raw_last = response_obj
+                        output_truncated = True
+                        stop_reason = "max_output_tokens"
+                        break
 
         # Never promote unfinished stream accumulators: a function call is
         # executable only after output_item.done or a completed-output fallback.
-        native_calls = finalized_calls
+        if output_truncated and not text_parts:
+            terminal_text, _, _ = self._extract_output(raw_last)
+            if terminal_text:
+                text_parts.append(terminal_text)
+        native_calls = [] if output_truncated else finalized_calls
         return ChatResult(
             text="".join(text_parts), raw=raw_last, usage=usage,
+            output_truncated=output_truncated, requested_max_tokens=max_tokens,
             stop_reason=stop_reason, had_thinking=had_thinking, native_tool_calls=native_calls or None,
             had_native_tool_call=bool(native_calls),
         )

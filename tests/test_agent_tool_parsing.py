@@ -973,3 +973,29 @@ async def test_tool_call_parses_llama_cpp_tokenized_raw_call_format(tmp_path: Pa
     out_file = Path("/tmp/one_tok.txt")
     assert out_file.exists()
     assert out_file.read_text(encoding="utf-8").strip() == "TOK_OK"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ['', '{"tool":"bash","args":{"command":"touch unsafe"}}'])
+async def test_truncated_response_never_executes_or_repairs_and_preserves_usage(tmp_path, text):
+    session = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    agent = _chatgpt_agent(session, tmp_path)
+    provider = _RecordingCodex([ChatResult(
+        text=text, raw={}, usage={"input_tokens": 12, "output_tokens": 16384},
+        stop_reason="max_output_tokens", output_truncated=True,
+        native_tool_calls=[{"id": "call1", "name": "bash", "arguments": {"command": "touch unsafe"}}],
+    )])
+    agent.providers = {"chatgpt": provider}
+    events = []
+    agent.subscribe(events.append)
+    await agent.prompt("do it")
+    assert len(provider.payloads) == 1
+    assert not (tmp_path / "unsafe").exists()
+    assert not any(e["type"] == "tool_call_start" for e in events)
+    final = agent.messages[-1]
+    assert final["stopReason"] == "max_output_tokens"
+    assert final["usage"]["output"] == 16384
+    assert final["outputTruncation"]["requestedMaxTokens"] > 0
+    assert "Output token limit reached" in agent._assistant_text(final)
+    assert any(e["type"] == "warning" and e.get("warning") == "output_truncated" for e in events)
+    assert any(e["type"] == "turn_end" and e["ok"] is False for e in events)

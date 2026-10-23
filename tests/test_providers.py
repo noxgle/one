@@ -173,12 +173,12 @@ async def test_codex_responses_stream_raises_on_failed_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_codex_responses_stream_raises_on_incomplete_event() -> None:
-    with pytest.raises(RuntimeError, match="responses incomplete.*max_output_tokens"):
+async def test_codex_responses_stream_raises_on_unknown_incomplete_event() -> None:
+    with pytest.raises(RuntimeError, match="responses incomplete.*unknown_reason"):
         await _stream_with(CodexResponsesAdapter(), _sse(
             {
                 "type": "response.incomplete",
-                "response": {"incomplete_details": {"reason": "max_output_tokens"}},
+                "response": {"incomplete_details": {"reason": "unknown_reason"}},
             },
         ))
 
@@ -915,3 +915,25 @@ async def test_raw_reasoning_callback_raises_still_finishes(adapter: OpenAICompa
     assert result.text == ""
     # All 3 chunks were attempted; chunk 2 raised but was swallowed
     assert call_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["response.incomplete", "response.completed"])
+async def test_codex_output_limit_preserves_partial_usage_and_discards_tools(terminal):
+    response = {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 123, "output_tokens": 456}}
+    result, visible, _ = await _stream_with(CodexResponsesAdapter(), _sse(
+        {"type": "response.output_text.delta", "delta": "partial"},
+        {"type": "response.output_item.done", "item": {
+            "type": "function_call", "id": "item1", "call_id": "call1", "name": "bash",
+            "arguments": '{"command":"touch unsafe"}'}},
+        {"type": "response.output_item.added", "item": {
+            "type": "function_call", "id": "item2", "call_id": "call2", "name": "bash"}},
+        {"type": terminal, "response": response},
+    ))
+    assert result.output_truncated
+    assert result.stop_reason == "max_output_tokens"
+    assert result.text == "partial" and visible == ["partial"]
+    assert result.usage == response["usage"]
+    assert result.raw == response
+    assert not result.native_tool_calls

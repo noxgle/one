@@ -77,6 +77,8 @@ class ChatResult:
     # Indicates that the provider response contained a native tool call.
     had_native_tool_call: bool = False
     native_tool_calls: list[NativeToolCall] | None = None
+    output_truncated: bool = False
+    requested_max_tokens: int | None = None
 
 
 class ProviderAdapter:

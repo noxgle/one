@@ -8,7 +8,18 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Added
+
+- **Generation budget** — `generation.maxOutputTokens` configures per-response
+  output tokens independently of the default context reserve, clamped to model
+  capacity and remaining context. Default remains 16,384 tokens.
+
 ### Fixed
+
+- **ChatGPT output truncation** — output-token exhaustion preserves partial text,
+  usage and the requested limit, with an actionable warning rather than an opaque
+  exception. Truncated responses never execute tools or trigger automatic repair
+  or retry; unknown incomplete reasons remain errors.
 
 - **Preset shortcut recovery** — after a preset fails to activate (for example,
   because its model is unavailable), the next Shift+Tab advances to the next

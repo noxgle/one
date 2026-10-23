@@ -7355,6 +7355,8 @@ if TEXTUAL_AVAILABLE:
                 # apply a snapshot against the current session view.
                 if isinstance(self.session, TuiSessionView) and event.get("epoch") == self.session.epoch:
                     self._request_status_refresh()
+            elif et == "warning" and event.get("warning") == "output_truncated":
+                self._write(sanitize_display_text(str(event.get("message", "Output token limit reached."))), "warn")
             elif et == "tui_command_error":
                 self._write(f"[{event.get('operation', 'command')}] {event.get('error', 'command failed')}", "error")
             elif et == "mcp_availability":

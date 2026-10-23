@@ -41,12 +41,13 @@ class ContextBudget:
     estimated: bool
 
 
-def resolve_context_budget(model: ModelInfo | None, policy: object = "endpoint-max", *, request_tokens: int | None = None) -> ContextBudget:
+def resolve_context_budget(model: ModelInfo | None, policy: object = "endpoint-max", *, request_tokens: int | None = None, max_output_tokens: int | None = None) -> ContextBudget:
     """Resolve total/input/output limits without treating defaults as endpoint facts."""
     selected_policy = policy if isinstance(policy, str) and policy in POLICIES else "endpoint-max"
+    requested = valid_limit(max_output_tokens) or DEFAULT_OUTPUT_RESERVE
     if model is None:
-        return ContextBudget(selected_policy, None, FALLBACK_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE,
-                             DEFAULT_OUTPUT_RESERVE, "unknown estimate", (), True)
+        return ContextBudget(selected_policy, None, FALLBACK_CONTEXT_WINDOW, requested,
+                             requested, "unknown estimate", (), True)
     manual = set(model.manual_fields)
     # Older persisted models predate per-field provenance. Their models.json
     # capacity is still an explicit user configuration, never a catalogue hint.
@@ -65,9 +66,9 @@ def resolve_context_budget(model: ModelInfo | None, policy: object = "endpoint-m
     if manual_total:
         constraints.append("manualContextWindow")
     output_limit = valid_limit(model.output_limit)
-    reserve = min(DEFAULT_OUTPUT_RESERVE, output_limit) if output_limit else DEFAULT_OUTPUT_RESERVE
+    reserve = min(requested, output_limit) if output_limit else requested
     if total:
-        reserve = min(reserve, max(1, total // 8))
+        reserve = min(reserve, total if requested != DEFAULT_OUTPUT_RESERVE else max(1, total // 8))
     if output_limit:
         constraints.append("outputLimit")
 

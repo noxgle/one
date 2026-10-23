@@ -18,6 +18,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "defaultModel": None,
     "defaultThinkingLevel": "medium",
     "context": {"policy": "endpoint-max"},
+    "generation": {"maxOutputTokens": 16384},
     "defaultTemperature": DEFAULT_TEMPERATURE,
     "enabledModels": [],
     "compaction": {
@@ -333,6 +334,11 @@ class SettingsManager:
         settings = self.merged().get("compaction", {})
         return settings if isinstance(settings, dict) else {}
 
+    def get_generation_max_output_tokens(self) -> int:
+        generation = self.merged().get("generation", {})
+        value = generation.get("maxOutputTokens") if isinstance(generation, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 16384
+
     def get_context_policy(self) -> str:
         context = self.merged().get("context", {})
         policy = context.get("policy") if isinstance(context, dict) else None
@@ -586,6 +592,10 @@ class SettingsManager:
             raise ValueError("Invalid config key")
         if key == "context.policy" and (not isinstance(value, str) or value not in {"endpoint-max", "provider-default"}):
             raise ValueError("context.policy must be 'endpoint-max' or 'provider-default'")
+        if key == "generation.maxOutputTokens" and (
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+        ):
+            raise ValueError("generation.maxOutputTokens must be a positive integer")
         for part in parts:
             if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", part):
                 raise ValueError(f"Invalid config key segment: {part}")

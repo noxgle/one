@@ -292,7 +292,8 @@ class AgentSession:
     def _context_budget(self, *, request_tokens: int | None = None):
         """Resolve live settings/metadata; never use a stale cached policy."""
         return resolve_context_budget(
-            self.model, self.settings_manager.get_context_policy(), request_tokens=request_tokens
+            self.model, self.settings_manager.get_context_policy(), request_tokens=request_tokens,
+            max_output_tokens=self.settings_manager.get_generation_max_output_tokens()
         )
 
     def _current_request_tokens(self, request: list[dict[str, Any]]) -> int:
@@ -3220,6 +3221,21 @@ class AgentSession:
             "_streamedSuppressed": streamed_suppressed,
             "_providerToolCallId": self._provider_tool_call_id(res.raw),
         }
+        if getattr(res, "output_truncated", False):
+            limit = chat_kwargs.get("max_tokens")
+            notice = (
+                f"Output token limit reached (requested: {limit}). Response may be incomplete. "
+                "Increase generation.maxOutputTokens, lower thinking, or split the task. "
+                "No tools from this response were executed; no automatic retry was made."
+            )
+            assistant_message["outputTruncation"] = {
+                "reason": "max_output_tokens", "requestedMaxTokens": limit,
+                "outputTokens": assistant_message["usage"]["output"],
+            }
+            assistant_message["content"] = [{"type": "text", "text": res.text + "\n\n[warning] " + notice}]
+            assistant_message["_streamedSuppressed"] = False
+            self._emit({"type": "warning", "warning": "output_truncated", "provider": self.model.provider,
+                        "model": self.model.id, "message": notice, **assistant_message["outputTruncation"]})
         self._record_context_usage(res.usage, messages)
         if count_output_generation and generation_started_at is not None:
             output_usage = res.usage.get("completion_tokens")
@@ -3240,7 +3256,7 @@ class AgentSession:
             assistant_message["_hadThinking"] = True
         if bool(getattr(res, "had_native_tool_call", False)):
             assistant_message["_hadNativeToolCall"] = True
-        if getattr(res, "native_tool_calls", None):
+        if getattr(res, "native_tool_calls", None) and not getattr(res, "output_truncated", False):
             assistant_message["_nativeToolCalls"] = res.native_tool_calls
         return assistant_message
 
@@ -3706,6 +3722,9 @@ class AgentSession:
                             provider_tool_call_id = assistant.pop("_providerToolCallId", None)
                             self.messages.append(assistant)
                             assistant_text = self._assistant_text(assistant)
+                            if assistant.get("outputTruncation"):
+                                final_assistant = assistant
+                                break
                             tool_call_source = "response"
                             # Consume tool-loaded images after the first provider call
                             # in the tool loop — they were attached to the prompt and
@@ -3773,6 +3792,10 @@ class AgentSession:
                                     self._abort_requested = True
                                     final_assistant = self._abort_assistant_message()
                                     break
+                                if nudged.get("outputTruncation"):
+                                    self.messages[-1] = nudged
+                                    final_assistant = nudged
+                                    break
                                 nudged_text = self._assistant_text(nudged)
                                 nudged_tool_calls, nudged_native = self._native_tool_calls(nudged, step)
                                 if not nudged_native:
@@ -3836,6 +3859,10 @@ class AgentSession:
                                 except _AbortSignal:
                                     self._abort_requested = True
                                     final_assistant = self._abort_assistant_message()
+                                    break
+                                if repaired.get("outputTruncation"):
+                                    self.messages[-1] = repaired
+                                    final_assistant = repaired
                                     break
                                 repaired_text = self._assistant_text(repaired)
                                 repaired_tool_calls, repaired_native = self._native_tool_calls(repaired, step)
@@ -4014,7 +4041,7 @@ class AgentSession:
                         self._emit(
                             {
                                 "type": "turn_end",
-                                "ok": not invalid_tool_call_failure,
+                                "ok": not invalid_tool_call_failure and not bool(final_assistant.get("outputTruncation")),
                                 "attempt": attempt + 1,
                                 "aborted": final_assistant.get("stopReason") == "abort",
                                 "reason": final_assistant.get("stopReason") or "completed",
@@ -4024,7 +4051,7 @@ class AgentSession:
                             }
                         )
                         self._agent_event("agent_end", [user_msg, final_assistant])
-                        if invalid_tool_call_failure:
+                        if invalid_tool_call_failure or final_assistant.get("outputTruncation"):
                             terminal_error = True
                         break
                     except _CapabilityError as e:
