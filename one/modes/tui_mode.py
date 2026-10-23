@@ -1729,6 +1729,7 @@ if TEXTUAL_AVAILABLE:
             # setting only selects its initial mode.
             self._layout_mode = "wide" if self._info_layout == "sidebar" else "compact"
             self._model_picker_models: list[ModelInfo] = []
+            self._preset_cycle_cursor: tuple[Any, int | None, str, str] | None = None
             # Numbered /sessions targets must keep referring to the list the
             # user saw, rather than to a newly mtime-sorted filesystem scan.
             self._session_list_snapshot: list[SessionInfo] | None = None
@@ -5372,6 +5373,7 @@ if TEXTUAL_AVAILABLE:
                         await session.command("ui", operation="set_preset", payload={"id": ident})
                     else:
                         session.activate_preset(ident, getattr(session.resource_loader, "agent_dir", None))
+                    self._preset_cycle_cursor = None
                     self._write(f"Preset set to {session.preset_name}", "info")
                     self._refresh_sidebar()
                 except Exception as exc:
@@ -7169,8 +7171,19 @@ if TEXTUAL_AVAILABLE:
                     return
                 if not ids:
                     return
-                index = ids.index(session.preset_id) if session.preset_id in ids else -1
-                await self._handle_command(f"/preset {ids[(index + 1) % len(ids)]}")
+                current = session.preset_id
+                cursor = self._preset_cycle_cursor
+                # Failed activation retains the active preset, but the next key
+                # press must advance beyond the failed candidate, not retry it.
+                if cursor is not None and cursor[:3] == (session, epoch, current):
+                    current = cursor[3]
+                index = ids.index(current) if current in ids else -1
+                target = ids[(index + 1) % len(ids)]
+                await self._handle_command(f"/preset {target}")
+                if session is self.session and (
+                    not isinstance(session, TuiSessionView) or session.epoch == epoch
+                ):
+                    self._preset_cycle_cursor = (session, epoch, session.preset_id, target)
             except Exception as exc:
                 self._write(str(exc), "error")
 

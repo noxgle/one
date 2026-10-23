@@ -415,6 +415,9 @@ does not revoke a provider account token or remove environment credentials.
 
 Named agent presets are documented in [docs/PRESETS.md](docs/PRESETS.md). Use
 `one --preset readonly` for app-enforced read-only inspection (not OS sandboxing).
+Optional workspace presets, including Project, Researcher, and coding-agent
+profiles, are available under [`extras/presets/`](extras/presets/); copy a
+selected preset into the configured agent directory's `presets/` folder to use it.
 
 By default state is private under `~/.config/one` (override with
 `ONE_CODING_AGENT_DIR`): `auth.json`, `models.json`, `settings.json`, sessions,

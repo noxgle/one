@@ -8,6 +8,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Fixed
+
+- **Preset shortcut recovery** — after a preset fails to activate (for example,
+  because its model is unavailable), the next Shift+Tab advances to the next
+  preset instead of repeatedly retrying the unavailable one.
+
 ### Added
 
 - **Preset shortcut** — Shift+Tab cycles named presets from the TUI main input
@@ -15,6 +21,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 - **Named presets** — packaged Default and Readonly single-file YAML-frontmatter presets,
   strict user preset validation, CLI selection, and runtime Readonly tool enforcement.
+
+- **Optional workspace presets** — added Project, Researcher, and two coding-agent
+  profiles under `extras/presets/`. Copy a preset into the configured agent
+  directory's `presets/` folder to use it; these files are not packaged built-ins.
 
 ## [0.1.93] - 2026-10-21
 

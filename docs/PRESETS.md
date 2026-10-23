@@ -18,6 +18,24 @@ description: Careful code review.
 Review the requested change and report evidence and risks.
 ```
 
+## Included optional presets
+
+The repository's [`extras/presets/`](../extras/presets/) directory contains
+four optional workspace presets: `coder-junior-qwen`,
+`coder-mid-gpt5-6-terra`, `project`, and `researcher`. These are source files,
+not packaged built-ins: copy a selected file into
+`$ONE_CODING_AGENT_DIR/presets/` (or the equivalent directory under
+`XDG_CONFIG_HOME`) to make it discoverable. The application does not scan
+`extras/` automatically.
+
+The coding presets and Researcher include editing and shell tools; Project is
+planning-only and has no `bash`, `edit`, or `apply_patch` capability. The
+presets may specify model IDs that are not available in every installation;
+configure the corresponding provider/model before selecting one. As with any
+preset, tool lists narrow the capabilities already granted by CLI options and
+parent policy; they cannot grant extra authority. Review these prompt files
+before use, especially when copying them from another project version.
+
 IDs must be lowercase filename-matching slugs. Unknown or duplicate YAML keys,
 invalid types, duplicate IDs, path escapes, non-finite temperatures, and nonempty
 `sandboxes` are rejected. Sandboxes are not implemented and are never claimed as
@@ -50,6 +68,9 @@ In the TUI main input, **Shift+Tab** cycles through the `/preset` discovery orde
 and wraps from the last preset to the first. It preserves the draft and cursor,
 updates the sidebar, and uses the same idle-only activation checks as `/preset`.
 If activation fails, the error is displayed and the current preset is retained.
+The next Shift+Tab advances past that failed candidate, so an unavailable model
+does not trap keyboard cycling. Explicit `/preset id` selection still validates
+and applies only the requested preset.
 Dialogs and open overlays keep their normal Shift+Tab focus navigation.
 
 For a new session the order is explicit CLI provider/model, temperature mode or

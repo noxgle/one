@@ -137,3 +137,63 @@ async def test_preset_discovery_failure_is_displayed(tmp_path, monkeypatch):
     await app._cycle_preset()
     assert errors == [("Invalid preset file", "error")]
     assert view.preset_id == "default"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detached", [False, True])
+async def test_shift_tab_advances_past_unavailable_preset(tmp_path, monkeypatch, detached):
+    monkeypatch.setenv("ONE_CODING_AGENT_DIR", str(tmp_path))
+    presets = tmp_path / "presets"
+    presets.mkdir()
+    (presets / "broken.md").write_text(
+        "---\nversion: 1\nid: broken\nname: Broken\nmodel: openai/unavailable-model\n---\nUnavailable.\n"
+    )
+    (presets / "reviewer.md").write_text(
+        "---\nversion: 1\nid: reviewer\nname: Reviewer\n---\nReview carefully.\n"
+    )
+    session = _mk_app_session(tmp_path)
+    session.activate_preset("readonly", str(tmp_path))
+    if detached:
+        class Facade:
+            def subscribe(self, listener, **kwargs):
+                return lambda: None
+
+            async def command(self, name, payload=None):
+                if name == "ui":
+                    if payload["operation"] == "preset_list":
+                        return {"result": {"presets": [
+                            {"id": ident} for ident in ("default", "readonly", "broken", "reviewer")
+                        ]}}
+                    assert payload["operation"] == "set_preset"
+                    session.activate_preset(payload["payload"]["id"], str(tmp_path))
+                return {"result": {"epoch": 0, "sidebar": {
+                    "preset": session.preset_id, "presetName": session.preset_name,
+                }, "messages": []}}
+
+        view = TuiSessionView(Facade())
+        await view.command("snapshot")
+        app = _OneTextualApp(view)
+    else:
+        app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        editor = app.query_one("#input", TextArea)
+        editor.text = "unfinished draft"
+        editor.move_cursor((0, 4))
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert session.preset_id == "readonly"
+        assert "Preset model is unavailable: openai/unavailable-model" in "\n".join(app._stream_lines)
+        # Explicit selection resets the cycle even when reapplying the same ID.
+        await app._handle_command("/preset readonly")
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert session.preset_id == "readonly"
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert session.preset_id == "reviewer"
+        assert editor.text == "unfinished draft"
+        assert editor.cursor_location == (0, 4)
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert session.preset_id == "default"
