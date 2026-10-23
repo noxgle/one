@@ -10,11 +10,27 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Fullscreen subagent inspector** — `/agents` fills the terminal, keeps status
+  and navigation fixed, and opens a single timeline starting with the complete
+  task prompt. Provider-emitted display Thinking is included, block colors follow
+  the selected theme, and tool completion updates the original operation block.
+  New runs retain the redacted full prompt; older runs explicitly show a summary
+  fallback when the full task was not recorded.
+
+- **Subagent history** — `/agents` now reads paged, private display journals rather
+  than just the last two operations. Home/End and PageUp/PageDown browse recorded
+  work or return to live updates; completed runs remain available after resuming
+  a saved parent session. N/P browse additional pages of direct child agents.
+
 - **Generation budget** — `generation.maxOutputTokens` configures per-response
   output tokens independently of the default context reserve, clamped to model
   capacity and remaining context. Default remains 16,384 tokens.
 
 ### Fixed
+
+- **Subagent toggle recovery** — Ctrl+S can re-enable subagents after they were
+  disabled in settings. The runtime now reports the immutable `--no-subagents`
+  restriction separately from the current toggle state.
 
 - **ChatGPT output truncation** — output-token exhaustion preserves partial text,
   usage and the requested limit, with an actionable warning rather than an opaque

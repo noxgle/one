@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from one.core.provider_login import _redact_credentials
+from one.core.subagent_history import SubagentHistory
 from one.tools.common import sanitize_display_text
 
 MAX_OUTPUT_BYTES = 32 * 1024
@@ -34,12 +35,17 @@ _CONTENT_FIELD_ALIASES = frozenset({
 class SubagentMonitor:
     """Thread-safe snapshots of direct children, with bounded output tails."""
 
-    def __init__(self) -> None:
+    def __init__(self, session_file: str | None = None) -> None:
         self._lock = threading.RLock()
         self._children: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._subscribers: dict[int, Callable[[dict[str, Any]], None]] = {}
         self._next_subscription = 0
         self._revision = 0
+        self.history = SubagentHistory(session_file)
+        self._archived = self.history.children()
+        for child in self._archived:
+            if child.get("status") == "interrupted":
+                self.history.close_operations(child["sessionId"], "interrupted")
 
     @staticmethod
     def _label(value: Any) -> str:
@@ -171,6 +177,7 @@ class SubagentMonitor:
         delta = sanitize_display_text(str(text or ""))
         if not delta:
             return False
+        self.history.response(child["sessionId"], delta)
         timeline = child["timeline"]
         if timeline and timeline[-1].get("kind") == "response":
             # Redact after concatenation so split credentials are not retained.
@@ -183,6 +190,7 @@ class SubagentMonitor:
     def _changed(self, session_id: str, event_type: str) -> tuple[dict[str, Any], list[Callable[[dict[str, Any]], None]]]:
         self._revision += 1
         self._children[session_id]["revision"] = self._revision
+        self.history.metadata(self._children[session_id])
         return ({"type": event_type, "sessionId": session_id, "revision": self._revision}, list(self._subscribers.values()))
 
     @staticmethod
@@ -197,12 +205,14 @@ class SubagentMonitor:
         now = time.monotonic() if started_at is None else started_at
         with self._lock:
             self._children[session_id] = {
-                "sessionId": session_id, "task": self._label(task), "model": self._label(model),
+                "sessionId": session_id, "task": self._safe_text(task)[:MAX_LABEL_CHARS], "model": self._safe_text(model)[:MAX_LABEL_CHARS],
                 "startedAt": now, "startedMonotonic": now, "completedAt": None, "status": "running",
                 "currentTool": None, "activity": "started", "outputTruncated": False,
                 "timeline": [], "timelineTruncated": False, "previewTruncated": False,
                 "outcome": None, "error": None, "errorType": None, "externalState": None, "revision": 0,
             }
+            self.history.save_prompt(session_id, task)
+            self.history.append(session_id, "lifecycle", "Started")
             notice, listeners = self._changed(session_id, "registered")
         self._notify(notice, listeners)
 
@@ -222,6 +232,17 @@ class SubagentMonitor:
                 changed = True
             if not changed:
                 return
+            notice, listeners = self._changed(session_id, "updated")
+        self._notify(notice, listeners)
+
+    def thinking(self, session_id: str, delta: Any = "") -> None:
+        with self._lock:
+            child = self._children.get(session_id)
+            if child is None:
+                return
+            if delta:
+                self.history.response(session_id, str(delta), "thinking")
+            child["activity"] = "Thinking"
             notice, listeners = self._changed(session_id, "updated")
         self._notify(notice, listeners)
 
@@ -262,6 +283,7 @@ class SubagentMonitor:
             if child["timeline"] and child["timeline"][-1].get("kind") == "response":
                 child["timeline"][-1]["text"] = combined
                 self._enforce_preview_budget(child)
+                self.history.response(session_id, addition)
             else:
                 # A tool since the last prose block is a real ordering boundary.
                 # Keep the final suffix after that tool rather than rewriting
@@ -281,6 +303,8 @@ class SubagentMonitor:
             child["currentTool"] = name
             child["activity"] = "using tool"
             timeout = effective_timeout if isinstance(effective_timeout, (int, float)) and not isinstance(effective_timeout, bool) and effective_timeout > 0 else None
+            self.history.tool_start(session_id, name, self._label(tool_call_id),
+                                    self.display_tool_args(args) if not isinstance(args, str) else self._safe_text(args)[:MAX_TOOL_ARGS_CHARS])
             self._append_timeline(child, {
                 "kind": "tool", "tool": name, "toolCallId": self._label(tool_call_id) or None,
                 "args": self._safe_text(args)[:MAX_TOOL_ARGS_CHARS] if isinstance(args, str) else self.display_tool_args(args), "effectiveTimeout": timeout,
@@ -303,6 +327,7 @@ class SubagentMonitor:
             child["currentTool"] = None
             child["activity"] = "responding" if child["status"] == "running" else child["activity"]
             if retain:
+                self.history.tool_end(session_id, name, self._label(tool_call_id), bool(ok), elapsed, text)
                 call_id = self._label(tool_call_id) or None
                 match = next((item for item in child["timeline"] if item.get("kind") == "tool" and item.get("state") == "running" and item.get("toolCallId") == call_id), None) if call_id else None
                 if match is None:
@@ -328,6 +353,8 @@ class SubagentMonitor:
                           "error": self._safe_text(error)[:512] if error else None,
                           "errorType": self._label(error_type) if error_type else None,
                           "externalState": self._label(external_state) if external_state else None})
+            self.history.close_operations(session_id, status)
+            self.history.append(session_id, "lifecycle", f"Completed: {status}\n{child.get('error') or ''}")
             completed = [
                 (key, item["completedAt"])
                 for key, item in self._children.items()
@@ -340,9 +367,24 @@ class SubagentMonitor:
             notice, listeners = self._changed(session_id, "completed")
         self._notify(notice, listeners)
 
+    def list_children(self, offset: int = 0) -> dict[str, Any]:
+        if type(offset) is not int or offset < 0:
+            raise ValueError("Invalid agent list offset")
+        with self._lock:
+            archived = self.history.children(offset, 20)
+            for index, child in enumerate(archived):
+                live = self._children.get(child["sessionId"])
+                if live is not None:
+                    archived[index] = {key: copy.deepcopy(value) for key, value in live.items()
+                                       if key not in {"timeline", "outputTail"}}
+            return {"revision": self._revision, "children": archived, "offset": offset,
+                    "hasMore": bool(self.history.children(offset + 20, 1))}
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             children = copy.deepcopy(list(self._children.values()))
+            known = {child["sessionId"] for child in children}
+            children.extend(copy.deepcopy(child) for child in self._archived if child["sessionId"] not in known)
             for child in children:
                 # outputTail remains a read-compatible snapshot field, derived
                 # from timeline response blocks rather than stored twice.

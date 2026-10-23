@@ -1873,3 +1873,54 @@ async def test_runtime_rejects_invalid_image_references(tmp_path, images) -> Non
     host._session = lambda: SimpleNamespace(_storage_dir=str(tmp_path))
     with pytest.raises(AttachmentValidationError):
         await host.dispatch("prompt", {"text": "describe", "images": images})
+
+
+@pytest.mark.parametrize("enabled,hard", [(False, False), (True, False), (False, True)])
+def test_detached_subagent_hard_ceiling_is_independent_of_toggle(enabled: bool, hard: bool) -> None:
+    view = TuiSessionView(SimpleNamespace())
+    view.apply_status_snapshot({"sidebar": {"subagents": enabled, "subagentsHardDisabled": hard}})
+    assert view.subagents_hard_disabled is hard
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hard", [False, True])
+async def test_detached_ctrl_s_can_reenable_but_cannot_override_cli_ceiling(hard: bool) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    class Facade:
+        def __init__(self) -> None:
+            self.enabled = False
+            self.toggles: list[bool] = []
+
+        async def command(self, command, payload=None):
+            if command == "ui":
+                assert payload["operation"] == "set_subagents"
+                self.enabled = payload["payload"]["enabled"]
+                self.toggles.append(self.enabled)
+            return {"result": {"epoch": 1, "sidebar": {
+                "theme": "default", "subagents": self.enabled, "subagentsHardDisabled": hard,
+                "bashOutput": True, "retry": "on", "cooperation": False,
+            }, "messages": []}}
+
+        def subscribe(self, _listener):
+            return lambda: None
+
+    facade = Facade()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        if hard:
+            assert not facade.toggles
+            assert "--no-subagents" in "\n".join(app._stream_lines)
+        else:
+            assert facade.toggles == [True]
+            assert view.snapshot["sidebar"]["subagents"] is True
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            assert facade.toggles == [True, False, True]
+            assert "--no-subagents" not in "\n".join(app._stream_lines)

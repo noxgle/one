@@ -453,6 +453,29 @@ class TuiRuntimeHost:
             return await self.snapshot()
         if command == "status_snapshot" and not payload:
             return self.status_snapshot()
+        if command == "agents_page" and set(payload) == {"offset", "epoch"}:
+            if payload["epoch"] != self._epoch:
+                raise ValueError("Session changed")
+            return self._json({"epoch": self._epoch, **self._session().subagent_monitor.list_children(payload["offset"])}, maximum=192 * 1024)
+        if command == "agent_inspector_page" and set(payload) == {"session_id", "cursor", "part", "epoch"}:
+            if payload["epoch"] != self._epoch:
+                raise ValueError("Session changed")
+            session = self._session()
+            show = getattr(getattr(session, "settings_manager", None), "get_bash_show_output", lambda: True)()
+            page = session.subagent_monitor.history.inspector_page(payload["session_id"], payload["cursor"], payload["part"], show_results=show)
+            return self._json({"epoch": self._epoch, **page}, maximum=240 * 1024)
+        if command == "agent_prompt_page" and set(payload) == {"session_id", "offset", "epoch"}:
+            if payload["epoch"] != self._epoch:
+                raise ValueError("Session changed")
+            page = self._session().subagent_monitor.history.prompt_page(payload["session_id"], payload["offset"])
+            return self._json({"epoch": self._epoch, **page}, maximum=192 * 1024)
+        if command == "agent_history_page" and set(payload) == {"session_id", "cursor", "part", "epoch"}:
+            if payload["epoch"] != self._epoch:
+                raise ValueError("Session changed")
+            session = self._session()
+            show = getattr(getattr(session, "settings_manager", None), "get_bash_show_output", lambda: True)()
+            page = session.subagent_monitor.history.page(payload["session_id"], payload["cursor"], payload["part"], show_results=show)
+            return self._json({"epoch": self._epoch, **page}, maximum=192 * 1024)
         if command == "monitor_snapshot" and not payload:
             return self.monitor_snapshot()
         if command == "prompt" and set(payload) in ({"text"}, {"text", "images"}):
@@ -553,6 +576,7 @@ class TuiRuntimeHost:
             "coop": "on" if session.approval_callback is not None else "off",
             "temperatureMode": str(getattr(session, "temperature_mode", "balanced")),
             "retry": str(getattr(session.settings_manager, "get_retry_mode", lambda: "on")()),
+            "subagentsHardDisabled": bool(getattr(session, "subagents_hard_disabled", False)),
             "subagents": not bool(getattr(session, "subagents_hard_disabled", False))
             and bool(session.settings_manager.get_subagents_enabled()),
             "contextPercent": float(usage.get("percent") or 0),
@@ -604,7 +628,7 @@ class TuiRuntimeHost:
             "children": [
                 {
                     **{key: _bounded_snapshot_text(child.get(key))[:96] if isinstance(child.get(key), str) else child.get(key)
-                       for key in ("sessionId", "task", "model", "status", "activity", "currentTool") if key in child},
+                       for key in ("sessionId", "task", "model", "status", "activity", "currentTool", "startedMonotonic", "completedAt", "revision") if key in child},
                     "outputTail": _bounded_snapshot_text(child.get("outputTail"))[:192],
                     "timeline": [
                         {key: _bounded_snapshot_text(item.get(key))[:96] if isinstance(item.get(key), str) else item.get(key)
@@ -1127,6 +1151,8 @@ class TuiRuntimeHost:
             session.settings_manager.set_retry_mode(mode)
             session.set_auto_retry_enabled(mode in ("on", "unlimited"))
         elif operation == "set_subagents":
+            if getattr(session, "subagents_hard_disabled", False):
+                raise ValueError("Subagents are unavailable for this session because it was started with --no-subagents.")
             session.settings_manager.set_subagents_enabled(bool(payload["enabled"]))
         elif operation == "set_cooperation":
             enabled = bool(payload["enabled"])
@@ -1574,6 +1600,10 @@ TUI_COMMANDS = frozenset(
         "snapshot",
         "status_snapshot",
         "monitor_snapshot",
+        "agent_history_page",
+        "agent_prompt_page",
+        "agent_inspector_page",
+        "agents_page",
         "prompt",
         "abort",
         "models_page",

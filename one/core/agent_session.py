@@ -183,7 +183,7 @@ class AgentSession:
         self._plan_just_created = False
         self._restore_plan_from_messages(self.messages)
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
-        self.subagent_monitor = SubagentMonitor()
+        self.subagent_monitor = SubagentMonitor(self.session_manager.session_file)
         self._activity_callback = activity_callback
         self._is_streaming = False
         self._is_compacting = False
@@ -2254,16 +2254,23 @@ class AgentSession:
             if event.get("type") in {"tool_call_start", "tool_call_end", "tool_call_error"}:
                 last_tool_name = str(event.get("tool") or "unknown")
             # Monitor only visible prose, tool labels, and an allowlisted tool
-            # result projection. It never receives reasoning, arguments, raw
-            # results, or arbitrary events.
+            # result projection and provider-emitted display Thinking deltas.
+            # Never retain raw arguments/results or arbitrary event payloads.
             try:
                 event_type = event.get("type")
-                if event_type == "message_update":
+                if event_type == "thinking_delta":
+                    self.subagent_monitor.thinking(sub_id, event.get("delta", ""))
+                elif event_type == "message_update":
                     message_event = event.get("assistantMessageEvent")
                     if isinstance(message_event, dict) and message_event.get("type") == "text_delta":
                         delta = message_event.get("delta")
                         if isinstance(delta, str):
                             self.subagent_monitor.update(sub_id, text=delta, activity="responding")
+                elif event_type == "tool_call_error":
+                    self.subagent_monitor.tool_finished(
+                        sub_id, event.get("tool"), False, event.get("elapsedMs"),
+                        event.get("error"), tool_call_id=event.get("toolCallId"),
+                    )
                 elif event_type == "tool_call_start":
                     if event.get("tool") != "finish":
                         # Convert transient raw event arguments immediately to a
@@ -5269,6 +5276,7 @@ class AgentSession:
         return result
 
     async def dispose(self) -> None:
+        self.subagent_monitor.history.close()
         if self._catalog_refresh_task is not None:
             self._catalog_refresh_task.cancel()
             try:

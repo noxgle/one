@@ -70,7 +70,7 @@ async def test_tui_agents_panel_live_snapshot_and_trusted_stream_click(tmp_path:
         preview = app.query_one("#agents_content", Static)
         assert panel.has_class("visible")
         assert "untrusted" in str(preview.content)
-        assert "Agent 1/2" in str(preview.content)
+        assert "Agent 1/2" in str(app.query_one("#agents_help", Static).content)
         assert not app.query("#agents_list")
         assert not app.query("#agents_preview")
         session.subagent_monitor.update("child-b", text="only child b", tool="read", activity="responding")
@@ -2294,3 +2294,139 @@ async def test_tui_output_truncation_warning_is_visible(tmp_path):
                                    "message": "Output token limit reached (requested: 65536)."})
         await pilot.pause()
         assert "Output token limit reached" in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
+async def test_agents_history_home_pages_pause_and_end_live(tmp_path: Path) -> None:
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    monitor = session.subagent_monitor
+    monitor.register("child", "task", "model")
+    for index in range(80):
+        monitor.update("child", text=f"response-{index}")
+        monitor.tool_started("child", "read")
+        monitor.tool_finished("child", "read", True, index, f"output-{index}")
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(100, 35)) as pilot:
+        await _submit(app, pilot, "/agents")
+        await pilot.press("home")
+        await pilot.pause()
+        def preview() -> str:
+            return str(app.query_one("#agents_content", Static).content)
+        assert "response-0" in preview()
+        assert "response-79" not in preview()
+        first = preview().split("History", 1)[1]
+        monitor.update("child", text="NEW LIVE TEXT")
+        await pilot.pause()
+        app._flush_monitor_refresh()
+        await pilot.pause()
+        assert preview().split("History", 1)[1] == first
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert "response-0" not in preview()
+        await pilot.press("pageup")
+        await pilot.pause()
+        assert "response-0" in preview()
+        await pilot.press("end")
+        await pilot.pause()
+        assert "NEW LIVE TEXT" in preview()
+        monitor.complete("child", "completed")
+        await pilot.pause()
+        await pilot.press("escape")
+        await _submit(app, pilot, "/agents")
+        await pilot.press("home")
+        await pilot.pause()
+        assert "response-0" in preview()
+        assert "completed" in str(app.query_one("#agents_help", Static).content)
+
+
+@pytest.mark.asyncio
+async def test_agents_fullscreen_unified_prompt_and_history_preserve_draft(tmp_path: Path) -> None:
+    from textual.containers import Vertical, VerticalScroll
+    from textual.widgets import Static, TextArea
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    prompt = "START\n" + "    code line żółć\n" * 500 + "END PROMPT"
+    session.subagent_monitor.register("child", prompt, "model")
+    session.subagent_monitor.update("child", text="\n".join(f"history {i}" for i in range(100)))
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(80, 30)) as pilot:
+        await _submit(app, pilot, "/agents")
+        overlay = app.query_one("#agents_overlay", Vertical)
+        assert overlay.region.width == 80
+        assert overlay.region.height == 30
+        draft = app.query_one("#input", TextArea)
+        draft.text = "keep draft"
+        await pilot.press("home", "down")
+        await pilot.pause()
+        timeline = app.query_one("#agents_timeline", VerticalScroll)
+        assert timeline.scroll_y >= 0
+        cursor = app._agent_page_cursor
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app._agent_page_cursor == cursor
+        assert "START" in str(app.query_one("#agents_content", Static).content)
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert "END PROMPT" in str(app.query_one("#agents_content", Static).content)
+        session.subagent_monitor.update("child", text="new live activity")
+        await pilot.pause()
+        assert not app._agent_follow
+        assert "END PROMPT" in str(app.query_one("#agents_content", Static).content)
+        await pilot.press("home")
+        await pilot.pause()
+        assert app._agent_page_cursor == cursor
+        assert "START" in str(app.query_one("#agents_content", Static).content)
+        await pilot.resize_terminal(40, 16)
+        await pilot.pause()
+        assert overlay.region.width == 40 and overlay.region.height == 16
+        await pilot.press("escape")
+        assert draft.text == "keep draft"
+        assert app.focused is draft
+
+
+@pytest.mark.asyncio
+async def test_agents_thinking_theme_and_paused_operation_refresh(tmp_path: Path) -> None:
+    from rich.text import Text
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    monitor = session.subagent_monitor
+    monitor.register("child", "FULL PROMPT " + "x" * 200, "model")
+    monitor.thinking("child", "visible provider summary")
+    monitor.tool_started("child", "read", tool_call_id="one")
+    app = _OneTextualApp(session)
+    async with app.run_test(size=(90, 30)) as pilot:
+        await _submit(app, pilot, "/agents")
+        content = app.query_one("#agents_content", Static)
+        assert "FULL PROMPT " + "x" * 200 in str(content.content)
+        assert "Thinking" in str(content.content)
+        assert "Tool: ○ read" in str(content.content)
+        y = app.query_one("#agents_timeline", VerticalScroll).scroll_y
+        monitor.tool_finished("child", "read", True, 5, "done", tool_call_id="one")
+        await pilot.pause()
+        app._flush_monitor_refresh()
+        await pilot.pause()
+        assert "Tool: ✓ read" in str(content.content)
+        assert "Tool: ○ read" not in str(content.content)
+        assert app.query_one("#agents_timeline", VerticalScroll).scroll_y == y
+        app._apply_theme("default")
+        first = Text()
+        app._append_agent_entry(first, {"kind": "tool", "text": "Tool: ✓ read"})
+        assert f"bold {app._theme.tool}" in [span.style for span in first.spans]
+        app._apply_theme("hacker")
+        second = Text()
+        app._append_agent_entry(second, {"kind": "thinking", "text": "visible"})
+        assert f"italic {app._theme.info}" in [span.style for span in second.spans]
+        monitor.thinking("child", "more")
+        app._flush_monitor_refresh()
+        await pilot.pause()
+        assert "Thinking" in str(app.query_one("#agents_help", Static).content)

@@ -307,7 +307,7 @@ class TuiSessionView:
 
     @property
     def subagents_hard_disabled(self) -> bool:
-        return not bool(self._snapshot["sidebar"].get("subagents", True))
+        return bool(self._snapshot["sidebar"].get("subagentsHardDisabled", False))
 
     def get_context_usage(self) -> dict[str, Any]:
         return {"percent": self._snapshot["sidebar"].get("contextPercent", 0.0)}
@@ -535,6 +535,7 @@ def build_sidebar_snapshot(
         "tokenCacheWrite": int(tokens.get("cacheWrite") or 0),
         "tokenTotal": int(tokens.get("total") or 0),
         "cost": float(stats.get("cost") or 0.0),
+        "subagentsHardDisabled": bool(getattr(session, "subagents_hard_disabled", False)),
         "subagents": not bool(getattr(session, "subagents_hard_disabled", False))
         and bool(getattr(getattr(session, "settings_manager", None), "get_subagents_enabled", lambda: True)()),
         "bashOutput": bool(getattr(getattr(session, "settings_manager", None), "get_bash_show_output", lambda: True)()),
@@ -1146,6 +1147,8 @@ if TEXTUAL_AVAILABLE:
         ]
 
         async def _on_key(self, event: events.Key) -> None:
+            if self.app._handle_agents_panel_key(event):
+                return
             if (
                 event.key == "shift+tab"
                 and len(self.app.screen_stack) == 1
@@ -1500,10 +1503,10 @@ if TEXTUAL_AVAILABLE:
         #agents_overlay {
             display: none;
             position: absolute;
-            offset: 8% 8%;
-            width: 84%;
-            height: 78%;
-            padding: 1 2;
+            offset: 0 0;
+            width: 100%;
+            height: 100%;
+            padding: 0 1;
             layer: above;
             layout: vertical;
         }
@@ -1511,6 +1514,7 @@ if TEXTUAL_AVAILABLE:
         #agents_overlay.visible { display: block; }
 
         #agents_help { height: auto; }
+        #agents_footer { height: auto; }
 
         #agents_timeline {
             height: 1fr;
@@ -1540,10 +1544,10 @@ if TEXTUAL_AVAILABLE:
         #evidence_overlay {
             display: none;
             position: absolute;
-            offset: 8% 8%;
-            width: 84%;
-            height: 78%;
-            padding: 1 2;
+            offset: 0 0;
+            width: 100%;
+            height: 100%;
+            padding: 0 1;
             layer: above;
             layout: vertical;
         }
@@ -1742,6 +1746,15 @@ if TEXTUAL_AVAILABLE:
             self._monitor_snapshot: dict[str, Any] = {"revision": 0, "children": []}
             self._monitor_dirty = False
             self._monitor_dirty_lock = threading.Lock()
+            self._agent_panel_generation = 0
+            self._agent_restore_scroll: float | None = None
+            self._agent_page: dict[str, Any] | None = None
+            self._agent_page_cursor = (0, 0)
+            self._agent_list_offset = 0
+            self._agent_list_has_more = False
+            self._agent_page_stack: list[tuple[int, int]] = []
+            self._agent_page_loading = False
+            self._agent_follow = True
             self._monitor_refresh_inflight = False
             self._status_refresh_inflight = False
             self._status_refresh_dirty = False
@@ -1790,10 +1803,6 @@ if TEXTUAL_AVAILABLE:
                             yield Button("Previous page", id="evidence-prev")
                             yield Button("Next page", id="evidence-next")
                             yield Button("Close", id="evidence-close")
-                    with Vertical(id="agents_overlay"):
-                        yield Static("", id="agents_help")
-                        with VerticalScroll(id="agents_timeline"):
-                            yield Static("", id="agents_content")
                     with Vertical(id="approval_overlay"):
                         yield Static("", id="approval_summary")
                         yield _ApprovalReasonInput(
@@ -1804,6 +1813,11 @@ if TEXTUAL_AVAILABLE:
                             yield Button("Reject (Alt+R)", id="approval-reject", variant="error")
                     yield _CommandTextArea(placeholder="Type a command or /help", id="input", soft_wrap=True)
                 yield Static(id="sidebar")
+            with Vertical(id="agents_overlay"):
+                yield Static("", id="agents_help")
+                with VerticalScroll(id="agents_timeline"):
+                    yield Static("", id="agents_content")
+                yield Static("", id="agents_footer")
 
         def get_system_commands(self, screen: Any) -> list[tuple[str, str, Any, bool]]:  # noqa: ARG002
             """Expose only current one commands in Textual's Ctrl+P palette.
@@ -1987,6 +2001,12 @@ if TEXTUAL_AVAILABLE:
             self._off_monitor_listener = None
             self._monitor_revision = -1
             self._monitor_snapshot = {"revision": 0, "children": []}
+            self._agent_page = None
+            self._agent_panel_generation += 1
+            self._agent_page_cursor = (0, 0)
+            self._agent_page_stack = []
+            self._agent_list_offset = 0
+            self._agent_list_has_more = False
             self._selected_agent_id = None
             self._agents_panel_open = False
             self._clear_agent_link_metadata()
@@ -2029,7 +2049,8 @@ if TEXTUAL_AVAILABLE:
             if not isinstance(children, list):
                 return False
             self._monitor_revision = revision
-            self._monitor_snapshot = {"revision": revision, "children": children}
+            if not (self._agents_panel_open and self._agent_list_offset):
+                self._monitor_snapshot = {"revision": revision, "children": children}
             return True
 
         def _flush_monitor_refresh(self) -> None:
@@ -2051,6 +2072,9 @@ if TEXTUAL_AVAILABLE:
                     return
                 if changed:
                     self._schedule_sidebar_refresh()
+                    self._agent_page = None
+                    if self._agent_follow:
+                        self._agent_page_cursor = (0, 1)
                     self._render_agents_panel()
                 return
             with self._monitor_dirty_lock:
@@ -2074,6 +2098,9 @@ if TEXTUAL_AVAILABLE:
                             session.apply_monitor_snapshot(result)
                             if self._accept_monitor_snapshot(session.monitor_snapshot, generation):
                                 self._schedule_sidebar_refresh()
+                                self._agent_page = None
+                                if self._agent_follow:
+                                    self._agent_page_cursor = (0, 1)
                                 self._render_agents_panel()
                     except Exception as exc:
                         self._write(f"[Monitor] {exc}", "error")
@@ -3447,6 +3474,10 @@ if TEXTUAL_AVAILABLE:
 
         def _tick_waiting(self) -> None:
             """Animate a tiny status widget; never rebuild the transcript."""
+            if self._agents_panel_open:
+                child = self._monitor_child(self._selected_agent_id or "")
+                if child and child.get("activity") == "Thinking":
+                    self._render_agents_panel()
             now = time.monotonic()
             if not evaluate_waiting(self._turn_active, self._last_delta_ts, now):
                 if self._thinking_active:
@@ -4185,6 +4216,7 @@ if TEXTUAL_AVAILABLE:
             # so force a repaint even when the logical lines are unchanged.
             self._rendered_stream_lines = ()
             self._schedule_stream_render()
+            self._render_agents_panel()
             return True
 
         def _set_theme(self, theme_name: str) -> bool:
@@ -4536,6 +4568,13 @@ if TEXTUAL_AVAILABLE:
             elif self._selected_agent_id is None and children:
                 self._selected_agent_id = str(children[0].get("sessionId") or "")
             self._agents_panel_open = True
+            self._agent_panel_generation += 1
+            if session_id is None:
+                self._load_agent_list(0)
+            self._agent_page = None
+            self._agent_page_cursor = (0, 0)
+            self._agent_page_stack = []
+            self._agent_follow = False
             self._render_agents_panel()
             try:
                 self.query_one("#agents_overlay", Vertical).add_class("visible")
@@ -4544,6 +4583,7 @@ if TEXTUAL_AVAILABLE:
 
         def _close_agents_panel(self) -> None:
             self._agents_panel_open = False
+            self._agent_panel_generation += 1
             try:
                 self.query_one("#agents_overlay", Vertical).remove_class("visible")
                 self.query_one("#input", TextArea).focus()
@@ -4552,14 +4592,35 @@ if TEXTUAL_AVAILABLE:
 
         def _handle_agents_panel_key(self, event: events.Key) -> bool:
             """Handle panel navigation from either the input or the app."""
-            if not self._agents_panel_open or event.key not in {"left", "right", "up", "down", "escape"}:
+            if not self._agents_panel_open or event.key not in {"left", "right", "up", "down", "escape", "home", "end", "pageup", "pagedown", "n", "p", "tab", "shift+tab"}:
                 return False
             if event.key == "escape":
                 self._close_agents_panel()
+            elif event.key in {"tab", "shift+tab"}:
+                pass
             elif event.key in {"left", "right"}:
                 self._select_agent_offset(-1 if event.key == "left" else 1)
+            elif event.key in {"n", "p"}:
+                self._load_agent_list(max(0, self._agent_list_offset + (20 if event.key == "n" else -20)))
+            elif event.key in {"home", "end", "pageup", "pagedown"}:
+                self._agent_follow = event.key == "end"
+                if event.key == "home":
+                    self._agent_page_cursor = (0, 0)
+                    self._agent_page_stack = []
+                elif event.key == "end":
+                    self._agent_page_cursor = (0, 1)
+                    self._agent_page_stack = []
+                elif event.key == "pageup":
+                    self._agent_page_cursor = self._agent_page_stack.pop() if self._agent_page_stack else (0, 0)
+                elif self._agent_page and self._agent_page.get("hasMore"):
+                    self._agent_page_stack.append(self._agent_page_cursor)
+                    self._agent_page_cursor = (self._agent_page["cursor"], self._agent_page["part"])
+                self._agent_page = None
+                self._agent_restore_scroll = 0
+                self._render_agents_panel()
             else:
                 try:
+                    self._agent_follow = False
                     timeline = self.query_one("#agents_timeline", VerticalScroll)
                     timeline.scroll_to(y=timeline.scroll_y + (-3 if event.key == "up" else 3), animate=False)
                 except Exception:
@@ -4578,7 +4639,90 @@ if TEXTUAL_AVAILABLE:
             except ValueError:
                 index = 0
             self._selected_agent_id = ids[(index + offset) % len(ids)]
+            self._agent_page = None
+            self._agent_page_cursor = (0, 0)
+            self._agent_page_stack = []
+            self._agent_follow = False
             self._render_agents_panel()
+
+        def _load_agent_list(self, offset: int) -> None:
+            if not isinstance(self.session, TuiSessionView) and not callable(getattr(getattr(self.session, "subagent_monitor", None), "list_children", None)):
+                return
+            session, generation = self.session, self._monitor_generation
+
+            async def load() -> None:
+                try:
+                    if isinstance(session, TuiSessionView):
+                        epoch = session.epoch
+                        result = await session.command("agents_page", offset=offset, epoch=epoch)
+                        if result.get("epoch") != epoch or session.epoch != epoch:
+                            return
+                    else:
+                        result = session.subagent_monitor.list_children(offset)
+                    if self.session is not session or self._monitor_generation != generation:
+                        return
+                    if not result.get("children"):
+                        return
+                    self._agent_list_offset = offset
+                    self._agent_list_has_more = result.get("hasMore", False)
+                    self._monitor_snapshot = result
+                    ids = {child["sessionId"] for child in result["children"]}
+                    if self._selected_agent_id not in ids:
+                        self._selected_agent_id = result["children"][0]["sessionId"]
+                    self._agent_page = None
+                    self._agent_page_cursor = (0, 0)
+                    self._agent_page_stack = []
+                    self._render_agents_panel()
+                except Exception as exc:
+                    if self._monitor_generation == generation:
+                        self._write(f"[Agent list] {exc}", "error")
+            asyncio.create_task(load())
+
+        def _request_agent_page(self) -> None:
+            if self._agent_page_loading or not self._selected_agent_id or not self._agents_panel_open:
+                return
+            if not isinstance(self.session, TuiSessionView) and not hasattr(getattr(self.session, "subagent_monitor", None), "history"):
+                return
+            session, generation = self.session, self._monitor_generation
+            child, cursor = self._selected_agent_id, self._agent_page_cursor
+            panel_generation = self._agent_panel_generation
+            revision = self._monitor_revision
+            self._agent_page_loading = True
+
+            async def load() -> None:
+                try:
+                    if isinstance(session, TuiSessionView):
+                        epoch = session.epoch
+                        page = await session.command("agent_inspector_page", session_id=child,
+                                                     cursor=cursor[0], part=cursor[1], epoch=epoch)
+                        if page.get("epoch") != epoch or session.epoch != epoch:
+                            return
+                    else:
+                        show = getattr(session.settings_manager, "get_bash_show_output", lambda: True)()
+                        page = session.subagent_monitor.history.inspector_page(child, *cursor, show_results=show)
+                    if (self.session is session and self._monitor_generation == generation
+                            and self._agents_panel_open and panel_generation == self._agent_panel_generation
+                            and self._selected_agent_id == child and self._agent_page_cursor == cursor):
+                        self._agent_page = page
+                        self._render_agents_panel()
+                        if self._agent_restore_scroll is not None:
+                            self.call_after_refresh(self.query_one("#agents_timeline", VerticalScroll).scroll_to,
+                                                    y=self._agent_restore_scroll, animate=False)
+                            self._agent_restore_scroll = None
+                        elif self._agents_panel_open and self._agent_follow and revision > 0:
+                            self.call_after_refresh(self.query_one("#agents_timeline", VerticalScroll).scroll_end, animate=False)
+                except Exception as exc:
+                    if self._monitor_generation == generation:
+                        self._write(f"[Agent history] {exc}", "error")
+                finally:
+                    self._agent_page_loading = False
+                    if (self._agents_panel_open and self._monitor_generation == generation
+                            and (panel_generation != self._agent_panel_generation
+                                 or child != self._selected_agent_id or cursor != self._agent_page_cursor
+                                 or (self._agent_follow and revision != self._monitor_revision))):
+                        self._agent_page = None
+                        self._request_agent_page()
+            asyncio.create_task(load())
 
         def _render_agents_panel(self) -> None:
             if not self._agents_panel_open:
@@ -4588,84 +4732,85 @@ if TEXTUAL_AVAILABLE:
                 self._selected_agent_id = None
             if self._selected_agent_id is None and children:
                 self._selected_agent_id = str(children[0].get("sessionId") or "")
-            help_text = Text("Agents — current session only (read-only)\n", style="bold")
-            help_text.append("Left/Right select · Up/Down scroll timeline · Esc close")
-            if not children:
-                content = Text("No direct child agents in this session.\n")
+            selected = self._monitor_child(self._selected_agent_id or "")
+            header = Text("Agents — current session only (read-only)\n", style="bold")
+            content = Text()
+            if selected is None:
+                content.append("No direct child agents in this session.\n")
             else:
-                selected = self._monitor_child(self._selected_agent_id or "")
-                content = Text()
-                if selected is not None:
-                    position = next(
-                        (
-                            index
-                            for index, child in enumerate(children, 1)
-                            if child.get("sessionId") == self._selected_agent_id
-                        ),
-                        1,
-                    )
-                    task = sanitize_display_text(str(selected.get("task") or ""))[:120]
-                    model = sanitize_display_text(str(selected.get("model") or ""))[:80]
-                    elapsed = max(
-                        0.0,
-                        (selected.get("completedAt") or time.monotonic())
-                        - float(selected.get("startedMonotonic") or time.monotonic()),
-                    )
-                    content.append(f"Agent {position}/{len(children)} · {task}\n", style="bold")
-                    content.append(f"Model: {model} · {elapsed:.1f}s\n")
-                    tool = selected.get("currentTool")
-                    activity = sanitize_display_text(str(selected.get("activity") or ""))
-                    content.append(f"Status: {sanitize_display_text(str(selected.get('status') or 'unknown'))}")
-                    if tool:
-                        content.append(f" · Tool: {sanitize_display_text(str(tool))}")
-                    if activity:
-                        content.append(f" · {activity}")
-                    content.append("\n\nTimeline\n", style="bold")
+                position = next((index for index, child in enumerate(children, 1)
+                                 if child.get("sessionId") == self._selected_agent_id), 1)
+                elapsed = max(0.0, (selected.get("completedAt") or time.monotonic())
+                              - float(selected.get("startedMonotonic") or time.monotonic()))
+                elapsed = selected.get("elapsedSeconds", elapsed)
+                model = sanitize_display_text(str(selected.get("model") or ""))
+                status = sanitize_display_text(str(selected.get("status") or "unknown"))
+                header.append(f"Agent {position}/{len(children)} · {model} · {status} · {elapsed:.1f}s\n")
+                activity = selected.get("currentTool") or selected.get("activity") or ""
+                if activity == "Thinking":
+                    activity = f"{_THINKING_FRAMES[int(time.monotonic() * 5) % len(_THINKING_FRAMES)]} Thinking…"
+                header.append(f"Activity: {sanitize_display_text(str(activity))}\n")
+
+                if self._agent_page is None:
+                    self._request_agent_page()
+                page = self._agent_page
+                mode = "live" if self._agent_follow else "paused — End returns live"
+                content.append(f"History · {mode}\n", style="bold")
+                if page is not None:
+                    if not page.get("durable"):
+                        content.append("[temporary history; available only during this session]\n", style="dim")
+
+                    for entry in page.get("entries", []):
+                        self._append_agent_entry(content, entry)
+                    if page.get("hasMore"):
+                        content.append("\n[PgDn: more history]\n", style="dim")
+                else:
+                    # Legacy/test adapters may only expose the bounded snapshot.
                     if selected.get("timelineTruncated") or selected.get("previewTruncated"):
-                        content.append("[earlier preview text truncated]\n")
-                    timeline = [item for item in selected.get("timeline", []) if isinstance(item, dict)]
-                    has_response = any(item.get("kind") == "response" and item.get("text") for item in timeline)
-                    if not has_response:
-                        # Tool blocks below still make current activity clear;
-                        # avoid implying the child has done nothing.
-                        content.append("[no visible response text]\n")
-                    for item in timeline:
+                        content.append("[earlier preview text truncated]\n", style=self._theme.warn)
+                    for item in selected.get("timeline", []):
                         if item.get("kind") == "response":
-                            text = sanitize_display_text(str(item.get("text") or ""))
-                            if text:
-                                content.append(text)
-                                if not text.endswith("\n"):
-                                    content.append("\n")
-                            continue
-                        if item.get("kind") != "tool":
-                            continue
-                        name = sanitize_display_text(str(item.get("tool") or "tool"))
-                        running = item.get("state") == "running"
-                        badge = "○" if running else ("✓" if item.get("ok") else "×")
-                        elapsed = _format_elapsed_ms(item.get("elapsedMs"))
-                        timeout = item.get("effectiveTimeout")
-                        timeout_text = (
-                            f" (timeout {int(timeout)}s)" if isinstance(timeout, (int, float)) and timeout > 0 else ""
-                        )
-                        content.append(
-                            f"Tool: {badge} {name}"
-                            + (timeout_text if running else "")
-                            + (f" · {elapsed}" if elapsed else "")
-                            + "\n"
-                        )
-                        args = sanitize_display_text(str(item.get("args") or ""))
-                        if args:
-                            content.append(f"Arguments: {args}\n")
-                        result = sanitize_display_text(str(item.get("output") or ""))
-                        if result:
-                            content.append("Result:\n" if item.get("ok") else "Error:\n")
-                            content.append(result)
-                            content.append("\n")
+                            self._append_agent_entry(content, item)
+                        elif item.get("kind") == "tool":
+                            running = item.get("state") == "running"
+                            badge = "○" if running else ("✓" if item.get("ok") else "×")
+                            elapsed_ms = _format_elapsed_ms(item.get("elapsedMs"))
+                            text = f"Tool: {badge} {item.get('tool') or 'tool'}"
+                            if elapsed_ms:
+                                text += f" · {elapsed_ms}"
+                            if item.get("args"):
+                                text += "\nArguments: " + str(item["args"])
+                            if item.get("output"):
+                                text += ("\nResult:\n" if item.get("ok") else "\nError:\n") + str(item["output"])
+                            self._append_agent_entry(content, {"kind": "tool", "text": text})
+            footer = "←/→: agent · ↑/↓: scroll\nHome/End · PgUp/PgDn · N/P · Esc: close"
             try:
-                self.query_one("#agents_help", Static).update(help_text)
+                self.query_one("#agents_help", Static).update(header)
                 self.query_one("#agents_content", Static).update(content)
+                self.query_one("#agents_footer", Static).update(Text(footer, style="dim"))
             except Exception:
                 pass
+
+        def _append_agent_entry(self, content: Text, entry: dict[str, Any]) -> None:
+            kind = str(entry.get("kind") or "event")
+            text = sanitize_display_text(str(entry.get("text") or ""))
+            if not text:
+                return
+            labels = {"response": "Response", "tool": "Operation", "result": "Tool result", "lifecycle": "Status", "prompt": "Task prompt", "thinking": "Thinking"}
+            styles = {"response": f"bold {self._theme.assistant}", "tool": f"bold {self._theme.tool}",
+                      "result": f"bold {self._theme.tool}", "lifecycle": f"bold {self._theme.info}",
+                      "prompt": f"bold {self._theme.user}", "thinking": f"italic {self._theme.info}"}
+            content.append("\n── " + labels.get(kind, "Event") + " ──\n", style=styles.get(kind, "bold"))
+            if kind == "prompt" and not entry.get("complete", True):
+                content.append("[Only a saved task summary is available for this older run.]\n", style=self._theme.warn)
+            lines = text.splitlines(keepends=True)
+            for index, line in enumerate(lines):
+                if kind in {"tool", "result"} and index == 0:
+                    content.append(line, style=f"bold {self._theme.error}" if "×" in line else f"bold {self._theme.tool}")
+                else:
+                    content.append(line)
+            if not text.endswith("\n"):
+                content.append("\n")
 
         def _copy_selected_stream_text(self, text: str) -> bool:
             """Copy an already-snapshotted selection exactly once."""

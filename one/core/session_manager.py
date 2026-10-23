@@ -911,9 +911,13 @@ class SessionManager:
             raise ValueError("Session path is outside the managed session directory")
         if not candidate.exists() or not candidate.is_file():
             raise FileNotFoundError("Session no longer exists")
+        history = candidate.with_suffix(candidate.suffix + ".agents")
+        if history.is_symlink() or (history.exists() and not history.is_file()):
+            raise ValueError("Invalid subagent history sidecar")
         evidence = candidate.with_suffix(candidate.suffix + ".evidence")
         if evidence.exists():
             if not evidence.is_file() or evidence.parent != directory:
                 raise ValueError("Invalid session evidence sidecar")
             evidence.unlink()
+        history.unlink(missing_ok=True)
         candidate.unlink()

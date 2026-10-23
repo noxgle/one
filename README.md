@@ -166,14 +166,38 @@ isolation from blocked runtime I/O, but threads still share the Python GIL and
 do not provide a security sandbox or an unconditional latency guarantee.
 
 `/agents` opens a read-only monitor for direct child agents of the current
-session only. One frame shows the selected child's header and bounded live response/tool
-timeline. Each tool call is one row that changes from running to completed and includes a
-safe, redacted operation summary (for example a bash command or read options), plus safe
-result/error text only while the existing details
-toggle is enabled; it does not switch sessions or provide execution controls. Click an
-application-generated inline **[view]** link beside a `spawn_subagent` tool call to open the
-same monitor with that child selected. `/subagents on|off` remains only the
-enable/disable control for subagent tools.
+session only. The inspector fills the terminal, with a fixed status header and
+keyboard-help footer. It opens at the beginning of one timeline: the complete,
+redacted task prompt followed by recorded work, without a Tab switch. Long prompts
+and results are split into bounded pages with wrapped lines and preserved indentation.
+Older journals explicitly identify summary-only prompts. Full-prompt recording
+applies to newly started children. Home loads the beginning; End selects recent
+activity and enables live following. PageUp/PageDown browse pages; Up/Down scroll
+within a page and pause following. Operation blocks update in place from running
+to success/failure, retaining their arguments and detail-gated results. Paused pages
+refresh operation states without jumping to the tail. Block colors use the current
+theme. Provider-emitted display Thinking deltas appear in a Thinking block and
+activity indicator; no hidden reasoning is inferred when the provider supplies none.
+Left/Right select a child; N/P browse pages of 20 children, including older
+completed runs. Large bodies are split into bounded pages rather than silently
+removed from the journal. The window is read-only and never switches sessions.
+
+Saved parent sessions keep a private `.jsonl.agents` SQLite sidecar, separate from
+provider context. Resume restores recorded runs; unfinished runs are marked
+interrupted. Deleting a parent removes its journal. Ephemeral sessions use a private
+temporary journal that is removed when the session is disposed. Old sessions do
+not gain retrospective history, and forks start a new journal. Only visible,
+sanitized display data is recorded, including provider-emitted Thinking text but
+not undisclosed model reasoning, raw tool arguments,
+images, or complete evidence payloads. Result text is recorded only while details
+are enabled and is hidden from history pages when details are off. This is a
+recorded display history, not an unlimited raw tool-output archive; existing
+result projections and redaction still apply. Journals grow on disk with recorded
+work, while UI pages and preview caches stay bounded.
+
+Click an application-generated inline **[view]** link beside a `spawn_subagent`
+tool call to open the same monitor with that child selected. `/subagents on|off`
+remains only the enable/disable control for subagent tools.
 
 Completed durable tool results can also have an application-generated **[view]**
 action. It opens a bounded, sanitized page viewer; PageUp/PageDown retrieves the
