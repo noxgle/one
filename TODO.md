@@ -3,7 +3,39 @@
 ## Cel
 Udostępnić agentowi pobieranie wskazanego URL HTTP(S) bez dostępu do `bash`: GET, domyślna ekstrakcja HTML do Markdown, JSON i tekst bez HTML-cleaningu oraz jawne tryby `raw` i `text`. Wynik ma mieć ograniczony podgląd i możliwość odczytu całej dopuszczonej treści przez istniejące `evidence_read`.
 
-**Status:** plan implementacji; żadne poniższe zadanie nie zostało wykonane ani zweryfikowane testami w ramach planowania.
+**Status:** MVP zaimplementowane na `feat/web-connect`; T010–T011 pozostają poza zakresem. Szczegóły wykonania i weryfikacji poniżej. Opis stanu repozytorium w następnej sekcji jest historyczną podstawą planu.
+
+## Aktualizacja dostępności (2026-10-24)
+
+Na jawne zlecenie użytkownika `web_connect` włączono w Default i Readonly
+(wersja 0.1.103). Ta decyzja zastępuje konserwatywne ADR-005 oraz historyczne
+warunki o niewłączaniu domyślnym/readonly poniżej. Pułapy rodzica/CLI i zapisane
+snapshoty sesji nadal obowiązują; brak sandboxa i ACL IP pozostaje bez zmian.
+
+## Wykonanie MVP (2026-10-24)
+
+- Dodano `one/tools/web_connect.py`, konfigurację `webConnect`, rejestrację i dispatch,
+  trwałe evidence, ograniczone podglądy i redakcję URL w wynikach/zdarzeniach runtime.
+- Testy HTTP korzystają wyłącznie z `httpx.MockTransport` i kontrolowanych strumieni.
+  `tests/test_web_connect_runtime.py` sprawdza również prawdziwy adapter → mock HTTP →
+  evidence → odczyt bez ponownego GET oraz granicę niezaufanej treści.
+- Dokumentacja kontraktu i decyzji o błędach: sekcja „Native HTTP retrieval” w README.
+  Kompresja: gzip/deflate, obcięte strumienie i dodatkowe człony są odrzucane.
+  Proxy środowiskowe ignorowane; cookies czyszczone między redirectami; brak ACL IP.
+- Zależności sprawdzone lokalnie na Pythonie 3.12: beautifulsoup4 4.15.0 (MIT),
+  lxml 6.1.3 (BSD-3-Clause), markdownify 1.2.3 (MIT, plik LICENSE dystrybucji).
+  Fixture dokumentacji zachowuje tabelę, linki i kod; ranking treści usuwa szum.
+  Nie wykonywano porównania ze specjalizowanym ekstraktorem ani macierzy najstarszych
+  dopuszczonych wersji bibliotek: ta część T001 pozostaje otwarta, nie blokuje MVP.
+- Wersja 0.1.102, wpis Unreleased, README/SECURITY oraz snapshoty TUI zaktualizowane.
+  Snapshoty po normalizacji nowej wersji są identyczne z bazą.
+- Pierwsza pełna weryfikacja: 2257 passed, 2 skipped, 2 failed. Poprawiono pozycję
+  nagłówka atrybucji nowego modułu. Drugi błąd był zastanym nieaktualnym SHA skilla
+  `one`: SHA pliku z HEAD potwierdzono i zsynchronizowano test bez zmiany skilla.
+- Końcowa pełna weryfikacja: **2261 passed, 2 skipped** (592 s); testy uruchomione
+  z tymczasowym `ONE_CODING_AGENT_DIR`. Ruff i `git diff --check` bez błędów.
+- Fazy po MVP wymagają odrębnego projektu bezpieczeństwa; nie dodano auth/cache ani
+  metod modyfikujących. Nie tworzono commitów, tagów ani publikacji.
 
 ## Podstawa i stan repozytorium
 - Dokument źródłowy: `tmp/tool_web_connect_minimal.md`. To propozycja, nie dokumentacja działającego narzędzia.
@@ -58,7 +90,7 @@ Szacunki jakościowe: S — mały, M — średni, L — duży zakres; nie są de
   - **Akceptacja:** wybrany stos ma kompatybilne wersje i licencje; każda wymieniona niejednoznaczność ma udokumentowane zachowanie i scenariusz testowy; brak zmiany zakresu ACL IP.
   - **Weryfikacja:** przegląd dokumentacji/licencji zależności i lokalna próba ekstrakcji dokumentacji, artykułu, tabeli i kodu bez żywego HTTP.
 
-- [ ] **T002 — dodać i walidować konfigurację `webConnect`**
+- [x] **T002 — dodać i walidować konfigurację `webConnect`**
   - **Zmiany:** dodać domyślne wartości, odczyt i walidację typów/zakresów w istniejącym modelu ustawień; odrzucać m.in. bool zamiast liczby, wartości niedodatnie, nieskończone, ujemną liczbę redirectów. Zero redirectów jest poprawną konfiguracją. Zachować nakładanie ustawień globalnych/projektowych i działanie starej konfiguracji bez sekcji.
   - **Pliki:** `one/core/settings_manager.py`, `tests/test_settings.py`.
   - **Zależności:** T001.
@@ -68,14 +100,14 @@ Szacunki jakościowe: S — mały, M — średni, L — duży zakres; nie są de
 ### Faza 2 — ograniczony klient HTTP i parsery
 **Rezultat:** niezależny od sesji, testowalny asynchroniczny tool. **Warunki:** T001–T002. **Nakład / pewność:** L / średnia.
 
-- [ ] **T003 — zaimplementować GET i limity transportu**
+- [x] **T003 — zaimplementować GET i limity transportu**
   - **Zmiany:** asynchroniczny klient z wstrzykiwalnym transportem, walidacja URL/argumentów, standardowy TLS, przekierowania względne i limit ich liczby, strumieniowy limit bajtów przesłanych i rozpakowanych oraz całkowity deadline. Nie dziedziczyć cookies ani poświadczeń API z innych klientów ONE; jawnie ustalić obsługę proxy środowiskowego. Czyścić zasoby po błędzie i anulowaniu. Nie dodawać blokad IP.
   - **Pliki:** `one/tools/web_connect.py` (nowy), `tests/test_web_connect.py` (nowy).
   - **Zależności:** T001, T002.
   - **Akceptacja:** wyłącznie GET HTTP(S); brak obejścia limitów przez chunking, kompresję lub redirect; brak żądań po przekroczeniu deadline; błędy transportu nie ujawniają poświadczeń. Redirect do innego originu nie przenosi Authorization/Cookie, także po późniejszym dodaniu auth.
   - **Weryfikacja:** testy z `httpx.MockTransport`/kontrolowanym strumieniem: schematy, URL z userinfo, port, localhost i prywatny adres bez kontaktu z siecią, pętla redirectów, downgrade/protokół, timeout, anulowanie, kompresja i brak Content-Length.
 
-- [ ] **T004 — dodać parser HTML/JSON/tekst i trzy tryby**
+- [x] **T004 — dodać parser HTML/JSON/tekst i trzy tryby**
   - **Zmiany:** parsowanie typu i kodowania; ranking kandydatów głównej treści zamiast pierwszego dopasowania DOM, fallback do treści dokumentu; usuwanie skryptów, stylów, nawigacji, reklam i cookie-bannerów bez usuwania kodu/tabel. Markdown z nagłówkami, linkami i blokami kodu; linki względne rozwiązywać względem końcowego URL, nie emitować wykonywalnych schematów. Nie wykonywać ani nie pobierać zasobów HTML. `raw` omija ekstrakcję, a JSON nigdy nie trafia do HTML-cleaningu.
   - **Pliki:** `one/tools/web_connect.py` (nowy), `pyproject.toml`, `tests/test_web_connect.py` (nowy).
   - **Zależności:** T001, T003.
@@ -85,21 +117,21 @@ Szacunki jakościowe: S — mały, M — średni, L — duży zakres; nie są de
 ### Faza 3 — integracja runtime, evidence i uprawnienia
 **Rezultat:** działający tool dostępny jawnie, bez rozszerzenia uprawnień. **Warunki:** faza 2. **Nakład / pewność:** L / średnia.
 
-- [ ] **T005 — zarejestrować minimalny schemat i asynchroniczny dispatch**
+- [x] **T005 — zarejestrować minimalny schemat i asynchroniczny dispatch**
   - **Zmiany:** dodać `ToolDef`, opis, ścisły JSON Schema (`url` wymagany, `mode` opcjonalne, brak dodatkowych pól), promptowy schemat i gałąź dispatch z ustawieniami runtime. Walidować argumenty także przy bezpośrednim wykonaniu. Zachować istniejące kontrole polityki, zatwierdzenia i kontrakt zdarzeń.
   - **Pliki:** `one/tools/index.py`, `one/resources/resource_loader.py`, `one/core/agent_session.py`, `tests/test_agent_tool_calls.py`, `tests/test_resource_loader.py`, `tests/test_tools.py`.
   - **Zależności:** T002, T003, T004.
   - **Akceptacja:** rejestr, prompt i wykonanie zgadzają się; `method`, `body` i parametry limitów są odrzucane; wyłączony tool nie otwiera połączenia; brak zmian domyślnej listy narzędzi i zbioru readonly; timeout/anulowanie nie blokują pętli sesji.
   - **Weryfikacja:** testy schematu, promptu, bezpośredniego dispatch i zdarzeń; `.venv/bin/python -m pytest -q tests/test_agent_tool_calls.py tests/test_resource_loader.py tests/test_tools.py tests/test_agent_timeouts_limits.py tests/test_event_snapshots.py`.
 
-- [ ] **T006 — połączyć ograniczony podgląd z trwałym evidence**
+- [x] **T006 — połączyć ograniczony podgląd z trwałym evidence**
   - **Zmiany:** przeprowadzić pełny dopuszczony wynik przez istniejący zapis evidence przed cięciem podglądu; egzekwować `maxOutputChars` niezależnie od ogólnego limitu runtime bez podwójnego magazynu. Zwracać rzeczywiste `evidenceId` i instrukcję kontynuacji przez `nextOffset`; rozróżniać truncation podglądu, odrzucenie transferu i niedostępny magazyn. Zredagować wrażliwe dane w URL/diagnostyce przed eventami i persistencją; nie obiecywać automatycznego wykrywania dowolnych sekretów w treści dokumentu.
   - **Pliki:** `one/core/agent_session.py`, `one/tools/web_connect.py` (nowy), `tests/test_durable_evidence.py`, `tests/test_tool_output_pruning.py`; `one/core/session_manager.py` tylko jeśli testy wykażą potrzebę rozszerzenia istniejącego kontraktu.
   - **Zależności:** T005.
   - **Akceptacja:** długa odpowiedź daje mały podgląd, a kolejne `evidence_read` odtwarzają całą dopuszczoną treść bez ponownego HTTP, także po wznowieniu sesji; brak wymyślonego ID przy awarii zapisu; odczyt evidence nadal jest ograniczony i nie tworzy rekurencyjnie dowodów; granice sesji zachowane.
   - **Weryfikacja:** test trwałej sesji w katalogu tymczasowym, rekonstrukcji fragmentów, awarii zapisu i działania bez trwałości; `.venv/bin/python -m pytest -q tests/test_durable_evidence.py tests/test_tool_output_pruning.py`.
 
-- [ ] **T007 — sprawdzić pułapy uprawnień i granicę niezaufanej treści**
+- [x] **T007 — sprawdzić pułapy uprawnień i granicę niezaufanej treści**
   - **Zmiany:** testy sesji z jawnym `web_connect` i bez `bash`, bez rozszerzania reserved readonly; rodzic i CLI ograniczają żądane narzędzia dziecka, również przy presetach i odświeżeniu MCP. Sprawdzić istniejące blokady ręcznej powłoki i hooków rozszerzeń; nie przedstawiać listy narzędzi jako sandboxa procesu. Treść strony i evidence ma zachować istniejący wrapper niezaufanych wyników.
   - **Pliki:** `tests/test_preset_runtime.py`, `tests/test_presets.py`, `tests/test_preset_sessions.py`, `tests/test_subagent_presets.py`, `tests/test_manual_command_policy.py`, `tests/test_system_prompt.py`; `one/core/tool_policy.py` i mechanizmy presetów tylko przy udowodnionej regresji.
   - **Zależności:** T005, T006.
@@ -109,14 +141,14 @@ Szacunki jakościowe: S — mały, M — średni, L — duży zakres; nie są de
 ### Faza 4 — akceptacja i przygotowanie wydania MVP
 **Rezultat:** udokumentowane, zweryfikowane MVP gotowe do przeglądu, bez automatycznej publikacji. **Warunki:** T003–T007. **Nakład / pewność:** M / wysoka.
 
-- [ ] **T008 — uzupełnić macierz regresji i scenariusz end-to-end**
+- [x] **T008 — uzupełnić macierz regresji i scenariusz end-to-end**
   - **Zmiany:** zintegrować fixture'y HTML/JSON/raw, limitów, nie-2xx, złego JSON, kompresji i powolnego serwera; scenariusz agent → web_connect → evidence_read → wynik bez bash. Sprawdzić, że transport nigdy nie dotyka prawdziwej sieci i brak sekretów w błędach/metadanych. Nowy moduł uruchamiać jawnie, bo helper ma stałe listy zestawów.
   - **Pliki:** `tests/test_web_connect.py` (nowy), `tests/test_headless_e2e.py`, `tests/test_durable_evidence.py`, `scripts/test.sh` tylko jeśli uzasadnione dodanie modułu do zestawu tools.
   - **Zależności:** T003, T004, T005, T006, T007.
   - **Akceptacja:** scenariusze akceptacyjne ze specyfikacji są pokryte; wszystkie async testy mają jawny marker; powtórny odczyt dowodu nie zwiększa liczby żądań HTTP; wyniki nie zależą od sieci hosta.
   - **Weryfikacja:** `.venv/bin/python -m pytest -q tests/test_web_connect.py tests/test_headless_e2e.py tests/test_durable_evidence.py`; następnie pełna bramka opisana poniżej.
 
-- [ ] **T009 — opisać użycie, ryzyko i przygotować zmianę wersji**
+- [x] **T009 — opisać użycie, ryzyko i przygotować zmianę wersji**
   - **Zmiany:** opisać jawne włączenie toola bez bash, dwa argumenty, ustawienia, ograniczenia raw, evidence i błędy. Wyraźnie ostrzec o dostępie do lokalnej/prywatnej sieci, możliwych skutkach GET i braku sandboxa. Dodać wpis `Unreleased`, podnieść `one/config.py:VERSION` zgodnie z polityką projektu i odświeżyć snapshoty TUI. Nie zmieniać domyślnej polityki przy tej okazji.
   - **Pliki:** `README.md`, `SECURITY.md`, `docs/PRESETS.md` (jeśli potrzebny przykład), `CHANGELOG.md`, `one/config.py`, `tests/snapshots/tui/`, `tests/test_tui_snapshots.py`.
   - **Zależności:** T008.
@@ -168,10 +200,10 @@ Bramka MVP po T009, w kolejności:
 - **Domyślne włączenie:** przyjęto opt-in; rozszerzenie `DEFAULT_TOOL_NAMES` albo `READONLY_TOOLS` wymaga odrębnej decyzji i analizy wpływu na `is_readonly`, ręczną powłokę oraz hooki.
 
 ## Kryteria akceptacji MVP
-- [ ] Tool działa w sesji bez bash, z dokładnie dwoma polami interfejsu i jednym wymaganym argumentem.
-- [ ] Dokumentacja HTML daje Markdown z kodem, linkami, nagłówkami i tabelami; artykuł jest oczyszczony; JSON nie jest modyfikowany przez ekstraktor; raw zachowuje źródło tekstowe.
-- [ ] Timeouty, redirecty, wielkość odpowiedzi i ekspansja kompresji są ograniczone oraz przetestowane bez rzeczywistej sieci.
-- [ ] Długi wynik ma ograniczony podgląd i prawdziwe, trwałe evidence odczytywane fragmentami bez kolejnego HTTP; awaria zapisu nie tworzy pozornej dostępności.
-- [ ] Uprawnienia rodzica/CLI/presetu są egzekwowane przy wykonaniu; brak automatycznego rozszerzenia readonly i narzędzi domyślnych.
-- [ ] Dokumentacja jasno opisuje brak ACL IP i sandboxa, dostępność prywatnych usług oraz ryzyko efektów ubocznych GET.
+- [x] Tool działa w sesji bez bash, z dokładnie dwoma polami interfejsu i jednym wymaganym argumentem.
+- [x] Dokumentacja HTML daje Markdown z kodem, linkami, nagłówkami i tabelami; artykuł jest oczyszczony; JSON nie jest modyfikowany przez ekstraktor; raw zachowuje źródło tekstowe.
+- [x] Timeouty, redirecty, wielkość odpowiedzi i ekspansja kompresji są ograniczone oraz przetestowane bez rzeczywistej sieci.
+- [x] Długi wynik ma ograniczony podgląd i prawdziwe, trwałe evidence odczytywane fragmentami bez kolejnego HTTP; awaria zapisu nie tworzy pozornej dostępności.
+- [x] Uprawnienia rodzica/CLI/presetu są egzekwowane przy wykonaniu; brak automatycznego rozszerzenia readonly i narzędzi domyślnych.
+- [x] Dokumentacja jasno opisuje brak ACL IP i sandboxa, dostępność prywatnych usług oraz ryzyko efektów ubocznych GET.
 - [ ] T001–T009 zakończone na podstawie dowodów wykonania; pełne testy, lint, kontrola diffów i wymagane snapshoty przechodzą. T010–T011 nie są warunkiem przyjęcia MVP.

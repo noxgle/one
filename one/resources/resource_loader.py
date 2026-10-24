@@ -231,6 +231,7 @@ TOOL_ARG_SCHEMAS: dict[str, str] = {
     "ask_user": "{question, timeoutSec?}  # for necessary preferences, materially ambiguous requirements, or unapproved destructive/security/account decisions; waits for one human answer, then continue the same task",
     "apply_patch": "{patchText}  # non-empty string in OpenCode patch format, NOT ---/+++ unified diff. Exact Update example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch. For updates, prefix unchanged context lines with a space; read the current file first. Matches are exact; ambiguous hunks fail and there is no fuzzy matching. On mismatch re-read and rebuild the patch. Supports Add/Update/Delete/Move; Add/Move targets must be absent; conflicts and symlinks rejected; staged backup/rollback-protected",
     "read_image": "{path}  # read an image file and return its content as a base64-encoded blob with metadata",
+    "web_connect": "{url, mode?}  # GET one HTTP(S) URL; mode is auto, raw, or text",
 }
 
 # Injected via replace() (not str.format) because the text contains literal JSON braces.

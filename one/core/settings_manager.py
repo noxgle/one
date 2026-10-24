@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -51,6 +52,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "shellCommandPrefix": None,
     "tools": {"maxSteps": 100, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit", "plan", "apply_patch"]},
     "bash": {"showOutput": False},
+    "webConnect": {
+        "timeoutSec": 15,
+        "maxResponseBytes": 2_000_000,
+        "maxOutputChars": 12_000,
+        "maxRedirects": 5,
+        "extractMainContent": True,
+        "preserveLinks": True,
+        "preserveCodeBlocks": True,
+    },
     "subagents": {
         "enabled": True,
         "maxConcurrent": 2,
@@ -468,6 +478,43 @@ class SettingsManager:
     def get_bash_show_output(self) -> bool:
         bash = self.merged().get("bash", {})
         return bool(bash.get("showOutput", False)) if isinstance(bash, dict) else False
+
+    def get_web_connect_settings(self) -> dict[str, int | float | bool]:
+        """Return validated limits for the GET-only ``web_connect`` tool."""
+        raw = self.merged().get("webConnect", {})
+        if not isinstance(raw, dict):
+            raise ValueError("webConnect settings must be an object")
+
+        def positive_number(name: str) -> int | float:
+            value = raw.get(name, DEFAULT_SETTINGS["webConnect"][name])
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"webConnect.{name} must be a positive finite number")
+            return value
+
+        def positive_integer(name: str) -> int:
+            value = raw.get(name, DEFAULT_SETTINGS["webConnect"][name])
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"webConnect.{name} must be a positive integer")
+            return value
+
+        def boolean(name: str) -> bool:
+            value = raw.get(name, DEFAULT_SETTINGS["webConnect"][name])
+            if not isinstance(value, bool):
+                raise ValueError(f"webConnect.{name} must be a boolean")
+            return value
+
+        redirects = raw.get("maxRedirects", DEFAULT_SETTINGS["webConnect"]["maxRedirects"])
+        if isinstance(redirects, bool) or not isinstance(redirects, int) or redirects < 0:
+            raise ValueError("webConnect.maxRedirects must be a non-negative integer")
+        return {
+            "timeoutSec": positive_number("timeoutSec"),
+            "maxResponseBytes": positive_integer("maxResponseBytes"),
+            "maxOutputChars": positive_integer("maxOutputChars"),
+            "maxRedirects": redirects,
+            "extractMainContent": boolean("extractMainContent"),
+            "preserveLinks": boolean("preserveLinks"),
+            "preserveCodeBlocks": boolean("preserveCodeBlocks"),
+        }
 
     def set_bash_show_output(self, enabled: bool, persist: bool = True) -> None:
         if persist:

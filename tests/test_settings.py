@@ -519,3 +519,32 @@ def test_get_tool_max_steps_zero_means_unlimited() -> None:
     """maxSteps=0 is valid and means unlimited."""
     settings = SettingsManager.in_memory(initial={"tools": {"maxSteps": 0}})
     assert settings.get_tool_max_steps() == 0
+
+
+def test_web_connect_defaults_and_project_merge_are_validated() -> None:
+    settings = SettingsManager.in_memory({"webConnect": {"maxRedirects": 0, "maxOutputChars": 7}})
+    assert settings.get_web_connect_settings() == {
+        "timeoutSec": 15,
+        "maxResponseBytes": 2_000_000,
+        "maxOutputChars": 7,
+        "maxRedirects": 0,
+        "extractMainContent": True,
+        "preserveLinks": True,
+        "preserveCodeBlocks": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ({"timeoutSec": True}, "timeoutSec"),
+        ({"timeoutSec": float("inf")}, "timeoutSec"),
+        ({"maxResponseBytes": 0}, "maxResponseBytes"),
+        ({"maxOutputChars": False}, "maxOutputChars"),
+        ({"maxRedirects": -1}, "maxRedirects"),
+        ({"extractMainContent": 1}, "extractMainContent"),
+    ],
+)
+def test_web_connect_malformed_settings_fail_closed(value: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        SettingsManager.in_memory({"webConnect": value}).get_web_connect_settings()

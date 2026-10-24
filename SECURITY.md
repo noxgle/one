@@ -53,6 +53,26 @@ exclusive temp files and fsync).
 - **Cooperation mode** is an **approval gate only**, not a sandbox. Tools
   still execute with full permissions.
 
+### Native HTTP retrieval
+
+`web_connect` is a GET-only capability available in Default and Readonly, not a network
+sandbox or SSRF filter. It intentionally permits localhost, private addresses
+and infrastructure metadata endpoints accessible to the ONE process. GET can
+have side effects. Do not enable it for sessions that must not access the network;
+use process/container/network isolation for enforcement outside the application.
+Exclude it with an explicit tool allowlist when network retrieval is not wanted.
+
+Requests use a dedicated client without provider credentials or environment
+proxies, with TLS verification, validated redirects and bounded transfer/output.
+Response cookies are cleared between redirect hops. Only HTTP(S) URLs without
+userinfo are accepted. Tool metadata and runtime argument diagnostics redact
+queries and credentials; arbitrary secrets embedded in documents, URL paths,
+original user/model messages, or raw source cannot be automatically identified.
+Full permitted content may be retained in private evidence sidecars and passed
+to the model through `evidence_read`. All retrieved content remains untrusted;
+HTML parsing does not execute scripts or fetch subresources. These protections
+do not guarantee model resistance to every prompt injection.
+
 ### Provider data transmission
 
 Provider API keys and OAuth tokens are sent to the respective provider

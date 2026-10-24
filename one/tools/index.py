@@ -18,6 +18,7 @@ from .plan import plan_tool
 from .read import read_tool
 from .read_image import read_image_tool
 from .spawn_subagent import spawn_subagent_tool
+from .web_connect import web_connect_tool
 from .write import write_tool
 
 ToolFunc = Callable[..., Any]
@@ -40,7 +41,7 @@ def native_tool_definitions(names: list[str]) -> list[dict[str, Any]]:
 
 
 DEFAULT_TOOL_NAMES: list[str] = [
-    "read", "read_image", "bash", "edit", "write", "grep", "find", "ls", "evidence_read", "finish", "plan", "spawn_subagent", "ask_user", "apply_patch",
+    "read", "read_image", "bash", "edit", "write", "grep", "find", "ls", "web_connect", "evidence_read", "finish", "plan", "spawn_subagent", "ask_user", "apply_patch",
 ]
 
 all_tools: dict[str, ToolDef] = {
@@ -72,6 +73,12 @@ all_tools: dict[str, ToolDef] = {
         spawn_subagent_tool, {"type":"object","properties":{"task":{"type":"string","minLength":1},"tasks":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"model":{"type":"string","minLength":1},"tools":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"preset":{"type":"string","minLength":1},"timeout":{"type":"integer","minimum":0}},"additionalProperties":False,"oneOf":[{"required":["task"]},{"required":["tasks"]}]},
     ),
     "apply_patch": ToolDef("apply_patch", "Apply an OpenCode patch-format patch, NOT a standard ---/+++ unified diff. patchText must be a non-empty string, for example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch. For updates, prefix unchanged context lines with a space; read the current file first. Matches are exact and ambiguous hunks fail (no fuzzy matching); on mismatch read again and rebuild the patch. Supports Add/Update/Delete/Move; staged, backup/rollback-protected; Add/Move targets must be absent; conflicts and symlinks rejected.", apply_patch_tool, {"type":"object","properties":{"patchText":{"type":"string","minLength":1}},"required":["patchText"],"additionalProperties":False}),
+    "web_connect": ToolDef(
+        "web_connect",
+        "Fetch one HTTP(S) URL with GET. Args: required 'url'; optional mode 'auto', 'raw', or 'text'.",
+        web_connect_tool,
+        {"type": "object", "properties": {"url": {"type": "string", "minLength": 1}, "mode": {"type": "string", "enum": ["auto", "raw", "text"]}}, "required": ["url"], "additionalProperties": False},
+    ),
 }
 
 coding_tools = [all_tools["read"], all_tools["read_image"], all_tools["bash"], all_tools["edit"], all_tools["write"], all_tools["apply_patch"]]

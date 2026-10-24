@@ -48,12 +48,16 @@ replacement role only, not a task template.
 
 `default` and `readonly` are packaged reserved IDs. Default retains the normal
 dynamic prompt, project guidance, skills, and current model settings. Readonly
-allows inspection, evidence reads, completion, and cooperation-gated questions;
+allows inspection, HTTP(S) GET via `web_connect`, evidence reads, completion,
+and cooperation-gated questions;
 it denies shell and editing tools at dispatch time, including refreshed MCP tools.
 It is an application policy, not an OS sandbox and does not confine extensions
 that have already run. While active it denies app-mediated manual shell commands
 and does not bind or invoke extension hooks; normal session persistence remains
-available.
+available. Both Default and Readonly include `web_connect`. GET may have side
+effects and access localhost/private services; Readonly is not a network sandbox.
+Existing saved effective preset snapshots are not expanded automatically; reapply
+the preset to adopt the new tool list (subject to parent/CLI ceilings).
 
 Use `one --preset readonly ...`, or `/preset` to list and `/preset readonly` to
 apply an idle session preset in TUI or interactive mode. RPC exposes

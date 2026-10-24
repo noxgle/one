@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from one.core.activity_watchdog import ActivityWatchdog
 from one.core.context_budget import (
@@ -97,6 +98,62 @@ def _sanitise_read_image_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(args, dict):
         out["args"] = _sanitise_read_image_args(args)
     return out
+
+
+def _sanitise_web_connect_url(value: object) -> object:
+    """Redact credentials, queries, and fragments without raising on bad URLs."""
+    if not isinstance(value, str):
+        return value
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        port = parts.port  # validates malformed ports before it can leak
+    except ValueError:
+        return "<invalid url>"
+    if not host:
+        return "<invalid url>"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host + (f":{port}" if port is not None else "")
+    return urlunsplit((parts.scheme, netloc, parts.path, "<redacted>" if parts.query else "", ""))
+
+
+def _sanitise_web_connect_args(args: dict[str, Any]) -> dict[str, Any]:
+    out = dict(args)
+    if "url" in out:
+        out["url"] = _sanitise_web_connect_url(out["url"])
+    return out
+
+
+def _sanitise_web_connect_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    args = out.get("args")
+    if isinstance(args, dict):
+        out["args"] = _sanitise_web_connect_args(args)
+    return out
+
+
+def _sanitise_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if tool_name == "read_image":
+        return _sanitise_read_image_args(args)
+    if tool_name == "web_connect":
+        return _sanitise_web_connect_args(args)
+    return dict(args)
+
+
+def _sanitise_runtime_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Make a runtime-facing payload safe without changing durable evidence."""
+    tool_name = str(payload.get("tool") or "")
+    if tool_name != "web_connect":
+        return payload
+    safe = dict(payload)
+    args = safe.get("args")
+    if isinstance(args, dict):
+        safe["args"] = _sanitise_web_connect_args(args)
+    # web_connect retains this only until _store_tool_evidence has persisted it.
+    # Runtime listeners, extension hooks, and callers must never receive it.
+    safe.pop("rawResult", None)
+    return safe
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +252,7 @@ class AgentSession:
         self._policy_ceiling = tool_policy or ToolPolicy()
         self._mcp_manager = mcp_manager
         self._tool_policy = self._policy_ceiling
-        base = list(all_tools.keys()) if tools is None else list(tools)
+        base = list(all_tools) if tools is None else list(tools)
         self._configured_base_tools = tuple(base)
         if preset is not None:
             base, self._tool_policy = self._resolve_preset_tools(preset, base, self._tool_policy)
@@ -1297,7 +1354,7 @@ class AgentSession:
     def _build_tool_result_message_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         args = payload.get("args", {})
         if isinstance(args, dict):
-            args = dict(args)
+            args = _sanitise_tool_args(str(payload.get("tool") or ""), args)
         if payload.get("tool") == "write" and isinstance(args, dict):
             # Write data has already been executed and is available in durable
             # evidence when persistence is enabled. Do not replay an entire
@@ -1447,7 +1504,12 @@ class AgentSession:
     def _store_tool_evidence(self, payload: dict[str, Any]) -> tuple[str | None, str | None]:
         # read_image is the existing path-sensitive contract; apply it before
         # storing both args and raw output so sidecar privacy matches JSONL.
-        safe_payload = _sanitise_read_image_payload(payload) if payload.get("tool") == "read_image" else dict(payload)
+        if payload.get("tool") == "read_image":
+            safe_payload = _sanitise_read_image_payload(payload)
+        elif payload.get("tool") == "web_connect":
+            safe_payload = _sanitise_web_connect_payload(payload)
+        else:
+            safe_payload = dict(payload)
         safe_args = safe_payload.get("args", {})
         raw = safe_payload.get("rawResult", safe_payload)
         return self.session_manager.append_evidence({
@@ -1542,8 +1604,16 @@ class AgentSession:
         if tool_name == "evidence_read":
             return self._read_evidence(args)
 
-        cwd = self.session_manager.cwd
         fn = tool.fn
+        if tool_name == "web_connect":
+            result = await asyncio.wait_for(
+                fn(args, settings=self.settings_manager.get_web_connect_settings()), timeout=effective_timeout
+            )
+            if not isinstance(result, dict):
+                raise RuntimeError("Invalid result from tool: web_connect")
+            return result
+
+        cwd = self.session_manager.cwd
         path_arg = args.get("path") or args.get("file")
         # Safe fallback: when the model passes a `/skill:<name>` or
         # `skill:<name>` path to `read`, return a structured diagnostic
@@ -1788,13 +1858,14 @@ class AgentSession:
                     msg["_nativeToolCallId"] = native_replay_call_id
                 self.messages.append(msg)
                 self.session_manager.append_message(msg)
-                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": args, "reason": reason, "toolCallId": tool_call_id})
-                # Sanitise read_image paths in tool_call_end event.
-                end_result = payload
+                rejected_args = _sanitise_tool_args(tool_name, args)
+                self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": rejected_args, "reason": reason, "toolCallId": tool_call_id})
+                # Keep durable raw output out of runtime events.
+                end_result = _sanitise_runtime_tool_payload(payload)
                 if tool_name == "read_image":
                     end_result = _sanitise_read_image_payload(payload)
                 self._emit({"type": "tool_call_end", "tool": tool_name, "toolCallId": tool_call_id, "ok": False, "result": end_result})
-                return payload
+                return _sanitise_runtime_tool_payload(payload)
         # Rejections are timed as zero; accepted approvals intentionally do not
         # include the human wait. Hooks and all execution handling do.
         self._elapsed_tool_started_at.setdefault(tool_call_id, []).append(self._elapsed_clock())
@@ -1827,21 +1898,20 @@ class AgentSession:
                     msg["_nativeToolCallId"] = native_replay_call_id
                 self.messages.append(msg)
                 self.session_manager.append_message(msg)
-                # Sanitise read_image paths in both rejection events.
-                rej_args = args
+                # Sanitise sensitive arguments in both rejection events.
+                rej_args = _sanitise_tool_args(tool_name, args)
                 if tool_name == "read_image":
                     rej_args = _sanitise_read_image_args(args)
                 self._emit({"type": "tool_approval_rejected", "tool": tool_name, "args": rej_args, "reason": denied, "toolCallId": tool_call_id})
-                end_result = payload
+                end_result = _sanitise_runtime_tool_payload(payload)
                 if tool_name == "read_image":
                     end_result = _sanitise_read_image_payload(payload)
                 self._emit({"type": "tool_call_end", "tool": tool_name, "toolCallId": tool_call_id, "ok": False, "result": end_result})
-                return payload
-        # Sanitise read_image path arguments before emitting events — the
-        # full source path must not appear in tool_call_start / JSONL / logs.
-        emit_args = args
+                return _sanitise_runtime_tool_payload(payload)
+        # Sanitise sensitive runtime-controlled arguments before emitting events.
+        emit_args = _sanitise_tool_args(tool_name, args)
         if tool_name == "read_image":
-            emit_args = dict(args)
+            emit_args = dict(emit_args)
             for key in ("path", "file"):
                 val = emit_args.get(key)
                 if isinstance(val, str):
@@ -1867,19 +1937,37 @@ class AgentSession:
                     text = "".join(x.get("text", "") for x in content if isinstance(x, dict))
                 if not text:
                     text = str(result.get("output", ""))
-                payload: dict[str, Any] = {
-                    "ok": True,
-                    "tool": tool_name,
-                    "args": args,
-                    "result": text,
-                    "outputText": text,
-                    "content": result.get("content"),
-                    "details": result.get("details"),
-                    "exitCode": result.get("exitCode"),
-                    "truncated": result.get("truncated"),
-                    "fullOutputPath": result.get("fullOutputPath"),
-                    "rawResult": result,
-                }
+                if tool_name == "web_connect":
+                    preview = result.get("content")
+                    full_content = result.get("fullContent")
+                    if not isinstance(preview, str) or not isinstance(full_content, str):
+                        raise RuntimeError("Invalid result from tool: web_connect")
+                    payload = {
+                        "ok": True,
+                        "tool": tool_name,
+                        "args": args,
+                        "result": preview,
+                        "outputText": preview,
+                        "details": result.get("details"),
+                        # Evidence retains the one full result under output;
+                        # ordinary context gets only the tool's own preview.
+                        "rawResult": {"output": full_content, "details": result.get("details")},
+                    }
+                    result = {"content": preview, "details": result.get("details")}
+                else:
+                    payload = {
+                        "ok": True,
+                        "tool": tool_name,
+                        "args": args,
+                        "result": text,
+                        "outputText": text,
+                        "content": result.get("content"),
+                        "details": result.get("details"),
+                        "exitCode": result.get("exitCode"),
+                        "truncated": result.get("truncated"),
+                        "fullOutputPath": result.get("fullOutputPath"),
+                        "rawResult": result,
+                    }
                 # Only propagate timedOut/cancelled when the raw tool result actually has them.
                 if "timedOut" in result:
                     payload["timedOut"] = result.get("timedOut", False)
@@ -1961,10 +2049,10 @@ class AgentSession:
                     "error": error_text,
                     "errorType": e.__class__.__name__,
                 }
-                # Sanitise read_image paths in tool_call_error event.
-                error_event_args = args
+                # Keep sensitive tool arguments out of error events too.
+                error_event_args = _sanitise_tool_args(tool_name, args)
                 if tool_name == "read_image":
-                    error_event_args = dict(args)
+                    error_event_args = dict(error_event_args)
                     for k in ("path", "file"):
                         v = error_event_args.get(k)
                         if isinstance(v, str):
@@ -1997,16 +2085,17 @@ class AgentSession:
             msg["_nativeToolCallId"] = native_replay_call_id
         self.messages.append(msg)
         self.session_manager.append_message(msg)
+        runtime_payload = _sanitise_runtime_tool_payload(payload)
         await self._invoke_extension_after_tool(
             tool_name,
-            bool(payload.get("ok")),
-            str(payload.get("result") or payload.get("error") or ""),
-            metadata={"exitCode": payload.get("exitCode"), "errorType": payload.get("errorType")},
+            bool(runtime_payload.get("ok")),
+            str(runtime_payload.get("result") or runtime_payload.get("error") or ""),
+            metadata={"exitCode": runtime_payload.get("exitCode"), "errorType": runtime_payload.get("errorType")},
         )
         # Sanitise read_image path in tool_call_end event (payload still has
         # the raw args — _build_tool_result_message_payload sanitises the
         # message_payload, but the event result dict does not).
-        event_result = payload
+        event_result = runtime_payload
         if tool_name == "read_image":
             event_result = dict(payload)
             event_args = event_result.get("args", {})
@@ -2024,7 +2113,7 @@ class AgentSession:
             tool_call_end["cancelled"] = True
         self._emit(tool_call_end)
         self._report_activity("tool_finished" if payload.get("ok") else "tool_failed")
-        return payload
+        return runtime_payload
 
     def _subagent_depth(self) -> int:
         """Depth of this session in the subagent tree (0 = top-level)."""
@@ -3435,11 +3524,12 @@ class AgentSession:
             msg["_nativeToolCallId"] = tool_call["toolCallId"]
         self.messages.append(msg)
         self.session_manager.append_message(msg)
+        runtime_payload = _sanitise_runtime_tool_payload(payload)
         self._emit({
             "type": "tool_call_start",
             "tool": tool_call["tool"],
             "toolCallId": tool_call["toolCallId"],
-            "args": copy.deepcopy(tool_call["args"]),
+            "args": copy.deepcopy(_sanitise_tool_args(tool_call["tool"], tool_call["args"])),
             "cancelled": True,
         })
         event: dict[str, Any] = {
@@ -3447,7 +3537,7 @@ class AgentSession:
             "tool": tool_call["tool"],
             "toolCallId": tool_call["toolCallId"],
             "ok": False,
-            "result": payload,
+            "result": runtime_payload,
         }
         if aborted:
             event["aborted"] = True
@@ -3455,7 +3545,7 @@ class AgentSession:
             event["budgetExceeded"] = True
         self._emit(event)
         self._report_activity("tool_failed")
-        return payload
+        return runtime_payload
 
     @staticmethod
     def _native_replay_keep_start(messages: list[dict[str, Any]], keep_start: int) -> int:

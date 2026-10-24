@@ -458,6 +458,62 @@ See [Cooperation and safety](#cooperation-and-safety) and the slash-command
 help for configuration such as `tools.maxSteps` (`0` means unlimited tool steps)
 and optional `toolOutputPruning`.
 
+### Native HTTP retrieval (`web_connect`)
+
+`web_connect` is available in Default and Readonly and does not require `bash`.
+To restrict a session to retrieval and evidence, for example:
+
+```bash
+one --tools web_connect,evidence_read,finish
+```
+
+It accepts only `url` (HTTP(S), no embedded credentials) and optional `mode`:
+`auto` (default: HTML to Markdown, JSON and text unchanged), `text` (HTML to
+plain text), or `raw` (decoded textual source, not a binary download). HTML
+extraction preserves tables, links and fenced code; it never executes JavaScript
+or fetches embedded resources. Relative links use the final URL. No search,
+custom headers, authentication or non-GET methods are provided.
+
+Configure limits in `settings.json` (global/project merge applies):
+
+```json
+{
+  "webConnect": {
+    "timeoutSec": 15,
+    "maxResponseBytes": 2000000,
+    "maxOutputChars": 12000,
+    "maxRedirects": 5,
+    "extractMainContent": true,
+    "preserveLinks": true,
+    "preserveCodeBlocks": true
+  }
+}
+```
+
+`timeoutSec` covers redirects, transfer and processing; an earlier runtime tool
+deadline wins. `maxResponseBytes` independently caps encoded transfer bytes and
+decoded body bytes. Gzip/deflate are supported; malformed/truncated compression
+and byte-limit overflow fail without presenting partial content. `maxOutputChars`
+limits the preview, not durable evidence. Retrieve the full permitted output via
+the returned `evidenceId` and bounded `evidence_read` calls, following `nextOffset`.
+Evidence requires an available session store; a storage failure is reported
+rather than returning a fictitious ID. Generic runtime preview limits still apply.
+
+Non-2xx responses, unsupported binary types and invalid JSON in `auto`/`text`
+produce errors. `raw` can show invalid JSON source. Missing Content-Type is treated
+as text (binary-looking data is rejected); absent/invalid charset falls back to
+UTF-8 replacement decoding. Empty successful responses are allowed. Proxy
+environment variables are ignored, TLS verification stays enabled, and cookies
+are not forwarded between redirects. URL queries/credentials are redacted in tool
+runtime diagnostics and metadata, not necessarily in original conversation input
+or returned document content. Do not put secrets in URLs or prompts.
+
+**Network access is not sandboxed:** localhost, private networks and metadata
+services are reachable if the process can reach them. GET requests may have side
+effects. Availability in Readonly does not imply that GET is free of side effects;
+parent/CLI capability ceilings still apply. Pages and evidence are
+untrusted tool data, not instructions. See [SECURITY.md](SECURITY.md).
+
 ### Context policy
 
 `context.policy` defaults to `endpoint-max`, using endpoint capacity while

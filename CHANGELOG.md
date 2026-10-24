@@ -10,6 +10,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Native `web_connect`** — bounded async HTTP(S) GET without bash,
+  HTML-to-Markdown/plain-text extraction and raw textual source, configurable
+  deadlines/byte/preview limits, and full permitted output via durable evidence.
+  Available in Default and Readonly; network access is not sandboxed and GET
+  may have side effects. Explicit parent/CLI restrictions still apply.
+
 - **Fullscreen subagent inspector** — `/agents` fills the terminal, keeps status
   and navigation fixed, and opens a single timeline starting with the complete
   task prompt. Provider-emitted display Thinking is included, block colors follow

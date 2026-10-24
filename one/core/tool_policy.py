@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-READONLY_TOOLS = frozenset({"read", "read_image", "grep", "find", "ls", "evidence_read", "finish", "ask_user", "spawn_subagent"})
+READONLY_TOOLS = frozenset({"read", "read_image", "grep", "find", "ls", "web_connect", "evidence_read", "finish", "ask_user", "spawn_subagent"})
 
 
 @dataclass(frozen=True)
