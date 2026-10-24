@@ -27,6 +27,21 @@ def test_snapshot_is_copied_and_notifications_are_identity_only() -> None:
     assert len(notices) == 2
 
 
+def test_register_preset_snapshot_is_optional_sanitized_and_bounded() -> None:
+    monitor = SubagentMonitor()
+    monitor.register("legacy", "task", "provider/parent")
+    monitor.register(
+        "preset", "task", "provider/override", preset_id="review\x1b[31m", preset_name="Review\x1b[2J" + "x" * 2000,
+    )
+    children = {child["sessionId"]: child for child in monitor.snapshot()["children"]}  # type: ignore[index]
+
+    assert "presetId" not in children["legacy"] and "presetName" not in children["legacy"]
+    assert children["preset"]["presetId"] == "review"
+    assert "\x1b" not in children["preset"]["presetName"]
+    assert len(children["preset"]["presetName"]) == 1024
+    assert children["preset"]["model"] == "provider/override"
+
+
 def test_output_is_utf8_bounded_sanitized_and_redacts_split_secret() -> None:
     monitor = SubagentMonitor()
     monitor.register("child", "task\x1b[31m", "model")

@@ -52,6 +52,24 @@ def test_history_survives_preview_eviction_and_resume(tmp_path: Path) -> None:
     restored.history.close()
 
 
+def test_preset_snapshot_survives_history_reload_without_changing_legacy_records(tmp_path: Path) -> None:
+    path = str(tmp_path / "parent.jsonl")
+    monitor = SubagentMonitor(path)
+    monitor.register("legacy", "task", "provider/parent")
+    monitor.register("preset", "task", "provider/override", preset_id="review", preset_name="Review")
+    monitor.complete("legacy", "completed")
+    monitor.complete("preset", "completed")
+    monitor.history.close()
+
+    restored = SubagentMonitor(path)
+    children = {child["sessionId"]: child for child in restored.list_children()["children"]}
+    assert "presetId" not in children["legacy"] and "presetName" not in children["legacy"]
+    assert children["preset"]["presetId"] == "review"
+    assert children["preset"]["presetName"] == "Review"
+    assert children["preset"]["model"] == "provider/override"
+    restored.history.close()
+
+
 def test_large_unicode_response_is_paged_and_live_cursor_continues() -> None:
     monitor = SubagentMonitor()
     monitor.register("child", "task", "model")

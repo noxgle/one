@@ -236,7 +236,12 @@ class TuiSessionView:
         """Copied monitor projection; the live monitor remains runtime-owned."""
         monitor = self._snapshot.get("monitor", {"revision": 0, "children": []})
         children = monitor.get("children") if isinstance(monitor, dict) else []
-        return {"revision": monitor.get("revision", 0), "children": [dict(child) for child in children if isinstance(child, dict)]}
+        # A JSON round trip makes nested timeline and preset fields detached too;
+        # no live monitor/session object can cross the facade boundary.
+        return json.loads(json.dumps({
+            "revision": monitor.get("revision", 0),
+            "children": [child for child in children if isinstance(child, dict)],
+        }, ensure_ascii=False))
 
     @property
     def session_id(self) -> str:
@@ -4744,8 +4749,10 @@ if TEXTUAL_AVAILABLE:
                               - float(selected.get("startedMonotonic") or time.monotonic()))
                 elapsed = selected.get("elapsedSeconds", elapsed)
                 model = sanitize_display_text(str(selected.get("model") or ""))
+                preset_name = sanitize_display_text(str(selected.get("presetName") or ""))
                 status = sanitize_display_text(str(selected.get("status") or "unknown"))
-                header.append(f"Agent {position}/{len(children)} · {model} · {status} · {elapsed:.1f}s\n")
+                identity = f"{preset_name} ({model})" if preset_name else model
+                header.append(f"Agent {position}/{len(children)} · {identity} · {status} · {elapsed:.1f}s\n")
                 activity = selected.get("currentTool") or selected.get("activity") or ""
                 if activity == "Thinking":
                     activity = f"{_THINKING_FRAMES[int(time.monotonic() * 5) % len(_THINKING_FRAMES)]} Thinking…"

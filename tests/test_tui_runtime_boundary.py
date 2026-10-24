@@ -1001,6 +1001,30 @@ async def test_detached_tui_monitor_refreshes_from_snapshots_and_rebinds_epoch()
         assert app._monitor_child("new-child") is not None
 
 
+def test_detached_monitor_snapshot_preserves_preset_fields_without_live_access() -> None:
+    view = TuiSessionView(SimpleNamespace())
+    view.apply_monitor_snapshot({"epoch": 3, "monitor": {"revision": 4, "children": [{
+        "sessionId": "child", "presetId": "review", "presetName": "Review", "model": "provider/override",
+    }]}})
+
+    snapshot = view.monitor_snapshot
+    snapshot["children"][0]["presetName"] = "mutated"
+    assert view.monitor_snapshot["children"][0] == {
+        "sessionId": "child", "presetId": "review", "presetName": "Review", "model": "provider/override",
+    }
+
+
+def test_runtime_monitor_projection_allows_preset_fields() -> None:
+    host = TuiRuntimeHost.__new__(TuiRuntimeHost)
+    host._session = lambda: SimpleNamespace(subagent_monitor=SimpleNamespace(snapshot=lambda: {"revision": 1, "children": [{
+        "sessionId": "child", "presetId": "review", "presetName": "Review", "model": "provider/override",
+    }]}))  # type: ignore[method-assign]
+
+    child = host._monitor_projection()["children"][0]
+    assert child["presetId"] == "review"
+    assert child["presetName"] == "Review"
+
+
 @pytest.mark.asyncio
 async def test_detached_monitor_refresh_is_single_flight_and_retries_dirty_state() -> None:
     from one.modes.tui_mode import _OneTextualApp

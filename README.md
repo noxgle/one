@@ -165,6 +165,12 @@ with that runtime; it does not access live session state. This improves
 isolation from blocked runtime I/O, but threads still share the Python GIL and
 do not provide a security sandbox or an unconditional latency guarantee.
 
+Subagent headers show the effective preset name and actual provider/model.
+Legacy history without preset metadata keeps its model-only label. Invalid
+provider/model selections return an error to the parent; models dynamically
+served by supported providers remain allowed. Permanent model/access errors
+end the child as failed rather than waiting indefinitely in unlimited retry.
+
 `/agents` opens a read-only monitor for direct child agents of the current
 session only. The inspector fills the terminal, with a fixed status header and
 keyboard-help footer. It opens at the beginning of one timeline: the complete,
@@ -438,7 +444,7 @@ does not revoke a provider account token or remove environment credentials.
 ## Sessions and configuration
 
 Named agent presets are documented in [docs/PRESETS.md](docs/PRESETS.md). Use
-`one --preset readonly` for app-enforced read-only inspection (not OS sandboxing).
+`one --preset readonly` for app-enforced read-only inspection (not OS or network sandboxing).
 Optional workspace presets, including Project, Researcher, and coding-agent
 profiles, are available under [`extras/presets/`](extras/presets/); copy a
 selected preset into the configured agent directory's `presets/` folder to use it.
@@ -510,9 +516,9 @@ or returned document content. Do not put secrets in URLs or prompts.
 
 **Network access is not sandboxed:** localhost, private networks and metadata
 services are reachable if the process can reach them. GET requests may have side
-effects. Availability in Readonly does not imply that GET is free of side effects;
-parent/CLI capability ceilings still apply. Pages and evidence are
-untrusted tool data, not instructions. See [SECURITY.md](SECURITY.md).
+effects. Readonly limits ONE's app-mediated tools, not network reachability;
+parent/CLI capability ceilings still apply. Pages and evidence are untrusted
+tool data, not instructions. See [SECURITY.md](SECURITY.md).
 
 ### Context policy
 

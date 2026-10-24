@@ -201,16 +201,36 @@ class SubagentMonitor:
             except Exception:
                 pass
 
-    def register(self, session_id: str, task: Any, model: Any, *, started_at: float | None = None) -> None:
+    def register(
+        self,
+        session_id: str,
+        task: Any,
+        model: Any,
+        *,
+        started_at: float | None = None,
+        preset_id: Any | None = None,
+        preset_name: Any | None = None,
+    ) -> None:
+        """Register a child using its resolved spawn-time model/preset snapshot.
+
+        ``preset_id`` and ``preset_name`` are optional for compatibility with
+        histories created before presets were displayed. They are only persisted
+        when supplied, so older records retain their original shape.
+        """
         now = time.monotonic() if started_at is None else started_at
         with self._lock:
-            self._children[session_id] = {
+            child = {
                 "sessionId": session_id, "task": self._safe_text(task)[:MAX_LABEL_CHARS], "model": self._safe_text(model)[:MAX_LABEL_CHARS],
                 "startedAt": now, "startedMonotonic": now, "completedAt": None, "status": "running",
                 "currentTool": None, "activity": "started", "outputTruncated": False,
                 "timeline": [], "timelineTruncated": False, "previewTruncated": False,
                 "outcome": None, "error": None, "errorType": None, "externalState": None, "revision": 0,
             }
+            if preset_id is not None:
+                child["presetId"] = self._safe_text(preset_id)[:MAX_LABEL_CHARS]
+            if preset_name is not None:
+                child["presetName"] = self._safe_text(preset_name)[:MAX_LABEL_CHARS]
+            self._children[session_id] = child
             self.history.save_prompt(session_id, task)
             self.history.append(session_id, "lifecycle", "Started")
             notice, listeners = self._changed(session_id, "registered")

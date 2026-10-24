@@ -2191,22 +2191,27 @@ class AgentSession:
             raise RuntimeError(f"Too many parallel subagents: {len(tasks)} > maxConcurrent {max_concurrent}")
 
         sub_model = self.model
-        if model_spec:
-            if "/" in model_spec:
-                p, m = model_spec.split("/", 1)
-                sub_model = self.model_registry.resolve(p, m, allow_dynamic=True)
-            else:
-                sub_model = self.model_registry.resolve(self.model.provider, model_spec, allow_dynamic=True)
-            if not sub_model:
-                raise RuntimeError(f"Unknown model: {model_spec}")
-        elif preset and preset.model:
-            p, m = preset.model.split("/", 1)
+        requested_model = model_spec or (preset.model if preset else None)
+        if requested_model:
             try:
-                sub_model = self.model_registry.resolve(p, m, allow_dynamic=True)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise RuntimeError(f"Preset model is unavailable: {preset.model}") from exc
+                if model_spec and "/" not in model_spec:
+                    if self.model is None:
+                        raise ValueError("no parent model is selected")
+                    provider_name, model_id = self.model.provider, model_spec
+                else:
+                    provider_name, model_id = self._parse_subagent_model(requested_model)
+                sub_model = self.model_registry.resolve(provider_name, model_id, allow_dynamic=True)
+            except (KeyError, TypeError, ValueError):
+                label = "Preset model" if preset and not model_spec else "Model"
+                return self._subagent_unavailable_result(f"{label} is invalid: {requested_model}")
             if sub_model is None:
-                raise RuntimeError(f"Preset model is unavailable: {preset.model}")
+                return self._subagent_unavailable_result(f"Model is unavailable: {requested_model}")
+        if sub_model is None:
+            return self._subagent_unavailable_result("No model is selected for the subagent")
+        if sub_model.provider not in self.providers:
+            return self._subagent_unavailable_result(
+                f"Provider '{sub_model.provider}' is not available for model '{sub_model.id}'"
+            )
         if preset and preset.temperature is not None and args.get("temperature") is None and args.get("temperatureMode") is None:
             child_temperature = preset.temperature
         child_thinking = (preset.thinking if preset and preset.thinking is not None else self.thinking_level)
@@ -2251,6 +2256,32 @@ class AgentSession:
             "output": combined,
             "content": [{"type": "text", "text": combined}],
             "error": aggregate_error,
+        }
+
+    @staticmethod
+    def _parse_subagent_model(model_spec: str) -> tuple[str, str]:
+        """Validate a provider/model selection without restricting dynamic ids."""
+        provider, separator, model_id = model_spec.strip().partition("/")
+        if not separator or not provider.strip() or not model_id.strip():
+            raise ValueError("expected provider/model")
+        return provider.strip(), model_id.strip()
+
+    @staticmethod
+    def _redact_provider_error(error: str) -> str:
+        return re.sub(r"(sk-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9\._\-~+/=]+)", "REDACTED", error)[:512]
+
+    @classmethod
+    def _subagent_unavailable_result(cls, error: str) -> dict[str, Any]:
+        """Return a tool-safe failure before allocating a child session."""
+        safe_error = cls._redact_provider_error(error + ". Check the provider/model ID and provider access.")
+        return {
+            "ok": False,
+            "goalSuccess": False,
+            "finished": False,
+            "output": safe_error,
+            "content": [{"type": "text", "text": safe_error}],
+            "error": safe_error,
+            "errorType": "SubagentProviderUnavailable",
         }
 
     def _all_images(self) -> list[dict[str, Any]] | None:
@@ -2403,7 +2434,9 @@ class AgentSession:
         task_id = task
         model_id = f"{sub_model.provider}/{sub_model.id}" if sub_model is not None else "unknown"
         try:
-            self.subagent_monitor.register(sub_id, task_id, model_id)
+            self.subagent_monitor.register(
+                sub_id, task_id, model_id, preset_id=sub.preset_id, preset_name=sub.preset_name
+            )
         except Exception:
             pass
         ok = False
@@ -2544,6 +2577,10 @@ class AgentSession:
                 else:
                     error_text = "Subagent finished but goal was not successful"
                     error_type = "GoalNotSatisfied"
+                provider_failure = getattr(sub, "_subagent_provider_failure", None)
+                if provider_failure:
+                    error_text = provider_failure
+                    error_type = "SubagentProviderUnavailable"
                 # Sanitise: strip anything that looks like an API key / secret.
                 error_text = re.sub(
                     r"(sk-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9\._\-~+/=]+)",
@@ -4217,6 +4254,8 @@ class AgentSession:
                         # while ``on`` retains the explicit zero=no-retry
                         # semantics and the finite default from settings.
                         generic_retry = retries_enabled and self._is_retryable_error(error_text) and (
+                            getattr(getattr(e, "response", None), "status_code", None) not in {400, 401, 403, 404}
+                        ) and (
                             retry_mode == "unlimited" or attempt < max_retries
                         )
                         will_retry = recovery_retry or (
@@ -4234,6 +4273,14 @@ class AgentSession:
                         )
                         if not will_retry:
                             terminal_error = True
+                            status = getattr(getattr(e, "response", None), "status_code", None)
+                            if status in {401, 403, 404} or not self._is_retryable_error(error_text):
+                                self._subagent_provider_failure = self._redact_provider_error(
+                                    f"Provider/model unavailable: {self.model.provider}/{self.model.id}. "
+                                    "Check the model ID, provider credentials and model access. "
+                                    f"{error_text}"
+                                )
+                                error_text = self._subagent_provider_failure
                             error_msg = {
                                 "role": "assistant",
                                 "content": [{"type": "text", "text": error_text}],
@@ -4964,11 +5011,15 @@ class AgentSession:
         lower = error_text.lower()
         permanent_markers = (
             "invalid api key", "invalid_api_key", "authentication", "unauthorized",
-            "forbidden", "permission denied", "model not found", "unknown model",
+            "forbidden", "permission denied", "model not found", "model_not_found", "unknown model",
+            "model does not exist", "model is not available", "model is not supported",
+            "do not have access to",
             "unsupported model", "invalid request", "bad request", "status 400",
             "status 401", "status 403", "status 404",
         )
-        return not any(marker in lower for marker in permanent_markers)
+        return not (any(marker in lower for marker in permanent_markers) or re.search(
+            r"(?:api error|client error)\s*[\"\']?(?:400|401|403|404)\b", lower
+        ))
 
     @staticmethod
     def _context_limit_details(error_text: str) -> dict[str, int]:

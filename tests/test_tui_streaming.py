@@ -60,7 +60,9 @@ async def test_tui_agents_panel_live_snapshot_and_trusted_stream_click(tmp_path:
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
-    session.subagent_monitor.register("child-a", "[b] untrusted [/b]", "openai/a", started_at=1.0)
+    session.subagent_monitor.register(
+        "child-a", "[b] untrusted [/b]", "openai/override", started_at=1.0, preset_id="review", preset_name="Review",
+    )
     session.subagent_monitor.register("child-b", "second", "openai/b", started_at=1.0)
     app = _OneTextualApp(session)
     async with app.run_test(size=(100, 30)) as pilot:
@@ -71,6 +73,7 @@ async def test_tui_agents_panel_live_snapshot_and_trusted_stream_click(tmp_path:
         assert panel.has_class("visible")
         assert "untrusted" in str(preview.content)
         assert "Agent 1/2" in str(app.query_one("#agents_help", Static).content)
+        assert "Review (openai/override)" in str(app.query_one("#agents_help", Static).content)
         assert not app.query("#agents_list")
         assert not app.query("#agents_preview")
         session.subagent_monitor.update("child-b", text="only child b", tool="read", activity="responding")

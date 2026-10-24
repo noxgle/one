@@ -290,6 +290,7 @@ There are 14 registered tools:
 | `grep` | Search file contents | Read-only |
 | `find` | Find files by pattern | Read-only |
 | `ls` | List directory contents | Read-only |
+| `web_connect` | Fetch and extract an HTTP(S) URL (GET) | Network access; GET may have side effects |
 | `evidence_read` | Read durable evidence by ID | Read-only (session-scoped) |
 | `finish` | End the task with summary | Terminal |
 | `plan` | Store an execution plan | Utility |
@@ -300,7 +301,10 @@ There are 14 registered tools:
 ### 5.1 Tool categories
 
 - **Coding tools:** `read`, `read_image`, `bash`, `edit`, `write`, `apply_patch`.
-- **Read-only tools:** `read`, `read_image`, `grep`, `find`, `ls`.
+- **Inspection tools:** `read`, `read_image`, `grep`, `find`, `ls`, `web_connect`.
+  `web_connect` is available in Default and Readonly, but network access is not
+  sandboxed: localhost/private services may be reachable and GET may have side
+  effects. Readonly is not a network sandbox.
 - **Mutating tools:** subject to cooperation approval when enabled.
 
 ### 5.2 Evidence storage

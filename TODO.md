@@ -3,7 +3,9 @@
 ## Cel
 Udostępnić agentowi pobieranie wskazanego URL HTTP(S) bez dostępu do `bash`: GET, domyślna ekstrakcja HTML do Markdown, JSON i tekst bez HTML-cleaningu oraz jawne tryby `raw` i `text`. Wynik ma mieć ograniczony podgląd i możliwość odczytu całej dopuszczonej treści przez istniejące `evidence_read`.
 
-**Status:** MVP zaimplementowane na `feat/web-connect`; T010–T011 pozostają poza zakresem. Szczegóły wykonania i weryfikacji poniżej. Opis stanu repozytorium w następnej sekcji jest historyczną podstawą planu.
+**Status:** MVP zaimplementowane; T010–T011 pozostają poza zakresem. Szczegóły
+wykonania i weryfikacji poniżej. Notatki o pierwotnym stanie repozytorium i
+konserwatywnej decyzji opt-in są historyczną podstawą planu, nie aktualną polityką.
 
 ## Aktualizacja dostępności (2026-10-24)
 
@@ -11,6 +13,8 @@ Na jawne zlecenie użytkownika `web_connect` włączono w Default i Readonly
 (wersja 0.1.103). Ta decyzja zastępuje konserwatywne ADR-005 oraz historyczne
 warunki o niewłączaniu domyślnym/readonly poniżej. Pułapy rodzica/CLI i zapisane
 snapshoty sesji nadal obowiązują; brak sandboxa i ACL IP pozostaje bez zmian.
+Szczegółowy opis obecnego zachowania i ryzyka znajduje się w README, SECURITY
+i `docs/PRESETS.md`.
 
 ## Wykonanie MVP (2026-10-24)
 
@@ -27,7 +31,8 @@ snapshoty sesji nadal obowiązują; brak sandboxa i ACL IP pozostaje bez zmian.
   Fixture dokumentacji zachowuje tabelę, linki i kod; ranking treści usuwa szum.
   Nie wykonywano porównania ze specjalizowanym ekstraktorem ani macierzy najstarszych
   dopuszczonych wersji bibliotek: ta część T001 pozostaje otwarta, nie blokuje MVP.
-- Wersja 0.1.102, wpis Unreleased, README/SECURITY oraz snapshoty TUI zaktualizowane.
+- Wersja 0.1.102, wpis Unreleased, README/SECURITY oraz snapshoty TUI zaktualizowane;
+  później dostępność poszerzono do Default/Readonly w wersji 0.1.103.
   Snapshoty po normalizacji nowej wersji są identyczne z bazą.
 - Pierwsza pełna weryfikacja: 2257 passed, 2 skipped, 2 failed. Poprawiono pozycję
   nagłówka atrybucji nowego modułu. Drugi błąd był zastanym nieaktualnym SHA skilla
@@ -41,11 +46,11 @@ snapshoty sesji nadal obowiązują; brak sandboxa i ACL IP pozostaje bez zmian.
 - Dokument źródłowy: `tmp/tool_web_connect_minimal.md`. To propozycja, nie dokumentacja działającego narzędzia.
 - Potwierdzono katalog roboczy przez `ls .`; przed utworzeniem tego pliku nie było głównego `TODO.md`.
 - `pyproject.toml`: Python 3.12+, istniejąca zależność `httpx>=0.27.0`; brak zadeklarowanych BeautifulSoup, lxml i markdownify.
-- `one/tools/index.py`: `ToolDef`, `all_tools`, `native_tool_definitions()` i `DEFAULT_TOOL_NAMES`; brak rejestracji `web_connect`.
+- `one/tools/index.py`: `ToolDef`, `all_tools`, `native_tool_definitions()` i `DEFAULT_TOOL_NAMES`; początkowo brak rejestracji `web_connect` (stan historyczny).
 - `one/core/agent_session.py`: osobny dispatch `_execute_tool_by_name()`, kontrola aktywności i polityki przed wykonaniem, istniejące zapisywanie evidence oraz odczyt fragmentów. `_build_tool_result_message_payload()` ogranicza podgląd; kontrakt ten należy zachować.
 - `one/resources/resource_loader.py`: osobny promptowy `TOOL_ARG_SCHEMAS`; sama rejestracja JSON Schema nie wystarczy.
 - `one/core/settings_manager.py`: ustawienia łączone globalnie/projektowo, istniejące limity narzędzi; nowa sekcja `webConnect` wymaga implementacji i walidacji.
-- `one/core/tool_policy.py`: `READONLY_TOOLS` nie obejmuje sieci; `ToolPolicy.is_readonly` zależy od tego zbioru. Nie zmieniać go automatycznie przy dodaniu GET.
+- `one/core/tool_policy.py`: `READONLY_TOOLS` i `ToolPolicy.is_readonly` wyznaczają app-enforced pułap uprawnień; obecnie obejmuje `web_connect`, ale nie ogranicza dostępu sieciowego procesu.
 - Istnieją testy `tests/test_durable_evidence.py`, `tests/test_agent_tool_calls.py`, `tests/test_settings.py`, `tests/test_presets.py`, `tests/test_preset_runtime.py`, `tests/test_preset_sessions.py` i `tests/test_subagent_presets.py`.
 - Przeczytano wskazaną specyfikację, odpowiednie fragmenty kodu, `CONTRIBUTING.md` i początek `CHANGELOG.md`. Nie uruchamiano testów, instalacji ani połączeń do usług; nie czytano `.one/` ani rzeczywistego stanu użytkownika.
 
@@ -56,7 +61,7 @@ snapshoty sesji nadal obowiązują; brak sandboxa i ACL IP pozostaje bez zmian.
 
 **Poza zakresem:** wyszukiwarka `web_search`, rendering JavaScript, uruchamianie kodu strony, pobieranie binariów, sandbox sieciowy, własne ACL adresów IP oraz opcja `networkAccess`.
 
-Nie dodawać argumentów `method`, `body`, nagłówków, sekretów, `timeout`, `max_chars`, `offset`, `limit` ani `chunk_size` do MVP. Nie rozszerzać automatycznie uprawnień presetów ani subagentów. GET może mieć skutki uboczne i nie oznacza izolacji sieciowej.
+Nie dodawać argumentów `method`, `body`, nagłówków, sekretów, `timeout`, `max_chars`, `offset`, `limit` ani `chunk_size` do MVP. Dalsze uprawnienia nadal podlegają limitom rodzica/CLI i snapshotom sesji. GET może mieć skutki uboczne i nie oznacza izolacji sieciowej.
 
 ## Architektura i decyzje
 Przepływ: kontrola uprawnień ONE → walidacja argumentów → asynchroniczny klient HTTP → kontrola statusu/typu/rozmiaru → parser i ekstrakcja → wynik narzędzia → istniejący magazyn evidence i ograniczony podgląd → opcjonalne `evidence_read`.
@@ -65,7 +70,7 @@ Przepływ: kontrola uprawnień ONE → walidacja argumentów → asynchroniczny 
 - **ADR-002 — transport:** wykorzystać istniejący `httpx.AsyncClient`, strumieniowanie i jawne, ograniczone przekierowania zamiast `bash`/curl lub dodatkowego klienta. Weryfikacja TLS pozostaje włączona. Anulowanie ma zamykać odpowiedź i klienta.
 - **ADR-003 — ekstrakcja:** planowany stos to BeautifulSoup + lxml + markdownify, zgodny z inspiracją dokumentu; przed implementacją potwierdzić kompatybilność wersji i zachowanie tabel, linków i kodu na lokalnych fixture'ach. Alternatywa: wyspecjalizowany ekstraktor artykułów; prostszy wybór głównej treści, ale dodatkowa zależność i ryzyko utraty dokumentacji technicznej. Własny parser oparty o stdlib zmniejsza zależności, lecz zwiększa koszt poprawnej obsługi HTML. Nie kopiować kodu z zewnętrznego projektu bez weryfikacji licencji. Zewnętrznych bibliotek ani źródła inspiracji nie badano w ramach tego planu.
 - **ADR-004 — evidence już w MVP:** repozytorium ma gotową ścieżkę evidence, więc integrację przenieść z proponowanego etapu 2 do MVP. Nie generować niezapisanego `evidence_id` ani drugiego magazynu. Użyć istniejącego `evidenceId` w opakowaniu runtime, a wewnętrzny wynik dostosować do konwencji `output`/`details`. Limit podglądu nie może bezpowrotnie obcinać treści przed zapisem evidence.
-- **ADR-005 — jawne udostępnienie:** zarejestrować narzędzie, lecz początkowo nie dodawać go do `DEFAULT_TOOL_NAMES` ani `READONLY_TOOLS`. Włączać przez istniejący mechanizm jawnego wyboru narzędzi/presetu, bez `bash`. To konserwatywne założenie wdrożeniowe; domyślne włączenie wymaga osobnej decyzji po ocenie ryzyka sieciowego.
+- **ADR-005 — jawne udostępnienie (zastąpione):** pierwotny plan opt-in nie jest już aktualny. Po osobnej decyzji użytkownika `web_connect` wchodzi w skład `DEFAULT_TOOL_NAMES` i `READONLY_TOOLS`, ale nie może przekroczyć pułapów rodzica/CLI. GET może docierać do localhost/prywatnych usług; Readonly nie jest sandboxem sieciowym. Zobacz zaktualizowaną sekcję „Native HTTP retrieval” README i SECURITY.
 
 ### Kontrakt do wdrożenia
 - URL: niepusty HTTP(S), poprawny host/port, bez osadzonych danych logowania; walidować także każdy redirect. Fragment nie trafia do żądania. Inne schematy i nieznane argumenty odrzucać również w runtime.
@@ -121,7 +126,7 @@ Szacunki jakościowe: S — mały, M — średni, L — duży zakres; nie są de
   - **Zmiany:** dodać `ToolDef`, opis, ścisły JSON Schema (`url` wymagany, `mode` opcjonalne, brak dodatkowych pól), promptowy schemat i gałąź dispatch z ustawieniami runtime. Walidować argumenty także przy bezpośrednim wykonaniu. Zachować istniejące kontrole polityki, zatwierdzenia i kontrakt zdarzeń.
   - **Pliki:** `one/tools/index.py`, `one/resources/resource_loader.py`, `one/core/agent_session.py`, `tests/test_agent_tool_calls.py`, `tests/test_resource_loader.py`, `tests/test_tools.py`.
   - **Zależności:** T002, T003, T004.
-  - **Akceptacja:** rejestr, prompt i wykonanie zgadzają się; `method`, `body` i parametry limitów są odrzucane; wyłączony tool nie otwiera połączenia; brak zmian domyślnej listy narzędzi i zbioru readonly; timeout/anulowanie nie blokują pętli sesji.
+  - **Akceptacja:** rejestr, prompt i wykonanie zgadzają się; `method`, `body` i parametry limitów są odrzucane; wyłączony tool nie otwiera połączenia; aktualna lista domyślna i zbiór readonly są jawnie ustalone; timeout/anulowanie nie blokują pętli sesji.
   - **Weryfikacja:** testy schematu, promptu, bezpośredniego dispatch i zdarzeń; `.venv/bin/python -m pytest -q tests/test_agent_tool_calls.py tests/test_resource_loader.py tests/test_tools.py tests/test_agent_timeouts_limits.py tests/test_event_snapshots.py`.
 
 - [x] **T006 — połączyć ograniczony podgląd z trwałym evidence**
@@ -132,7 +137,7 @@ Szacunki jakościowe: S — mały, M — średni, L — duży zakres; nie są de
   - **Weryfikacja:** test trwałej sesji w katalogu tymczasowym, rekonstrukcji fragmentów, awarii zapisu i działania bez trwałości; `.venv/bin/python -m pytest -q tests/test_durable_evidence.py tests/test_tool_output_pruning.py`.
 
 - [x] **T007 — sprawdzić pułapy uprawnień i granicę niezaufanej treści**
-  - **Zmiany:** testy sesji z jawnym `web_connect` i bez `bash`, bez rozszerzania reserved readonly; rodzic i CLI ograniczają żądane narzędzia dziecka, również przy presetach i odświeżeniu MCP. Sprawdzić istniejące blokady ręcznej powłoki i hooków rozszerzeń; nie przedstawiać listy narzędzi jako sandboxa procesu. Treść strony i evidence ma zachować istniejący wrapper niezaufanych wyników.
+  - **Zmiany:** testy sesji z `web_connect` w Default/Readonly i bez `bash` w Readonly; rodzic i CLI ograniczają żądane narzędzia dziecka, również przy presetach i odświeżeniu MCP. Sprawdzić istniejące blokady ręcznej powłoki i hooków rozszerzeń; nie przedstawiać listy narzędzi jako sandboxa procesu. Treść strony i evidence ma zachować istniejący wrapper niezaufanych wyników.
   - **Pliki:** `tests/test_preset_runtime.py`, `tests/test_presets.py`, `tests/test_preset_sessions.py`, `tests/test_subagent_presets.py`, `tests/test_manual_command_policy.py`, `tests/test_system_prompt.py`; `one/core/tool_policy.py` i mechanizmy presetów tylko przy udowodnionej regresji.
   - **Zależności:** T005, T006.
   - **Akceptacja:** sesja może wykonać mockowany GET bez bash; dziecko nie uzyskuje bash ani web_connect zabronionego rodzicowi; readonly zachowuje blokady; strona z instrukcją zmiany system promptu pozostaje danymi także po odczycie evidence. Nie deklarować odporności modelu na wszystkie prompt injection.
@@ -195,15 +200,15 @@ Bramka MVP po T009, w kolejności:
 - **Prompt injection:** zachować wrapper niezaufanych danych; instrukcje stron i evidence nigdy nie otrzymują priorytetu systemowego. Nie deklarować pełnej ochrony wynikającej wyłącznie z wrappera.
 - **Kompresja i duży HTML:** limitować obie reprezentacje bajtów przed parsowaniem; testować deadline i koszt ekstrakcji na maksymalnym dopuszczonym dokumencie. Jeśli parser blokuje pętlę, w T004 dobrać izolowane przetwarzanie bez przekazywania żywej sesji do workerów; timeout wątku sam nie kończy pracy parsera.
 - **Utrata treści:** test integracyjny evidence obowiązkowy, nie wystarczy pole z ID. Pełna treść oznacza tylko wynik w dozwolonym limicie transferu, nie nieograniczony dokument.
-- **Nowe zależności:** kompatybilność i licencje do potwierdzenia w T001; brak zewnętrznego researchu w tej sesji.
-- **Nieustalone detale kontraktu:** statusy HTTP, brak Content-Type, kodowania, raw JSON i proxy do zamknięcia w T001/T003 przed publikacją; nie blokują utworzenia planu.
-- **Domyślne włączenie:** przyjęto opt-in; rozszerzenie `DEFAULT_TOOL_NAMES` albo `READONLY_TOOLS` wymaga odrębnej decyzji i analizy wpływu na `is_readonly`, ręczną powłokę oraz hooki.
+- **Nowe zależności (częściowo otwarte):** lokalne licencje i podstawowa zgodność sprawdzone; macierz minimalnych wersji oraz porównanie alternatywnego ekstraktora pozostają niezbadane.
+- **Detale kontraktu (zamknięte dla MVP):** statusy HTTP, brak Content-Type, kodowanie, raw JSON, proxy i typy binarne są opisane w README i testowane.
+- **Domyślne włączenie (historyczne):** pierwotne założenie opt-in zostało zastąpione decyzją o włączeniu `web_connect` do Default/Readonly. `is_readonly` pozostaje app-enforced polityką; możliwości sieciowe procesu się od tego nie zmieniają.
 
 ## Kryteria akceptacji MVP
 - [x] Tool działa w sesji bez bash, z dokładnie dwoma polami interfejsu i jednym wymaganym argumentem.
 - [x] Dokumentacja HTML daje Markdown z kodem, linkami, nagłówkami i tabelami; artykuł jest oczyszczony; JSON nie jest modyfikowany przez ekstraktor; raw zachowuje źródło tekstowe.
 - [x] Timeouty, redirecty, wielkość odpowiedzi i ekspansja kompresji są ograniczone oraz przetestowane bez rzeczywistej sieci.
 - [x] Długi wynik ma ograniczony podgląd i prawdziwe, trwałe evidence odczytywane fragmentami bez kolejnego HTTP; awaria zapisu nie tworzy pozornej dostępności.
-- [x] Uprawnienia rodzica/CLI/presetu są egzekwowane przy wykonaniu; brak automatycznego rozszerzenia readonly i narzędzi domyślnych.
+- [x] Uprawnienia rodzica/CLI/presetu są egzekwowane przy wykonaniu; `web_connect` dostępne jest w Default/Readonly bez osłabienia pułapów nadrzędnych.
 - [x] Dokumentacja jasno opisuje brak ACL IP i sandboxa, dostępność prywatnych usług oraz ryzyko efektów ubocznych GET.
-- [ ] T001–T009 zakończone na podstawie dowodów wykonania; pełne testy, lint, kontrola diffów i wymagane snapshoty przechodzą. T010–T011 nie są warunkiem przyjęcia MVP.
+- [ ] T001–T009 całkowicie zamknięte: implementacja i weryfikacja zakończone, ale porównanie z alternatywnym ekstraktorem oraz test najstarszych wersji zależności z T001 pozostają otwarte. T010–T011 nie są warunkiem przyjęcia MVP.

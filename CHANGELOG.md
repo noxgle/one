@@ -10,11 +10,22 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Subagent preset labels** — `/agents` shows the effective preset name beside
+  the actual provider/model, including saved history; old records keep the
+  model-only label.
+- **Subagent model failures** — invalid model selections and unsupported providers
+  return actionable failures to the parent before spawning. Permanent provider
+  authentication/model errors stop even with unlimited retry.
+
 - **Native `web_connect`** — bounded async HTTP(S) GET without bash,
   HTML-to-Markdown/plain-text extraction and raw textual source, configurable
   deadlines/byte/preview limits, and full permitted output via durable evidence.
   Available in Default and Readonly; network access is not sandboxed and GET
   may have side effects. Explicit parent/CLI restrictions still apply.
+
+- **Readonly network capability** — the reserved Readonly preset now includes
+  `web_connect` for HTTP(S) retrieval. This does not restrict network access;
+  localhost/private services may be reachable and GET can have side effects.
 
 - **Fullscreen subagent inspector** — `/agents` fills the terminal, keeps status
   and navigation fixed, and opens a single timeline starting with the complete

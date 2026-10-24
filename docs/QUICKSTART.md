@@ -71,7 +71,8 @@ commands. The exact provider and model names depend on your account and setup.
 
 ## 4. Try a useful prompt
 
-Start with a bounded, read-only request:
+Start with a bounded request (Readonly restricts ONE-mediated file/shell actions,
+not network access):
 
 ```text
 Inspect this repository and explain its structure. Do not edit files or run
@@ -98,7 +99,7 @@ More copy-and-paste prompts are in [EXAMPLES.md](EXAMPLES.md).
 | Force a context summary | `/compact` |
 | Paste an image | `Ctrl+Alt+V` or `/paste-image` |
 | Run one task from a script | `one run "..." --json` |
-| Inspect safely | `one --preset readonly` or `/preset readonly` |
+| Inspect with app-enforced read-only tools | `one --preset readonly` or `/preset readonly` |
 
 ## Safety baseline
 
@@ -116,4 +117,5 @@ never include API keys or session files.
 ## Named presets
 
 Use `one --preset readonly` to start an app-enforced read-only inspection session.
-See [PRESETS.md](PRESETS.md) for the strict one-file format and limitations.
+Readonly includes `web_connect`; it does not restrict network access, and GET
+requests can have side effects. See [PRESETS.md](PRESETS.md) for its limitations.

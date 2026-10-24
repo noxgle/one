@@ -55,8 +55,9 @@ exclusive temp files and fsync).
 
 ### Native HTTP retrieval
 
-`web_connect` is a GET-only capability available in Default and Readonly, not a network
-sandbox or SSRF filter. It intentionally permits localhost, private addresses
+`web_connect` is a GET-only capability available in Default and Readonly, not a
+network sandbox or SSRF filter. Readonly limits app-mediated file/shell actions,
+not this tool's network reachability. It intentionally permits localhost, private addresses
 and infrastructure metadata endpoints accessible to the ONE process. GET can
 have side effects. Do not enable it for sessions that must not access the network;
 use process/container/network isolation for enforcement outside the application.

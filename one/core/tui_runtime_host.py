@@ -628,7 +628,7 @@ class TuiRuntimeHost:
             "children": [
                 {
                     **{key: _bounded_snapshot_text(child.get(key))[:96] if isinstance(child.get(key), str) else child.get(key)
-                       for key in ("sessionId", "task", "model", "status", "activity", "currentTool", "startedMonotonic", "completedAt", "revision") if key in child},
+                       for key in ("sessionId", "task", "model", "presetId", "presetName", "status", "activity", "currentTool", "startedMonotonic", "completedAt", "revision") if key in child},
                     "outputTail": _bounded_snapshot_text(child.get("outputTail"))[:192],
                     "timeline": [
                         {key: _bounded_snapshot_text(item.get(key))[:96] if isinstance(item.get(key), str) else item.get(key)
