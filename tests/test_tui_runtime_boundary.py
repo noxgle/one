@@ -946,7 +946,11 @@ async def test_question_and_approval_replies_return_authoritative_snapshots() ->
 
 
 @pytest.mark.asyncio
-async def test_detached_approval_disable_dismisses_waiter_without_resolving_it() -> None:
+@pytest.mark.parametrize(
+    ("origin", "label"),
+    [("main", "Main"), ("parent-id", "Main"), ("child-id", "Subagent #1 — Coder Junior Qwen")],
+)
+async def test_detached_approval_disable_dismisses_waiter_without_resolving_it(origin: str, label: str) -> None:
     """A detached UI waiter has no local future and must only be dismissed."""
     from one.modes.tui_mode import _OneTextualApp
 
@@ -955,8 +959,11 @@ async def test_detached_approval_disable_dismisses_waiter_without_resolving_it()
             self.listeners = []
             self.snapshot = {
                 "epoch": 4,
-                "sidebar": {"theme": "default", "cooperation": True, "model": "stub/model"},
+                "sidebar": {"theme": "default", "cooperation": True, "model": "stub/model", "sessionId": "parent-id"},
                 "messages": [],
+                "monitor": {"revision": 1, "children": [
+                    {"sessionId": "child-id", "presetName": "Coder Junior Qwen"},
+                ]},
             }
             self.commands: list[tuple[str, dict[str, object]]] = []
 
@@ -985,11 +992,12 @@ async def test_detached_approval_disable_dismisses_waiter_without_resolving_it()
     async with app.run_test() as pilot:
         facade.emit({
             "type": "tui_approval_request", "approvalId": "a-1", "tool": "bash",
-            "origin": "main", "epoch": 4,
+            "origin": origin, "epoch": 4,
         })
         await pilot.pause()
         assert len(app._approval_waiters) == 1
         assert app.query_one("#approval_overlay").has_class("visible")
+        assert f"Agent: {label}\n" in str(app.query_one("#approval_summary").content)
 
         app.action_toggle_cooperation()
         await pilot.pause()

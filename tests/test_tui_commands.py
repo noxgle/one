@@ -986,7 +986,7 @@ async def test_tui_agents_and_approval_overlay_colors_follow_every_builtin_theme
             assert reject.styles.color.hex.lower() == theme.error
             assert all(border[1].hex.lower() == theme.error for border in reject.styles.border)
             content = summary.content
-            assert str(content).startswith("PENDING TOOL APPROVAL\nAgent: Main agent\nTool: bash")
+            assert str(content).startswith("PENDING TOOL APPROVAL\nAgent: Main\nTool: bash")
             assert content.style == f"bold {theme.warn}"
             assert content.spans[0].style == theme.screen_fg
 

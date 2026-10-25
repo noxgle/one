@@ -52,6 +52,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Tool approval agent labels** — pending approvals identify the main agent as
+  `Main` and direct subagents by their number in the agents panel and preset name.
+  Detached runtime session IDs no longer appear as `Child unknown`; unmatched
+  children show a shortened session ID instead.
+
 - **Subagent toggle recovery** — Ctrl+S can re-enable subagents after they were
   disabled in settings. The runtime now reports the immutable `--no-subagents`
   restriction separately from the current toggle state.

@@ -251,7 +251,7 @@ async def test_tui_main_and_child_approvals_share_fifo_overlay(tmp_path: Path) -
         await pilot.pause()
         assert app._approval_pending is not None
         assert len(app._approval_waiters) == 2
-        assert "Main agent" in str(app.query_one("#approval_summary").content)
+        assert "Agent: Main\n" in str(app.query_one("#approval_summary").content)
 
         # Main prompt remains a normal prompt and cannot resolve either request.
         prompts: list[str] = []
@@ -266,7 +266,7 @@ async def test_tui_main_and_child_approvals_share_fifo_overlay(tmp_path: Path) -
         await pilot.press("alt+a")
         assert (await asyncio.wait_for(main_task, timeout=2))["ok"] is True
         await pilot.pause()
-        assert "Child " in str(app.query_one("#approval_summary").content)
+        assert f"Agent: Subagent — {child.session_id[:12]}\n" in str(app.query_one("#approval_summary").content)
         await pilot.press("alt+a")
         assert (await asyncio.wait_for(child_task, timeout=2))["ok"] is True
 
@@ -455,3 +455,46 @@ async def test_tui_ask_user_event_toasts(tmp_path: Path):
         await pilot.pause()
         assert any("Agent waiting for response" in n for n in notified)
         assert app._ask_user_pending is not None
+
+
+@pytest.mark.parametrize("object_origin", [False, True])
+@pytest.mark.parametrize(
+    ("session_id", "expected"),
+    [
+        ("main", "Main"),
+        ("child-first", "Subagent #1 — Coder Junior Qwen"),
+        ("child-second", "Subagent #2 — readonly"),
+        ("child-legacy", "Subagent #3"),
+        ("child-untracked-long-id", "Subagent — child-untrac"),
+        ("", "Subagent — unknown"),
+    ],
+)
+def test_approval_origin_labels(tmp_path: Path, object_origin: bool, session_id: str, expected: str) -> None:
+    from types import SimpleNamespace
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    app._monitor_snapshot = {"children": [
+        {"sessionId": "child-first", "presetName": "Coder Junior Qwen", "presetId": "coder"},
+        {"sessionId": "child-second", "presetId": "readonly"},
+        {"sessionId": "child-legacy"},
+    ]}
+    origin = SimpleNamespace(session_id=session_id) if object_origin else session_id
+    assert app._approval_origin_label(origin) == expected
+    assert app._approval_origin_label(None) == "Main"
+    assert app._approval_origin_label(session) == "Main"
+    assert app._approval_origin_label(session.session_id) == "Main"
+
+
+def test_approval_origin_labels_compare_full_ids_and_bound_display(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    app._monitor_snapshot = {"children": [
+        {"sessionId": "same-prefix-first", "presetName": "First"},
+        {"sessionId": "same-prefix-second", "presetName": "\x1b[31m" + "X" * 100},
+    ]}
+    assert app._approval_origin_label("same-prefix-second") == "Subagent #2 — " + "X" * 80
+    assert app._approval_origin_label("\x1b[31muntracked") == "Subagent — untracked"

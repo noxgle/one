@@ -6831,14 +6831,18 @@ if TEXTUAL_AVAILABLE:
         def _approval_origin_label(self, origin: Any) -> str:
             """Return a safe, bounded identity for the requesting session."""
             if origin is None or origin is self.session:
-                return "Main agent"
-            session_id = sanitize_display_text(str(getattr(origin, "session_id", "unknown")))[:12]
-            task = ""
-            for child in self._monitor_snapshot.get("children", []):
-                if str(child.get("sessionId")) == str(getattr(origin, "session_id", "")):
-                    task = sanitize_display_text(str(child.get("task") or ""))[:80]
-                    break
-            return f"Child {session_id}" + (f": {task}" if task else "")
+                return "Main"
+            # Runtime events carry detached session IDs; legacy callbacks pass
+            # the session itself. Compare full IDs before shortening for display.
+            session_id = origin if isinstance(origin, str) else str(getattr(origin, "session_id", "") or "")
+            if session_id == "main" or (session_id and session_id == self.session.session_id):
+                return "Main"
+            for number, child in enumerate(self._monitor_snapshot.get("children", []), 1):
+                if session_id and str(child.get("sessionId")) == session_id:
+                    name = sanitize_display_text(str(child.get("presetName") or child.get("presetId") or ""))[:80]
+                    return f"Subagent #{number}" + (f" — {name}" if name else "")
+            short_id = sanitize_display_text(session_id)[:12]
+            return "Subagent" + (f" — {short_id}" if short_id else " — unknown")
 
         def _install_approval_callback(self, session: Any) -> None:
             """Bind an approval callback to exactly one session lifetime."""
