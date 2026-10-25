@@ -552,22 +552,28 @@ MCP tool names are validated before the child starts.
 ### TUI session browser
 
 Persisted sessions are scoped to the current project/session directory. In the
-TUI, `/sessions` lists them newest first with a temporary number, name, age, and
-message count. The first user prompt automatically becomes the local session
+TUI, `/sessions` lists them newest first with a temporary number, full session
+ID, title, age, and message count (`*` marks the active session). The first user prompt automatically becomes the local session
 name after whitespace/control-character normalization (up to 64 Unicode
 characters); rename it when needed.
 
 ```text
 /sessions
 /sessions 2
-/sessions Fix the parser error
+/sessions a8c42bd1-9144-42c1-a92d-52ebd540b3dc
 /sessions rename 2 Parser investigation
-/sessions delete Parser investigation
+/sessions delete a8c42bd1-9144-42c1-a92d-52ebd540b3dc
 yes
 ```
 
-Names in load, rename, and delete commands must be the **full exact name**—no
-partial or fuzzy matching is performed. `delete` always asks for `yes`; any
+Load, rename, and delete accept a **number from the last displayed list** or an
+**exact full session ID** copied from your list (the UUID above is illustrative).
+IDs work without first listing sessions. Titles are descriptive only and may
+repeat; neither title selection nor ID-prefix matching is supported. Run
+`/sessions` before using a number. Numbers retain the last displayed ordering;
+missing or replaced sessions are rejected rather than selecting another session.
+Switching, renaming, or deleting invalidates the numbered list; list again before
+using another number. `delete` always asks for `yes`; any
 other reply cancels it. It deletes the JSONL and its matching durable-evidence
 sidecar. Deleting the active session opens a new empty session so the TUI stays
 usable. Loading or deleting waits until an active turn has stopped. Use

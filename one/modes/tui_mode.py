@@ -2232,17 +2232,23 @@ if TEXTUAL_AVAILABLE:
         def _invalidate_session_list_snapshot(self) -> None:
             self._session_list_snapshot = None
 
-        def _resolve_session_target(self, target: str) -> tuple[SessionInfo | None, str | None]:
-            infos = self._session_infos()
+        def _resolve_session_target(
+            self, target: str, fresh_infos: list[SessionInfo] | None = None
+        ) -> tuple[SessionInfo | None, str | None]:
+            """Resolve only a displayed number or a complete persisted ID.
+
+            ``fresh_infos`` is supplied by detached command handlers.  It must
+            not update the numbered snapshot: a number remains tied to the last
+            list the user explicitly requested, while ID commands may work
+            without first listing sessions.
+            """
+            infos = fresh_infos if fresh_infos is not None else self._session_infos()
             target = target.strip()
-            matches = [info for info in infos if info.name == target]
-            if matches:
-                if len(matches) != 1:
-                    return None, "Session name is ambiguous; use its number from /sessions."
-                return matches[0], None
             if target.isdigit():
                 index = int(target)
-                numbered_infos = self._session_list_snapshot if self._session_list_snapshot is not None else infos
+                numbered_infos = self._session_list_snapshot
+                if numbered_infos is None:
+                    return None, "Session number requires the last displayed /sessions list. Run /sessions first."
                 if not 1 <= index <= len(numbered_infos):
                     return None, f"Session number out of range (1..{len(numbered_infos)})"
                 selected = numbered_infos[index - 1]
@@ -2252,47 +2258,47 @@ if TEXTUAL_AVAILABLE:
                 if live is None:
                     return None, "Session from the last /sessions list is no longer available. Run /sessions again."
                 return live, None
-            return None, "No session has that exact name. Use /sessions to list sessions."
+            match = next((info for info in infos if info.id == target), None)
+            if match is not None:
+                return match, None
+            return None, "No session has that exact full ID. Use /sessions to list sessions."
 
         def _parse_session_rename_target(self, rename_rest: str) -> tuple[str | None, str | None, str | None]:
-            """Return a target and replacement, rejecting overlapping-name ambiguity."""
+            """Return a number/full-ID target and its replacement title."""
             target, separator, new_name = rename_rest.partition(" ")
             if not separator or not new_name.strip():
-                return None, None, "Usage: /sessions rename <number|full exact name> <new name>"
-            if target.isdigit():
-                return target, new_name, None
+                return None, None, "Usage: /sessions rename <number|full ID> <new title>"
+            return target, new_name, None
 
-            names = {
-                info.name for info in self._session_infos() if info.name and rename_rest.startswith(info.name + " ")
-            }
-            if not names:
-                return target, new_name, None
-            if len(names) != 1:
-                return None, None, "Session rename target is ambiguous; use its number from /sessions."
-            name = names.pop()
-            return name, rename_rest[len(name) + 1 :], None
+        async def _fresh_detached_session_infos(self) -> list[SessionInfo]:
+            """Read the owner-loop session list without changing UI numbering."""
+            assert isinstance(self.session, TuiSessionView)
+            result = await self.session.command("session_list")
+            return self._session_infos_from_result(result)
+
+        @staticmethod
+        def _session_infos_from_result(result: dict[str, Any]) -> list[SessionInfo]:
+            infos: list[SessionInfo] = []
+            for item in result.get("sessions", []):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    infos.append(
+                        SessionInfo(
+                            path=str(item["path"]), id=str(item["id"]), cwd=str(item.get("cwd", "")),
+                            name=item.get("name") if isinstance(item.get("name"), str) else None,
+                            modified=datetime.fromisoformat(str(item["modified"])),
+                            created=datetime.fromisoformat(str(item["modified"])),
+                            message_count=int(item.get("messageCount", 0)),
+                        )
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return infos
 
         async def _list_sessions(self) -> None:
             if isinstance(self.session, TuiSessionView):
-                result = await self.session.command("session_list")
-                infos = []
-                for item in result.get("sessions", []):
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        infos.append(
-                            SessionInfo(
-                                path=str(item["path"]),
-                                id=str(item["id"]),
-                                cwd=str(item.get("cwd", "")),
-                                name=item.get("name") if isinstance(item.get("name"), str) else None,
-                                modified=datetime.fromisoformat(str(item["modified"])),
-                                created=datetime.fromisoformat(str(item["modified"])),
-                                message_count=int(item.get("messageCount", 0)),
-                            )
-                        )
-                    except (KeyError, TypeError, ValueError):
-                        continue
+                infos = await self._fresh_detached_session_infos()
             else:
                 infos = self._session_infos()
             self._session_list_snapshot = list(infos)
@@ -2312,8 +2318,8 @@ if TEXTUAL_AVAILABLE:
                 )
                 name = info.name or "(unnamed)"
                 active = " *" if info.id == self.session.session_id else ""
-                lines.append(f"{index}. {name} — {age}, {info.message_count} messages{active}")
-            lines.append("Load: /sessions <number|full exact name>")
+                lines.append(f"{index}. {info.id} — {name} — {age}, {info.message_count} messages{active}")
+            lines.append("Load: /sessions <number|full ID>")
             self._write("\n".join(lines), "info")
 
         async def _switch_to_session(self, info: SessionInfo) -> None:
@@ -5060,11 +5066,11 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write(
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /sessions [number|full exact name] | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>",
+                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /sessions [number|full ID] | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>",
                     "info",
                 )
                 self._write(
-                    "/sessions rename <number|full exact name> <new name> | /sessions delete <number|full exact name>",
+                    "/sessions rename <number|full ID> <new title> | /sessions delete <number|full ID>",
                     "info",
                 )
                 self._write(
@@ -5197,16 +5203,6 @@ if TEXTUAL_AVAILABLE:
                         return
                     try:
                         normalized = normalize_session_name(new_name)
-                        duplicate = next(
-                            (
-                                info
-                                for info in self._session_infos()
-                                if info.path != target.path and info.name == normalized
-                            ),
-                            None,
-                        )
-                        if duplicate is not None:
-                            raise ValueError("A session with that name already exists")
                         if not isinstance(session, TuiSessionView):
                             if target.id == session.session_id:
                                 session.set_session_name(normalized)
@@ -6164,7 +6160,8 @@ if TEXTUAL_AVAILABLE:
             if cmd.startswith("/sessions "):
                 rest = cmd[len("/sessions ") :].strip()
                 if rest.startswith("delete "):
-                    target, error = self._resolve_session_target(rest[len("delete ") :])
+                    fresh_infos = await self._fresh_detached_session_infos()
+                    target, error = self._resolve_session_target(rest[len("delete ") :], fresh_infos)
                     if error:
                         self._write(error, "error")
                     elif session.is_streaming:
@@ -6181,7 +6178,8 @@ if TEXTUAL_AVAILABLE:
                     if error:
                         self._write(error, "error")
                         return True
-                    target, error = self._resolve_session_target(target_text or "")
+                    fresh_infos = await self._fresh_detached_session_infos()
+                    target, error = self._resolve_session_target(target_text or "", fresh_infos)
                     if error:
                         self._write(error, "error")
                         return True
@@ -6190,8 +6188,6 @@ if TEXTUAL_AVAILABLE:
                         return True
                     try:
                         normalized = normalize_session_name(new_name or "")
-                        if any(info.path != target.path and info.name == normalized for info in self._session_infos()):
-                            raise ValueError("A session with that name already exists")
                     except ValueError as exc:
                         self._write(str(exc), "error")
                         return True
@@ -6201,7 +6197,8 @@ if TEXTUAL_AVAILABLE:
                         self._invalidate_session_list_snapshot()
                         self._refresh_sidebar()
                     return True
-                target, error = self._resolve_session_target(rest)
+                fresh_infos = await self._fresh_detached_session_infos()
+                target, error = self._resolve_session_target(rest, fresh_infos)
                 if error:
                     self._write(error, "error")
                 else:
@@ -6427,6 +6424,14 @@ if TEXTUAL_AVAILABLE:
                     return
                 if self.session.is_streaming:
                     self._write("Stop or wait for the active turn before deleting a session.", "error")
+                    return
+                fresh_infos = (
+                    await self._fresh_detached_session_infos()
+                    if isinstance(self.session, TuiSessionView)
+                    else self._session_infos()
+                )
+                if not any(info.path == target.path and info.id == target.id for info in fresh_infos):
+                    self._write("Selected session is no longer available. Run /sessions again.", "error")
                     return
                 try:
                     active = target.id == self.session.session_id
@@ -7445,7 +7450,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /preset [id] /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full exact name] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /agents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /preset [id] /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full ID] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /agents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 

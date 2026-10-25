@@ -8,6 +8,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Changed
+
+- **Session selection by ID** — `/sessions` shows the number, full session ID,
+  title, age, and message count. Loading, renaming, and deleting accept an exact
+  full ID or a number from the last displayed list, not a title. IDs work without
+  listing first; stale numbered selections are rejected without renumbering.
+
 ### Added
 
 - **Subagent preset labels** — `/agents` shows the effective preset name beside

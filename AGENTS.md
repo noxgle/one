@@ -31,9 +31,10 @@
   .venv/bin/python -m build && .venv/bin/twine check dist/*`.
 - CLI: `.venv/bin/one ...`, `python -m one ...`, or
   `python -m one.cli.main ...`.
-- TUI sessions use `/sessions`, `/sessions <number|full exact name>`,
-  `/sessions rename ...`, and `/sessions delete ...`; preserve exact-name
-  matching, confirmation, session sidecars, and stale-listener protection.
+- TUI sessions use `/sessions`, `/sessions <number|full ID>`,
+  `/sessions rename ...`, and `/sessions delete ...`; titles are descriptive only.
+  Preserve last-displayed numbering, fresh exact-ID validation, confirmation,
+  session sidecars, and stale-listener protection.
 
 ## Safety and state
 

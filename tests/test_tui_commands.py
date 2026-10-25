@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -1357,19 +1358,19 @@ async def test_tui_sessions_lists_renames_and_confirms_delete(tmp_path: Path):
         await _submit(app, pilot, "/sessions")
         stream = "\n".join(app._stream_lines)
         assert "First session" in stream and "Second session" in stream
-        await _submit(app, pilot, "/sessions rename First session Renamed session")
+        await _submit(app, pilot, f"/sessions rename {session.session_id} Renamed session")
         assert "Renamed session" in "\n".join(app._stream_lines)
-        await _submit(app, pilot, "/sessions delete Second session")
+        await _submit(app, pilot, f"/sessions delete {other.session_id}")
         await _submit(app, pilot, "no")
         assert other_path.exists()
-        await _submit(app, pilot, "/sessions delete Second session")
+        await _submit(app, pilot, f"/sessions delete {other.session_id}")
         await _submit(app, pilot, "yes")
         assert not other_path.exists()
         assert not sidecar.exists()
 
 
 @pytest.mark.asyncio
-async def test_tui_sessions_load_exact_name_and_ignore_old_listener(tmp_path: Path):
+async def test_tui_sessions_load_full_id_and_ignore_old_listener(tmp_path: Path):
     from one.core.agent_session import AgentSession
     from one.core.session_manager import SessionManager
     from one.modes.tui_mode import _OneTextualApp
@@ -1409,21 +1410,22 @@ async def test_tui_sessions_load_exact_name_and_ignore_old_listener(tmp_path: Pa
     app = _OneTextualApp(first, runtime_host=host)
     async with app.run_test() as pilot:
         await pilot.pause()
-        await _submit(app, pilot, "/sessions Second session")
+        await _submit(app, pilot, f"/sessions {second.session_id}")
         assert app.session.session_id == second.session_id
         assert "second transcript" in "\n".join(app._stream_lines)
         assert "compaction transcript" in "\n".join(app._stream_lines)
         assert "branch transcript" in "\n".join(app._stream_lines)
-        first_number = next(str(i) for i, info in enumerate(app._session_infos(), 1) if info.id == first.session_id)
+        await _submit(app, pilot, "/sessions")
+        first_number = next(str(i) for i, info in enumerate(app._session_list_snapshot or [], 1) if info.id == first.session_id)
         await _submit(app, pilot, f"/sessions {first_number}")
         assert app.session.session_id == first.session_id
         first._emit({"type": "message_end", "message": {"role": "assistant", "content": "stale old event"}})
         await pilot.pause()
         assert "stale old event" not in "\n".join(app._stream_lines)
         await _submit(app, pilot, "/sessions Second")
-        assert "No session has that exact name" in "\n".join(app._stream_lines)
+        assert "No session has that exact full ID" in "\n".join(app._stream_lines)
         first_path = Path(first.session_file or "")
-        await _submit(app, pilot, "/sessions delete First session")
+        await _submit(app, pilot, f"/sessions delete {first.session_id}")
         await _submit(app, pilot, "yes")
         assert not first_path.exists()
         assert app.session.session_id != first.session_id
@@ -1582,9 +1584,10 @@ async def test_tui_session_load_marks_persisted_abort_as_historical(tmp_path: Pa
     app = _OneTextualApp(first, runtime_host=Host())
     async with app.run_test() as pilot:
         await pilot.pause()
+        await _submit(app, pilot, "/sessions")
         restored_number = next(
             str(index)
-            for index, info in enumerate(app._session_infos(), 1)
+            for index, info in enumerate(app._session_list_snapshot or [], 1)
             if info.id == restored.session_id
         )
         await _submit(app, pilot, f"/sessions {restored_number}")
@@ -1603,7 +1606,7 @@ async def test_tui_session_load_marks_persisted_abort_as_historical(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_tui_sessions_target_names_precede_indexes_and_rename_is_unambiguous(tmp_path: Path):
+async def test_tui_sessions_accept_only_numbers_or_full_ids(tmp_path: Path):
     from one.modes.tui_mode import _OneTextualApp
 
     session = _persistent_tui_session(tmp_path, "Current", "current")
@@ -1615,20 +1618,56 @@ async def test_tui_sessions_target_names_precede_indexes_and_rename_is_unambiguo
     async with app.run_test() as pilot:
         await pilot.pause()
         target, error = app._resolve_session_target("42")
+        assert target is None
+        assert error == "Session number requires the last displayed /sessions list. Run /sessions first."
+        target, error = app._resolve_session_target(numeric_name.session_id)
         assert error is None
         assert target is not None and target.id == numeric_name.session_id
+        target, error = app._resolve_session_target("Project Notes")
+        assert target is None
+        assert error == "No session has that exact full ID. Use /sessions to list sessions."
+        await _submit(app, pilot, "/sessions")
         indexed, error = app._resolve_session_target("1")
         assert error is None
-        assert indexed is not None and indexed.id == app._session_infos()[0].id
-        _persistent_tui_session(tmp_path, "42", "duplicate numeric name")
-        target, error = app._resolve_session_target("42")
-        assert target is None
-        assert error == "Session name is ambiguous; use its number from /sessions."
+        assert indexed is not None and indexed.id == (app._session_list_snapshot or [])[0].id
+        replaced = replace((app._session_list_snapshot or [])[0], id="replacement-id")
+        stale, error = app._resolve_session_target("1", [replaced])
+        assert stale is None
+        assert error == "Session from the last /sessions list is no longer available. Run /sessions again."
 
         await _submit(app, pilot, "/sessions rename Project Notes renamed")
-        assert "Session rename target is ambiguous" in "\n".join(app._stream_lines)
-        await _submit(app, pilot, "/sessions rename Name With Spaces renamed")
+        assert "No session has that exact full ID" in "\n".join(app._stream_lines)
+        named = next(info for info in app._session_infos() if info.name == "Name With Spaces")
+        await _submit(app, pilot, f"/sessions rename {named.id} renamed")
         assert any(info.name == "renamed" for info in app._session_infos())
+
+
+@pytest.mark.asyncio
+async def test_tui_sessions_allow_duplicate_titles_and_select_by_exact_id(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    current = _persistent_tui_session(tmp_path, "Current", "current")
+    first = _persistent_tui_session(tmp_path, "Shared", "first")
+    second = _persistent_tui_session(tmp_path, "Other", "second")
+    app = _OneTextualApp(current)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit(app, pilot, "/sessions")
+        stream = "\n".join(app._stream_lines)
+        assert first.session_id in stream
+        assert second.session_id in stream
+
+        selected, error = app._resolve_session_target(first.session_id)
+        assert error is None
+        assert selected is not None and selected.id == first.session_id
+        for invalid in (first.session_id[:9], "not-a-session-id"):
+            selected, error = app._resolve_session_target(invalid)
+            assert selected is None
+            assert error == "No session has that exact full ID. Use /sessions to list sessions."
+
+        await _submit(app, pilot, f"/sessions rename {second.session_id} Shared")
+
+    assert [info.name for info in app._session_infos()].count("Shared") == 2
 
 
 @pytest.mark.asyncio
@@ -1640,6 +1679,6 @@ async def test_tui_sessions_rename_is_blocked_while_streaming(tmp_path: Path):
     async with app.run_test() as pilot:
         await pilot.pause()
         session._is_streaming = True
-        await _submit(app, pilot, "/sessions rename Current renamed")
+        await _submit(app, pilot, f"/sessions rename {session.session_id} renamed")
         assert "before renaming" in "\n".join(app._stream_lines)
         assert session.session_manager.get_session_name() == "Current"

@@ -813,7 +813,7 @@ async def test_rebuild_session_transcript_uses_legacy_settings_or_detached_snaps
 
 
 @pytest.mark.asyncio
-async def test_detached_sessions_rename_uses_runtime_host_command(tmp_path) -> None:
+async def test_detached_sessions_full_id_uses_fresh_runtime_host_list_without_number_snapshot(tmp_path) -> None:
     """A real detached Textual pilot must not reach legacy session mutation paths."""
     from one.modes import tui_mode
     from one.modes.tui_mode import _OneTextualApp
@@ -830,12 +830,18 @@ async def test_detached_sessions_rename_uses_runtime_host_command(tmp_path) -> N
             if command == "snapshot":
                 return {"result": self.snapshot}
             if command == "session_list":
-                return {"result": {"sessions": [{
-                    "id": "target", "name": "Exact Name", "path": target_path,
-                    "cwd": str(tmp_path), "modified": datetime.now(UTC).isoformat(), "messageCount": 1,
-                }]}}
+                return {"result": {"sessions": [
+                    {
+                        "id": "target", "name": "Exact Name", "path": target_path,
+                        "cwd": str(tmp_path), "modified": datetime.now(UTC).isoformat(), "messageCount": 1,
+                    },
+                    {
+                        "id": "other", "name": "Duplicate", "path": str(tmp_path / "other.jsonl"),
+                        "cwd": str(tmp_path), "modified": datetime.now(UTC).isoformat(), "messageCount": 1,
+                    },
+                ]}}
             assert command == "ui"
-            assert payload == {"operation": "rename_session", "payload": {"path": target_path, "name": "Renamed"}}
+            assert payload == {"operation": "rename_session", "payload": {"path": target_path, "name": "Duplicate"}}
             return {"result": self.snapshot}
 
         def subscribe(self, _listener):
@@ -848,13 +854,71 @@ async def test_detached_sessions_rename_uses_runtime_host_command(tmp_path) -> N
     tui_mode.SessionManager.open = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy open"))
     try:
         async with app.run_test() as pilot:
-            await app._handle_command("/sessions")
-            await app._handle_command("/sessions rename Exact Name Renamed")
+            await app._handle_command("/sessions rename target Duplicate")
             await pilot.pause()
     finally:
         tui_mode.SessionManager.open = original_open
 
-    assert ("ui", {"operation": "rename_session", "payload": {"path": target_path, "name": "Renamed"}}) in calls
+    assert ("ui", {"operation": "rename_session", "payload": {"path": target_path, "name": "Duplicate"}}) in calls
+    assert app._session_list_snapshot is None
+    assert ("session_list", {}) in calls
+
+
+@pytest.mark.asyncio
+async def test_detached_session_number_uses_displayed_snapshot_and_full_id_needs_no_list(tmp_path) -> None:
+    """Detached numbering is stable across a reorder and rejects path/ID replacement."""
+    from one.modes.tui_mode import _OneTextualApp
+
+    timestamp = datetime.now(UTC).isoformat()
+    first = {"id": "first-id", "name": "Shared", "path": str(tmp_path / "first.jsonl"), "cwd": str(tmp_path), "modified": timestamp}
+    second = {"id": "second-id", "name": "Shared", "path": str(tmp_path / "second.jsonl"), "cwd": str(tmp_path), "modified": timestamp}
+    calls: list[tuple[str, dict[str, object]]] = []
+    lists = [
+        [first, second],  # Exact-ID load, before the UI has displayed a list.
+        [first, second],  # A prefix is not a valid ID.
+        [first, second],  # Displayed number snapshot.
+        [second, first],  # Fresh lookup reordered, but retains first-id.
+        [first, second],  # A new displayed number snapshot.
+        [{**first, "id": "replacement-id"}, second],  # Reused path must not match.
+    ]
+
+    class Facade:
+        snapshot = {"epoch": 1, "sidebar": {"sessionId": "current", "theme": "default"}, "messages": []}
+
+        async def command(self, command, payload=None):
+            payload = payload or {}
+            calls.append((command, payload))
+            if command == "snapshot":
+                return {"result": self.snapshot}
+            if command == "session_list":
+                return {"result": {"sessions": lists.pop(0)}}
+            if command == "switch_session":
+                assert payload == {"path": first["path"], "id": "first-id"}
+                return {"result": self.snapshot}
+            raise AssertionError((command, payload))
+
+        def subscribe(self, _listener):
+            return lambda: None
+
+    view = TuiSessionView(Facade())
+    await view.refresh()
+    app = _OneTextualApp(view, runtime_host=object())
+    async with app.run_test() as pilot:
+        await app._handle_command("/sessions first-id")
+        assert ("switch_session", {"path": first["path"], "id": "first-id"}) in calls
+        await app._handle_command("/sessions first")
+        assert "No session has that exact full ID. Use /sessions to list sessions." in "\n".join(app._stream_lines)
+
+        await app._handle_command("/sessions")
+        await app._handle_command("/sessions 1")
+        assert ("switch_session", {"path": first["path"], "id": "first-id"}) in calls
+
+        await app._handle_command("/sessions")
+        await app._handle_command("/sessions 1")
+        assert "Session from the last /sessions list is no longer available. Run /sessions again." in "\n".join(app._stream_lines)
+        await pilot.pause()
+
+    assert [command for command, _payload in calls].count("session_list") == 6
 
 
 @pytest.mark.asyncio
