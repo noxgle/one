@@ -744,3 +744,11 @@ future target, while Windows 10 support is deferred.
 - [docs/SKILLS.md](docs/SKILLS.md) — skills contract
 - [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) — release verification
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community guidelines
+
+### Command center (Ctrl+P)
+
+Open Ctrl+P to search grouped session, model/agent, tools, appearance, and help
+actions by name, description, shortcut, or slash command. Arrow keys and
+PageUp/PageDown navigate; Enter applies an action or opens its choices. Esc
+returns from a submenu or closes the window; Ctrl+P closes it directly.
+Unavailable actions explain why. The conversation draft is preserved.

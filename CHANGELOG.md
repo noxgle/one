@@ -16,6 +16,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Command center** — Ctrl+P provides grouped searchable ONE actions, shortcut
+  hints, current toggle states, disabled-action explanations, and nested theme,
+  preset, thinking, temperature, and layout choices without consuming chat drafts.
+
 - **Modal model picker** — `Ctrl+K` opens a searchable, keyboard and mouse
   navigable provider/model picker with model capability details and a current
   marker. Selections can apply only to the current session or also save the

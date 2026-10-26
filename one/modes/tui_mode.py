@@ -38,6 +38,7 @@ from one.core.provider_login import run_oauth_login, validate_and_fetch
 from one.core.session_manager import SessionInfo, SessionManager, normalize_session_name
 from one.core.subagent_monitor import SubagentMonitor
 from one.core.types import ModelInfo
+from one.modes.tui_commands import CommandAction, command_actions, search_actions
 from one.tools.common import sanitize_display_text
 
 _UI_EVENT_CAPACITY = 256
@@ -1129,6 +1130,176 @@ if TEXTUAL_AVAILABLE:
             self.value = value
             super().__init__()
 
+    class _CommandCenter(ModalScreen[None]):
+        """ONE action palette. Rendering stays on the UI loop."""
+
+        BINDINGS = [("escape", "back", "Back"), ("ctrl+p", "close", "Close")]
+        DEFAULT_CSS = """
+        _CommandCenter { align: center top; padding-top: 2; background: $background 75%; }
+        #command-center { width: 90%; max-width: 100; height: 80%; max-height: 32;
+            border: round $primary; padding: 0 1; background: $panel; }
+        #command-search { height: 3; margin: 0; }
+        #command-results { height: 1fr; border: none; background: $panel; padding: 0; }
+        #command-results > .option-list--option-highlighted { background: $primary 20%; text-style: bold; }
+        #command-description { height: 3; border-top: solid $border; color: $text-muted; }
+        _CommandCenter.compact { padding-top: 0; }
+        _CommandCenter.compact #command-center { width: 100%; height: 100%; }
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._page = ""
+            self._actions: list[CommandAction] = []
+            self._visible: list[CommandAction] = []
+            self._busy = False
+            self._dispatched = False
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="command-center"):
+                yield _CommandSearch(placeholder="Search commands…", id="command-search")
+                yield OptionList(id="command-results", markup=False)
+                yield Static("", id="command-description", markup=False)
+
+        def on_resize(self, event: events.Resize) -> None:
+            self.set_class(event.size.height < 26 or event.size.width < 70, "compact")
+            if self.is_mounted:
+                self.call_after_refresh(self._render_actions)
+
+        def on_mount(self) -> None:
+            self.query_one("#command-center").border_subtitle = "↑↓ select · Enter run/open · Esc back"
+            self.styles.background = self.app._theme.screen_bg + "BF"
+            self._home()
+            self.call_after_refresh(self._render_actions)
+            self.query_one("#command-search", Input).focus()
+
+        def _home(self) -> None:
+            self._page = ""
+            self._actions = self.app._command_center_actions()
+            self.query_one("#command-search", Input).value = ""
+            self._render_actions()
+
+        def _render_actions(self) -> None:
+            query = self.query_one("#command-search", Input).value
+            self._visible = search_actions(self._actions, query)
+            options = []
+            previous = ""
+            width = max(25, self.query_one("#command-results").size.width - 2)
+            for action in self._visible:
+                if not query and action.category != previous:
+                    options.append(Option(f"── {action.category.upper()} ──", disabled=True))
+                    previous = action.category
+                label = ("○ " if not action.enabled else "  ") + action.title
+                hint = action.shortcut or action.command
+                options.append(Option(f"{label:<{max(12, width - len(hint) - 2)}}  {hint}", id=action.id))
+            listing = self.query_one("#command-results", OptionList)
+            listing.set_options(options or [Option("No matching commands", disabled=True)])
+            listing.action_first()
+            self.query_one("#command-center").border_title = "Commands" + (f" / {self._page}" if self._page else "")
+            self._details()
+
+        def _selected(self) -> CommandAction | None:
+            listing = self.query_one("#command-results", OptionList)
+            if listing.highlighted is None:
+                return None
+            ident = listing.get_option_at_index(listing.highlighted).id
+            return next((a for a in self._visible if a.id == ident), None)
+
+        def _details(self) -> None:
+            action = self._selected()
+            self.query_one("#command-description", Static).update(
+                (action.description + (f"\nUnavailable: {action.disabled_reason}" if not action.enabled else ""))
+                if action else "Try a command name, shortcut, or /command."
+            )
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            event.stop()
+            self._render_actions()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            event.stop()
+            self.app.run_worker(self._execute(), exclusive=False)
+
+        def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+            self._details()
+
+        def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+            self.app.run_worker(self._execute(), exclusive=False)
+
+        async def _execute(self) -> None:
+            action = self._selected()
+            if self._busy or self._dispatched or action is None:
+                return
+            if not action.enabled:
+                self._details()
+                return
+            self._busy = True
+            try:
+                if action.id in {"theme", "preset", "thinking", "temperature", "layout", "sidebar"}:
+                    await self._submenu(action.id)
+                    return
+                if self._page:
+                    await self.app._apply_center_choice(self._page, action.command)
+                    self._dispatched = True
+                    self.dismiss()
+                else:
+                    # Dismiss before opening another ONE dialog or changing sessions.
+                    self._dispatched = True
+                    self.dismiss()
+                    await self.app._execute_center_action(action)
+            except Exception:
+                if self.is_mounted:
+                    self.query_one("#command-description", Static).update("Unable to apply this action. Check session state and retry.")
+            finally:
+                self._busy = False
+
+        async def _submenu(self, page: str) -> None:
+            if page == "theme":
+                entries = [(name, name, "Set the ONE color theme.") for name in BUILTIN_TUI_THEMES]
+            elif page == "preset":
+                session = self.app.session
+                if isinstance(session, TuiSessionView):
+                    data = await session.command("ui", operation="preset_list", payload={})
+                    entries = [(p["id"], p["name"], p["description"]) for p in data["presets"]]
+                else:
+                    from one.core.presets import discover_presets
+                    entries = [(p.id, p.name, p.description or "") for p in discover_presets(getattr(session.resource_loader, "agent_dir", None)).values()]
+            else:
+                choices = {"thinking": ["off", "on", "minimal", "low", "medium", "high", "xhigh"],
+                           "temperature": ["coder", "balanced", "creative", "experimental"],
+                           "layout": ["wide", "compact", "focus"], "sidebar": ["show", "hide"]}
+                entries = [(value, value, f"Set {page} to {value}.") for value in choices[page]]
+            self._page = page
+            current = self.app._center_current(page)
+            self._actions = [CommandAction(ident, ("● " if ident == current else "") + title,
+                                          description, page, command=ident) for ident, title, description in entries]
+            self.query_one("#command-search", Input).value = ""
+            self._render_actions()
+
+        def action_back(self) -> None:
+            if self._page:
+                self._home()
+            else:
+                self.dismiss()
+
+        def action_close(self) -> None:
+            self.dismiss()
+
+    class _CommandSearch(Input):
+        BINDINGS = [("up", "move_up"), ("down", "move_down"),
+                    ("pageup", "page_up"), ("pagedown", "page_down")]
+
+        def action_move_up(self) -> None:
+            self.screen.query_one("#command-results", OptionList).action_cursor_up()
+
+        def action_move_down(self) -> None:
+            self.screen.query_one("#command-results", OptionList).action_cursor_down()
+
+        def action_page_up(self) -> None:
+            self.screen.query_one("#command-results", OptionList).action_page_up()
+
+        def action_page_down(self) -> None:
+            self.screen.query_one("#command-results", OptionList).action_page_down()
+
     class _ModelPicker(ModalScreen[None]):
         """Searchable, scrollable model picker which remains open on errors."""
 
@@ -2022,33 +2193,73 @@ if TEXTUAL_AVAILABLE:
                     yield Static("", id="agents_content")
                 yield Static("", id="agents_footer")
 
-        def get_system_commands(self, screen: Any) -> list[tuple[str, str, Any, bool]]:  # noqa: ARG002
-            """Expose only current one commands in Textual's Ctrl+P palette.
+        def action_command_palette(self) -> None:
+            if isinstance(self.screen, _CommandCenter):
+                self.screen.dismiss()
+            elif len(self.screen_stack) == 1:
+                self.push_screen(_CommandCenter())
 
-            Textual's default Theme and Keys commands use its own theme registry
-            and merged widget bindings, both of which differ from one.
-            """
-            commands: list[tuple[str, str, Any, bool]] = [
-                ("Show one keyboard shortcuts", "Show the current one TUI shortcuts", self.action_show_shortcuts, True),
-                ("Show one slash-command help", "Show the current slash-command reference", self.action_help, True),
-                ("List named presets", "Show available named session presets", lambda: asyncio.create_task(self._handle_command("/preset")), True),
-                ("Clear conversation stream", "Clear the visible conversation stream", self.action_clear_stream, True),
-                ("Toggle cooperation", "Require approval for mutating tools", self.action_toggle_cooperation, True),
-                ("Toggle subagents", "Enable or disable subagent tools", self.action_toggle_subagents, True),
-                ("Show current-session agents", "Inspect direct child agents", self.action_show_agents, True),
-                ("Toggle details output", "Show or hide detailed tool output", self.action_toggle_bash_show, True),
-                ("Quit one", "Quit the application", self.exit, True),
-            ]
-            for theme_name in sorted(BUILTIN_TUI_THEMES):
-                commands.append(
-                    (
-                        f"Theme: {theme_name}",
-                        f"Set the one theme to {theme_name}",
-                        lambda name=theme_name: self._set_theme(name),
-                        True,
-                    )
-                )
-            return commands
+        def _command_center_actions(self) -> list[CommandAction]:
+            if isinstance(self.session, TuiSessionView):
+                sidebar = self.session.snapshot["sidebar"]
+                cooperation = sidebar.get("cooperation", False)
+                subagents = sidebar.get("subagents", True)
+                details = sidebar.get("bashOutput", True)
+            else:
+                settings = self.session.settings_manager
+                cooperation = self.session.approval_callback is not None
+                subagents = settings.get_subagents_enabled()
+                details = settings.get_bash_show_output()
+            return command_actions({"streaming": self.session.is_streaming,
+                "cooperation": cooperation, "subagents": subagents, "details": details,
+                "subagents_hard_disabled": getattr(self.session, "subagents_hard_disabled", False)})
+
+        def _center_current(self, page: str) -> str:
+            return {"theme": self._theme.name, "preset": getattr(self.session, "preset_id", "default"),
+                    "thinking": self.session.thinking_level, "temperature": self.session.temperature_mode,
+                    "layout": self._layout_mode}.get(page, "")
+
+        async def _apply_center_choice(self, page: str, value: str) -> None:
+            if page == "theme":
+                if isinstance(self.session, TuiSessionView):
+                    if not await self._run_view_command("set_theme", {"theme": value}):
+                        raise ValueError("Theme change failed")
+                else:
+                    self._set_theme(value)
+            else:
+                if page == "preset" and self.session.is_streaming:
+                    raise ValueError("Wait for streaming to finish")
+                await self._handle_command(f"/{page} {value}")
+
+        async def _execute_center_action(self, action: CommandAction) -> None:
+            current = next((a for a in self._command_center_actions() if a.id == action.id), None)
+            if current is None or not current.enabled:
+                self._write(current.disabled_reason if current else "Action unavailable.", "warn")
+                return
+            if action.id == "model":
+                self.action_show_model_picker()
+            elif action.id == "cooperation":
+                self.action_toggle_cooperation()
+            elif action.id == "subagents":
+                await self._toggle_subagents()
+            elif action.id == "details":
+                await self._toggle_bash_show()
+            elif action.id == "agents":
+                self.action_show_agents()
+            elif action.id == "shortcuts":
+                self.action_show_shortcuts()
+            elif action.id == "clear":
+                self.action_clear_stream()
+            elif action.id == "quit":
+                self.exit()
+            elif action.command:
+                await self._handle_command(action.command)
+
+        def get_system_commands(self, screen: Any) -> list[tuple[str, str, Any, bool]]:
+            """Compatibility discovery uses the same ONE action catalog."""
+            return [(action.title, action.description,
+                     lambda selected=action: self.run_worker(self._execute_center_action(selected)), True)
+                    for action in self._command_center_actions()]
 
         def on_mount(self) -> None:
             self.query_one("#input", TextArea).focus()

@@ -898,9 +898,7 @@ async def test_tui_action_help_lists_providers(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_ctrl_p_palette_lists_only_current_one_commands(tmp_path: Path):
-    from textual.command import CommandPalette
-
-    from one.modes.tui_mode import _OneTextualApp
+    from one.modes.tui_mode import _CommandCenter, _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
@@ -909,21 +907,20 @@ async def test_ctrl_p_palette_lists_only_current_one_commands(tmp_path: Path):
         commands = app.get_system_commands(app.screen)
         names = [name for name, _help, _callback, _discover in commands]
 
-        assert names.count("Theme") == 0
+        assert names.count("Theme") == 1
         assert "Keys" not in names
-        assert "Show one keyboard shortcuts" in names
-        assert {name.removeprefix("Theme: ") for name in names if name.startswith("Theme: ")} == set(
-            BUILTIN_TUI_THEMES
-        )
+        assert "Keyboard shortcuts" in names
+        assert "Theme" in names
+        assert not any(name.startswith("Theme: ") for name in names)
 
         # Textual owns the Ctrl+P binding; invoking the bound action directly
         # keeps this regression test independent of TextArea key handling.
         app.action_command_palette()
         await pilot.pause()
-        assert isinstance(app.screen, CommandPalette)
+        assert isinstance(app.screen, _CommandCenter)
         await pilot.press("escape")
         await pilot.pause()
-        assert not isinstance(app.screen, CommandPalette)
+        assert not isinstance(app.screen, _CommandCenter)
 
 
 @pytest.mark.asyncio
@@ -942,9 +939,7 @@ async def test_tui_shortcuts_panel_and_palette_theme_use_one_state(tmp_path: Pat
         await pilot.press("escape")
         assert not overlay.has_class("visible")
 
-        commands = app.get_system_commands(app.screen)
-        callback = next(callback for name, _help, callback, _discover in commands if name == "Theme: fallout")
-        callback()
+        await app._apply_center_choice("theme", "fallout")
         await pilot.pause()
         assert app._theme.name == "fallout"
         assert session.settings_manager.get_theme() == "fallout"
@@ -952,7 +947,7 @@ async def test_tui_shortcuts_panel_and_palette_theme_use_one_state(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_tui_agents_and_approval_overlay_colors_follow_every_builtin_theme(tmp_path: Path):
-    from one.modes.tui_mode import BUILTIN_TUI_THEMES, _OneTextualApp
+    from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
     app = _OneTextualApp(session)
