@@ -8,6 +8,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+## [0.1.106] - 2026-10-26
+
 ### Changed
 
 - **Session selection by ID** — `/sessions` shows the number, full session ID,
