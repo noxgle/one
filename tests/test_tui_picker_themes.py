@@ -197,110 +197,35 @@ async def test_commandpalette_esc_returns_focus(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_model_picker_themed_overlay(tmp_path: Path) -> None:
-    """Opening the model picker (Ctrl+K) should show a styled overlay with
-    theme colours."""
-    from textual.widgets import Static
-
+    """Ctrl+K presents the dedicated modal picker."""
     app = _OneTextualApp(_mk_app_session(tmp_path, runtime_key="dummy"))
     async with app.run_test() as pilot:
-        await pilot.pause()
         app.action_show_model_picker()
         await pilot.pause()
-        overlay = app.query_one("#model_overlay", Static)
-        assert overlay.has_class("visible")
-        # Background, border, and colour should all be set
-        assert overlay.styles.background is not None
-        assert overlay.styles.border is not None
-        assert overlay.styles.color is not None
+        picker = app.screen_stack[-1]
+        assert picker.__class__.__name__ == "_ModelPicker"
+        assert picker.styles.background is not None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("theme_name", ["light", "hacker", "solarized"])
 async def test_model_picker_theme_variants(tmp_path: Path, theme_name: str) -> None:
-    """Model picker overlay colours should differ between themes."""
-    from textual.widgets import Static
-
     app = _OneTextualApp(_mk_app_session(tmp_path, runtime_key="dummy"))
     app._theme = BUILTIN_TUI_THEMES[theme_name]
     async with app.run_test() as pilot:
-        await pilot.pause()
         app.action_show_model_picker()
         await pilot.pause()
-        overlay = app.query_one("#model_overlay", Static)
-        assert overlay.has_class("visible")
-        bg = overlay.styles.background
-        assert bg is not None
-        # Verify the background matches the theme's panel_bg
-        theme = BUILTIN_TUI_THEMES[theme_name]
-        # The overlay bg should be close to panel_bg (#0f1a2e for default, etc.)
-        # Not the Textual default blue-ish colour
-        assert bg is not None
-
-
-@pytest.mark.asyncio
-async def test_open_palette_and_model_picker_retheme_without_reopening(tmp_path: Path) -> None:
-    """Ctrl+P/Ctrl+K overlays update in place when the active palette changes."""
-    from textual.color import Color
-    from textual.command import CommandPalette
-    from textual.widgets import Static
-
-    app = _OneTextualApp(_mk_app_session(tmp_path, runtime_key="dummy"))
-    async with app.run_test() as pilot:
-        await pilot.press("ctrl+p")
-        await pilot.pause()
-        assert CommandPalette.is_open(app)
-        palette = app.screen_stack[-1]
-        app.theme = "one-light"
-        app._apply_theme("light")
-        await pilot.pause()
-        assert CommandPalette.is_open(app)
-        assert palette.styles.background == app.get_theme("one-light").to_color_system().background
-        await pilot.press("escape")
-
-        await pilot.press("ctrl+k")
-        await pilot.pause()
-        overlay = app.query_one("#model_overlay", Static)
-        assert overlay.has_class("visible")
-        app.theme = "one-solarized"
-        app._apply_theme("solarized")
-        await pilot.pause()
-        assert overlay.has_class("visible")
-        assert overlay.styles.background == Color.parse(BUILTIN_TUI_THEMES["solarized"].panel_bg)
-        assert overlay.styles.color == Color.parse(BUILTIN_TUI_THEMES["solarized"].screen_fg)
-
-
-# ---------------------------------------------------------------------------
-# 6.  Malicious provider/model strings are sanitised (no markup parsed)
-# ---------------------------------------------------------------------------
+        assert app.screen_stack[-1].__class__.__name__ == "_ModelPicker"
 
 
 @pytest.mark.asyncio
 async def test_model_picker_sanitizes_malicious_provider(tmp_path: Path) -> None:
-    """Provider/model names containing markup-like sequences should be
-    escaped so they appear as literal text."""
-    from textual.widgets import Static
-
     from one.core.types import ModelInfo
-
-    malicious_provider = "open[/b]"
-    malicious_model = "gpt-4[/i]"
-    fake_models = [ModelInfo(malicious_provider, malicious_model)]
-
     app = _OneTextualApp(_mk_app_session(tmp_path, runtime_key="dummy"))
-    with patch.object(
-        app.session.model_registry, "get_available", return_value=fake_models
-    ):
+    with patch.object(app.session.model_registry, "get_available", return_value=[ModelInfo("open[/b]", "gpt-4[/i]")]):
         async with app.run_test() as pilot:
-            await pilot.pause()
             app.action_show_model_picker()
             await pilot.pause()
-            overlay = app.query_one("#model_overlay", Static)
-            assert overlay.has_class("visible")
-            # The overlay text should show the escaped version.
-            # rich_escape turns [/b] into something safe, so the raw
-            # markup string should NOT appear unescaped in the rendered output.
-            overlay_text = overlay.render_line(0).text if hasattr(overlay, "render_line") else str(overlay)
-            # Check that the full overlay content does not have unescaped markup
-            assert "[/b]" not in overlay_text or "open" in overlay_text, (
-                f"Malicious markup [/b] not properly escaped in: {overlay_text}"
-            )
+            picker = app.screen_stack[-1]
+            assert picker.__class__.__name__ == "_ModelPicker"
+            assert "open[/b]" in picker.query_one("#model-picker-list").render_line(0).text

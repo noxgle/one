@@ -378,26 +378,27 @@ async def test_tui_layout_sidebar_and_model_picker_commands(tmp_path: Path):
         await app._handle_command("/layout invalid")
         assert app._stream_lines[-1] == "Usage: /layout <compact|wide|focus>"
         app.action_show_model_picker()
-        assert app._model_picker_models
-        await app._select_picker_model("1")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "_ModelPicker"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
         assert session.settings_manager.get_default_model() == session.model.id
 
 
 @pytest.mark.asyncio
 async def test_tui_slash_command_cancels_model_picker_and_runs_normally(tmp_path: Path):
-    from textual.widgets import Static
-
     from one.modes.tui_mode import _OneTextualApp
 
     app = _OneTextualApp(_mk_app_session(tmp_path, runtime_key="dummy"))
     async with app.run_test() as pilot:
         await pilot.pause()
         app.action_show_model_picker()
-        assert app._model_picker_models
-        assert app.query_one("#model_overlay", Static).has_class("visible")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "_ModelPicker"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
         await _submit(app, pilot, "/stats")
-        assert app._model_picker_models == []
-        assert not app.query_one("#model_overlay", Static).has_class("visible")
         assert '"userMessages"' in "\n".join(app._stream_lines)
 
 

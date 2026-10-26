@@ -8,6 +8,34 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Changed
+
+- **Model picker layout** — a compact command-palette layout with inline search
+  and provider filter, result counts, a highlighted list, separated model details,
+  and labelled action buttons adapts to smaller terminals.
+
+### Added
+
+- **Modal model picker** — `Ctrl+K` opens a searchable, keyboard and mouse
+  navigable provider/model picker with model capability details and a current
+  marker. Selections can apply only to the current session or also save the
+  startup default; model changes are blocked during streaming with actionable
+  feedback.
+
+### Fixed
+
+- **Model picker button contrast** — action buttons keep explicit outline, text,
+  and background styles when hovered, focused, or pressed instead of inheriting
+  the default opaque button tint.
+
+- **Detached model picker catalog loading** — `Ctrl+K` now byte-paginates large
+  model catalogs through the runtime facade and sends only picker-relevant
+  identity/capability metadata, avoiding its 64 KiB DTO limit.
+- **Model picker capabilities and controls** — detached TUI model DTOs retain
+  reasoning, vision, and context metadata; unknown limits are identified as
+  absent rather than fabricated. Picker actions are visible bordered buttons
+  with session/default labels at compact terminal sizes.
+
 ## [0.1.106] - 2026-10-26
 
 ### Changed

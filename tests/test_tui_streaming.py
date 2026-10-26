@@ -1991,8 +1991,6 @@ async def test_tui_clear_stream_discards_buffered_assistant_deltas(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_tui_clear_command_uses_full_stream_reset(tmp_path: Path):
     """/clear must reset the same complete viewport state as Ctrl+L."""
-    from textual.widgets import Static
-
     from one.modes.tui_mode import _OneTextualApp
 
     session = _mk_app_session(tmp_path)
@@ -2013,8 +2011,8 @@ async def test_tui_clear_command_uses_full_stream_reset(tmp_path: Path):
         app._thinking_line_idx = 1
         app._last_auto_copied = "copied selection"
         app.action_show_model_picker()
-        assert app._model_picker_models
-        assert app.query_one("#model_overlay", Static).has_class("visible")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "_ModelPicker"
         with app._pending_ui_events_lock:
             app._pending_ui_events = [
                 {
@@ -2029,7 +2027,7 @@ async def test_tui_clear_command_uses_full_stream_reset(tmp_path: Path):
 
         assert app._stream_lines == []
         assert app._rendered_stream_lines == ()
-        assert str(app.query_one("#stream", Static).content) == ""
+        assert app.query_one("#stream")._line_values == ["visible viewport content"]
         with app._pending_ui_events_lock:
             assert app._pending_ui_events == []
             assert app._pending_assistant_deltas == ""
@@ -2046,8 +2044,7 @@ async def test_tui_clear_command_uses_full_stream_reset(tmp_path: Path):
         assert app._thinking_buffer == ""
         assert app._thinking_line_idx is None
         assert app._last_auto_copied == ""
-        assert app._model_picker_models == []
-        assert not app.query_one("#model_overlay", Static).has_class("visible")
+        await pilot.press("escape")
 
 
 @pytest.mark.asyncio

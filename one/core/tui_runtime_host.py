@@ -46,6 +46,10 @@ _SNAPSHOT_MAX_BYTES = 60 * 1024
 _SNAPSHOT_ENTRY_MAX_BYTES = 3 * 1024
 _SNAPSHOT_MESSAGES_MAX_BYTES = 36 * 1024
 _MODELS_PAGE_SIZE = 100
+# Model pages are returned through the facade's 64 KiB command DTO envelope.
+# Keep enough headroom for that envelope and page metadata.  This limit applies
+# to the complete response, rather than assuming a fixed number of entries fits.
+_MODELS_PAGE_MAX_BYTES = 48 * 1024
 _EVIDENCE_PAGE_CHARS = 12 * 1024
 _EVIDENCE_PAGE_BYTES = 12 * 1024
 _ASSISTANT_PAGE_ROWS = 96
@@ -802,11 +806,32 @@ class TuiRuntimeHost:
             raise ValueError("invalid model page")
         registry = getattr(self._session(), "model_registry", None)
         available = registry.get_available() if registry is not None else []
-        page = available[offset : offset + limit]
-        return self._json({"epoch": self._epoch, "offset": offset, "total": len(available), "models": [
-            {"provider": str(item.provider), "id": str(item.id), "reasoning": bool(item.reasoning), "contextWindow": int(item.context_window or 0), "inputLimit": item.input_limit, "outputLimit": item.output_limit, "maxContextWindow": item.max_context_window, "metadataSource": item.metadata_source}
-            for item in page
-        ], "nextOffset": offset + len(page) if offset + len(page) < len(available) else None})
+        def dto(item: ModelInfo) -> dict[str, Any]:
+            # The picker only renders and returns these identity/capability
+            # fields.  Capacity provenance is not UI state and can make a full
+            # provider catalogue exceed the cross-thread command limit.
+            return {
+                "provider": str(item.provider), "id": str(item.id), "reasoning": item.reasoning,
+                "contextWindow": item.context_window, "inputImage": item.input_image,
+            }
+
+        models: list[dict[str, Any]] = []
+        upper = min(offset + limit, len(available))
+        for index in range(offset, upper):
+            candidate = dto(available[index])
+            response = {"epoch": self._epoch, "offset": offset, "total": len(available), "models": models + [candidate],
+                        "nextOffset": index + 1 if index + 1 < len(available) else None}
+            if len(json.dumps(response, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > _MODELS_PAGE_MAX_BYTES:
+                if not models:
+                    raise ValueError(
+                        f"model at catalog offset {index} is too large to display; shorten its provider or model ID and try again"
+                    )
+                break
+            models.append(candidate)
+        next_offset = offset + len(models) if offset + len(models) < len(available) else None
+        return self._json({
+            "epoch": self._epoch, "offset": offset, "total": len(available), "models": models, "nextOffset": next_offset,
+        })
 
     def evidence_page(self, evidence_id: Any, offset: Any, epoch: Any) -> dict[str, Any]:
         if epoch != self._epoch or not isinstance(evidence_id, str) or not evidence_id or not isinstance(offset, int) or offset < 0:
@@ -1008,7 +1033,9 @@ class TuiRuntimeHost:
             "preset_list": set(),
             "set_preset": {"id"},
         }
-        if operation not in schemas or set(payload) != schemas[operation]:
+        if operation == "set_model" and set(payload) == {"provider", "model", "save_default"}:
+            pass
+        elif operation not in schemas or set(payload) != schemas[operation]:
             raise ValueError(f"invalid TUI operation payload: {operation}")
         string_fields = {
             "set_theme": {"theme"},
@@ -1026,13 +1053,14 @@ class TuiRuntimeHost:
         if operation in string_fields:
             if not all(isinstance(payload[field], str) for field in string_fields[operation]):
                 raise ValueError(f"invalid TUI operation payload: {operation}")
-        if operation in {"set_subagents", "set_bash_output", "set_cooperation", "navigate"} and any(
+        if operation in {"set_subagents", "set_bash_output", "set_cooperation", "set_model", "navigate"} and any(
             not isinstance(payload[key], bool)
             for key in (
                 {
                     "set_subagents": {"enabled"},
                     "set_bash_output": {"enabled"},
                     "set_cooperation": {"enabled"},
+                    "set_model": {"save_default"} if "save_default" in payload else set(),
                     "navigate": {"summarize"},
                 }.get(operation, set())
             )
@@ -1163,12 +1191,15 @@ class TuiRuntimeHost:
         elif operation == "set_bash_output":
             session.settings_manager.set_bash_show_output(bool(payload["enabled"]))
         elif operation == "set_model":
+            if bool(getattr(session, "is_streaming", False)):
+                raise ValueError("model changes are unavailable while a response is streaming")
             model = session.model_registry.resolve(str(payload["provider"]), str(payload["model"]), allow_dynamic=True)
             if model is None:
                 raise ValueError("model not found")
             await session.set_model(model)
-            session.settings_manager.set_default_provider(model.provider)
-            session.settings_manager.set_default_model(model.id)
+            if bool(payload.get("save_default", True)):
+                session.settings_manager.set_default_provider(model.provider)
+                session.settings_manager.set_default_model(model.id)
         elif operation == "cycle_model":
             model = await session.cycle_model()
             if model is None:

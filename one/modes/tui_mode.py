@@ -172,7 +172,12 @@ class TuiSessionView:
                 offset = next_offset
             self._models = models
             self._models_epoch = self.epoch
-        return [SimpleNamespace(provider=str(item.get("provider", "")), id=str(item.get("id", ""))) for item in self._models]
+        def snake_case(name: str) -> str:
+            return re.sub(r"(?<!^)([A-Z])", r"_\1", name).lower()
+
+        # Preserve the complete host DTO so UI capability details do not cross
+        # the runtime boundary or silently lose false/unknown distinctions.
+        return [SimpleNamespace(**{snake_case(key): value for key, value in item.items()}) for item in self._models]
 
     def subscribe(self, listener: Any) -> Any:
         self._listeners.append(listener)
@@ -395,8 +400,10 @@ try:
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.content import Content
     from textual.message import Message
+    from textual.screen import ModalScreen
     from textual.style import Style as TextualStyle
-    from textual.widgets import Button, Input, Static, TextArea
+    from textual.widgets import Button, Input, OptionList, Select, Static, TextArea
+    from textual.widgets.option_list import Option
     from textual.widgets.text_area import Edit
 
     from one.modes.tui_transcript import TranscriptWidget
@@ -1122,6 +1129,199 @@ if TEXTUAL_AVAILABLE:
             self.value = value
             super().__init__()
 
+    class _ModelPicker(ModalScreen[None]):
+        """Searchable, scrollable model picker which remains open on errors."""
+
+        BINDINGS = [("escape", "dismiss_picker", "Close"), ("ctrl+k", "dismiss_picker", "Close")]
+        DEFAULT_CSS = """
+        _ModelPicker { align: center middle; background: $background 75%; }
+        #model_picker {
+            width: 92%; max-width: 108; height: 85%; max-height: 34;
+            padding: 0 1; border: round $primary;
+            background: $panel; color: $foreground;
+        }
+        #model-picker-title { height: 1; color: $text-muted; }
+        #model-picker-filters { height: 3; margin: 1 0 0 0; }
+        #model-picker-search { width: 2fr; margin: 0 1 0 0; border: tall $border; }
+        #model-picker-provider { width: 1fr; min-width: 18; margin: 0; }
+        #model-picker-list {
+            height: 1fr; min-height: 3; border: none; padding: 0;
+            background: $panel; scrollbar-size: 1 1;
+        }
+        #model-picker-list > .option-list--option { padding: 0 1; }
+        #model-picker-list > .option-list--option-highlighted {
+            background: $primary 25%; color: $foreground; text-style: bold;
+        }
+        #model-picker-details {
+            height: 3; padding: 0 1; border-top: solid $border;
+            color: $text-muted; overflow: hidden;
+        }
+        #model-picker-error { height: auto; color: $error; }
+        #model-picker-actions { height: 3; }
+        #model-picker-actions Button { width: 1fr; height: 3; min-height: 3; min-width: 0; margin: 0 1 0 0; border: round $border; }
+        #model-picker-actions Button {
+            background: $panel; color: $foreground; background-tint: transparent;
+            tint: transparent; text-opacity: 100%;
+        }
+        #model-picker-actions Button.-primary { border: round $primary; color: $primary; background: $panel; }
+        #model-picker-actions Button:hover, #model-picker-actions Button:focus {
+            background: $primary 15%; color: $foreground; border: round $primary;
+            background-tint: transparent; tint: transparent;
+        }
+        #model-picker-actions Button.-active {
+            background: $primary 25%; color: $foreground; border: round $primary;
+            tint: transparent;
+        }
+        #model-picker-cancel { margin: 0; }
+        _ModelPicker.compact #model_picker { width: 100%; height: 100%; padding: 0 1; }
+        _ModelPicker.compact #model-picker-filters { margin: 0; }
+        """
+
+        def __init__(self, models: list[Any], current: tuple[str, str] | None) -> None:
+            super().__init__()
+            self._models, self._current = models, current
+            self._filtered: list[Any] = []
+            self._applying = False
+
+        def compose(self) -> ComposeResult:
+            providers = sorted({str(self._value(model, "provider", "")) for model in self._models})
+            with Vertical(id="model_picker"):
+                yield Static("", id="model-picker-title", markup=False)
+                with Horizontal(id="model-picker-filters"):
+                    yield _ModelPickerSearch(placeholder="Search models…", id="model-picker-search")
+                    yield Select([("All providers", "")] + [(provider, provider) for provider in providers], value="", allow_blank=False, id="model-picker-provider")
+                yield OptionList(id="model-picker-list", markup=False)
+                yield Static("", id="model-picker-error", markup=False)
+                yield Static("", id="model-picker-details", markup=False)
+                with Horizontal(id="model-picker-actions"):
+                    yield Button("Session (Enter)", id="model-picker-session", variant="primary")
+                    yield Button("Default (Ctrl+S)", id="model-picker-default")
+                    yield Button("Cancel (Esc)", id="model-picker-cancel")
+
+        def on_mount(self) -> None:
+            self.call_after_refresh(self._initialize)
+
+        def on_resize(self, event: events.Resize) -> None:
+            self.set_class(event.size.height < 27 or event.size.width < 72, "compact")
+
+        def _initialize(self) -> None:
+            self.query_one("#model_picker").border_title = "Choose model"
+            self.query_one("#model_picker").border_subtitle = "↑ ↓ navigate · PgUp/PgDn scroll · Esc close"
+            self._render_results(select_current=True)
+            self.query_one("#model-picker-search", Input).focus()
+
+        def _value(self, model: Any, name: str, default: Any = None) -> Any:
+            return model.get(name, default) if isinstance(model, dict) else getattr(model, name, default)
+
+        def _render_results(self, select_current: bool = False) -> None:
+            query = self.query_one("#model-picker-search", Input).value.casefold().split()
+            provider = self.query_one("#model-picker-provider", Select).value
+            self._filtered = [model for model in self._models if (not provider or self._value(model, "provider") == provider) and all(token in " ".join(str(self._value(model, key, "")) for key in ("provider", "id", "name")).casefold() for token in query)]
+            options = [Option(f"{'● ' if self._current == (str(self._value(model, 'provider')), str(self._value(model, 'id'))) else '  '}{self._value(model, 'provider')}/{self._value(model, 'id')}") for model in self._filtered]
+            listing = self.query_one("#model-picker-list", OptionList)
+            listing.set_options(options)
+            current = "/".join(self._current) if self._current else "none"
+            self.query_one("#model-picker-title", Static).update(
+                f"Current: {current}  ·  {len(self._filtered)} / {len(self._models)} models"
+            )
+            selected = next((index for index, model in enumerate(self._filtered) if self._current == (str(self._value(model, "provider")), str(self._value(model, "id")))), 0) if select_current else min(listing.highlighted or 0, max(0, len(self._filtered) - 1))
+            if self._filtered:
+                listing.highlighted = selected
+                listing.scroll_to_highlight()
+            self._render_details()
+
+        def _render_details(self) -> None:
+            listing = self.query_one("#model-picker-list", OptionList)
+            index = listing.highlighted
+            if index is None or not self._filtered:
+                self.query_one("#model-picker-details", Static).update("No matching models. Search provider, id, or display name.")
+                return
+            model = self._filtered[index]
+            context = self._value(model, "context_window", self._value(model, "contextWindow"))
+            model_id = f"{self._value(model, 'provider')}/{self._value(model, 'id')}"
+            reasoning = self._value(model, "reasoning")
+            vision = self._value(model, "input_image", self._value(model, "inputImage"))
+            self.query_one("#model-picker-details", Static).update(
+                f"{model_id}\nContext: {context if isinstance(context, int) else 'unknown (no registry limit)'}"
+                f" · Reasoning: {'yes' if reasoning is True else 'no' if reasoning is False else 'unknown'}"
+                f" · Vision: {'yes' if vision is True else 'no' if vision is False else 'unknown'}"
+            )
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            if event.input.id == "model-picker-search":
+                self._render_results()
+
+        def on_select_changed(self, event: Select.Changed) -> None:
+            if event.select.id == "model-picker-provider":
+                self._render_results(select_current=True)
+
+        def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+            self._render_details()
+
+        def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+            self._choose(False)
+
+        async def _on_key(self, event: events.Key) -> None:
+            focused = self.focused
+            if event.key == "ctrl+s":
+                self._choose(True)
+                event.stop()
+                event.prevent_default()
+                return
+            if event.key == "enter" and focused is self.query_one("#model-picker-search", Input):
+                self._choose(False)
+                event.stop()
+                event.prevent_default()
+                return
+            await super()._on_key(event)
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "model-picker-cancel":
+                self.dismiss()
+            else:
+                self._choose(event.button.id == "model-picker-default")
+
+        def _choose(self, save_default: bool) -> None:
+            listing = self.query_one("#model-picker-list", OptionList)
+            if not self._applying and listing.highlighted is not None and self._filtered:
+                self._applying = True
+                self.query_one("#model-picker-error", Static).update("")
+                self.app._choose_picker_model(self, self._filtered[listing.highlighted], save_default)
+
+        def finish_apply(self, error: str | None) -> None:
+            self._applying = False
+            if not self.is_mounted or self.app.screen is not self:
+                return
+            if error:
+                self.query_one("#model-picker-error", Static).update(error)
+            else:
+                self.dismiss()
+
+        def action_dismiss_picker(self) -> None:
+            self.dismiss()
+
+    class _ModelPickerSearch(Input):
+        """Search field which delegates list navigation without losing focus."""
+
+        BINDINGS = [
+            ("up", "picker_cursor_up"),
+            ("down", "picker_cursor_down"),
+            ("pageup", "picker_page_up"),
+            ("pagedown", "picker_page_down"),
+        ]
+
+        def action_picker_cursor_up(self) -> None:
+            self.screen.query_one("#model-picker-list", OptionList).action_cursor_up()
+
+        def action_picker_cursor_down(self) -> None:
+            self.screen.query_one("#model-picker-list", OptionList).action_cursor_down()
+
+        def action_picker_page_up(self) -> None:
+            self.screen.query_one("#model-picker-list", OptionList).action_page_up()
+
+        def action_picker_page_down(self) -> None:
+            self.screen.query_one("#model-picker-list", OptionList).action_page_down()
+
     class _CommandTextArea(TextArea):
         """Multi-line command input whose ctrl+v pastes from the system clipboard.
 
@@ -1158,7 +1358,6 @@ if TEXTUAL_AVAILABLE:
                 event.key == "shift+tab"
                 and len(self.app.screen_stack) == 1
                 and not self.app.query(".visible")
-                and not self.app._model_picker_models
             ):
                 event.stop()
                 event.prevent_default()
@@ -1737,7 +1936,6 @@ if TEXTUAL_AVAILABLE:
             # The layout mode owns information-panel visibility. The persisted
             # setting only selects its initial mode.
             self._layout_mode = "wide" if self._info_layout == "sidebar" else "compact"
-            self._model_picker_models: list[ModelInfo] = []
             self._preset_cycle_cursor: tuple[Any, int | None, str, str] | None = None
             # Numbered /sessions targets must keep referring to the list the
             # user saw, rather than to a newly mtime-sorted filesystem scan.
@@ -6410,12 +6608,6 @@ if TEXTUAL_AVAILABLE:
             input_widget = self.query_one("#input", _CommandTextArea)
             input_widget.text = ""
             input_widget.reset_history_navigation()
-            if self._model_picker_models:
-                if text.startswith("/"):
-                    self._dismiss_model_picker()
-                else:
-                    await self._select_picker_model(text)
-                    return
             if self._session_delete_pending is not None:
                 target = self._session_delete_pending
                 self._session_delete_pending = None
@@ -7221,57 +7413,61 @@ if TEXTUAL_AVAILABLE:
             self._resolve_approval(False, self._approval_reason())
 
         def action_show_model_picker(self) -> None:
-            """Open a small, authenticated-model-only picker using existing selection semantics."""
+            """Open the searchable modal without exposing runtime-owned objects."""
+            if isinstance(self.screen, _ModelPicker):
+                self.screen.action_dismiss_picker()
+                return
+            if len(self.screen_stack) > 1:
+                return
+            if self.session.is_streaming:
+                self._write("Model changes are unavailable while a response is streaming. Abort or wait, then try again.", "warn")
+                return
             if isinstance(self.session, TuiSessionView):
                 asyncio.create_task(self._open_detached_model_picker())
                 return
             self._open_model_picker(list(self.session.model_registry.get_available()))
 
         async def _open_detached_model_picker(self) -> None:
-            self._open_model_picker(await self.session.models())
+            try:
+                models = await self.session.models()
+            except Exception:
+                self._write("Unable to load the model catalog from the runtime. Retry Ctrl+K; if this persists, restart the TUI.", "error")
+                return
+            if len(self.screen_stack) == 1:
+                self._open_model_picker(models)
 
         def _open_model_picker(self, models: list[Any]) -> None:
-            overlay = self.query_one("#model_overlay", Static)
-            if self._model_picker_models:
-                self._dismiss_model_picker()
-                return
-            self._model_picker_models = list(models)
-            if not self._model_picker_models:
+            if not models:
                 self._write("No available authenticated models. Use /login first.", "warn")
                 return
             current_model = self.session.model
-            current = f"{rich_escape(current_model.provider)}/{rich_escape(current_model.id)}" if current_model else "none"
-            lines = [f"Model picker — current: {current}", "Type a number and press Enter (Ctrl+K cancels):"]
-            lines.extend(f"{i}. {rich_escape(model.provider)}/{rich_escape(model.id)}" for i, model in enumerate(self._model_picker_models, 1))
-            overlay.update("\n".join(lines))
-            overlay.add_class("visible")
-            self.query_one("#input", TextArea).focus()
+            current = (current_model.provider, current_model.id) if current_model else None
+            self.push_screen(_ModelPicker(models, current))
 
-        async def _select_picker_model(self, text: str) -> None:
-            models = self._model_picker_models
-            self._dismiss_model_picker()
-            if not text.isdigit() or not 1 <= int(text) <= len(models):
-                self._write("Model picker cancelled: enter a listed number.", "warn")
-                return
-            model = models[int(text) - 1]
-            if not isinstance(self.session, TuiSessionView):
-                await self.session.set_model(model)
-                self.session.settings_manager.set_default_provider(model.provider)
-                self.session.settings_manager.set_default_model(model.id)
-            else:
-                await self.session.command(
-                    "ui", operation="set_model", payload={"provider": model.provider, "model": model.id}
-                )
-            self._write(f"Model set to {rich_escape(model.provider)}/{rich_escape(model.id)} (saved as default)", "info")
-            self._refresh_sidebar()
+        def _choose_picker_model(self, picker: _ModelPicker, model: Any, save_default: bool) -> None:
+            asyncio.create_task(self._set_picker_model(picker, model, save_default))
 
-        def _dismiss_model_picker(self) -> None:
-            """Close the picker without changing the current model."""
-            self._model_picker_models = []
+        async def _set_picker_model(self, picker: _ModelPicker, model: Any, save_default: bool) -> None:
+            error: str | None = None
             try:
-                self.query_one("#model_overlay", Static).remove_class("visible")
+                if self.session.is_streaming:
+                    error = "Model was not changed because a response started streaming. Try again when it completes."
+                elif not isinstance(self.session, TuiSessionView):
+                    await self.session.set_model(model)
+                    if save_default:
+                        self.session.settings_manager.set_default_provider(model.provider)
+                        self.session.settings_manager.set_default_model(model.id)
+                else:
+                    await self.session.command("ui", operation="set_model", payload={"provider": model.provider, "model": model.id, "save_default": save_default})
             except Exception:
-                pass
+                error = "Unable to change model: the runtime rejected the selection. Verify provider access and try again."
+            if error:
+                picker.finish_apply(error)
+                return
+            saved = " and saved as default" if save_default else " for this session only"
+            self._write(f"Model set to {rich_escape(model.provider)}/{rich_escape(model.id)}{saved}.", "info")
+            self._refresh_sidebar()
+            picker.finish_apply(None)
 
         def action_toggle_subagents(self) -> None:
             asyncio.create_task(self._toggle_subagents())
@@ -7427,7 +7623,6 @@ if TEXTUAL_AVAILABLE:
             self._thinking_buffer = ""
             self._thinking_line_idx = None
             self._last_auto_copied = ""
-            self._dismiss_model_picker()
 
         def action_show_shortcuts(self) -> None:
             """Show one-owned shortcuts rather than Textual's merged key panel."""

@@ -621,6 +621,36 @@ async def test_detached_model_pages_preserve_every_model_choice() -> None:
 
 
 @pytest.mark.asyncio
+async def test_detached_model_pages_preserve_capabilities_for_picker_details() -> None:
+    """Host camelCase model DTO metadata survives the detached UI projection."""
+    from one.core.types import ModelInfo
+
+    models = [
+        ModelInfo("openai", "known", reasoning=True, context_window=200_000, input_image=True),
+        ModelInfo("openai", "limited", reasoning=False, context_window=None, input_image=False),
+        ModelInfo("chatgpt", "gpt-5.6-sol", reasoning=True, context_window=None, input_image=True),
+    ]
+    host = object.__new__(TuiRuntimeHost)
+    host._epoch = 3
+    host._session = lambda: SimpleNamespace(model_registry=SimpleNamespace(get_available=lambda: models))
+    host._json = lambda value: value
+
+    class Facade:
+        async def command(self, command, payload=None):
+            if command == "snapshot":
+                return {"result": {"epoch": 3, "sidebar": {}, "messages": [], "models": {"paged": True}}}
+            assert command == "models_page"
+            return {"result": host.models_page(**payload)}
+
+    view = TuiSessionView(Facade())
+    await view.refresh()
+    known, limited, chatgpt = await view.models()
+    assert (known.reasoning, known.input_image, known.context_window) == (True, True, 200_000)
+    assert (limited.reasoning, limited.input_image, limited.context_window) == (False, False, None)
+    assert (chatgpt.reasoning, chatgpt.input_image, chatgpt.context_window) == (True, True, None)
+
+
+@pytest.mark.asyncio
 async def test_production_tui_command_allowlist_includes_bounded_page_commands() -> None:
     """The facade must not reject commands that the production host accepts."""
     class Host:
@@ -1421,7 +1451,16 @@ async def test_tui_host_uses_explicit_detached_session_and_control_commands() ->
 
     await host.dispatch("ui", {"operation": "set_theme", "payload": {"theme": "ocean"}})
     await host.dispatch("ui", {"operation": "set_retry", "payload": {"mode": "unlimited"}})
-    await host.dispatch("ui", {"operation": "set_model", "payload": {"provider": "stub", "model": "m"}})
+    await host.dispatch("ui", {
+        "operation": "set_model",
+        "payload": {"provider": "stub", "model": "temporary", "save_default": False},
+    })
+    await host.dispatch("ui", {
+        "operation": "set_model",
+        "payload": {"provider": "stub", "model": "saved", "save_default": True},
+    })
+    # The original two-field DTO remains a compatible request to save the model.
+    await host.dispatch("ui", {"operation": "set_model", "payload": {"provider": "stub", "model": "legacy"}})
     with pytest.raises(ValueError, match="invalid TUI operation payload"):
         await host.dispatch("ui", {"operation": "set_theme", "payload": {"theme": "ocean", "extra": True}})
     with pytest.raises(ValueError, match="invalid TUI runtime command payload"):
@@ -1429,8 +1468,61 @@ async def test_tui_host_uses_explicit_detached_session_and_control_commands() ->
 
     assert calls == [
         ("theme", "ocean"), ("retry", "unlimited"), ("autoRetry", True),
-        ("setModel", "m"), ("provider", "stub"), ("model", "m"),
+        ("setModel", "temporary"),
+        ("setModel", "saved"), ("provider", "stub"), ("model", "saved"),
+        ("setModel", "legacy"), ("provider", "stub"), ("model", "legacy"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {"provider": "stub", "model": "m", "save_default": "false"},
+    {"provider": "stub", "model": "m", "save_default": 0},
+    {"provider": "stub", "model": "m", "save_default": False, "extra": True},
+])
+async def test_tui_host_rejects_invalid_set_model_save_default_payloads(payload) -> None:
+    """The optional model persistence flag is boolean-only and exact-shaped."""
+    calls: list[tuple[str, object]] = []
+
+    class Settings:
+        def set_default_provider(self, value): calls.append(("provider", value))
+        def set_default_model(self, value): calls.append(("model", value))
+
+    class Session:
+        settings_manager = Settings()
+        model_registry = SimpleNamespace(resolve=lambda *args: SimpleNamespace(provider="stub", id="m"))
+        async def set_model(self, value): calls.append(("setModel", value.id))
+
+    host = TuiRuntimeHost(SimpleNamespace(session=Session()), None)
+
+    with pytest.raises(ValueError, match="invalid TUI operation payload: set_model"):
+        await host.dispatch("ui", {"operation": "set_model", "payload": payload})
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_tui_host_streaming_set_model_does_not_mutate_model_or_settings() -> None:
+    """A streaming response rejects model selection before any persistent side effect."""
+    calls: list[tuple[str, object]] = []
+
+    class Settings:
+        def set_default_provider(self, value): calls.append(("provider", value))
+        def set_default_model(self, value): calls.append(("model", value))
+
+    class Session:
+        is_streaming = True
+        settings_manager = Settings()
+        model_registry = SimpleNamespace(resolve=lambda *args: calls.append(("resolve", args)))
+        async def set_model(self, value): calls.append(("setModel", value))
+
+    host = TuiRuntimeHost(SimpleNamespace(session=Session()), None)
+
+    with pytest.raises(ValueError, match="model changes are unavailable while a response is streaming"):
+        await host.dispatch("ui", {
+            "operation": "set_model",
+            "payload": {"provider": "stub", "model": "m", "save_default": True},
+        })
+    assert calls == []
 
 
 def test_tui_snapshot_projection_stays_below_command_result_cap() -> None:
