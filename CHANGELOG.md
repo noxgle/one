@@ -16,6 +16,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Thinking shortcut** — Ctrl+T cycles the thinking level in the TUI using the
+  same behavior and persistence as `/thinking-cycle`, without submitting the draft.
+
 - **Session browser** — Ctrl+P → Sessions opens a searchable recent-first
   browser with exact-ID loading, current-session marker, refresh, and preserved
   command-palette search on Back. Drafts require explicit keep-and-switch

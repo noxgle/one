@@ -250,6 +250,7 @@ Current application shortcuts are:
 | `Ctrl+V` | Paste host/system clipboard text |
 | `Ctrl+Shift+V` | Paste terminal text (SSH-safe) |
 | `Ctrl+Alt+V` | Paste an image from the system clipboard |
+| `Ctrl+T` | Cycle thinking level (same as `/thinking-cycle`) |
 | `Ctrl+R` | Cycle retry mode (`off` → `on` → `unlimited` → `off`) |
 | `Ctrl+Up` / `Ctrl+Down` | Navigate the local input history (up to 50 prompts and commands) |
 | `Ctrl+F1` | Show slash-command help |

@@ -733,6 +733,7 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+Shift+V", "Paste terminal"),
     ("Ctrl+Alt+V", "Paste image"),
     ("Ctrl+R", "Retry mode"),
+    ("Ctrl+T", "Cycle thinking level"),
     ("Ctrl+← / →", "Adjust temperature"),
     ("Ctrl+↑ / ↓", "Input history"),
     ("Ctrl+F1", "Command help"),
@@ -2118,6 +2119,7 @@ if TEXTUAL_AVAILABLE:
             ("ctrl+s", "toggle_subagents", "Toggle subagents"),
             Binding("ctrl+o", "toggle_bash_show", "Toggle details output", priority=True),
             Binding("ctrl+r", "cycle_retry_mode", "Cycle retry mode", priority=True),
+            Binding("ctrl+t", "cycle_thinking", "Cycle thinking level", priority=True),
             Binding("ctrl+k", "show_model_picker", "Model picker", priority=True),
             Binding("ctrl+left", "decrease_temperature", "Decrease temperature", priority=True),
             Binding("ctrl+right", "increase_temperature", "Increase temperature", priority=True),
@@ -7960,6 +7962,11 @@ if TEXTUAL_AVAILABLE:
                     self._preset_cycle_cursor = (session, epoch, session.preset_id, target)
             except Exception as exc:
                 self._write(str(exc), "error")
+
+        async def action_cycle_thinking(self) -> None:
+            """Use exactly the same runtime path as /thinking-cycle."""
+            if len(self.screen_stack) == 1:
+                await self._handle_command("/thinking-cycle")
 
         def action_cycle_retry_mode(self) -> None:
             asyncio.create_task(self._cycle_retry_mode())

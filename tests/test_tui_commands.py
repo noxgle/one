@@ -1678,3 +1678,24 @@ async def test_tui_sessions_rename_is_blocked_while_streaming(tmp_path: Path):
         await _submit(app, pilot, f"/sessions rename {session.session_id} renamed")
         assert "before renaming" in "\n".join(app._stream_lines)
         assert session.session_manager.get_session_name() == "Current"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_t_cycles_thinking_once_without_changing_draft(tmp_path: Path):
+    from textual.widgets import TextArea
+
+    session = _mk_app_session(tmp_path, runtime_key="dummy")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        draft = app.query_one("#input", TextArea)
+        draft.text = "keep this draft"
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert session.thinking_level == "high"
+        assert session.settings_manager.get_default_thinking_level() == "high"
+        assert draft.text == "keep this draft"
+        assert sum("Thinking level cycled to" in line for line in app._stream_lines) == 1
+        await pilot.press("ctrl+p")
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert session.thinking_level == "high"
