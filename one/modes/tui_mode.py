@@ -1130,6 +1130,176 @@ if TEXTUAL_AVAILABLE:
             self.value = value
             super().__init__()
 
+    class _SessionBrowser(ModalScreen[None]):
+        """Identity-based session selection, separate from slash-list numbering."""
+
+        BINDINGS = [("escape", "back", "Back")]
+        DEFAULT_CSS = """
+        _SessionBrowser { align: center middle; background: $background 75%; }
+        #session-browser { width: 92%; max-width: 110; height: 85%; max-height: 36;
+            border: round $primary; padding: 0 1; background: $panel; }
+        #session-search { height: 3; }
+        #session-count { height: 1; color: $text-muted; }
+        #session-results { height: 1fr; min-height: 2; border: none; padding: 0; background: $panel; }
+        #session-details { height: 4; border-top: solid $border; color: $text-muted; }
+        #session-notice { height: auto; color: $warning; }
+        #session-actions { height: 3; }
+        #session-actions Button { width: 1fr; min-width: 0; height: 3; border: round $border;
+            background: $panel; color: $foreground; tint: transparent; margin-right: 1; }
+        #session-actions Button:hover, #session-actions Button:focus { border: round $primary; background: $primary 15%; }
+        _SessionBrowser.compact #session-browser { width: 100%; height: 100%; }
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._infos: list[SessionInfo] = []
+            self._filtered: list[SessionInfo] = []
+            self._busy = False
+            self._confirmed: tuple[str, str] | None = None
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="session-browser"):
+                yield _SessionSearch(placeholder="Search title or full session ID…", id="session-search")
+                yield Static("Loading sessions…", id="session-count", markup=False)
+                yield OptionList(id="session-results", markup=False)
+                yield Static("", id="session-details", markup=False)
+                yield Static("", id="session-notice", markup=False)
+                with Horizontal(id="session-actions"):
+                    yield Button("Load (Enter)", id="session-load")
+                    yield Button("Refresh", id="session-refresh")
+                    yield Button("Back (Esc)", id="session-back")
+
+        def on_resize(self, event: events.Resize) -> None:
+            self.set_class(event.size.height < 27 or event.size.width < 72, "compact")
+
+        def on_mount(self) -> None:
+            panel = self.query_one("#session-browser")
+            panel.border_title = "Sessions"
+            panel.border_subtitle = "↑↓ select · PgUp/PgDn scroll · ● current"
+            self.query_one("#session-search", Input).focus()
+            self.run_worker(self._refresh())
+
+        async def _refresh(self) -> None:
+            try:
+                infos = await self.app._browser_session_infos()
+                if self.is_mounted:
+                    self._infos = sorted(infos, key=lambda item: item.modified.timestamp(), reverse=True)
+                    self._filter()
+            except Exception:
+                if self.is_mounted:
+                    self.query_one("#session-notice", Static).update("Unable to list sessions. Refresh to retry.")
+
+        def _filter(self) -> None:
+            tokens = self.query_one("#session-search", Input).value.casefold().split()
+            self._filtered = [info for info in self._infos
+                              if all(token in f"{info.name or ''} {info.id}".casefold() for token in tokens)]
+            listing = self.query_one("#session-results", OptionList)
+            listing.set_options([Option(
+                f"{'●' if info.id == self.app.session.session_id else ' '} {info.name or 'Untitled session'}"
+                f"  ·  {info.modified:%d %b %H:%M}  ·  {info.message_count} msgs"
+            ) for info in self._filtered])
+            if self._filtered:
+                listing.highlighted = 0
+            self.query_one("#session-count", Static).update(
+                f"Recent first  ·  {len(self._filtered)} / {len(self._infos)} sessions"
+            )
+            self._details()
+
+        def _selected(self) -> SessionInfo | None:
+            index = self.query_one("#session-results", OptionList).highlighted
+            return self._filtered[index] if index is not None and index < len(self._filtered) else None
+
+        def _details(self) -> None:
+            self._confirmed = None
+            info = self._selected()
+            self.query_one("#session-details", Static).update(
+                f"{info.name or 'Untitled session'}\nID: {info.id}\n"
+                f"Updated: {info.modified:%Y-%m-%d %H:%M}  ·  {info.message_count} messages" if info
+                else "No matching sessions. Try another title or full ID."
+            )
+            streaming = self.app.session.is_streaming
+            self.query_one("#session-load", Button).disabled = streaming or info is None
+            self.query_one("#session-notice", Static).update(
+                "Stop or wait for the current response before loading." if streaming else ""
+            )
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            event.stop()
+            self._filter()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            event.stop()
+            self.app.run_worker(self._load())
+
+        def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+            self._details()
+
+        def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+            self.app.run_worker(self._load())
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            event.stop()
+            if event.button.id == "session-back":
+                self.action_back()
+            elif event.button.id == "session-refresh":
+                self.run_worker(self._refresh(), exclusive=True)
+            else:
+                self.app.run_worker(self._load())
+
+        async def _load(self) -> None:
+            info = self._selected()
+            if self._busy or info is None:
+                return
+            notice = self.query_one("#session-notice", Static)
+            if self.app.session.is_streaming:
+                notice.update("Stop or wait for the current response before loading.")
+                return
+            if info.id == self.app.session.session_id:
+                notice.update("This session is already active.")
+                return
+            draft = self.app.query_one("#input", TextArea).text
+            if draft.strip() and self._confirmed != (info.id, draft):
+                self._confirmed = (info.id, draft)
+                notice.update("Keep your draft and switch? Press Load / Enter again to confirm, or Esc to cancel.")
+                return
+            self._busy = True
+            try:
+                fresh = await self.app._browser_session_infos()
+                target = next((item for item in fresh if item.id == info.id and item.path == info.path), None)
+                if target is None:
+                    notice.update("Selected session is no longer available. Refresh the list.")
+                    return
+                await self.app._load_browser_session(target)
+                if self.is_mounted:
+                    self.dismiss()
+                if isinstance(self.app.screen, _CommandCenter):
+                    self.app.screen.dismiss()
+            except Exception:
+                if self.is_mounted:
+                    notice.update("Unable to load this session. Current draft kept; refresh and retry.")
+            finally:
+                self._busy = False
+
+        def action_back(self) -> None:
+            if not self._busy:
+                self.dismiss()
+
+    class _SessionSearch(Input):
+        BINDINGS = [("up", "previous"), ("down", "next"),
+                    ("pageup", "page_up"), ("pagedown", "page_down")]
+
+        def action_previous(self) -> None:
+            self.screen.query_one("#session-results", OptionList).action_cursor_up()
+
+        def action_next(self) -> None:
+            self.screen.query_one("#session-results", OptionList).action_cursor_down()
+
+        def action_page_up(self) -> None:
+            self.screen.query_one("#session-results", OptionList).action_page_up()
+
+        def action_page_down(self) -> None:
+            self.screen.query_one("#session-results", OptionList).action_page_down()
+
     class _CommandCenter(ModalScreen[None]):
         """ONE action palette. Rendering stays on the UI loop."""
 
@@ -1234,6 +1404,9 @@ if TEXTUAL_AVAILABLE:
                 return
             self._busy = True
             try:
+                if action.id == "sessions" and not self._page:
+                    self.app.push_screen(_SessionBrowser())
+                    return
                 if action.id in {"theme", "preset", "thinking", "temperature", "layout", "sidebar"}:
                     await self._submenu(action.id)
                     return
@@ -2705,6 +2878,35 @@ if TEXTUAL_AVAILABLE:
                     continue
             return infos
 
+        async def _browser_session_infos(self) -> list[SessionInfo]:
+            if not isinstance(self.session, TuiSessionView):
+                return self._session_infos()
+            infos: list[SessionInfo] = []
+            offset = 0
+            epoch = self.session.epoch
+            while True:
+                result = await self.session.command("session_list_page", offset=offset, limit=100)
+                if self.session.epoch != epoch:
+                    raise ValueError("Session changed while loading list")
+                infos.extend(self._session_infos_from_result(result))
+                next_offset = result.get("nextOffset")
+                if next_offset is None:
+                    return infos
+                if not isinstance(next_offset, int) or next_offset <= offset:
+                    raise ValueError("Invalid session page")
+                offset = next_offset
+
+        async def _load_browser_session(self, info: SessionInfo) -> None:
+            if self.session.is_streaming:
+                raise ValueError("Wait for the current response")
+            if self.runtime_host is None and not isinstance(self.session, TuiSessionView):
+                raise ValueError("Runtime host unavailable")
+            draft = self.query_one("#input", TextArea).text
+            try:
+                await self._switch_to_session(info)
+            finally:
+                self.query_one("#input", TextArea).text = draft
+
         async def _list_sessions(self) -> None:
             if isinstance(self.session, TuiSessionView):
                 infos = await self._fresh_detached_session_infos()
@@ -2735,15 +2937,19 @@ if TEXTUAL_AVAILABLE:
             if self.session.is_streaming:
                 self._write("Stop or wait for the active turn before loading a session.", "error")
                 return
-            if self.runtime_host is None:
+            if self.runtime_host is None and not isinstance(self.session, TuiSessionView):
                 self._write("Runtime host unavailable: session loading is not supported in this context.", "error")
                 return
             self._prepare_session_change()
-            if isinstance(self.session, TuiSessionView):
-                await self.session.command("switch_session", path=info.path, id=info.id)
-            else:
-                await self.runtime_host.switch_session(info.path)
-                self.session = self.runtime_host.session
+            try:
+                if isinstance(self.session, TuiSessionView):
+                    await self.session.command("switch_session", path=info.path, id=info.id)
+                else:
+                    await self.runtime_host.switch_session(info.path)
+                    self.session = self.runtime_host.session
+            except Exception:
+                self._approval_rebinding = False
+                raise
             self._bind_session()
             self._invalidate_session_list_snapshot()
             self._clear_extension_ui_state()

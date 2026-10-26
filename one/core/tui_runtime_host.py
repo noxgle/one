@@ -50,6 +50,7 @@ _MODELS_PAGE_SIZE = 100
 # Keep enough headroom for that envelope and page metadata.  This limit applies
 # to the complete response, rather than assuming a fixed number of entries fits.
 _MODELS_PAGE_MAX_BYTES = 48 * 1024
+_SESSION_LIST_PAGE_MAX_BYTES = 48 * 1024
 _EVIDENCE_PAGE_CHARS = 12 * 1024
 _EVIDENCE_PAGE_BYTES = 12 * 1024
 _ASSISTANT_PAGE_ROWS = 96
@@ -502,6 +503,8 @@ class TuiRuntimeHost:
             return await self.new_session()
         if command == "session_list" and not payload:
             return await self.session_list()
+        if command == "session_list_page" and set(payload) == {"offset", "limit"}:
+            return await self.session_list_page(payload["offset"], payload["limit"])
         if command == "ui" and set(payload) == {"operation", "payload"} and isinstance(payload["operation"], str):
             return await self.ui_operation(payload["operation"], payload["payload"])
         raise ValueError(f"invalid TUI runtime command payload: {command}")
@@ -939,6 +942,8 @@ class TuiRuntimeHost:
     async def switch_session(self, path: str, session_id: str) -> dict[str, Any]:
         if not isinstance(path, str) or not path or not isinstance(session_id, str) or not session_id:
             raise ValueError("session path is required")
+        if bool(getattr(self._session(), "is_streaming", False)):
+            raise ValueError("session changes are unavailable while a response is streaming")
         # Never present prior-session accounting while a switch is rejected or
         # in progress. The next full snapshot repopulates this authoritatively.
         self._sidebar_expensive = None
@@ -979,6 +984,42 @@ class TuiRuntimeHost:
                 for x in SessionManager.list(manager.cwd, manager.session_dir)
             ]
         }
+
+    async def session_list_page(self, offset: Any, limit: Any) -> dict[str, Any]:
+        """Return a byte-bounded page of session identities for detached browsers."""
+        if (
+            not isinstance(offset, int) or isinstance(offset, bool) or offset < 0
+            or not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
+        ):
+            raise ValueError("invalid session list page")
+        manager = self._session().session_manager
+        available = SessionManager.list(manager.cwd, manager.session_dir)
+        if offset > len(available):
+            raise ValueError("invalid session list offset")
+
+        sessions: list[dict[str, Any]] = []
+        upper = min(offset + limit, len(available))
+        for index in range(offset, upper):
+            item = available[index]
+            candidate = {
+                "id": item.id,
+                "name": item.name,
+                "path": item.path,
+                "cwd": item.cwd,
+                "modified": item.modified.isoformat(),
+                "messageCount": item.message_count,
+            }
+            response = {
+                "sessions": [*sessions, candidate],
+                "nextOffset": index + 1 if index + 1 < len(available) else None,
+            }
+            if len(json.dumps(response, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > _SESSION_LIST_PAGE_MAX_BYTES:
+                if not sessions:
+                    raise ValueError(f"session at list offset {index} is too large to display")
+                break
+            sessions.append(candidate)
+        next_offset = offset + len(sessions) if offset + len(sessions) < len(available) else None
+        return self._json({"sessions": sessions, "nextOffset": next_offset}, maximum=_SESSION_LIST_PAGE_MAX_BYTES)
 
     async def ui_operation(self, operation: str, payload: Any) -> dict[str, Any]:
         """Explicit, UI-facing mutations.  Keep this list auditable; no reflection."""
@@ -1645,6 +1686,7 @@ TUI_COMMANDS = frozenset(
         "switch_session",
         "new_session",
         "session_list",
+        "session_list_page",
         "ui",
     }
 )

@@ -16,6 +16,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Session browser** — Ctrl+P → Sessions opens a searchable recent-first
+  browser with exact-ID loading, current-session marker, refresh, and preserved
+  command-palette search on Back. Drafts require explicit keep-and-switch
+  confirmation; streaming and stale selections cannot load another session.
+
 - **Command center** — Ctrl+P provides grouped searchable ONE actions, shortcut
   hints, current toggle states, disabled-action explanations, and nested theme,
   preset, thinking, temperature, and layout choices without consuming chat drafts.

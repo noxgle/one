@@ -1648,6 +1648,79 @@ async def test_session_switches_clear_cached_expensive_sidebar_before_success_or
     assert host._epoch == 3
 
 
+@pytest.mark.asyncio
+async def test_session_list_page_is_byte_bounded_and_preserves_unicode_offsets(tmp_path) -> None:
+    """The detached browser can page every session without a fixed row limit."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    for index in range(105):
+        (session_dir / f"{index:03}.jsonl").write_text(
+            "\n".join((
+                json.dumps({"type": "session", "id": f"id-{index}", "timestamp": "2026-01-01T00:00:00+00:00", "cwd": str(tmp_path)}),
+                json.dumps({"type": "session_info", "name": f"会話{index}-" + "😀" * 1_000}),
+            )) + "\n",
+            encoding="utf-8",
+        )
+    host = object.__new__(TuiRuntimeHost)
+    host._host = SimpleNamespace(session=SimpleNamespace(
+        session_manager=SimpleNamespace(cwd=str(tmp_path), session_dir=str(session_dir)),
+    ))
+
+    offset, ids = 0, []
+    while offset is not None:
+        page = await host.dispatch("session_list_page", {"offset": offset, "limit": 200})
+        assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 48 * 1024
+        assert all(set(item) == {"path", "id", "name", "cwd", "modified", "messageCount"} for item in page["sessions"])
+        ids.extend(item["id"] for item in page["sessions"])
+        expected = offset + len(page["sessions"])
+        assert page["nextOffset"] == (expected if expected < 105 else None)
+        offset = page["nextOffset"]
+
+    assert len(ids) == 105
+    assert set(ids) == {f"id-{index}" for index in range(105)}
+    assert "session_list_page" in TUI_COMMANDS
+
+
+@pytest.mark.asyncio
+async def test_streaming_session_switch_rejects_before_listing_or_side_effects(monkeypatch) -> None:
+    session = SimpleNamespace(
+        is_streaming=True,
+        session_manager=SimpleNamespace(cwd="/tmp", session_dir="/tmp/sessions"),
+    )
+    owner = SimpleNamespace(session=session)
+    host = object.__new__(TuiRuntimeHost)
+    host._host, host._epoch = owner, 2
+    host._session = lambda: host._host.session
+    host._sidebar_expensive = {"usage": {"percent": 99}}
+    host._close_waits = lambda _reason: pytest.fail("streaming rejection must not close waits")
+    monkeypatch.setattr(SessionManager, "list", staticmethod(lambda *_args: pytest.fail("streaming rejection must not list sessions")))
+
+    with pytest.raises(ValueError, match="unavailable while a response is streaming"):
+        await host.switch_session("/tmp/target", "target")
+    assert host._sidebar_expensive == {"usage": {"percent": 99}}
+
+
+@pytest.mark.asyncio
+async def test_session_switch_rejects_stale_id_before_waits(monkeypatch) -> None:
+    session = SimpleNamespace(
+        is_streaming=False,
+        session_manager=SimpleNamespace(cwd="/tmp", session_dir="/tmp/sessions"),
+    )
+    host = object.__new__(TuiRuntimeHost)
+    host._host, host._epoch = SimpleNamespace(session=session), 2
+    host._session = lambda: host._host.session
+    host._sidebar_expensive = None
+    host._close_waits = lambda _reason: pytest.fail("stale IDs must not close waits")
+    monkeypatch.setattr(
+        SessionManager,
+        "list",
+        staticmethod(lambda *_args: [SimpleNamespace(path="/tmp/target", id="current")]),
+    )
+
+    with pytest.raises(ValueError, match="no longer available"):
+        await host.switch_session("/tmp/target", "stale")
+
+
 def test_tui_snapshot_whole_document_is_bounded_and_keeps_latest_control_state() -> None:
     """Combined registry/MCP/monitor/history pressure cannot evict controls."""
     class Registry:

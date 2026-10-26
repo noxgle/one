@@ -752,3 +752,10 @@ actions by name, description, shortcut, or slash command. Arrow keys and
 PageUp/PageDown navigate; Enter applies an action or opens its choices. Esc
 returns from a submenu or closes the window; Ctrl+P closes it directly.
 Unavailable actions explain why. The conversation draft is preserved.
+
+Choose **Sessions** in Ctrl+P to browse saved sessions for the current project.
+Search by title or full ID, use Enter/Load to switch, or Esc/Back to return to
+the command center. Refresh reloads the list without changing `/sessions`
+numbering. A nonempty chat draft requires a second confirmation and is kept
+after switching. Loading is blocked during streaming. Rename/delete remain
+available through `/sessions`; this browser does not read all conversation bodies.
