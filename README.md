@@ -19,11 +19,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 
-`one` is an autonomous Python terminal agent with **14 built-in tools**:
+`one` is an autonomous Python terminal agent with **15 built-in tools**:
 `read`, `read_image`, `bash`, `edit`, `write`, `grep`, `find`, `ls`,
-`evidence_read`, `finish`, `plan`, `spawn_subagent`, `ask_user`, and
-`apply_patch`. It can plan, use files and shell tools, verify work, and report
-a result. It also supports approval gates, steering, questions, sessions, MCP
+`web_connect`, `evidence_read`, `finish`, `plan`, `spawn_subagent`, `ask_user`, and
+`apply_patch`. It can plan, use files and shell tools, retrieve HTTP(S) pages
+with the built-in [`web_connect`](#native-http-retrieval-web_connect) tool
+without bash or an MCP server, verify work, and report a result. It also supports approval gates, steering, questions, sessions, MCP
 tools, extensions, skills, and image input.
 
 > **Maturity:** Alpha (`0.1.x`). Public APIs, tool contracts, and storage
@@ -37,9 +38,14 @@ tools, extensions, skills, and image input.
 - [Beginner guides](#beginner-guides)
 - [Updating](#updating)
 - [Choose a mode](#choose-a-mode)
+  - [Command center (Ctrl+P)](#command-center-ctrlp)
+  - [Model picker (Ctrl+K)](#model-picker-ctrlk)
 - [Headless tasks with `one run`](#headless-tasks-with-one-run)
 - [Providers and authentication](#providers-and-authentication)
 - [Sessions and configuration](#sessions-and-configuration)
+  - [TUI session browser](#tui-session-browser)
+  - [Generation budget](#generation-budget)
+  - [Built-in HTTP retrieval (`web_connect`)](#native-http-retrieval-web_connect)
 - [Images](#images)
 - [Cooperation and safety](#cooperation-and-safety)
 - [Integrations](#integrations)
@@ -237,7 +243,7 @@ Current application shortcuts are:
 
 | Shortcut | Action |
 | --- | --- |
-| `Ctrl+P` | Command palette |
+| `Ctrl+P` | Command center: search actions and open submenus |
 | `Ctrl+K` | Searchable provider/model picker; Enter applies for this session and `Ctrl+S` also saves the default |
 | `Shift+Tab` | Next preset (main input, idle only; wraps to the first preset) |
 | `Ctrl+C` | Abort turn |
@@ -250,13 +256,47 @@ Current application shortcuts are:
 | `Ctrl+V` | Paste host/system clipboard text |
 | `Ctrl+Shift+V` | Paste terminal text (SSH-safe) |
 | `Ctrl+Alt+V` | Paste an image from the system clipboard |
-| `Ctrl+T` | Cycle thinking level (same as `/thinking-cycle`) |
+| `Ctrl+T` | Cycle thinking level (same as `/thinking-cycle`; main view only) |
+| `Ctrl+Left` / `Ctrl+Right` | Decrease / increase temperature |
 | `Ctrl+R` | Cycle retry mode (`off` → `on` → `unlimited` → `off`) |
 | `Ctrl+Up` / `Ctrl+Down` | Navigate the local input history (up to 50 prompts and commands) |
 | `Ctrl+F1` | Show slash-command help |
 | `Esc` | Close the shortcuts panel |
 
 Use `/paste-image` if the terminal intercepts `Ctrl+Alt+V`.
+
+#### Command center (Ctrl+P)
+
+Open **Ctrl+P** to search grouped session, model/agent, tools, appearance, and
+help actions. Search by name, description, shortcut, or slash command; selected
+Polish aliases such as `sesje` and `motyw` are also supported. Toggle actions
+show their current ON/OFF state, and unavailable actions explain why.
+
+Use Up/Down or PageUp/PageDown to navigate, and Enter or a mouse click to run an
+action or open its choices. Themes, presets, thinking levels, temperature,
+layout, and sidebar visibility have submenus. Esc returns from a submenu or
+closes the command center; Ctrl+P closes the command center directly. Opening
+and cancelling it preserves the conversation draft.
+
+Choose **Sessions** to open the [session browser](#tui-session-browser), or
+**Select model** to open the model picker below.
+
+#### Model picker (Ctrl+K)
+
+**Ctrl+K** opens a searchable list of available models with a provider filter.
+Search tokens match the provider and model ID (and a display name when supplied).
+The current model is marked `●`; the selected model's full ID, context limit,
+reasoning capability, and image-input capability appear below the list.
+`unknown` means metadata is unavailable, not that the model has zero capacity.
+
+- Up/Down, PageUp/PageDown, and the mouse navigate the list.
+- **Session (Enter)** changes the model for the current session only.
+- **Default (Ctrl+S)** also saves the selection as the startup default.
+- **Cancel (Esc)** or Ctrl+K closes the picker without changing the model or draft.
+
+Model changes are blocked during generation. A selection failure leaves the
+picker open with feedback. The meaning of Ctrl+S here is local to this window;
+in the main conversation it toggles subagents.
 
 ### TUI `/bash` command profile
 
@@ -390,7 +430,7 @@ variables include `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GEMINI_API_KEY`.
 
 ### Thinking levels
 
-`/thinking <off|minimal|low|medium|high|xhigh>` and `/thinking-cycle` save the
+`/thinking <off|on|minimal|low|medium|high|xhigh>` and `/thinking-cycle` save the
 selected level as the default for future sessions; a loaded session continues
 to use its recorded level. Models without reasoning capability remain at
 `off`. `off` omits enabled reasoning where supported. OpenAI-compatible and
@@ -446,12 +486,18 @@ does not revoke a provider account token or remove environment credentials.
 
 Named agent presets are documented in [docs/PRESETS.md](docs/PRESETS.md). Use
 `one --preset readonly` for app-enforced read-only inspection (not OS or network sandboxing).
+List presets with `/preset`, apply one with `/preset readonly`, or use
+Ctrl+P → Select preset. Shift+Tab cycles presets from the main input while idle.
+Readonly is application policy, not a sandbox; see the preset documentation
+for capability ceilings and saved-session behavior.
+
 Optional workspace presets, including Project, Researcher, and coding-agent
 profiles, are available under [`extras/presets/`](extras/presets/); copy a
 selected preset into the configured agent directory's `presets/` folder to use it.
 
-By default state is private under `~/.config/one` (override with
-`ONE_CODING_AGENT_DIR`): `auth.json`, `models.json`, `settings.json`, sessions,
+By default state is private under `~/.config/one`. If `XDG_CONFIG_HOME` is set,
+the default becomes `$XDG_CONFIG_HOME/one`; `ONE_CODING_AGENT_DIR` overrides
+both locations. State includes `auth.json`, `models.json`, `settings.json`, sessions,
 and reports. A project `.one/` directory supplies per-project MCP and extension
 configuration. Use `--no-session`, `--session`, `--continue`, `--resume`, or
 `--fork` to control session use. Use `--tools <list>` to restrict the agent to
@@ -529,6 +575,22 @@ provider-default` to use a provider-advertised default input budget instead.
 Manual smaller limits are retained. Unknown models use an internal estimate only;
 see [model capacity metadata](docs/MODEL_CATALOG.md) for diagnostics and caveats.
 
+### Generation budget
+
+`generation.maxOutputTokens` sets the requested per-response output budget
+(default: **16384**, positive integer). For example, from the TUI:
+
+```text
+/config generation.maxOutputTokens 32768
+```
+
+This is not the model's context-window size or a guarantee of backend capacity.
+The request is clamped to known model output limits and available context;
+reasoning tokens can consume the budget even when the visible answer is short.
+Larger budgets may increase latency and usage. Changes affect subsequent
+requests. See [model capacity and truncated responses](docs/MODEL_CATALOG.md#generation-limit-and-truncated-responses)
+for reserve behavior and output-truncation diagnostics.
+
 ### Subagent timeouts
 
 Subagents use `subagents.idleTimeoutSec` (default `1800`) for time without
@@ -551,6 +613,29 @@ it; duplicate tool names are removed while preserving order. Built-in and active
 MCP tool names are validated before the child starts.
 
 ### TUI session browser
+
+#### Window: Ctrl+P → Sessions
+
+Choose **Sessions** in Ctrl+P to browse persisted sessions for the current
+project. The searchable list is ordered by last update and marks the current
+session with `●`. Search by title or full ID; the details show the full selected
+ID, update time, and message count. Titles may repeat: loading always validates
+the exact ID and path, never a title or a replacement row.
+
+Use Up/Down, PageUp/PageDown, or the mouse to navigate. **Load (Enter)** opens
+the selected session, **Refresh** reloads the list, and **Back (Esc)** returns
+to Ctrl+P with its previous search intact. Opening, searching, or refreshing
+this browser does not replace the numbering of a previously displayed
+`/sessions` list.
+
+If the conversation draft is nonempty, Load/Enter first asks whether to keep it
+and switch; press Load/Enter again to confirm, or Esc to cancel. The draft is
+kept after switching. Loading the active session is a no-op. Loading is blocked
+while a turn is active; stale selections and failures leave the browser open
+with feedback. The list does not load every conversation body, and model
+metadata is not currently shown in this browser.
+
+#### Text commands: list, load, rename, delete
 
 Persisted sessions are scoped to the current project/session directory. In the
 TUI, `/sessions` lists them newest first with a temporary number, full session
@@ -718,10 +803,14 @@ smoke test is opt-in: `WRITE_TOOL_DOCKER_SMOKE=1 .venv/bin/python -m pytest -q t
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
+export ONE_CODING_AGENT_DIR="$(mktemp -d)"
 .venv/bin/python -m pytest -q
 .venv/bin/ruff check .
 git diff --check
 ```
+
+The temporary state directory keeps tests away from real credentials and
+sessions. Export it again in each new shell used for tests or manual CLI checks.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor conventions and focused
 test commands. Linux and macOS are supported in CI. Windows is currently
@@ -743,20 +832,7 @@ future target, while Windows 10 support is deferred.
 - [docs/architecture.md](docs/architecture.md) — internal architecture
 - [docs/EXTENSIONS.md](docs/EXTENSIONS.md) — extension contract
 - [docs/SKILLS.md](docs/SKILLS.md) — skills contract
+- [docs/PRESETS.md](docs/PRESETS.md) — presets and capability policy
+- [docs/MODEL_CATALOG.md](docs/MODEL_CATALOG.md) — model capacity and generation budgets
 - [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) — release verification
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community guidelines
-
-### Command center (Ctrl+P)
-
-Open Ctrl+P to search grouped session, model/agent, tools, appearance, and help
-actions by name, description, shortcut, or slash command. Arrow keys and
-PageUp/PageDown navigate; Enter applies an action or opens its choices. Esc
-returns from a submenu or closes the window; Ctrl+P closes it directly.
-Unavailable actions explain why. The conversation draft is preserved.
-
-Choose **Sessions** in Ctrl+P to browse saved sessions for the current project.
-Search by title or full ID, use Enter/Load to switch, or Esc/Back to return to
-the command center. Refresh reloads the list without changing `/sessions`
-numbering. A nonempty chat draft requires a second confirmation and is kept
-after switching. Loading is blocked during streaming. Rename/delete remain
-available through `/sessions`; this browser does not read all conversation bodies.
