@@ -1131,6 +1131,229 @@ if TEXTUAL_AVAILABLE:
             self.value = value
             super().__init__()
 
+    class _McpBrowser(ModalScreen[None]):
+        """Safe status browser; Enter inspects, only a button changes state."""
+
+        BINDINGS = [("escape", "back", "Back")]
+        DEFAULT_CSS = """
+        _McpBrowser { align: center middle; background: $background 75%; }
+        #mcp-browser { width: 92%; max-width: 110; height: 85%; max-height: 36;
+            border: round $primary; padding: 0 1; background: $panel; }
+        #mcp-search { height: 3; }
+        #mcp-count { height: 1; color: $text-muted; }
+        #mcp-results { height: 1fr; min-height: 2; border: none; padding: 0; background: $panel; }
+        #mcp-summary { height: 3; border-top: solid $border; color: $text-muted; }
+        #mcp-notice { height: auto; color: $warning; }
+        #mcp-actions { height: 3; }
+        #mcp-actions Button { width: 1fr; min-width: 0; height: 3; border: round $border;
+            background: $panel; color: $foreground; tint: transparent; margin-right: 1; }
+        #mcp-actions Button:hover, #mcp-actions Button:focus { border: round $primary; background: $primary 15%; }
+        _McpBrowser.compact #mcp-browser { width: 100%; height: 100%; }
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._rows: list[dict[str, Any]] = []
+            self._filtered: list[dict[str, Any]] = []
+            self._blocked = ""
+            self._busy = False
+            self._origin: tuple[Any, int | None] | None = None
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="mcp-browser"):
+                yield _McpSearch(placeholder="Search MCP servers…", id="mcp-search")
+                yield Static("Loading…", id="mcp-count", markup=False)
+                yield OptionList(id="mcp-results", markup=False)
+                yield Static("", id="mcp-summary", markup=False)
+                yield Static("", id="mcp-notice", markup=False)
+                with Horizontal(id="mcp-actions"):
+                    yield Button("Enable server", id="mcp-toggle")
+                    yield Button("Refresh", id="mcp-refresh")
+                    yield Button("Back (Esc)", id="mcp-back")
+
+        def on_resize(self, event: events.Resize) -> None:
+            self.set_class(event.size.height < 27 or event.size.width < 72, "compact")
+
+        def on_mount(self) -> None:
+            self._origin = (self.app.session, getattr(self.app.session, "epoch", None))
+            self.query_one("#mcp-browser").border_title = "MCP servers"
+            self.query_one("#mcp-browser").border_subtitle = "↑↓ select · Enter details · Changes are saved"
+            self.query_one("#mcp-search", Input).focus()
+            self.run_worker(self._refresh())
+
+        async def _refresh(self, selected: str | None = None) -> None:
+            rows = []
+            offset = 0
+            try:
+                while True:
+                    result = await self.app._mcp_browser_command("mcp_browser_list", {"offset": offset, "limit": 100})
+                    rows.extend(result["servers"])
+                    self._blocked = result["blockedReason"]
+                    next_offset = result.get("nextOffset")
+                    if next_offset is None:
+                        break
+                    if not isinstance(next_offset, int) or next_offset <= offset:
+                        raise ValueError("Invalid MCP page")
+                    offset = next_offset
+                if self.is_mounted:
+                    self._rows = rows
+                    self._filter(selected)
+            except Exception:
+                if self.is_mounted:
+                    self._blocked = "Unable to retrieve MCP status. Refresh to retry."
+                    self.query_one("#mcp-notice", Static).update(self._blocked)
+                    self.query_one("#mcp-toggle", Button).disabled = True
+
+        @staticmethod
+        def _state(row: dict[str, Any]) -> str:
+            if not row["enabled"]:
+                return "Disabled"
+            if row["running"]:
+                return "Connected"
+            if row.get("hasError"):
+                return "Failed"
+            return str(row.get("runtimeState", "Stopped"))
+
+        def _filter(self, selected: str | None = None) -> None:
+            query = self.query_one("#mcp-search", Input).value.casefold().split()
+            self._filtered = [row for row in self._rows if all(t in row["name"].casefold() for t in query)]
+            listing = self.query_one("#mcp-results", OptionList)
+            listing.set_options([Option(sanitize_display_text(
+                f"{row['name']}  ·  {self._state(row)}  ·  {row['transport']}  ·  {row['toolCount']} tools"
+            )) for row in self._filtered])
+            if self._filtered:
+                listing.highlighted = next((i for i, row in enumerate(self._filtered) if row["name"] == selected), 0)
+            self.query_one("#mcp-count", Static).update(
+                f"{len(self._rows)} configured · {sum(r['running'] for r in self._rows)} connected"
+                f" · {sum(not r['enabled'] for r in self._rows)} disabled"
+            )
+            self._selection()
+
+        def _selected(self) -> dict[str, Any] | None:
+            index = self.query_one("#mcp-results", OptionList).highlighted
+            return self._filtered[index] if index is not None and index < len(self._filtered) else None
+
+        def _selection(self) -> None:
+            row = self._selected()
+            toggle = self.query_one("#mcp-toggle", Button)
+            toggle.label = "Disable server" if row and row["enabled"] else "Enable server"
+            toggle.disabled = self._busy or row is None or bool(self._blocked) or self.app.session.is_streaming
+            self.query_one("#mcp-summary", Static).update(sanitize_display_text(
+                f"{row['name']}\nEnabled: {'yes' if row['enabled'] else 'no'} · {self._state(row)}"
+                f" · Restart attempts: {row['restartAttempts']}"
+            ) if row else "No matching MCP servers.")
+            self.query_one("#mcp-notice", Static).update(self._blocked or (
+                "Wait for the current response before changing servers." if self.app.session.is_streaming else ""
+            ))
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            event.stop()
+            self._filter()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            event.stop()
+            self._details()
+
+        def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+            self._selection()
+
+        def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+            event.stop()
+            self._details()
+
+        def _details(self) -> None:
+            row = self._selected()
+            if row:
+                self.app.push_screen(_McpDetails(row))
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            event.stop()
+            if event.button.id == "mcp-back":
+                self.action_back()
+            elif event.button.id == "mcp-refresh":
+                if not self._busy:
+                    self.run_worker(self._refresh())
+            else:
+                self.app.run_worker(self._toggle())
+
+        async def _toggle(self) -> None:
+            row = self._selected()
+            if self._origin != (self.app.session, getattr(self.app.session, "epoch", None)):
+                self._blocked = "Session changed. Close and reopen MCP servers."
+                self._selection()
+                return
+            if self._busy or not row or self._blocked or self.app.session.is_streaming:
+                return
+            self._busy = True
+            toggle = self.query_one("#mcp-toggle", Button)
+            toggle.disabled = True
+            toggle.label = "Disabling…" if row["enabled"] else "Enabling…"
+            try:
+                await self.app._mcp_browser_command("mcp_browser_set", {"name": row["name"], "enabled": not row["enabled"]})
+                await self._refresh(row["name"])
+            except Exception:
+                if self.is_mounted:
+                    self.query_one("#mcp-notice", Static).update("MCP operation failed. Refresh status and check server configuration.")
+            finally:
+                self._busy = False
+                if self.is_mounted:
+                    toggle.label = "Disable server" if self._selected() and self._selected()["enabled"] else "Enable server"
+                    toggle.disabled = bool(self._blocked) or self.app.session.is_streaming or self._selected() is None
+
+        def action_back(self) -> None:
+            if not self._busy:
+                self.dismiss()
+
+    class _McpSearch(Input):
+        BINDINGS = [("up", "previous"), ("down", "next"), ("pageup", "page_up"), ("pagedown", "page_down")]
+
+        def action_previous(self) -> None:
+            self.screen.query_one("#mcp-results", OptionList).action_cursor_up()
+
+        def action_next(self) -> None:
+            self.screen.query_one("#mcp-results", OptionList).action_cursor_down()
+
+        def action_page_up(self) -> None:
+            self.screen.query_one("#mcp-results", OptionList).action_page_up()
+
+        def action_page_down(self) -> None:
+            self.screen.query_one("#mcp-results", OptionList).action_page_down()
+
+    class _McpDetails(ModalScreen[None]):
+        BINDINGS = [("escape", "close", "Back")]
+        DEFAULT_CSS = """
+        _McpDetails { align: center middle; background: $background 75%; }
+        #mcp-details { width: 90%; max-width: 100; height: 80%; border: round $primary;
+            padding: 1; background: $panel; }
+        #mcp-detail-scroll { height: 1fr; }
+        #mcp-detail-text { height: auto; }
+        """
+
+        def __init__(self, row: dict[str, Any]) -> None:
+            super().__init__()
+            self._row = dict(row)
+
+        def compose(self) -> ComposeResult:
+            row = self._row
+            with Vertical(id="mcp-details"):
+                with VerticalScroll(id="mcp-detail-scroll"):
+                    yield Static(sanitize_display_text(
+                        f"{row['name']}\nTransport: {row['transport']}\n"
+                        f"Enabled: {row['enabled']}\nConnection: {_McpBrowser._state(row)}\n"
+                        f"Restart attempts: {row['restartAttempts']} / {row['maxRestartAttempts']}\n"
+                        + ("Last error: connection failed; review server configuration.\n" if row['hasError'] else "")
+                        + f"\nTools ({row['toolCount']}):\n" + "\n".join(row['tools'])
+                        + ("\nMore tools omitted from this bounded preview." if row['toolsTruncated'] else "")
+                    ), id="mcp-detail-text", markup=False)
+                yield Button("Back (Esc)", id="mcp-detail-back")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            event.stop()
+            self.dismiss()
+
+        def action_close(self) -> None:
+            self.dismiss()
+
     class _SessionBrowser(ModalScreen[None]):
         """Identity-based session selection, separate from slash-list numbering."""
 
@@ -1405,6 +1628,9 @@ if TEXTUAL_AVAILABLE:
                 return
             self._busy = True
             try:
+                if action.id == "mcp" and not self._page:
+                    self.app.push_screen(_McpBrowser())
+                    return
                 if action.id == "sessions" and not self._page:
                     self.app.push_screen(_SessionBrowser())
                     return
@@ -2879,6 +3105,11 @@ if TEXTUAL_AVAILABLE:
                 except (KeyError, TypeError, ValueError):
                     continue
             return infos
+
+        async def _mcp_browser_command(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if not isinstance(self.session, TuiSessionView):
+                raise ValueError("MCP browser requires the detached TUI runtime")
+            return await self.session.command("ui", operation=operation, payload=payload)
 
         async def _browser_session_infos(self) -> list[SessionInfo]:
             if not isinstance(self.session, TuiSessionView):

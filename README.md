@@ -724,6 +724,22 @@ error is reported.
 
 ### MCP servers
 
+**Ctrl+P → MCP servers** opens a searchable status browser. Enabled configuration
+and actual connection state are shown separately; disabled and failed servers
+remain visible. Enter or a list click opens details (transport, restart attempts,
+and up to 100 tool names), never toggles a server. Use the explicit **Enable
+server / Disable server** button to change and persist its state. **Refresh**
+only reads status; it does not restart a server. Esc/Back returns to Ctrl+P with
+its search and the conversation draft preserved.
+
+Mutations are blocked while streaming, under the Readonly capability policy,
+and when MCP is unavailable (`--no-mcp`). Enable can launch a process or connect
+to a remote service with the agent's permissions. Errors stay in the window;
+connection failures are shown generically rather than exposing raw diagnostic
+text, command arguments, environment values, or URLs. The browser does not edit
+configuration or offer restart-all. Existing `/mcp` commands remain available.
+
+
 MCP servers can be configured in global or project `settings.json` with
 `mcpServers`. Stdio servers run as child processes; streamable HTTP servers use
 their configured URL. Use `--no-mcp` to disable all of them for a run and

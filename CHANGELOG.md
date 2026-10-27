@@ -16,6 +16,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **MCP browser** — Ctrl+P → MCP servers lists enabled, disabled, and failed
+  servers with connection states and bounded tool details. Explicit buttons
+  enable/disable servers with existing persistence; streaming, Readonly policy,
+  and `--no-mcp` block mutations. Raw commands and diagnostic secrets are excluded.
+
 - **Thinking shortcut** — Ctrl+T cycles the thinking level in the TUI using the
   same behavior and persistence as `/thinking-cycle`, without submitting the draft.
 

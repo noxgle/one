@@ -174,6 +174,7 @@ def test_tui_shortcuts_are_single_source_of_truth() -> None:
         ("Ctrl+Shift+V", "Paste terminal"),
         ("Ctrl+Alt+V", "Paste image"),
         ("Ctrl+R", "Retry mode"),
+        ("Ctrl+T", "Cycle thinking level"),
         ("Ctrl+← / →", "Adjust temperature"),
         ("Ctrl+↑ / ↓", "Input history"),
         ("Ctrl+F1", "Command help"),

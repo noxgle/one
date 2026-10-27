@@ -1066,6 +1066,8 @@ class TuiRuntimeHost:
             "oauth_login": {"provider"},
             "logout": {"provider"},
             "mcp_list": set(),
+            "mcp_browser_list": {"offset", "limit"},
+            "mcp_browser_set": {"name", "enabled"},
             "mcp_enable": {"name"},
             "mcp_disable": {"name"},
             "config_get": {"key"},
@@ -1179,6 +1181,45 @@ class TuiRuntimeHost:
         if operation == "logout":
             session.model_registry.remove_provider_credentials(str(payload["provider"]))
             return {"removed": True}
+        if operation == "mcp_browser_list":
+            offset, limit = payload["offset"], payload["limit"]
+            if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
+                raise ValueError("Invalid MCP page")
+            statuses = sorted(self._mcp.server_status() if self._mcp else [], key=lambda row: row["name"])
+            rows = []
+            for status in statuses[offset:offset + limit]:
+                row = self._mcp_browser_row(status)
+                if len(json.dumps(rows + [row], ensure_ascii=False).encode()) > 36 * 1024:
+                    if not rows:
+                        raise ValueError("MCP server metadata exceeds display limit")
+                    break
+                rows.append(row)
+            reason = self._mcp_browser_blocked()
+            return self._json({"servers": rows, "available": self._mcp is not None,
+                               "mutable": not reason, "blockedReason": reason,
+                               "nextOffset": offset + len(rows) if offset + len(rows) < len(statuses) else None})
+        if operation == "mcp_browser_set":
+            name, enabled = payload["name"], payload["enabled"]
+            if not isinstance(name, str) or type(enabled) is not bool:
+                raise ValueError("Invalid MCP selection")
+            reason = self._mcp_browser_blocked()
+            if reason:
+                raise ValueError(reason)
+            if getattr(self, "_mcp_browser_busy", False):
+                raise ValueError("An MCP operation is already running")
+            status = next((row for row in self._mcp.server_status() if row["name"] == name), None)
+            if status is None:
+                raise ValueError("MCP server no longer available")
+            self._mcp_browser_busy = True
+            try:
+                if enabled != bool(status.get("enabled")):
+                    if enabled:
+                        await self._mcp_enable(name)
+                    else:
+                        await self._mcp_disable(name)
+                return {"ok": True}
+            finally:
+                self._mcp_browser_busy = False
         if operation == "mcp_list":
             return self._json(
                 {"available": self._mcp is not None, "servers": self._mcp.server_status() if self._mcp else []}
@@ -1381,6 +1422,28 @@ class TuiRuntimeHost:
                 "models": [fetched_entry_id(item) for item in fetched[:20]],
             }
         )
+
+    def _mcp_browser_blocked(self) -> str:
+        if self._mcp is None:
+            return "MCP unavailable (started with --no-mcp)."
+        if self._session().is_streaming:
+            return "Stop or wait for the current response before changing MCP servers."
+        if getattr(self._session(), "_is_readonly", False):
+            return "MCP changes are unavailable under the Readonly capability policy."
+        return ""
+
+    @staticmethod
+    def _mcp_browser_row(status: dict[str, Any]) -> dict[str, Any]:
+        # Never send commands, arguments, environment, URLs, or raw exceptions.
+        tools = status.get("tools") or []
+        return {"name": str(status["name"]), "enabled": bool(status.get("enabled")),
+                "running": bool(status.get("running")), "transport": str(status.get("transport", "unknown")),
+                "runtimeState": str(status.get("runtimeState", "configured")),
+                "toolCount": len(tools), "tools": [str(tool) for tool in tools[:100]],
+                "toolsTruncated": len(tools) > 100,
+                "restartAttempts": status.get("restartAttempts", 0),
+                "maxRestartAttempts": status.get("maxRestartAttempts", 0),
+                "hasError": bool(status.get("error"))}
 
     async def _mcp_enable(self, name: str) -> dict[str, Any]:
         if self._mcp is None:
