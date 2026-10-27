@@ -16,6 +16,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Explore preset** — a built-in, evidence-focused project investigation role
+  with an application-enforced local read-only tool ceiling and no shell or HTTP
+  tool. It is not an OS sandbox.
+
 - **MCP browser** — Ctrl+P → MCP servers lists enabled, disabled, and failed
   servers with connection states and bounded tool details. Explicit buttons
   enable/disable servers with existing persistence; streaming, Readonly policy,

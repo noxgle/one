@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 READONLY_TOOLS = frozenset({"read", "read_image", "grep", "find", "ls", "web_connect", "evidence_read", "finish", "ask_user", "spawn_subagent"})
+EXPLORE_TOOLS = READONLY_TOOLS - {"web_connect"}
+RESERVED_READONLY_POLICIES = {"readonly": READONLY_TOOLS, "explore": EXPLORE_TOOLS}
 
 
 @dataclass(frozen=True)

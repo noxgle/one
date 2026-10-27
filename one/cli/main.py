@@ -431,7 +431,7 @@ async def _run(argv: list[str]) -> int:
         additional_skill_paths=parsed.skills,
         additional_prompt_template_paths=parsed.prompt_templates,
         additional_theme_paths=parsed.themes,
-        no_extensions=parsed.no_extensions or parsed.preset == "readonly",
+        no_extensions=parsed.no_extensions or parsed.preset in {"readonly", "explore"},
         no_skills=parsed.no_skills,
         no_prompt_templates=parsed.no_prompt_templates,
         no_themes=parsed.no_themes,

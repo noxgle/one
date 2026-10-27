@@ -11,7 +11,7 @@ from one.core.presets import PresetError, discover_presets, parse_preset
 
 def test_packaged_presets_are_discoverable(tmp_path) -> None:
     presets = discover_presets(str(tmp_path))
-    assert set(presets) == {"default", "readonly"}
+    assert set(presets) == {"default", "readonly", "explore"}
     assert presets["readonly"].tools and "bash" not in presets["readonly"].tools
 
 
@@ -29,9 +29,10 @@ def test_preset_parser_rejects_duplicate_keys_and_sandboxes() -> None:
     assert preset.sandboxes == ("future",)
 
 
-def test_user_collision_with_reserved_preset_fails(tmp_path) -> None:
+@pytest.mark.parametrize("ident", ["default", "readonly", "explore"])
+def test_user_collision_with_reserved_preset_fails(tmp_path, ident: str) -> None:
     directory = tmp_path / "presets"
     directory.mkdir()
-    (directory / "default.md").write_text("---\nversion: 1\nid: default\nname: Override\n---\n", encoding="utf-8")
+    (directory / f"{ident}.md").write_text(f"---\nversion: 1\nid: {ident}\nname: Override\n---\n", encoding="utf-8")
     with pytest.raises(PresetError, match="duplicate"):
         discover_presets(str(tmp_path))

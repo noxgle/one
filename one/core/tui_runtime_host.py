@@ -1620,7 +1620,7 @@ async def create_tui_runtime(bootstrap: TuiBootstrap) -> TuiRuntimeHost:
         additional_skill_paths=list(bootstrap.skills),
         additional_prompt_template_paths=list(bootstrap.prompt_templates),
         additional_theme_paths=list(bootstrap.themes),
-        no_extensions=bootstrap.no_extensions or bootstrap.preset == "readonly",
+        no_extensions=bootstrap.no_extensions or bootstrap.preset in {"readonly", "explore"},
         no_skills=bootstrap.no_skills,
         no_prompt_templates=bootstrap.no_prompt_templates,
         no_themes=bootstrap.no_themes,

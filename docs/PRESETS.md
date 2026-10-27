@@ -46,7 +46,7 @@ resolvable `provider/model`, while `temperature`, `thinking`, `description`,
 `tools`, and `sandboxes` have the types shown above. The Markdown body is the
 replacement role only, not a task template.
 
-`default` and `readonly` are packaged reserved IDs. Default retains the normal
+`default`, `readonly`, and `explore` are packaged reserved IDs. Default retains the normal
 dynamic prompt, project guidance, skills, and current model settings. Readonly
 allows inspection, HTTP(S) GET via `web_connect`, evidence reads, completion,
 and cooperation-gated questions; it denies shell and editing tools at dispatch
@@ -59,6 +59,16 @@ and does not bind or invoke extension hooks; normal session persistence remains
 available. Both Default and Readonly include `web_connect`.
 Existing saved effective preset snapshots are not expanded automatically; reapply
 the preset to adopt the new tool list (subject to parent/CLI ceilings).
+
+`explore` is a focused project investigation role. It searches and reads local
+resources, traces relevant behavior, and reports findings with path and line
+evidence. Its app-enforced ceiling excludes shell, editing, HTTP, and MCP tools;
+it allows read-only delegation subject to the same inherited ceiling. As with
+Readonly, manual shell commands and extension hooks are blocked, and activation
+requires a clean session if extensions have already executed. It is not an OS
+sandbox. Use `one --preset explore ...`, `/preset explore`, or request
+`preset: "explore"` when spawning a subagent. Existing session snapshots retain
+their saved effective settings; explicitly reapply the preset to adopt changes.
 
 Use `one --preset readonly ...`, or `/preset` to list and `/preset readonly` to
 apply an idle session preset in TUI or interactive mode. RPC exposes

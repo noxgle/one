@@ -28,7 +28,7 @@ async def test_shift_tab_cycles_presets_preserving_draft(tmp_path, monkeypatch):
         editor = app.query_one("#input", TextArea)
         editor.text = "unfinished\nmessage"
         editor.move_cursor((0, 4))
-        for expected in ("readonly", "reviewer", "default"):
+        for expected in ("explore", "readonly", "reviewer", "default"):
             await pilot.press("shift+tab")
             await pilot.pause()
             assert session.preset_id == expected

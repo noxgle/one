@@ -44,7 +44,7 @@ from one.core.settings_manager import THINKING_LEVELS, SettingsManager
 from one.core.subagent_monitor import SubagentMonitor
 from one.core.temperature import nearest_temperature_mode, normalize_temperature, temperature_for_mode
 from one.core.tool_output_pruning import prune_stale_tool_outputs
-from one.core.tool_policy import ToolPolicy
+from one.core.tool_policy import RESERVED_READONLY_POLICIES, ToolPolicy
 from one.core.types import ModelInfo
 from one.mcp import McpManager
 from one.providers.base import native_tool_replay_pairs
@@ -605,8 +605,8 @@ class AgentSession:
             raise PresetError(f"Unknown preset: {preset_id}") from exc
         if candidate.sandboxes:
             raise PresetError("Preset requests unsupported sandboxes")
-        if candidate.id == "readonly" and self._extensions_executed:
-            raise PresetError("Readonly requires a clean session with extensions disabled")
+        if candidate.id in RESERVED_READONLY_POLICIES and self._extensions_executed:
+            raise PresetError(f"{candidate.name} requires a clean session with extensions disabled")
         model = self.model
         if candidate.model:
             provider, model_id = candidate.model.split("/", 1)
@@ -649,8 +649,7 @@ class AgentSession:
         self, preset: PresetDefinition, configured_base: list[str], policy: ToolPolicy
     ) -> tuple[list[str], ToolPolicy]:
         """Validate and narrow a preset allowlist before any state is committed."""
-        if preset.id == "readonly":
-            policy = policy.intersect(set(ToolPolicy.readonly().allowed or ()))
+        policy = policy.intersect(RESERVED_READONLY_POLICIES.get(preset.id))
         if preset.tools is None:
             return list(configured_base), policy
         if "finish" not in preset.tools:
@@ -694,8 +693,11 @@ class AgentSession:
             raise PresetError("Corrupt preset policy snapshot")
         if ceiling is not None and (not isinstance(ceiling, list) or not all(isinstance(x, str) and x for x in ceiling) or len(set(ceiling)) != len(ceiling)):
             raise PresetError("Corrupt preset ceiling snapshot")
-        if ident == "readonly" and (policy is None or not set(policy).issubset(ToolPolicy.readonly().allowed or set())):
-            raise PresetError("Readonly snapshot policy is invalid")
+        reserved_policy = RESERVED_READONLY_POLICIES.get(ident)
+        if reserved_policy is not None and (policy is None or not set(policy).issubset(reserved_policy)):
+            raise PresetError(f"{ident.title()} snapshot policy is invalid")
+        if reserved_policy is not None and self._extensions_executed:
+            raise PresetError(f"{ident.title()} requires a clean session with extensions disabled")
         source = state.get("source", "session")
         content_hash = state.get("hash", "")
         if not isinstance(source, str) or not isinstance(content_hash, str):
@@ -730,8 +732,7 @@ class AgentSession:
         # still constrains configured builtins.  A custom/readonly policy is
         # an explicit allowlist and remains fail-closed for new MCP tools.
         next_policy = next_ceiling.intersect(set(policy) if policy is not None else None)
-        if ident == "readonly":
-            next_policy = next_policy.intersect(set(ToolPolicy.readonly().allowed or ()))
+        next_policy = next_policy.intersect(reserved_policy)
         active_tools = self._computed_active_tools(next_base, next_policy)
         baseline = state.get("baseline")
         if (not isinstance(baseline, list) or len(baseline) != 5 or

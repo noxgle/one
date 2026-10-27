@@ -373,3 +373,41 @@ async def test_rpc_set_preset_keeps_correlation_id_separate(tmp_path: Path, monk
     responses = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [(item["id"], item["success"]) for item in responses] == [(42, True), ("corr", True), ("missing", False)]
     assert session.preset_id == "default"
+
+
+@pytest.mark.asyncio
+async def test_explore_enforces_local_readonly_and_restore_ceiling(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.activate_preset("explore", str(tmp_path))
+    assert session._is_readonly
+    await session.bind_extensions()
+    assert session.resource_loader.extension_reads == 0
+    with pytest.raises(RuntimeError, match="disabled"):
+        await session.execute_bash("echo never")
+    for name in ("bash", "write", "web_connect"):
+        session._active_tools.append(name)
+        result = await session._run_tool_call(name, {})
+        assert result["ok"] is False
+        assert not session._tool_policy.permits(name)
+    state = session._preset_state(session._preset, session.model, session.temperature,
+                                  session.thinking_level, session._base_tools, session._tool_policy)
+    child = _session(tmp_path, policy=ToolPolicy(frozenset({"read", "finish"})))
+    child.restore_preset_state(state)
+    assert child._tool_policy.allowed == frozenset({"read", "finish"})
+    child.activate_preset("default", str(tmp_path))
+    assert child._tool_policy.allowed == frozenset({"read", "finish"})
+    for invalid in (None, ["read", "finish", "web_connect"], ["read", "finish", "bash"]):
+        with pytest.raises(PresetError, match="Explore snapshot policy"):
+            child.restore_preset_state({**state, "policy": invalid})
+    session._extensions_executed = True
+    with pytest.raises(PresetError, match="clean session"):
+        session.restore_preset_state(state)
+    with pytest.raises(PresetError, match="clean session"):
+        session.activate_preset("explore", str(tmp_path))
+
+
+def test_explore_reserved_ceiling_applies_to_untrusted_definition(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    definition = parse_preset("---\nversion: 1\nid: explore\nname: Explore\ntools: [read, finish, web_connect, bash]\n---\n")
+    _, policy = session._resolve_preset_tools(definition, ["read", "finish", "web_connect", "bash"], ToolPolicy())
+    assert policy.allowed == frozenset({"read", "finish"})
