@@ -45,6 +45,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **MCP stdio responses** — accept JSON-RPC lines up to 4 MiB, including large
+  tool lists, and report a transport error for oversized messages.
+
 - **Model picker button contrast** — action buttons keep explicit outline, text,
   and background styles when hovered, focused, or pressed instead of inheriting
   the default opaque button tint.

@@ -77,12 +77,14 @@ class McpClient:
     """One stdio MCP server connection (JSON-RPC 2.0, newline-delimited JSON)."""
 
     PROTOCOL_VERSION = "2024-11-05"
+    MAX_STDIO_LINE_BYTES = 4 * 1024 * 1024  # Excludes the newline delimiter.
 
     def __init__(self, config: McpServerConfig) -> None:
         self.config = config
         self._proc: asyncio.subprocess.Process | None = None
         self._next_id = 0
         self._stderr_tail: list[str] = []
+        self._unusable = False
         # JSON-RPC over one stdio stream has no multiplexed response reader.
         # Serialize calls so a timed-out request cannot have its late response
         # consumed as another call's reply.
@@ -98,6 +100,7 @@ class McpClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            limit=self.MAX_STDIO_LINE_BYTES,
         )
         # Drain stderr in the background (bounded tail kept for diagnostics).
         self._stderr_task: asyncio.Task[None] | None = asyncio.create_task(self._drain_stderr())
@@ -115,20 +118,37 @@ class McpClient:
         proc = self._proc
         if proc is None or proc.stderr is None:
             return
+        pending = bytearray()
+
+        def record_line() -> None:
+            text = pending.decode("utf-8", errors="replace").rstrip()
+            if text:
+                self._stderr_tail.append(text)
+                if len(self._stderr_tail) > 20:
+                    self._stderr_tail.pop(0)
+            pending.clear()
+
         try:
             while True:
-                line = await proc.stderr.readline()
-                if not line:
+                chunk = await proc.stderr.read(4096)
+                if not chunk:
+                    record_line()
                     break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    self._stderr_tail.append(text)
-                    if len(self._stderr_tail) > 20:
-                        self._stderr_tail.pop(0)
+                parts = chunk.split(b"\n")
+                for index, part in enumerate(parts):
+                    if index:
+                        record_line()
+                    pending.extend(part[: max(0, 4096 - len(pending))])
         except Exception:
             pass
 
+    async def _drain_stdout(self, stream: asyncio.StreamReader) -> None:
+        while await stream.read(65536):
+            pass
+
     async def _write(self, obj: dict[str, Any]) -> None:
+        if self._unusable:
+            raise McpTransportError(f"MCP server '{self.config.name}' transport is unusable")
         if self._proc is None or self._proc.stdin is None:
             raise RuntimeError(f"MCP server '{self.config.name}' is not running")
         self._proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
@@ -137,7 +157,15 @@ class McpClient:
     async def _read(self, timeout: float) -> dict[str, Any]:
         if self._proc is None or self._proc.stdout is None:
             raise RuntimeError(f"MCP server '{self.config.name}' is not running")
-        line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=timeout)
+        try:
+            line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=timeout)
+        except ValueError as e:
+            self._unusable = True
+            # Keep the pipe flowing until the child is terminated and reaped.
+            self._stdout_drain_task = asyncio.create_task(self._drain_stdout(self._proc.stdout))
+            raise McpTransportError(
+                f"MCP server '{self.config.name}' stdout line exceeds 4 MiB limit"
+            ) from e
         if not line:
             raise McpTransportError(f"MCP server '{self.config.name}' closed stdout")
         try:
@@ -214,6 +242,12 @@ class McpClient:
                 await proc.wait()
             except Exception:
                 pass
+
+        stdout_task = getattr(self, "_stdout_drain_task", None)
+        if stdout_task is not None:
+            if not stdout_task.done():
+                stdout_task.cancel()
+            await asyncio.gather(stdout_task, return_exceptions=True)
 
         # Close stdout/stderr read streams to release transport references.
         # feed_eof() signals EOF so any pending reads fail immediately.

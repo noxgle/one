@@ -744,6 +744,8 @@ MCP servers can be configured in global or project `settings.json` with
 `mcpServers`. Stdio servers run as child processes; streamable HTTP servers use
 their configured URL. Use `--no-mcp` to disable all of them for a run and
 `/mcp list|enable|disable` in the TUI. MCP tools are added to the agent prompt.
+Stdio JSON-RPC messages are limited to 4 MiB per line, excluding the newline;
+larger messages fail with a transport error and the connection is discarded.
 
 Stdio servers can opt into runtime recovery after an unexpected process exit or
 stdout EOF; recovery remains off by default for stdio. Streamable HTTP servers

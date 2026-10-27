@@ -113,6 +113,93 @@ def _write_fake_server(tmp_path: Path) -> Path:
 
 
 @pytest.mark.asyncio
+async def test_stderr_tail_preserves_lines_and_fragmented_writes() -> None:
+    reader = asyncio.StreamReader()
+    client = McpClient(McpServerConfig("test", "unused"))
+    from types import SimpleNamespace
+
+    client._proc = SimpleNamespace(stderr=reader)
+    task = asyncio.create_task(client._drain_stderr())
+    reader.feed_data(b"first  \nsecond\n\nfrag")
+    await asyncio.sleep(0)
+    reader.feed_data(b"ment \xe2\x82")
+    await asyncio.sleep(0)
+    reader.feed_data(b"\xac\n" + b"x" * 10000 + b"\nafter\nlast")
+    reader.feed_eof()
+    await task
+    assert client.stderr_tail() == ["first", "second", "fragment €", "x" * 4096, "after", "last"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [100_000, 4 * 1024 * 1024 + 1])
+async def test_stdio_large_list_and_overflow_cleanup(tmp_path: Path, size: int) -> None:
+    script = tmp_path / "large_server.py"
+    script.write_text('''\
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "notifications/initialized":
+        continue
+    if method == "tools/list":
+        sys.stderr.write("e" * 200000 + "\\n")
+        sys.stderr.flush()
+        result = {"tools": [{"name": "large", "description": "x" * int(sys.argv[1])}]}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
+''', encoding="utf-8")
+    client = McpClient(McpServerConfig("large", sys.executable, [str(script), str(size)]))
+    await client.start()
+    proc = client._proc
+    try:
+        if size < client.MAX_STDIO_LINE_BYTES:
+            tools = await client.list_tools(timeout=10)
+            assert len(tools[0]["description"]) == size
+            assert len((await client.list_tools(timeout=10))[0]["description"]) == size
+            assert sum(map(len, client.stderr_tail())) <= 20 * 4096
+        else:
+            with pytest.raises(mcp_client_module.McpTransportError, match="exceeds 4 MiB"):
+                await client.list_tools(timeout=10)
+            with pytest.raises(mcp_client_module.McpTransportError, match="unusable"):
+                await client.list_tools(timeout=1)
+    finally:
+        await asyncio.wait_for(client.close(), timeout=5)
+    assert proc is not None and proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_stdio_overflow_during_manager_connect_cleans_up(tmp_path: Path, monkeypatch) -> None:
+    script = tmp_path / "oversize_server.py"
+    script.write_text(
+        FAKE_SERVER_SRC.replace('"Echo back a string"', '"x" * (4 * 1024 * 1024 + 1)'),
+        encoding="utf-8",
+    )
+    clients = []
+    original = mcp_client_module.McpClient
+
+    class TrackingClient(original):
+        def __init__(self, config):
+            super().__init__(config)
+            clients.append(self)
+
+        async def start(self):
+            await super().start()
+            self.started_proc = self._proc
+
+    monkeypatch.setattr(mcp_client_module, "McpClient", TrackingClient)
+    manager = McpManager([McpServerConfig("large", sys.executable, [str(script)])])
+    try:
+        await asyncio.wait_for(manager.start(), timeout=10)
+        assert manager.tools() == []
+        assert "exceeds 4 MiB" in manager.errors()[0]
+        assert clients[0]._proc is None
+        assert clients[0].started_proc.returncode is not None
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_lists_and_calls_tool(tmp_path: Path):
     script = _write_fake_server(tmp_path)
     manager = McpManager([McpServerConfig("fake", sys.executable, [str(script)])])
