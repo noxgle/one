@@ -10,6 +10,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Preset tool diagnostics** — `/tools` lists tools currently advertised to the
+  model, respecting cooperation and subagent visibility. Failed preset selections
+  keep the command-center picker open instead of appearing to succeed.
+
 - **Subagent session recovery** — children without an explicit preset now save
   effective tool and MCP server ceilings for manual resume and fork. Forking a
   child session also preserves its subagent depth instead of resetting it.

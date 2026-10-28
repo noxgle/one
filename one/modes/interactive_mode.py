@@ -618,7 +618,7 @@ class InteractiveMode:
                 print("Usage: /queue or /queue clear [all|steering|follow]")
                 continue
             if line.strip() == "/tools":
-                print(json.dumps({"tools": session.active_tools}, ensure_ascii=False, indent=2))
+                print(json.dumps({"tools": session.model_visible_tools}, ensure_ascii=False, indent=2))
                 continue
             if line.strip() == "/clear":
                 print("\033[2J\033[H", end="")

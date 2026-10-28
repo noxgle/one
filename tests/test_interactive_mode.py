@@ -214,6 +214,7 @@ class _DummySession:
         self.session_id = "sid"
         self.session_file = "/tmp/session.jsonl"
         self.active_tools = ["read", "bash", "edit", "write", "grep", "find", "ls"]
+        self.model_visible_tools = list(self.active_tools)
         self.session_manager = _DummySessionManager()
         self.settings_manager = _DummySettings()
         self.model_registry = _DummyModelRegistry()

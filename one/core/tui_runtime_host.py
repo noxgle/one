@@ -1137,7 +1137,7 @@ class TuiRuntimeHost:
                 }
             )
         if operation == "tools":
-            return {"tools": list(getattr(session, "active_tools", []) or [])}
+            return {"tools": list(getattr(session, "model_visible_tools", []) or [])}
         if operation == "queues":
             return self._json(session.get_pending_queues() or {})
         if operation == "inspect_timeout":

@@ -2621,16 +2621,29 @@ if TEXTUAL_AVAILABLE:
                     "layout": self._layout_mode}.get(page, "")
 
         async def _apply_center_choice(self, page: str, value: str) -> None:
-            if page == "theme":
+            if page == "preset":
+                await self._apply_preset(value)
+            elif page == "theme":
                 if isinstance(self.session, TuiSessionView):
                     if not await self._run_view_command("set_theme", {"theme": value}):
                         raise ValueError("Theme change failed")
                 else:
                     self._set_theme(value)
             else:
-                if page == "preset" and self.session.is_streaming:
-                    raise ValueError("Wait for streaming to finish")
                 await self._handle_command(f"/{page} {value}")
+
+        async def _apply_preset(self, ident: str) -> None:
+            """Apply a preset, propagating failure so modal callers stay open."""
+            if not ident:
+                raise ValueError("Usage: /preset [id]")
+            session = self.session
+            if isinstance(session, TuiSessionView):
+                await session.command("ui", operation="set_preset", payload={"id": ident})
+            else:
+                session.activate_preset(ident, getattr(session.resource_loader, "agent_dir", None))
+            self._preset_cycle_cursor = None
+            self._write(f"Preset set to {session.preset_name}", "info")
+            self._refresh_sidebar()
 
         async def _execute_center_action(self, action: CommandAction) -> None:
             current = next((a for a in self._command_center_actions() if a.id == action.id), None)
@@ -6016,7 +6029,7 @@ if TEXTUAL_AVAILABLE:
                 )
                 return
             if cmd == "/tools":
-                self._write(json.dumps({"tools": session.active_tools}, ensure_ascii=False), "info")
+                self._write(json.dumps({"tools": session.model_visible_tools}, ensure_ascii=False), "info")
                 return
             if cmd == "/sessions":
                 await self._list_sessions()
@@ -6363,15 +6376,7 @@ if TEXTUAL_AVAILABLE:
             if cmd.startswith("/preset "):
                 ident = cmd[len("/preset "):].strip()
                 try:
-                    if not ident:
-                        raise ValueError("Usage: /preset [id]")
-                    if isinstance(session, TuiSessionView):
-                        await session.command("ui", operation="set_preset", payload={"id": ident})
-                    else:
-                        session.activate_preset(ident, getattr(session.resource_loader, "agent_dir", None))
-                    self._preset_cycle_cursor = None
-                    self._write(f"Preset set to {session.preset_name}", "info")
-                    self._refresh_sidebar()
+                    await self._apply_preset(ident)
                 except Exception as exc:
                     self._write(str(exc), "error")
                 return

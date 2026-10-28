@@ -11,8 +11,10 @@ import pytest
 from one.core.agent_session_runtime import AgentSessionRuntimeHost, create_agent_session_runtime
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
+from one.core.presets import PresetError
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.core.tui_runtime_host import TuiRuntimeHost
 
 
 class _Loader:
@@ -27,6 +29,35 @@ class _Loader:
 
     def get_system_prompt(self, **_: object) -> str:
         return "base"
+
+
+@pytest.mark.asyncio
+async def test_runtime_tools_follow_preset_switch_and_failed_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent_dir = tmp_path / "agent"
+    monkeypatch.setenv("ONE_CODING_AGENT_DIR", str(agent_dir))
+    presets = agent_dir / "presets"
+    presets.mkdir(parents=True)
+    for preset_id, tools in (("alpha", "read, finish"), ("beta", "grep, finish")):
+        (presets / f"{preset_id}.md").write_text(
+            f"---\nversion: 1\nid: {preset_id}\nname: {preset_id.title()}\ntools: [{tools}]\n---\n",
+            encoding="utf-8",
+        )
+    registry = ModelRegistry.create(AuthStorage.in_memory(), str(tmp_path / "models.json"))
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    bootstrap = {"agentDir": str(agent_dir), "settingsManager": SettingsManager.in_memory(),
+                 "modelRegistry": registry, "model": model, "preset": "alpha"}
+    runtime = await create_agent_session_runtime(bootstrap, {
+        "cwd": str(tmp_path), "sessionManager": SessionManager.in_memory(str(tmp_path)),
+        "resourceLoader": _Loader(str(agent_dir)),
+    })
+    host = TuiRuntimeHost(AgentSessionRuntimeHost(bootstrap, runtime), None)
+    assert await host.ui_operation("tools", {}) == {"tools": ["read", "finish"]}
+    await host.ui_operation("set_preset", {"id": "beta"})
+    assert await host.ui_operation("tools", {}) == {"tools": ["grep", "finish"]}
+    with pytest.raises(PresetError, match="Unknown preset"):
+        await host.ui_operation("set_preset", {"id": "missing"})
+    assert await host.ui_operation("tools", {}) == {"tools": ["grep", "finish"]}
 
 
 @pytest.mark.asyncio

@@ -2867,6 +2867,11 @@ class AgentSession:
     def active_tools(self) -> list[str]:
         return list(self._active_tools)
 
+    @property
+    def model_visible_tools(self) -> list[str]:
+        """Tools currently advertised to the model."""
+        return self._model_visible_tools()
+
     def sync_mcp_tools(self) -> None:
         """Recompute _active_tools from base tools + current MCP tool list."""
         if self._mcp_manager is None:

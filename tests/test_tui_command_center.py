@@ -102,3 +102,44 @@ async def test_center_executes_once_and_preserves_draft(tmp_path: Path):
             await pilot.pause()
             command.assert_awaited_once_with("/stats")
         assert draft.text == "keep me"
+
+
+@pytest.mark.asyncio
+async def test_center_preset_failure_keeps_picker_and_tools_then_allows_retry(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_CODING_AGENT_DIR", str(tmp_path))
+    presets = tmp_path / "presets"
+    presets.mkdir()
+    (presets / "reviewer.md").write_text(
+        "---\nversion: 1\nid: reviewer\nname: Reviewer\ntools: [read, finish]\n---\nReview.\n",
+        encoding="utf-8",
+    )
+    session = _mk_app_session(tmp_path)
+    session.resource_loader.agent_dir = str(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        picker = app.screen
+        await search(picker, pilot, "preset")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert picker._page == "preset"
+        await search(picker, pilot, "Reviewer")
+        before = session.model_visible_tools
+        session._is_compacting = True
+        try:
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen is picker
+            assert not picker._dispatched
+            assert session.preset_id == "default"
+            assert session.model_visible_tools == before
+            assert "Unable to apply" in str(picker.query_one("#command-description").content)
+        finally:
+            session._is_compacting = False
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, _CommandCenter)
+        assert session.preset_id == "reviewer"
+        await app._handle_command("/tools")
+        assert '{"tools": ["read", "finish"]}' in "\n".join(app._stream_lines)

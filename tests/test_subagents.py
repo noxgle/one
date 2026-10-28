@@ -499,6 +499,33 @@ async def test_subagent_visibility_updates_prompt_and_native_tools_live(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_runtime_tools_filter_cooperation_and_subagents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from one.core.tui_runtime_host import TuiRuntimeHost
+
+    monkeypatch.setenv("ONE_CODING_AGENT_DIR", str(tmp_path / "agent"))
+    agent = _mk_agent(tmp_path, tools=["read", "ask_user", "spawn_subagent"],
+                      settings_override={"subagents": {"enabled": False}})
+    host = TuiRuntimeHost(SimpleNamespace(session=agent), None)
+    assert agent.active_tools == ["read", "ask_user", "spawn_subagent"]
+    assert await host.ui_operation("tools", {}) == {"tools": ["read"]}
+
+    async def approve(_name, _args):
+        return True, ""
+
+    agent.approval_callback = approve
+    agent.settings_manager.set_subagents_enabled(True)
+    assert await host.ui_operation("tools", {}) == {"tools": agent.active_tools}
+    visible = agent.model_visible_tools
+    visible.clear()
+    assert agent.model_visible_tools == agent.active_tools
+    agent.approval_callback = None
+    agent.settings_manager.set_subagents_enabled(False)
+    assert await host.ui_operation("tools", {}) == {"tools": ["read"]}
+
+
+@pytest.mark.asyncio
 async def test_hard_disabled_subagents_remain_unavailable_after_live_enable(tmp_path: Path) -> None:
     auth = AuthStorage.in_memory()
     auth.set_runtime_api_key("openai", "dummy")
