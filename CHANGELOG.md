@@ -16,6 +16,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Subagent MCP restrictions** — `spawn_subagent` supports an optional
+  `mcp_servers` allowlist, intersected with inherited server and tool restrictions;
+  omit it to inherit or use an empty list to deny MCP access.
+
 - **Explore preset** — a built-in, evidence-focused project investigation role
   with an application-enforced local read-only tool ceiling and no shell or HTTP
   tool. It is not an OS sandbox.

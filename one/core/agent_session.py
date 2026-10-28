@@ -217,6 +217,7 @@ class AgentSession:
         subagents_hard_disabled: bool = False,
         preset: PresetDefinition | None = None,
         tool_policy: ToolPolicy | None = None,
+        mcp_server_ceiling: frozenset[str] | None = None,
     ) -> None:
         self.session_manager = session_manager
         self.settings_manager = settings_manager
@@ -251,6 +252,7 @@ class AgentSession:
         self._preset = preset
         self._policy_ceiling = tool_policy or ToolPolicy()
         self._mcp_manager = mcp_manager
+        self._mcp_server_ceiling = None if mcp_server_ceiling is None else frozenset(mcp_server_ceiling)
         self._tool_policy = self._policy_ceiling
         base = list(all_tools) if tools is None else list(tools)
         self._configured_base_tools = tuple(base)
@@ -498,7 +500,7 @@ class AgentSession:
             if callable(tools_getter):
                 candidate = tools_getter()
                 if isinstance(candidate, list):
-                    mcp_tools = candidate
+                    mcp_tools = [t for t in candidate if t.name in visible_tools and t.name not in all_tools]
         if mcp_tools:
             lines = [
                 "\n# MCP Tools",
@@ -553,7 +555,7 @@ class AgentSession:
 
     def _model_visible_tools(self) -> list[str]:
         """Return tools advertised to the model in the current mode."""
-        visible = [name for name in self._active_tools if self._tool_policy.permits(name)]
+        visible = [name for name in self._active_tools if self._tool_policy.permits(name) and self._mcp_server_permits(name)]
         if self._subagents_hard_disabled or not self.settings_manager.get_subagents_enabled():
             visible = [tool for tool in visible if tool != "spawn_subagent"]
         if not self.cooperation_enabled:
@@ -668,6 +670,7 @@ class AgentSession:
         return {"version": 1, "id": preset.id, "name": preset.name, "body": preset.body,
             "model": f"{model.provider}/{model.id}" if model else None, "temperature": temperature,
             "thinking": thinking, "tools": list(tools), "policy": allowed, "ceiling": sorted(self._policy_ceiling.allowed) if self._policy_ceiling.allowed is not None else None,
+            "mcp_servers": sorted(self._mcp_server_ceiling) if self._mcp_server_ceiling is not None else None,
             "hash": preset.content_hash, "source": preset.source,
             "baseline": [effective[0], effective[1], effective[2], list(effective[3]), sorted(effective[4]) if effective[4] is not None else None]}
 
@@ -693,6 +696,15 @@ class AgentSession:
             raise PresetError("Corrupt preset policy snapshot")
         if ceiling is not None and (not isinstance(ceiling, list) or not all(isinstance(x, str) and x for x in ceiling) or len(set(ceiling)) != len(ceiling)):
             raise PresetError("Corrupt preset ceiling snapshot")
+        saved_servers = state.get("mcp_servers")
+        if saved_servers is not None and (
+            not isinstance(saved_servers, list)
+            or not all(isinstance(x, str) and x.strip() for x in saved_servers)
+        ):
+            raise PresetError("Corrupt preset MCP server ceiling")
+        next_servers = self._intersect_mcp_servers(
+            frozenset(saved_servers) if saved_servers is not None else None
+        )
         reserved_policy = RESERVED_READONLY_POLICIES.get(ident)
         if reserved_policy is not None and (policy is None or not set(policy).issubset(reserved_policy)):
             raise PresetError(f"{ident.title()} snapshot policy is invalid")
@@ -733,7 +745,10 @@ class AgentSession:
         # an explicit allowlist and remains fail-closed for new MCP tools.
         next_policy = next_ceiling.intersect(set(policy) if policy is not None else None)
         next_policy = next_policy.intersect(reserved_policy)
-        active_tools = self._computed_active_tools(next_base, next_policy)
+        active_tools = [
+            name for name in self._computed_active_tools(next_base, next_policy)
+            if self._mcp_server_permits(name, next_servers)
+        ]
         baseline = state.get("baseline")
         if (not isinstance(baseline, list) or len(baseline) != 5 or
                 (baseline[0] is not None and not isinstance(baseline[0], str)) or
@@ -751,6 +766,7 @@ class AgentSession:
         self.thinking_level = "off" if self.model and not self.model.reasoning else thinking
         self._base_tools = next_base
         self._policy_ceiling = next_ceiling
+        self._mcp_server_ceiling = next_servers
         self._tool_policy = next_policy
         self._active_tools = active_tools
         self._preset_effective = (baseline[0], float(baseline[1]), baseline[2], tuple(baseline[3]), frozenset(baseline[4]) if baseline[4] is not None else None)
@@ -793,7 +809,7 @@ class AgentSession:
         # These names mirror the registered tool argument schemas.
         flat_argument_fields = {
             "bash": frozenset({"command", "timeout"}),
-            "spawn_subagent": frozenset({"task", "tasks", "model", "tools", "preset", "temperature", "temperatureMode", "timeout"}),
+            "spawn_subagent": frozenset({"task", "tasks", "model", "tools", "mcp_servers", "preset", "temperature", "temperatureMode", "timeout"}),
             "finish": frozenset({"summary", "goal_success"}),
         }
 
@@ -1576,7 +1592,7 @@ class AgentSession:
         # Direct callers must hit the same capability boundary before argument
         # validation, MCP lookup, approvals, hooks, or tool bodies.
         policy = getattr(self, "_tool_policy", ToolPolicy())
-        if tool_name not in self._active_tools or not policy.permits(tool_name):
+        if tool_name not in self._active_tools or not policy.permits(tool_name) or not self._mcp_server_permits(tool_name):
             raise RuntimeError(f"Tool '{tool_name}' is disabled")
         # Reject malformed OpenCode patch calls before capability checks,
         # approval hooks, timeout calculation, or tool execution.
@@ -2146,6 +2162,23 @@ class AgentSession:
         if not task and not tasks:
             raise RuntimeError("spawn_subagent requires 'task' or 'tasks'")
 
+        requested_servers = None
+        if "mcp_servers" in args:
+            servers = args["mcp_servers"]
+            if not isinstance(servers, list) or not all(isinstance(x, str) and x.strip() for x in servers):
+                raise RuntimeError("'mcp_servers' must be a list of non-empty server names")
+            known_servers: set[str] = set()
+            if self._mcp_manager is not None:
+                status = getattr(self._mcp_manager, "server_status", None)
+                if callable(status):
+                    known_servers.update(row["name"] for row in status())
+                known_servers.update(t.server for t in self._mcp_manager.tools())
+            unknown = set(servers) - known_servers
+            if unknown:
+                raise RuntimeError("Unknown MCP servers: " + ", ".join(sorted(unknown)))
+            requested_servers = frozenset(servers)
+        child_servers = self._intersect_mcp_servers(requested_servers)
+
         model_spec = str(args.get("model") or "").strip() or None
         preset: PresetDefinition | None = None
         preset_tools: list[str] | None = None
@@ -2237,8 +2270,8 @@ class AgentSession:
             sub_tools.append("finish")
 
         if task:
-            return await self._run_subagent(task, sub_model, sub_tools, depth, temperature=child_temperature, thinking_level=child_thinking, timeout_sec=timeout_sec, preset=preset)
-        results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth, temperature=child_temperature, thinking_level=child_thinking, timeout_sec=timeout_sec, preset=preset) for t in tasks))
+            return await self._run_subagent(task, sub_model, sub_tools, depth, temperature=child_temperature, thinking_level=child_thinking, timeout_sec=timeout_sec, preset=preset, mcp_server_ceiling=child_servers)
+        results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth, temperature=child_temperature, thinking_level=child_thinking, timeout_sec=timeout_sec, preset=preset, mcp_server_ceiling=child_servers) for t in tasks))
         # Aggregate: per-child results + top-level ok + error when any fails.
         all_ok = all(r.get("ok") for r in results)
         combined = "\n".join(f"- {r.get('summary', '(no summary)')}" for r in results)
@@ -2315,7 +2348,7 @@ class AgentSession:
         self._tool_images.append(image)
 
     async def _run_subagent(
-        self, task: str, sub_model: Any, sub_tools: list[str], depth: int, temperature: float | None = None, thinking_level: str | None = None, *, timeout_sec: int | None = None, preset: PresetDefinition | None = None
+        self, task: str, sub_model: Any, sub_tools: list[str], depth: int, temperature: float | None = None, thinking_level: str | None = None, *, timeout_sec: int | None = None, preset: PresetDefinition | None = None, mcp_server_ceiling: frozenset[str] | None = None
     ) -> dict[str, Any]:
         # Use the parent's session_dir so subagent files go to the same directory.
         # Use __init__ directly to bypass SessionManager.create()'s "session_dir or
@@ -2359,6 +2392,7 @@ class AgentSession:
             cooperation_state=self._cooperation_state,
             mcp_manager=self._mcp_manager,
             register_mcp_tools_callback=False,
+            mcp_server_ceiling=self._intersect_mcp_servers(mcp_server_ceiling),
             activity_callback=_child_activity,
             subagents_hard_disabled=self._subagents_hard_disabled,
             preset=preset or self._preset,
@@ -2836,12 +2870,31 @@ class AgentSession:
             return
         self._active_tools = self._computed_active_tools(self._base_tools, self._tool_policy)
 
+    def _intersect_mcp_servers(self, requested: frozenset[str] | None) -> frozenset[str] | None:
+        if self._mcp_server_ceiling is None:
+            return requested
+        return self._mcp_server_ceiling if requested is None else self._mcp_server_ceiling & requested
+
+    def _mcp_server_permits(self, name: str, ceiling: frozenset[str] | None = None) -> bool:
+        # Builtins win dispatch and are never constrained by MCP server policy.
+        if name in all_tools:
+            return True
+        effective = self._intersect_mcp_servers(ceiling)
+        if effective is None:
+            return True
+        if self._mcp_manager is None:
+            return False
+        # Resolve the *current* mapping even when active tools came from an old
+        # discovery snapshot. A renamed/remapped tool must not gain authority.
+        matches = [t for t in self._mcp_manager.tools() if t.name == name]
+        return bool(matches) and all(t.server in effective for t in matches)
+
     def _computed_active_tools(self, base_tools: list[str], policy: ToolPolicy) -> list[str]:
         """Prepare visible tools without mutating the active session."""
         mcp_names: list[str] = []
         if self._mcp_manager is not None:
             mcp_names = [t.name for t in self._mcp_manager.tools()]
-        return [name for name in dict.fromkeys(base_tools + mcp_names) if policy.permits(name)]
+        return [name for name in dict.fromkeys(base_tools + mcp_names) if policy.permits(name) and self._mcp_server_permits(name)]
 
     def _refresh_active_tools(self) -> None:
         """Rebuild visibility without allowing MCP tools through a policy ceiling."""
@@ -3205,7 +3258,10 @@ class AgentSession:
         if getattr(provider, "supports_native_tools", False) and "tools" in sig.parameters:
             definitions = native_tool_definitions(self._model_visible_tools())
             if self._mcp_manager is not None:
+                visible_tools = self._model_visible_tools()
                 for tool in self._mcp_manager.tools():
+                    if tool.name not in visible_tools or tool.name in all_tools:
+                        continue
                     schema = getattr(tool, "input_schema", None)
                     if isinstance(schema, dict):
                         definitions.append({"name": tool.name, "description": getattr(tool, "description", ""), "parameters": schema})
