@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Subagent inspector** — keep loaded history visible while activity refreshes,
+  including when the inspector is paused.
+
 - **Preset tool diagnostics** — `/tools` lists tools currently advertised to the
   model, respecting cooperation and subagent visibility. Failed preset selections
   keep the command-center picker open instead of appearing to succeed.

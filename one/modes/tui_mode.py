@@ -2900,10 +2900,10 @@ if TEXTUAL_AVAILABLE:
                     return
                 if changed:
                     self._schedule_sidebar_refresh()
-                    self._agent_page = None
                     if self._agent_follow:
                         self._agent_page_cursor = (0, 1)
                     self._render_agents_panel()
+                    self._request_agent_page()
                 return
             with self._monitor_dirty_lock:
                 self._monitor_refresh_inflight = True
@@ -2926,10 +2926,10 @@ if TEXTUAL_AVAILABLE:
                             session.apply_monitor_snapshot(result)
                             if self._accept_monitor_snapshot(session.monitor_snapshot, generation):
                                 self._schedule_sidebar_refresh()
-                                self._agent_page = None
                                 if self._agent_follow:
                                     self._agent_page_cursor = (0, 1)
                                 self._render_agents_panel()
+                                self._request_agent_page()
                     except Exception as exc:
                         self._write(f"[Monitor] {exc}", "error")
                     finally:
@@ -5588,11 +5588,10 @@ if TEXTUAL_AVAILABLE:
                         self._write(f"[Agent history] {exc}", "error")
                 finally:
                     self._agent_page_loading = False
-                    if (self._agents_panel_open and self._monitor_generation == generation
+                    if (self.session is session and self._agents_panel_open and self._monitor_generation == generation
                             and (panel_generation != self._agent_panel_generation
                                  or child != self._selected_agent_id or cursor != self._agent_page_cursor
-                                 or (self._agent_follow and revision != self._monitor_revision))):
-                        self._agent_page = None
+                                 or revision != self._monitor_revision)):
                         self._request_agent_page()
             asyncio.create_task(load())
 
@@ -5602,6 +5601,7 @@ if TEXTUAL_AVAILABLE:
             children = self._monitor_snapshot.get("children", [])
             if self._selected_agent_id and self._monitor_child(self._selected_agent_id) is None:
                 self._selected_agent_id = None
+                self._agent_page = None
             if self._selected_agent_id is None and children:
                 self._selected_agent_id = str(children[0].get("sessionId") or "")
             selected = self._monitor_child(self._selected_agent_id or "")
@@ -5659,9 +5659,13 @@ if TEXTUAL_AVAILABLE:
                             self._append_agent_entry(content, {"kind": "tool", "text": text})
             footer = "←/→: agent · ↑/↓: scroll\nHome/End · PgUp/PgDn · N/P · Esc: close"
             try:
-                self.query_one("#agents_help", Static).update(header)
-                self.query_one("#agents_content", Static).update(content)
-                self.query_one("#agents_footer", Static).update(Text(footer, style="dim"))
+                for selector, rendered in (("#agents_help", header), ("#agents_content", content),
+                                           ("#agents_footer", Text(footer, style="dim"))):
+                    widget = self.query_one(selector, Static)
+                    previous = widget.content
+                    if not (isinstance(previous, Text) and previous.plain == rendered.plain
+                            and previous.style == rendered.style and previous.spans == rendered.spans):
+                        widget.update(rendered)
             except Exception:
                 pass
 

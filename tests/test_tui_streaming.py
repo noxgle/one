@@ -2430,3 +2430,27 @@ async def test_agents_thinking_theme_and_paused_operation_refresh(tmp_path: Path
         app._flush_monitor_refresh()
         await pilot.pause()
         assert "Thinking" in str(app.query_one("#agents_help", Static).content)
+
+
+@pytest.mark.asyncio
+async def test_legacy_agent_history_remains_visible_before_refresh_load(tmp_path: Path) -> None:
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    monitor = session.subagent_monitor
+    monitor.register("child", "durable prompt", "model")
+    monitor.tool_started("child", "read", tool_call_id="one")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "/agents")
+        content = app.query_one("#agents_content", Static)
+        assert "durable prompt" in str(content.content)
+        app._agent_follow = False
+        monitor.tool_finished("child", "read", True, 5, "done", tool_call_id="one")
+        app._flush_monitor_refresh()
+        assert "durable prompt" in str(content.content)
+        assert "Tool: ○ read" in str(content.content)
+        await pilot.pause()
+        assert "Tool: ✓ read" in str(content.content)

@@ -2185,3 +2185,67 @@ async def test_detached_ctrl_s_can_reenable_but_cannot_override_cli_ceiling(hard
             await pilot.pause()
             assert facade.toggles == [True, False, True]
             assert "--no-subagents" not in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
+async def test_detached_agent_history_stays_visible_during_refresh_and_revision_retry() -> None:
+    from textual.widgets import Static
+
+    from one.modes.tui_mode import _OneTextualApp
+
+    class Facade:
+        def __init__(self):
+            self.listeners = []
+            self.revision = 1
+            self.calls = 0
+            self.entered = asyncio.Queue()
+            self.releases = [asyncio.Event(), asyncio.Event()]
+
+        async def command(self, command, _payload=None):
+            monitor = {"revision": self.revision, "children": [{"sessionId": "child"}]}
+            if command == "snapshot":
+                return {"result": {"epoch": 1, "sidebar": {"sessionId": "s"}, "messages": [], "monitor": monitor}}
+            if command == "status_snapshot":
+                return {"result": {"epoch": 1, "sidebar": {"sessionId": "s"}, "mcp": []}}
+            if command == "monitor_snapshot":
+                return {"result": {"epoch": 1, "monitor": monitor}}
+            assert command == "agent_inspector_page"
+            self.calls += 1
+            number = self.calls
+            if number > 1:
+                await self.entered.put(number)
+                await self.releases[number - 2].wait()
+            return {"result": {"epoch": 1, "durable": True,
+                               "entries": [{"kind": "response", "text": f"history {number}"}]}}
+
+        def subscribe(self, listener, **_kwargs):
+            self.listeners.append(listener)
+            return lambda: self.listeners.remove(listener)
+
+    facade = Facade()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    async with app.run_test() as pilot:
+        app._agents_panel_open = True
+        app._agent_follow = False
+        app._render_agents_panel()
+        await pilot.pause()
+        content = app.query_one("#agents_content", Static)
+        assert "history 1" in str(content.content)
+        facade.revision = 2
+        app._monitor_dirty = True
+        app._flush_monitor_refresh()
+        assert await asyncio.wait_for(facade.entered.get(), 2) == 2
+        assert "history 1" in str(content.content)
+        facade.revision = 3
+        app._monitor_dirty = True
+        app._flush_monitor_refresh()
+        await pilot.pause()
+        assert "history 1" in str(content.content)
+        facade.releases[0].set()
+        assert await asyncio.wait_for(facade.entered.get(), 2) == 3
+        assert "history 2" in str(content.content)
+        facade.releases[1].set()
+        await pilot.pause()
+        assert "history 3" in str(content.content)
