@@ -217,3 +217,86 @@ def test_model_visible_native_schema():
     assert "minItems" not in schema["properties"]["mcp_servers"]
     assert "omit to inherit" in definition["description"]
     assert "[] denies MCP" in definition["description"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("servers", [[], ["alpha"]])
+async def test_persistent_implicit_child_manual_resume_and_fork(tmp_path, monkeypatch, servers):
+    from one.core.agent_session_runtime import AgentSessionRuntimeHost, create_agent_session_runtime
+    from one.core.session_manager import SessionManager
+
+    manager = _Manager()
+    parent = _agent(tmp_path, manager)
+    parent.session_manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    assert parent._preset is None
+    captured = []
+
+    async def prompt(child, text, **kwargs):
+        child.session_manager.append_message({"role": "user", "content": text})
+        captured.append(child.session_manager.session_file)
+
+    monkeypatch.setattr(AgentSession, "prompt", prompt)
+    await parent._spawn_subagent({"task": "inspect", "mcp_servers": servers,
+                                  "tools": ["alpha_tool", "finish", "spawn_subagent"]})
+    assert len(captured) == 1 and captured[0]
+    child_path = captured[0]
+    saved = SessionManager.open(child_path).build_session_context()
+    assert saved["presetStatePresent"]
+    assert saved["presetState"]["mcp_servers"] == servers
+    expected = {"finish", "spawn_subagent"} | ({"alpha_tool"} if servers else set())
+
+    class Loader:
+        async def reload(self):
+            pass
+
+        def get_extensions(self):
+            return {"extensions": []}
+
+        def get_system_prompt(self, selected_tools=None, base_role=None):
+            assert base_role is None  # implicit Default must keep the dynamic role
+            return "normal role"
+
+    bootstrap = {"agentDir": str(tmp_path / "agent"), "settingsManager": parent.settings_manager,
+                 "modelRegistry": parent.model_registry, "model": parent.model, "mcpManager": manager,
+                 "resourceLoader": Loader()}
+    runtime = await create_agent_session_runtime(
+        bootstrap, {"sessionManager": parent.session_manager, "cwd": str(tmp_path)}
+    )
+    host = AgentSessionRuntimeHost(bootstrap, runtime)
+
+    async def verify():
+        session = host.session
+        assert session._subagent_depth() == 1
+        assert session._mcp_server_ceiling == frozenset(servers)
+        session.sync_mcp_tools()
+        assert set(session.active_tools) == expected
+        assert "normal role" in session._build_runtime_system_prompt()
+        with pytest.raises(RuntimeError, match="disabled"):
+            await session._execute_tool_by_name("beta_tool", {})
+        if not servers:
+            with pytest.raises(RuntimeError, match="disabled"):
+                await session._execute_tool_by_name("alpha_tool", {})
+        provider = _NativeToolProvider()
+        session.providers = {"openai": provider}
+        await session._invoke_provider([{"role": "user", "content": "inspect"}])
+        assert set(provider.tool_names[0]) == expected
+        assert manager.callback == session.sync_mcp_tools
+
+    try:
+        await host.switch_session(child_path)
+        await verify()
+        # Reapplying Default must not discard the inherited immutable ceiling.
+        host.session.activate_preset("default", str(tmp_path / "agent"))
+        await verify()
+        marker = host.session.session_manager.get_leaf_id()
+        await host.fork(marker)
+        assert host.session.session_manager.get_header()["parentSession"] == child_path
+        await verify()
+        # A new process can open the fork without access to the old runtime.
+        fork_path = host.session.session_manager.session_file
+        await host.switch_session(parent.session_manager.session_file)
+        await host.switch_session(fork_path)
+        await verify()
+    finally:
+        await host.dispose()
+        await parent.dispose()

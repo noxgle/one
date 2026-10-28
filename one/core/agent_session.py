@@ -2395,7 +2395,10 @@ class AgentSession:
             mcp_server_ceiling=self._intersect_mcp_servers(mcp_server_ceiling),
             activity_callback=_child_activity,
             subagents_hard_disabled=self._subagents_hard_disabled,
-            preset=preset or self._preset,
+            # Even an implicit Default child needs a durable effective snapshot:
+            # reopening its JSONL must not discard inherited tool/server ceilings.
+            # Default keeps the normal dynamic role rather than replacing it.
+            preset=preset or self._preset or PresetDefinition("default", "Default", "", "runtime"),
             tool_policy=self._tool_policy.intersect(set(sub_tools)),
         )
         sub.providers = self.providers

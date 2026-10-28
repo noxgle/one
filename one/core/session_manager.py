@@ -750,6 +750,8 @@ class SessionManager:
             "cwd": self._cwd,
             "parentSession": self._session_file,
         }
+        if "subagentDepth" in self.get_header():
+            header["subagentDepth"] = self.get_header()["subagentDepth"]
         self._entries = [header] + path
         self._reindex()
         if self._persist:
