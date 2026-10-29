@@ -484,12 +484,19 @@ does not revoke a provider account token or remove environment credentials.
 
 ## Sessions and configuration
 
-Named agent presets are documented in [docs/PRESETS.md](docs/PRESETS.md). Use
+Named agent presets, including MCP server selection and diagnostics, are documented
+in [docs/PRESETS.md](docs/PRESETS.md). Use
 `one --preset readonly` for app-enforced read-only inspection (not OS or network sandboxing).
 List presets with `/preset`, apply one with `/preset readonly`, or use
 Ctrl+P → Select preset. Shift+Tab cycles presets from the main input while idle.
 Readonly is application policy, not a sandbox; see the preset documentation
 for capability ceilings and saved-session behavior.
+
+Preset YAML may use `tools: ['*']` or `mcp_servers: ['*']` to dynamically
+include available tools or MCP servers under inherited parent and CLI ceilings.
+The quoted wildcard must be the only list entry, not a scalar or glob; newly
+available tools and servers may become accessible later. Omitting fields keeps
+legacy behavior, and `mcp_servers: []` still denies MCP access.
 
 Optional workspace presets, including Project, Researcher, and coding-agent
 profiles, are available under [`extras/presets/`](extras/presets/); copy a

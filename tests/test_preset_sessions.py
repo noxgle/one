@@ -107,3 +107,62 @@ async def test_fork_restores_historical_preset_snapshot_after_definitions_are_de
     assert host.session.thinking_level == "high"
     assert host.session._preset.body == "ALPHA BODY\n"
     assert host.session.active_tools == ["read", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_restores_mcp_selection_and_ceiling_on_switch_and_fork(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    class Manager:
+        def __init__(self):
+            self.items = [SimpleNamespace(name="alpha_tool", server="alpha"),
+                          SimpleNamespace(name="beta_tool", server="beta")]
+
+        def tools(self):
+            return self.items
+
+        def server_status(self):
+            return [{"name": "alpha"}, {"name": "beta"}]
+
+    agent_dir = tmp_path / "agent"
+    presets = agent_dir / "presets"
+    presets.mkdir(parents=True)
+    definition = presets / "selected.md"
+    definition.write_text("---\nversion: 1\nid: selected\nname: Selected\n"
+                          "mcp_servers: [alpha, beta]\n---\nORIGINAL\n", encoding="utf-8")
+    registry = ModelRegistry.create(AuthStorage.in_memory(), str(tmp_path / "models.json"))
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    mcp = Manager()
+    manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    bootstrap = {"agentDir": str(agent_dir), "settingsManager": SettingsManager.in_memory(),
+                 "modelRegistry": registry, "model": model, "mcpManager": mcp}
+    runtime = await create_agent_session_runtime(bootstrap, {
+        "cwd": str(tmp_path), "sessionManager": manager, "resourceLoader": _Loader(str(agent_dir)),
+    })
+    host = AgentSessionRuntimeHost(bootstrap, runtime)
+    host.session._mcp_server_ceiling = frozenset({"alpha"})
+    host.session.activate_preset("selected", str(agent_dir))
+    manager.append_message({"role": "user", "content": "marker"})
+    marker = manager.get_leaf_id()
+    parent_path = manager.session_file
+    assert marker and parent_path
+    definition.write_text("---\nversion: 1\nid: selected\nname: Changed\n"
+                          "mcp_servers: [beta]\n---\nCHANGED\n", encoding="utf-8")
+    mcp.items = [SimpleNamespace(name="reconnected", server="alpha"),
+                 SimpleNamespace(name="forbidden", server="beta")]
+
+    await host.switch_session(parent_path)
+    assert host.session._preset.body == "ORIGINAL\n"
+    assert host.session._preset.mcp_servers == ("alpha", "beta")
+    assert host.session._mcp_server_ceiling == frozenset({"alpha"})
+    assert "reconnected" in host.session.active_tools
+    assert "forbidden" not in host.session.active_tools
+
+    definition.unlink()
+    mcp.items.append(SimpleNamespace(name="later", server="alpha"))
+    await host.fork(marker)
+    assert host.session._preset.body == "ORIGINAL\n"
+    assert host.session._mcp_server_ceiling == frozenset({"alpha"})
+    assert {"reconnected", "later"} <= set(host.session.active_tools)
+    assert "forbidden" not in host.session.active_tools

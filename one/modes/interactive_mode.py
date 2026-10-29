@@ -595,6 +595,10 @@ class InteractiveMode:
                 try:
                     session.activate_preset(line[len("/preset ") :].strip(), getattr(session.resource_loader, "agent_dir", None))
                     print(f"Preset set to {session.preset_name}")
+                    diagnostics = session.preset_effective_settings.get("mcp_diagnostics", {})
+                    for key, label in (("unavailable", "Unavailable MCP servers"), ("restricted", "Restricted MCP servers")):
+                        if diagnostics.get(key):
+                            print(f"{label}: {', '.join(diagnostics[key])}")
                 except Exception as exc:
                     print(str(exc))
                 continue

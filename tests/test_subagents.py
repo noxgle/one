@@ -258,7 +258,7 @@ async def test_spawn_subagent_sets_parent_session_header(tmp_path: Path):
     model = registry.find("openai", "gpt-4.1")
     assert model is not None
     settings = SettingsManager.in_memory({"tools": {"maxSteps": 4, "timeoutSec": 5}})
-    agent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent"])
+    agent = AgentSession(manager, settings, registry, _Loader(), model, "medium", tools=["spawn_subagent", "finish"])
     agent.providers = {"openai": _Provider([spawn_json, finish_json])}
 
     await agent.prompt("go")

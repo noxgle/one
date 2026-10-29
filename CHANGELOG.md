@@ -29,6 +29,14 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Preset wildcards** — `tools: ['*']` and `mcp_servers: ['*']` dynamically
+  select available tools or servers under inherited ceilings. Future tools and
+  servers may become accessible; omission and empty server lists retain their
+  existing semantics.
+
+- **Preset MCP server selection** — select servers under inherited ceilings; selection
+  reports unavailable and restricted servers.
+
 - **Subagent MCP restrictions** — `spawn_subagent` supports an optional
   `mcp_servers` allowlist, intersected with inherited server and tool restrictions;
   omit it to inherit or use an empty list to deny MCP access.

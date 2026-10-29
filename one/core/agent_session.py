@@ -577,11 +577,38 @@ class AgentSession:
         return self._preset.name if self._preset else "Default"
 
     @property
+    def preset_mcp_diagnostics(self) -> dict[str, list[str]]:
+        """Project explicit server selection without connection details."""
+        requested = sorted(set(self._preset.mcp_servers or ())) if self._preset else []
+        if self._preset and (self._preset.mcp_servers == ("*",) or
+                             (self._preset.tools == ("*",) and self._preset.mcp_servers is None)):
+            requested = sorted(set(self.settings_manager.get_mcp_servers() or {}) |
+                               ({t.server for t in self._mcp_manager.tools()} if self._mcp_manager else set()) |
+                               ({row["name"] for row in self._mcp_manager.server_status()}
+                                if self._mcp_manager and callable(getattr(self._mcp_manager, "server_status", None)) else set()))
+        manager = self._mcp_manager
+        tools = manager.tools() if manager is not None else []
+        getter = getattr(manager, "server_status", None)
+        running = {row.get("name"): row.get("running") for row in getter()} if callable(getter) else {}
+        allowed, unavailable, restricted = [], [], []
+        for name in requested:
+            server_tools = [tool for tool in tools if tool.server == name]
+            if (self._mcp_server_ceiling is not None and name not in self._mcp_server_ceiling) or (
+                server_tools and not any(self._tool_policy.permits(t.name) and self._mcp_server_permits(t.name) for t in server_tools)
+            ):
+                restricted.append(name)
+                continue
+            allowed.append(name)
+            if running.get(name) is False or (running.get(name) is None and not server_tools):
+                unavailable.append(name)
+        return {"requested": requested, "allowed": allowed, "unavailable": unavailable, "restricted": restricted}
+
+    @property
     def preset_effective_settings(self) -> dict[str, object]:
         """Safe effective configuration projection; never expose prompt/body."""
         return {"model": f"{self.model.provider}/{self.model.id}" if self.model else None,
                 "temperature": self.temperature, "thinking": self.thinking_level,
-                "tools": self._model_visible_tools()}
+                "tools": self._model_visible_tools(), "mcp_diagnostics": self.preset_mcp_diagnostics}
 
     @property
     def preset_modified(self) -> bool:
@@ -629,13 +656,15 @@ class AgentSession:
         )
         # MCP discovery is fallible.  Prepare it before durability/state commits
         # so a broken manager cannot leave a partial preset transition behind.
-        active_tools = self._computed_active_tools(allowed_base, next_policy)
+        active_tools = self._computed_active_tools(allowed_base, next_policy, preset=candidate)
         next_baseline = (f"{model.provider}/{model.id}" if model else None, temperature, thinking, tuple(allowed_base), next_policy.allowed)
         snapshot = self._preset_state(candidate, model, temperature, thinking, allowed_base, next_policy, baseline=next_baseline)
+        snapshot["dynamic_policy_override"] = None
         # Persist first: after this point the prepared assignments cannot fail,
         # so no visible configuration is committed without durable history.
         self._persist_preset_state(snapshot)
         self._preset = candidate
+        self._dynamic_policy_override = None
         self._tool_policy = next_policy
         self.model = model
         self._model_metadata_epoch += 1
@@ -652,6 +681,27 @@ class AgentSession:
     ) -> tuple[list[str], ToolPolicy]:
         """Validate and narrow a preset allowlist before any state is committed."""
         policy = policy.intersect(RESERVED_READONLY_POLICIES.get(preset.id))
+        if preset.mcp_servers is not None or preset.tools == ("*",):
+            known = set(self.settings_manager.get_mcp_servers() or {})
+            if self._mcp_manager is not None:
+                status = getattr(self._mcp_manager, "server_status", None)
+                if callable(status):
+                    known.update(row["name"] for row in status())
+                known.update(t.server for t in self._mcp_manager.tools())
+            unknown = set(preset.mcp_servers or ()) - known - {"*"}
+            if unknown:
+                raise PresetError("Unknown MCP servers: " + ", ".join(sorted(unknown)))
+            if preset.tools is not None and preset.tools != ("*",):
+                if "finish" not in preset.tools:
+                    raise PresetError("Preset tools must include finish")
+                known_tools = set(all_tools)
+                if self._mcp_manager is not None:
+                    known_tools.update(t.name for t in self._mcp_manager.tools())
+                unknown_tools = set(preset.tools) - known_tools
+                if unknown_tools:
+                    raise PresetError("Preset references unknown tool(s): " + ", ".join(sorted(unknown_tools)))
+            base = [name for name in configured_base if name in all_tools and (preset.tools is None or preset.tools == ("*",) or name in preset.tools)]
+            return base, self._explicit_mcp_policy(preset, base, policy)
         if preset.tools is None:
             return list(configured_base), policy
         if "finish" not in preset.tools:
@@ -664,6 +714,14 @@ class AgentSession:
             raise PresetError("Preset references unknown tool(s): " + ", ".join(sorted(unknown_tools)))
         return [name for name in configured_base if name in preset.tools], policy.intersect(set(preset.tools))
 
+    def _explicit_mcp_policy(self, preset: PresetDefinition, base: list[str], ceiling: ToolPolicy) -> ToolPolicy:
+        names = set(base)
+        if self._mcp_manager is not None:
+            names.update(t.name for t in self._mcp_manager.tools()
+                         if (preset.mcp_servers == ("*",) or (preset.mcp_servers is None and preset.tools == ("*",))
+                             or t.server in (preset.mcp_servers or ())) and t.name not in all_tools)
+        return ceiling.intersect(RESERVED_READONLY_POLICIES.get(preset.id)).intersect(names)
+
     def _preset_state(self, preset: PresetDefinition, model: Any, temperature: float, thinking: str, tools: list[str], policy: ToolPolicy, *, baseline: tuple[Any, ...] | None = None) -> dict[str, Any]:
         allowed = sorted(policy.allowed) if policy.allowed is not None else None
         effective = baseline or getattr(self, "_preset_effective", (f"{model.provider}/{model.id}" if model else None, temperature, thinking, tuple(tools), policy.allowed))
@@ -671,6 +729,10 @@ class AgentSession:
             "model": f"{model.provider}/{model.id}" if model else None, "temperature": temperature,
             "thinking": thinking, "tools": list(tools), "policy": allowed, "ceiling": sorted(self._policy_ceiling.allowed) if self._policy_ceiling.allowed is not None else None,
             "mcp_servers": sorted(self._mcp_server_ceiling) if self._mcp_server_ceiling is not None else None,
+            "preset_mcp_servers": list(preset.mcp_servers) if preset.mcp_servers is not None and preset.mcp_servers != ("*",) else None,
+            "wildcard_tools": preset.tools == ("*",),
+            "wildcard_mcp_servers": preset.mcp_servers == ("*",),
+            "dynamic_policy_override": sorted(self._dynamic_policy_override) if getattr(self, "_dynamic_policy_override", None) is not None else None,
             "hash": preset.content_hash, "source": preset.source,
             "baseline": [effective[0], effective[1], effective[2], list(effective[3]), sorted(effective[4]) if effective[4] is not None else None]}
 
@@ -705,6 +767,19 @@ class AgentSession:
         next_servers = self._intersect_mcp_servers(
             frozenset(saved_servers) if saved_servers is not None else None
         )
+        wildcard_tools = state.get("wildcard_tools", False)
+        wildcard_servers = state.get("wildcard_mcp_servers", False)
+        if type(wildcard_tools) is not bool or type(wildcard_servers) is not bool:
+            raise PresetError("Corrupt preset wildcard snapshot")
+        selected_servers = state.get("preset_mcp_servers")
+        if selected_servers is not None and (not isinstance(selected_servers, list)
+                or not all(isinstance(x, str) and x and x == x.strip() and "*" not in x for x in selected_servers)
+                or len(set(selected_servers)) != len(selected_servers)):
+            raise PresetError("Corrupt preset MCP server selection")
+        if wildcard_servers and selected_servers is not None:
+            raise PresetError("Contradictory preset wildcard snapshot")
+        if any("*" in x for x in tools) or (policy is not None and any("*" in x for x in policy)):
+            raise PresetError("Corrupt preset wildcard snapshot")
         reserved_policy = RESERVED_READONLY_POLICIES.get(ident)
         if reserved_policy is not None and (policy is None or not set(policy).issubset(reserved_policy)):
             raise PresetError(f"{ident.title()} snapshot policy is invalid")
@@ -714,7 +789,8 @@ class AgentSession:
         content_hash = state.get("hash", "")
         if not isinstance(source, str) or not isinstance(content_hash, str):
             raise PresetError("Corrupt preset provenance")
-        definition = PresetDefinition(ident, name, body, source, tools=tuple(tools), content_hash=content_hash)
+        definition = PresetDefinition(ident, name, body, source, tools=("*",) if wildcard_tools else tuple(tools), content_hash=content_hash,
+                                      mcp_servers=("*",) if wildcard_servers else tuple(selected_servers) if selected_servers is not None else None)
         temperature = state.get("temperature")
         thinking = state.get("thinking")
         model_spec = state.get("model")
@@ -745,10 +821,6 @@ class AgentSession:
         # an explicit allowlist and remains fail-closed for new MCP tools.
         next_policy = next_ceiling.intersect(set(policy) if policy is not None else None)
         next_policy = next_policy.intersect(reserved_policy)
-        active_tools = [
-            name for name in self._computed_active_tools(next_base, next_policy)
-            if self._mcp_server_permits(name, next_servers)
-        ]
         baseline = state.get("baseline")
         if (not isinstance(baseline, list) or len(baseline) != 5 or
                 (baseline[0] is not None and not isinstance(baseline[0], str)) or
@@ -757,8 +829,28 @@ class AgentSession:
                 not all(isinstance(x, str) and x for x in baseline[3]) or len(set(baseline[3])) != len(baseline[3]) or
                 (baseline[4] is not None and (not isinstance(baseline[4], list) or not all(isinstance(x, str) and x for x in baseline[4]) or len(set(baseline[4])) != len(baseline[4])))):
             raise PresetError("Corrupt preset baseline")
+        baseline_policy = frozenset(baseline[4]) if baseline[4] is not None else None
+        saved_policy = frozenset(policy) if policy is not None else None
+        override = state.get("dynamic_policy_override")
+        if override is not None and (not isinstance(override, list) or
+                not all(isinstance(x, str) and x and "*" not in x for x in override) or len(set(override)) != len(override)):
+            raise PresetError("Corrupt dynamic policy override")
+        next_override = frozenset(override) if override is not None else None
+        if next_override is None and baseline_policy != saved_policy:
+            next_override = saved_policy
+        elif next_override is not None and baseline_policy != saved_policy:
+            next_override = ToolPolicy(next_override).intersect(saved_policy).allowed
+        if selected_servers is not None or wildcard_servers or wildcard_tools:
+            next_policy = self._explicit_mcp_policy(definition, next_base, next_ceiling)
+            if next_override is not None:
+                next_policy = next_policy.intersect(next_override)
+        active_tools = [
+            name for name in self._computed_active_tools(next_base, next_policy, preset=definition)
+            if self._mcp_server_permits(name, next_servers, preset=definition)
+        ]
         # Commit only after every snapshot field and fallible manager call pass.
         self._preset = definition
+        self._dynamic_policy_override = next_override
         self.model = model
         self._model_metadata_epoch += 1
         self._effective_context_window = _effective_context_window(model)
@@ -769,7 +861,9 @@ class AgentSession:
         self._mcp_server_ceiling = next_servers
         self._tool_policy = next_policy
         self._active_tools = active_tools
-        self._preset_effective = (baseline[0], float(baseline[1]), baseline[2], tuple(baseline[3]), frozenset(baseline[4]) if baseline[4] is not None else None)
+        if (selected_servers is not None or wildcard_servers or wildcard_tools) and baseline_policy == saved_policy and next_override is None:
+            baseline_policy = next_policy.allowed
+        self._preset_effective = (baseline[0], float(baseline[1]), baseline[2], tuple(baseline[3]), baseline_policy)
 
     @property
     def subagents_available(self) -> bool:
@@ -2177,7 +2271,7 @@ class AgentSession:
             if unknown:
                 raise RuntimeError("Unknown MCP servers: " + ", ".join(sorted(unknown)))
             requested_servers = frozenset(servers)
-        child_servers = self._intersect_mcp_servers(requested_servers)
+        child_servers = self._delegated_mcp_servers(requested_servers)
 
         model_spec = str(args.get("model") or "").strip() or None
         preset: PresetDefinition | None = None
@@ -2194,9 +2288,12 @@ class AgentSession:
                 raise RuntimeError("Preset requests unsupported sandboxes")
             # Validate the complete definition before allocating a child. This
             # also retains explicitly allowlisted, currently configured MCP tools.
-            preset_tools, _ = self._resolve_preset_tools(
+            preset_tools, child_policy = self._resolve_preset_tools(
                 preset, list(self._active_tools), self._tool_policy
             )
+            if preset.mcp_servers is not None or preset.tools == ("*",):
+                preset_tools += [name for name in self._active_tools if name not in all_tools
+                                 and child_policy.permits(name) and self._mcp_server_permits(name, preset=preset)]
         if args.get("temperature") is not None:
             child_temperature = normalize_temperature(args["temperature"])
         elif args.get("temperatureMode") is not None:
@@ -2255,7 +2352,11 @@ class AgentSession:
         inherited_tools = self._active_tools
         if tool_names is None and preset_tools is not None:
             inherited_tools = preset_tools
-        sub_tools = [name for name in dict.fromkeys(tool_names if tool_names is not None else inherited_tools) if self._tool_policy.permits(name)]
+        parent_tools = set(self._model_visible_tools())
+        child_policy = self._tool_policy.intersect(RESERVED_READONLY_POLICIES.get(preset.id) if preset else None)
+        sub_tools = [name for name in dict.fromkeys(tool_names if tool_names is not None else inherited_tools)
+                     if name in parent_tools and child_policy.permits(name)
+                     and self._mcp_server_permits(name, child_servers, preset=preset)]
         if tool_names is not None:
             # Distinguish omitted (None) from explicit empty list.
             if len(tool_names) == 0:
@@ -2265,9 +2366,12 @@ class AgentSession:
                     "least 'finish' to allow the subagent to complete."
                 )
         if "finish" not in sub_tools:
-            if not self._tool_policy.permits("finish"):
+            if not child_policy.permits("finish"):
                 raise RuntimeError("Parent tool policy does not permit finish for a subagent")
             sub_tools.append("finish")
+
+        if tool_names is not None and (preset is not None or self._preset is not None):
+            preset = replace(preset or self._preset, tools=tuple(sub_tools))
 
         if task:
             return await self._run_subagent(task, sub_model, sub_tools, depth, temperature=child_temperature, thinking_level=child_thinking, timeout_sec=timeout_sec, preset=preset, mcp_server_ceiling=child_servers)
@@ -2392,7 +2496,7 @@ class AgentSession:
             cooperation_state=self._cooperation_state,
             mcp_manager=self._mcp_manager,
             register_mcp_tools_callback=False,
-            mcp_server_ceiling=self._intersect_mcp_servers(mcp_server_ceiling),
+            mcp_server_ceiling=self._delegated_mcp_servers(mcp_server_ceiling),
             activity_callback=_child_activity,
             subagents_hard_disabled=self._subagents_hard_disabled,
             # Even an implicit Default child needs a durable effective snapshot:
@@ -2876,6 +2980,28 @@ class AgentSession:
         """Recompute _active_tools from base tools + current MCP tool list."""
         if self._mcp_manager is None:
             return
+        if self._preset is not None and (self._preset.mcp_servers is not None or self._preset.tools == ("*",)):
+            old_policy = self._tool_policy.allowed
+            baseline = getattr(self, "_preset_effective", None)
+            override = getattr(self, "_dynamic_policy_override", None)
+            modified_policy = override is not None or baseline is None or baseline[4] != old_policy
+            if baseline is None or baseline[4] != old_policy:
+                override = old_policy if override is None else ToolPolicy(override).intersect(old_policy).allowed
+            next_policy = self._explicit_mcp_policy(self._preset, self._base_tools, self._policy_ceiling)
+            if modified_policy:
+                next_policy = next_policy.intersect(override)
+            active_tools = self._computed_active_tools(self._base_tools, next_policy)
+            if modified_policy:
+                state = self._preset_state(self._preset, self.model, self.temperature,
+                    self.thinking_level, self._base_tools, next_policy)
+                state["dynamic_policy_override"] = sorted(override) if override is not None else None
+                self._persist_preset_state(state)
+            self._dynamic_policy_override = override
+            self._tool_policy = next_policy
+            if baseline and not modified_policy:
+                self._preset_effective = (*baseline[:4], next_policy.allowed)
+            self._active_tools = active_tools
+            return
         self._active_tools = self._computed_active_tools(self._base_tools, self._tool_policy)
 
     def _intersect_mcp_servers(self, requested: frozenset[str] | None) -> frozenset[str] | None:
@@ -2883,11 +3009,22 @@ class AgentSession:
             return requested
         return self._mcp_server_ceiling if requested is None else self._mcp_server_ceiling & requested
 
-    def _mcp_server_permits(self, name: str, ceiling: frozenset[str] | None = None) -> bool:
+    def _delegated_mcp_servers(self, requested: frozenset[str] | None) -> frozenset[str] | None:
+        effective = self._intersect_mcp_servers(requested)
+        if self._preset is not None and self._preset.mcp_servers is not None and self._preset.mcp_servers != ("*",):
+            selected = frozenset(self._preset.mcp_servers)
+            effective = selected if effective is None else effective & selected
+        return effective
+
+    def _mcp_server_permits(self, name: str, ceiling: frozenset[str] | None = None, *, preset: PresetDefinition | None = None) -> bool:
         # Builtins win dispatch and are never constrained by MCP server policy.
         if name in all_tools:
             return True
         effective = self._intersect_mcp_servers(ceiling)
+        selection = preset if preset is not None else self._preset
+        if selection is not None and selection.mcp_servers is not None and selection.mcp_servers != ("*",):
+            selected = frozenset(selection.mcp_servers)
+            effective = selected if effective is None else effective & selected
         if effective is None:
             return True
         if self._mcp_manager is None:
@@ -2897,12 +3034,12 @@ class AgentSession:
         matches = [t for t in self._mcp_manager.tools() if t.name == name]
         return bool(matches) and all(t.server in effective for t in matches)
 
-    def _computed_active_tools(self, base_tools: list[str], policy: ToolPolicy) -> list[str]:
+    def _computed_active_tools(self, base_tools: list[str], policy: ToolPolicy, *, preset: PresetDefinition | None = None) -> list[str]:
         """Prepare visible tools without mutating the active session."""
         mcp_names: list[str] = []
         if self._mcp_manager is not None:
-            mcp_names = [t.name for t in self._mcp_manager.tools()]
-        return [name for name in dict.fromkeys(base_tools + mcp_names) if policy.permits(name) and self._mcp_server_permits(name)]
+            mcp_names = [t.name for t in self._mcp_manager.tools() if t.name not in all_tools]
+        return [name for name in dict.fromkeys(base_tools + mcp_names) if policy.permits(name) and self._mcp_server_permits(name, preset=preset)]
 
     def _refresh_active_tools(self) -> None:
         """Rebuild visibility without allowing MCP tools through a policy ceiling."""

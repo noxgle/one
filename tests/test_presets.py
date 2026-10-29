@@ -29,10 +29,31 @@ def test_preset_parser_rejects_duplicate_keys_and_sandboxes() -> None:
     assert preset.sandboxes == ("future",)
 
 
+@pytest.mark.parametrize(("header", "expected"), [
+    ("", None),
+    ("mcp_servers: []", ()),
+    ("mcp_servers: [alpha, beta]", ("alpha", "beta")),
+])
+def test_preset_mcp_servers(header: str, expected: tuple[str, ...] | None) -> None:
+    preset = parse_preset(f"---\nversion: 1\nid: safe\nname: Safe\n{header}\n---\n")
+    assert preset.mcp_servers == expected
+
+
+@pytest.mark.parametrize("value", [
+    "null", "true", "server", "{}", "[null]", "[true]", "[123]", "[[]]",
+    "['']", "['   ']", "[' alpha']", "['alpha ']", "[alpha, alpha]",
+])
+def test_preset_rejects_invalid_mcp_servers(value: str) -> None:
+    with pytest.raises(PresetError, match="mcp_servers"):
+        parse_preset(f"---\nversion: 1\nid: safe\nname: Safe\nmcp_servers: {value}\n---\n")
+
+
 @pytest.mark.parametrize("ident", ["default", "readonly", "explore"])
 def test_user_collision_with_reserved_preset_fails(tmp_path, ident: str) -> None:
     directory = tmp_path / "presets"
     directory.mkdir()
-    (directory / f"{ident}.md").write_text(f"---\nversion: 1\nid: {ident}\nname: Override\n---\n", encoding="utf-8")
+    (directory / f"{ident}.md").write_text(
+        f"---\nversion: 1\nid: {ident}\nname: Override\nmcp_servers: []\n---\n", encoding="utf-8"
+    )
     with pytest.raises(PresetError, match="duplicate"):
         discover_presets(str(tmp_path))

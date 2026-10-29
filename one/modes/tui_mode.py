@@ -2643,6 +2643,10 @@ if TEXTUAL_AVAILABLE:
                 session.activate_preset(ident, getattr(session.resource_loader, "agent_dir", None))
             self._preset_cycle_cursor = None
             self._write(f"Preset set to {session.preset_name}", "info")
+            diagnostics = session.preset_effective_settings.get("mcp_diagnostics", {})
+            for key, label in (("unavailable", "Unavailable MCP servers"), ("restricted", "Restricted MCP servers")):
+                if diagnostics.get(key):
+                    self._write(f"{label}: {', '.join(diagnostics[key])}", "warn")
             self._refresh_sidebar()
 
         async def _execute_center_action(self, action: CommandAction) -> None:

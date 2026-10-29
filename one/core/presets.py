@@ -20,7 +20,7 @@ from one.core.temperature import normalize_temperature
 _ID = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _MAX_FILE = 256 * 1024
 _MAX_HEADER = 32 * 1024
-_KEYS = {"version", "id", "name", "model", "temperature", "thinking", "description", "tools", "sandboxes"}
+_KEYS = {"version", "id", "name", "model", "temperature", "thinking", "description", "tools", "sandboxes", "mcp_servers"}
 _THINKING = {"off", "on", "minimal", "low", "medium", "high", "xhigh"}
 
 
@@ -65,6 +65,7 @@ class PresetDefinition:
     tools: tuple[str, ...] | None = None
     sandboxes: tuple[str, ...] = ()
     content_hash: str = ""
+    mcp_servers: tuple[str, ...] | None = None
 
 
 def parse_preset(content: str, source: str = "<preset>") -> PresetDefinition:
@@ -125,14 +126,26 @@ def parse_preset(content: str, source: str = "<preset>") -> PresetDefinition:
     if description is not None and (not isinstance(description, str) or len(description) > 500):
         raise PresetError("preset description must be a string up to 500 characters")
     tools = data.get("tools")
-    if tools is not None and (not isinstance(tools, list) or not tools or not all(isinstance(x, str) and x for x in tools) or len(set(tools)) != len(tools)):
+    if "tools" in data and (not isinstance(tools, list) or not tools or not all(isinstance(x, str) and x for x in tools) or len(set(tools)) != len(tools)):
         raise PresetError("preset tools must be a non-empty list of unique strings")
+    if tools is not None and any("*" in x for x in tools) and tools != ["*"]:
+        raise PresetError("preset tools wildcard must be the sole entry")
+    mcp_servers = data.get("mcp_servers")
+    if "mcp_servers" in data and (
+        not isinstance(mcp_servers, list)
+        or not all(isinstance(x, str) and x and x == x.strip() for x in mcp_servers)
+        or len(set(mcp_servers)) != len(mcp_servers)
+    ):
+        raise PresetError("preset mcp_servers must be a list of unique, non-empty trimmed server names without '*'")
+    if mcp_servers is not None and any("*" in x for x in mcp_servers) and mcp_servers != ["*"]:
+        raise PresetError("preset mcp_servers wildcard must be the sole entry")
     sandboxes = data.get("sandboxes", [])
     if not isinstance(sandboxes, list) or not all(isinstance(x, str) and x for x in sandboxes):
         raise PresetError("preset sandboxes must be a list of non-empty strings")
     return PresetDefinition(ident, name.strip(), body, source, model, float(temperature) if temperature is not None else None,
                             thinking, description, tuple(tools) if tools is not None else None, tuple(sandboxes),
-                            hashlib.sha256(content.encode()).hexdigest())
+                            hashlib.sha256(content.encode()).hexdigest(),
+                            tuple(mcp_servers) if mcp_servers is not None else None)
 
 
 def _files(root: Path) -> list[Path]:

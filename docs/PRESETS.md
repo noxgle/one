@@ -43,8 +43,37 @@ enforced.
 
 The required schema is `version: 1`, `id`, and `name`; optional `model` is a
 resolvable `provider/model`, while `temperature`, `thinking`, `description`,
-`tools`, and `sandboxes` have the types shown above. The Markdown body is the
-replacement role only, not a task template.
+`tools`, and `sandboxes` have the types shown above. The optional `mcp_servers`
+is a list of unique, nonempty, already-trimmed server names. The Markdown body
+is the replacement role only, not a task template.
+
+The MCP policy preserves
+the legacy `tools` allowlist when `mcp_servers` is omitted. An explicit server
+list admits MCP tools from those servers separately from the builtin `tools`
+list; `mcp_servers: []` denies all MCP servers. Parent and CLI capability
+ceilings still apply. Reserved packaged IDs cannot be overridden by user files.
+
+Either allowlist can instead use a quoted wildcard as its sole list entry:
+
+```yaml
+tools: ['*']
+mcp_servers: ['*']
+```
+
+Quote `*` because unquoted YAML treats it as an alias; the value must be a list,
+not the scalar `'*'`. A wildcard cannot be mixed with names and is not a glob:
+`[read, '*']` and `['server*']` are invalid. `tools: ['*']` admits available
+tools dynamically, while `mcp_servers: ['*']` admits MCP tools from available
+servers separately from the builtin tool list. Both remain subject to inherited
+parent and CLI tool and server ceilings, as well as other applicable policy.
+For example, `tools: ['*']` with `mcp_servers: []` still denies MCP servers.
+Omitting `tools` retains its existing behavior; `tools: []` remains invalid.
+Omitting `mcp_servers` retains the legacy tool allowlist behavior described
+above, and `mcp_servers: []` still denies MCP access.
+
+Wildcards are dynamic, not a frozen list: newly available tools or servers can
+become accessible later, including after MCP refresh or reconnect, within those
+ceilings. Prefer explicit names when future access would be undesirable.
 
 `default`, `readonly`, and `explore` are packaged reserved IDs. Default retains the normal
 dynamic prompt, project guidance, skills, and current model settings. Readonly
