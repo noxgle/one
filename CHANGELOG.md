@@ -8,6 +8,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Documentation
+
+- **Preset documentation** — document current frontmatter validation and file limits,
+  MCP server selection, wildcard and omission behavior, reserved preset ID collisions,
+  explicit subagent override precedence, and inherited capability ceilings.
+
 ### Fixed
 
 - **Subagent inspector** — keep loaded history visible while activity refreshes,
