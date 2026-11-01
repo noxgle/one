@@ -484,6 +484,24 @@ does not revoke a provider account token or remove environment credentials.
 
 ## Sessions and configuration
 
+### Task checkpoints (opt-in)
+
+In the TUI, run `/checkpoints enable` before a task to retain undo records for
+direct `write`, `edit`, and `apply_patch` changes. `/checkpoints list` shows task
+IDs; `/checkpoints undo ID` prepares the latest eligible task and displays a
+confirmation token. Only `/checkpoints confirm TOKEN` restores files. Optional
+relative paths select part of a task; move endpoints must be selected together.
+Use `/checkpoints cancel` to cancel and `/checkpoints delete ID` to remove a
+retained record. Settings `{"checkpoints": {"enabled": true}}` enable recording
+for persistent sessions automatically. Once enabled, a session resumes recording
+from its existing sidecar.
+
+Saved file contents can include secrets. Checkpoints are private local data, not
+encrypted backups; shell, MCP, extensions and subagent changes are not covered.
+Undo refuses conflicts and requires idle state and write capability. It is not
+atomic against concurrent external writers. See [the full contract](docs/CHECKPOINTS.md)
+for limits, retention, platform requirements and safety restrictions.
+
 Named agent presets, including MCP server selection and diagnostics, are documented
 in [docs/PRESETS.md](docs/PRESETS.md). Use
 `one --preset readonly` for app-enforced read-only inspection (not OS or network sandboxing).

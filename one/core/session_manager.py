@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import shutil
+import stat
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -129,6 +132,20 @@ class SessionManager:
         self._entries = parsed
         self._migrate_if_needed()
         self._reindex()
+
+    def checkpoint_path(self) -> Path | None:
+        """Private, non-discoverable per-session storage; forks do not copy it."""
+        if not self._persist or not self._session_file:
+            return None
+        return Path(self._session_file + ".checkpoints")
+
+    def create_checkpoint_manager(self):
+        from one.core.checkpoints import CheckpointManager
+
+        path = self.checkpoint_path()
+        if path is None:
+            raise ValueError("Checkpoints require a persistent session")
+        return CheckpointManager(path, Path(self.cwd), self.session_id)
 
     def _evidence_path(self) -> Path | None:
         if not self._persist or not self._session_file:
@@ -916,6 +933,16 @@ class SessionManager:
         history = candidate.with_suffix(candidate.suffix + ".agents")
         if history.is_symlink() or (history.exists() and not history.is_file()):
             raise ValueError("Invalid subagent history sidecar")
+        checkpoints = candidate.with_suffix(candidate.suffix + ".checkpoints")
+        if checkpoints.is_symlink():
+            raise ValueError("Invalid checkpoint sidecar")
+        if checkpoints.exists():
+            info = checkpoints.stat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise ValueError("Invalid checkpoint sidecar")
+            if not shutil.rmtree.avoids_symlink_attacks:
+                raise ValueError("Safe checkpoint deletion unavailable")
+            shutil.rmtree(checkpoints)
         evidence = candidate.with_suffix(candidate.suffix + ".evidence")
         if evidence.exists():
             if not evidence.is_file() or evidence.parent != directory:

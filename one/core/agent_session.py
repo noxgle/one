@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
+import difflib
 import html
 import inspect
 import itertools
@@ -20,7 +22,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from one.core.activity_watchdog import ActivityWatchdog
@@ -193,6 +195,22 @@ class ModelCycleResult:
     isScoped: bool
 
 
+class _CheckpointLifecycle(Protocol):
+    def begin_task(self, task_id: str) -> None: ...
+
+    def end_task(self) -> None: ...
+
+    def replace_file(self, path: str, data: bytes) -> None: ...
+
+    def edit_file(self, path: str, edits: list[dict[str, str]]) -> tuple[str, str]: ...
+
+    def apply_patch(self, patchText: str) -> list[str]: ...
+
+    def _image(self, path: str) -> dict[str, Any]: ...
+
+    def close(self) -> None: ...
+
+
 class AgentSession:
     _TOOL_RESULT_MAX_CHARS = 12_000
     _EVIDENCE_READ_MAX_CHARS = 8_000
@@ -218,7 +236,10 @@ class AgentSession:
         preset: PresetDefinition | None = None,
         tool_policy: ToolPolicy | None = None,
         mcp_server_ceiling: frozenset[str] | None = None,
+        checkpoint_manager: _CheckpointLifecycle | None = None,
     ) -> None:
+        self._checkpoint_manager = checkpoint_manager
+        self._checkpoint_owner = None
         self.session_manager = session_manager
         self.settings_manager = settings_manager
         self.model_registry = model_registry
@@ -622,6 +643,49 @@ class AgentSession:
     @property
     def _is_readonly(self) -> bool:
         return self._tool_policy.is_readonly
+
+    def enable_checkpoints(self) -> _CheckpointLifecycle:
+        """Enable persistent checkpoints for the current idle session."""
+        running = any(x.get("status") == "running" for x in self.subagent_monitor.snapshot().get("children", []))
+        if (self._is_streaming or self._is_compacting or self._active_tool_tasks
+                or self._active_bash_tasks or self._pending_questions or running):
+            raise BusySessionError("Cannot enable checkpoints while work is active")
+        manager = getattr(self, "_checkpoint_manager", None)
+        owner = getattr(self, "_checkpoint_owner", None)
+        if manager is not None and (owner is None or owner is self.session_manager):
+            return manager
+        if manager is not None:
+            manager.close()
+            self._checkpoint_manager = None
+            self._checkpoint_owner = None
+        manager = self.session_manager.create_checkpoint_manager()
+        self._checkpoint_manager = manager
+        self._checkpoint_owner = self.session_manager
+        return manager
+
+    def _get_checkpoint_manager(self) -> _CheckpointLifecycle | None:
+        manager = getattr(self, "_checkpoint_manager", None)
+        owner = getattr(self, "_checkpoint_owner", None)
+        session = getattr(self, "session_manager", None)
+        if manager is not None and (owner is None or owner is session):
+            return manager
+        if manager is not None:
+            manager.close()
+            self._checkpoint_manager = None
+            self._checkpoint_owner = None
+        settings = getattr(self, "settings_manager", None)
+        merged = getattr(settings, "merged", lambda: {})()
+        config = merged.get("checkpoints", {})
+        enabled = isinstance(config, dict) and config.get("enabled") is True
+        path_fn = getattr(session, "checkpoint_path", None)
+        path = path_fn() if callable(path_fn) else None
+        if enabled or (path is not None and path.exists()):
+            # Lazy creation also runs from direct dispatch during a turn.
+            manager = session.create_checkpoint_manager()
+            self._checkpoint_manager = manager
+            self._checkpoint_owner = session
+            return manager
+        return None
 
     def activate_preset(self, preset_id: str, agent_dir: str | None = None) -> None:
         """Resolve and validate before committing a new, idle-only snapshot."""
@@ -1696,6 +1760,7 @@ class AgentSession:
                 raise ValueError("apply_patch requires args.patchText to be a non-empty string")
         if tool_name == "write":
             self._validate_write_args(args)
+        checkpoint = self._get_checkpoint_manager() if tool_name in {"write", "edit", "apply_patch"} else None
         effective_timeout = self._effective_tool_timeout(tool_name, args, timeout_sec)
         # Stale prompt context and direct callers must not be able to create a
         # human-input wait after cooperation has been disabled.
@@ -1796,13 +1861,68 @@ class AgentSession:
             result = fn(cwd, path_arg or "", self._storage_dir or "")
         elif tool_name == "write":
             write_path, content_arg = self._validate_write_args(args)
-            result = fn(cwd, write_path, content_arg)
+            if checkpoint is None:
+                result = fn(cwd, write_path, content_arg)
+            else:
+                path = Path(write_path)
+                if path.is_absolute():
+                    try:
+                        path = path.relative_to(Path(cwd))
+                    except ValueError as exc:
+                        raise ValueError("Checkpointed writes must be inside the workspace") from exc
+                checkpoint.replace_file(path.as_posix(), content_arg.encode("utf-8"))
+                result = {"content": [{"type": "text", "text": f"Successfully wrote {len(content_arg)} bytes to {write_path}"}], "details": None}
         elif tool_name == "edit":
-            result = fn(cwd, path_arg or "", args.get("edits", []))
+            if checkpoint is None:
+                result = fn(cwd, path_arg or "", args.get("edits", []))
+            else:
+                from one.tools.edit import _line_of_first_diff
+
+                edits = args.get("edits", [])
+                edit_path = path_arg or ""
+                if not edit_path and isinstance(edits, list) and edits and isinstance(edits[0], dict):
+                    edit_path = edits[0].get("path") or edits[0].get("file") or ""
+                path = Path(edit_path)
+                if path.is_absolute():
+                    try:
+                        path = path.relative_to(Path(cwd))
+                    except ValueError as exc:
+                        raise ValueError("Checkpointed edits must be inside the workspace") from exc
+                old, new = checkpoint.edit_file(path.as_posix(), edits)
+                diff = "".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True), fromfile=edit_path, tofile=edit_path))
+                result = {"content": [{"type": "text", "text": f"Successfully replaced {len(edits)} block(s) in {edit_path}."}], "details": {"diff": diff, "firstChangedLine": _line_of_first_diff(old, new)}}
         elif tool_name == "apply_patch":
             patch_text = args.get("patchText")
             assert isinstance(patch_text, str)
-            result = fn(cwd, patch_text)
+            if checkpoint is None:
+                result = fn(cwd, patch_text)
+            else:
+                # The engine preflights and commits through its safe transaction. Capture images
+                # for the same per-section summary and diff as the ordinary tool.
+                sections = []
+                for line in patch_text.replace("\r\n", "\n").splitlines():
+                    for kind in ("Add", "Update", "Delete"):
+                        prefix = f"*** {kind} File: "
+                        if line.startswith(prefix):
+                            name = line[len(prefix):]
+                            sections.append([kind, name, name, checkpoint._image(name)])
+                            break
+                    else:
+                        if line.startswith("*** Move to: ") and sections:
+                            sections[-1][2] = line[len("*** Move to: "):]
+                checkpoint.apply_patch(patch_text)
+                summaries, diffs = [], []
+                for kind, name, target, before in sections:
+                    summaries.append(f"{ {'Add': 'A', 'Update': 'M', 'Delete': 'D'}[kind]} {target}")
+                    if kind != "Delete":
+                        after = checkpoint._image(target)
+                        old = base64.b64decode(before.get("data", "")).decode("utf-8") if before["exists"] else ""
+                        new = base64.b64decode(after["data"]).decode("utf-8")
+                        diffs.append("".join(difflib.unified_diff(old.splitlines(keepends=True),
+                            new.splitlines(keepends=True), fromfile=name, tofile=name)))
+                result = {"content": [{"type": "text", "text":
+                    "Success. Updated the following files:\n" + "\n".join(summaries)}],
+                    "details": {"diff": "".join(diffs)}}
         elif tool_name == "grep":
             result = await asyncio.to_thread(fn, cwd, args.get("pattern", ""), args.get("path", "."))
         elif tool_name == "find":
@@ -3959,692 +4079,704 @@ class AgentSession:
                 return
             raise RuntimeError(f"Invalid streamingBehavior: {behavior}")
 
-        self._is_streaming = True
-        self._abort_requested = False
-        self._turn_sequence += 1
-        self._active_turn_id = f"turn-{self._turn_sequence}"
-        request_id = options.get("requestId")
-        self._active_request_id = str(request_id)[:128] if request_id is not None and str(request_id) else None
-        start_event: dict[str, Any] = {"type": "agent_start", "turnId": self._active_turn_id}
-        if self._active_request_id:
-            start_event["requestId"] = self._active_request_id
-        self._emit(start_event)
-        # Images are transient — stored on the session, never persisted
-        # to JSONL or emitted in events (no internal refs / paths leak).
-        self._images = images
-        self._tool_images = []
-        user_msg = {"role": "user", "content": text, "timestamp": int(time.time() * 1000)}
-        # Titles are local metadata, derived once from the first real prompt.
-        # Queued steering and plan custom messages intentionally do not name a
-        # session.
-        self.session_manager.set_automatic_name_from_prompt(text)
-        self.messages.append(user_msg)
-        self.session_manager.append_message(user_msg)
-        self._emit({"type": "message_start", "message": user_msg})
-        self._emit({"type": "message_end", "message": user_msg})
-        if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
-            await self._invoke_extension_chat_message(user_msg)
-
-        # Fail-closed outer wrapper: if anything unexpected escapes the retry
-        # loop (provider timeouts, unexpected exceptions, etc.), emit terminal
-        # events, reset streaming/retry flags, and re-raise.  This prevents the
-        # session from being stuck in _is_streaming=True forever when a
-        # provider call hangs or SSE keep-alives reset httpx timers.
-        finished_with_tool = False
-        terminal_error = False
-        context_recovery_attempted = False
+        checkpoint = self._get_checkpoint_manager()
+        if checkpoint is not None:
+            checkpoint.begin_task(str(uuid.uuid4()))
         try:
-            attempt = 0
-            # A format repair is scoped to the post-tool interval. A completed
-            # non-terminal tool starts a fresh interval and restores its one
-            # repair opportunity. This remains bounded: each interval has one
-            # repair, and maxSteps (when positive), abort, and budget limits
-            # still bound the enclosing tool loop.
-            format_repair_attempted = False
-            while True:
-                    try:
-                        self._emit({"type": "turn_start", "attempt": attempt + 1})
-                        # Nudge counters accumulate across turns (reported in get_session_stats);
-                        # fireCount in nudge events reflects per-turn fires (always 1 since _should_tool_nudge fires only at step 0).
-                        # self._nudge_fires and self._nudge_conversions are NOT reset here — they persist for session stats.
-                        tool_results: list[dict[str, Any]] = []
-                        tool_max = self.settings_manager.get_tool_max_steps()
-                        is_unlimited = tool_max == 0
-                        tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
-                        final_assistant: dict[str, Any] | None = None
-                        invalid_tool_call_failure = False
-                        # Unlimited mode (maxSteps=0): infinite iterator → loop only
-                        # exits via break (abort, budget, finish, no-tool-call).
-                        # Bounded mode (maxSteps>0): finite range → exits when exhausted.
-                        step_iter: Any = (
-                            itertools.count() if is_unlimited else range(max(1, tool_max))
-                        )
-                        for step in step_iter:
-                            if self._abort_requested:
-                                final_assistant = self._abort_assistant_message()
-                                break
-                            budget_hit = self._budget_exceeded()
-                            if budget_hit is not None:
-                                kind, message = budget_hit
-                                self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
-                                final_assistant = self._budget_exceeded_assistant_message(message)
-                                break
-                            try:
-                                # Capability gate: if images are present but the model does not
-                                # support image input, fail immediately (no provider call).
-                                images = self._all_images()
-                                if images and self.model and not self.model.input_image:
-                                    if self.approval_callback is not None:
-                                        raise _CapabilityErrorCooperative(
-                                            f"Model '{self.model.id}' does not support image input"
-                                        )
-                                    raise _CapabilityError(
-                                        f"Model '{self.model.id}' does not support image input"
-                                    )
-                                await self._preflight_compact()
-                                assistant = await self._invoke_provider(
-                                    self._flatten_messages_for_provider(),
-                                    allow_live_stream=True,
-                                    count_output_generation=attempt == 0,
-                                    purpose="response",
-                                )
-                            except _AbortSignal:
-                                self._abort_requested = True
-                                final_assistant = self._abort_assistant_message()
-                                break
-                            if self._abort_requested:
-                                final_assistant = self._abort_assistant_message()
-                                break
-                            provider_tool_call_id = assistant.pop("_providerToolCallId", None)
-                            self.messages.append(assistant)
-                            assistant_text = self._assistant_text(assistant)
-                            if assistant.get("outputTruncation"):
-                                final_assistant = assistant
-                                break
-                            tool_call_source = "response"
-                            # Consume tool-loaded images after the first provider call
-                            # in the tool loop — they were attached to the prompt and
-                            # should not be re-sent on subsequent provider calls.
-                            self._tool_images = []
-                            tool_calls, native_present = self._native_tool_calls(assistant, step)
-                            if not native_present:
-                                parsed = self._try_parse_tool_call(assistant_text, provider_tool_call_id)
-                                tool_calls = [parsed] if parsed else []
-                            # Codex recipient syntax is neither JSON nor a
-                            # native call.  It is deliberately non-executable;
-                            # hide it and allow exactly the existing bounded
-                            # format-repair request.
-                            pseudo_recipient = self._is_pseudo_recipient(assistant_text)
-                            if pseudo_recipient and not tool_calls:
-                                assistant["content"] = [{"type": "text", "text": ""}]
-                                assistant["_streamedSuppressed"] = True
-                                assistant_text = ""
-                            # Keep the long-standing diagnostic shape for canonical
-                            # candidates. Flat candidates get the existing bounded
-                            # repair path, while malformed canonical JSON retains
-                            # its normal post-tool-only repair behavior.
-                            toolish = self._is_explicit_tool_candidate(assistant_text)
-                            flat_toolish = toolish
-                            if toolish and not tool_calls:
-                                self._emit({
-                                    "type": "tool_call_parse_failed",
-                                    "source": "response",
-                                    "category": self._tool_call_parse_failure_category(assistant_text),
-                                })
-                            if (
-                                not tool_calls
-                                and not native_present
-                                and not pseudo_recipient
-                                and self._should_tool_nudge(
-                                assistant_text,
-                                step=step,
-                                tool_results=tool_results,
-                                had_thinking=bool(assistant.get("_hadThinking")),
-                                )
-                            ):
-                                self._nudge_fires += 1
-                                # fireCount is per-turn; currently always 1 since _should_tool_nudge fires only at step 0.
-                                self._emit({"type": "tool_call_nudge_start", "fireCount": self._nudge_fires})
-                                # The initial response stays in local history, but its
-                                # ephemeral classification must not survive the nudge.
-                                assistant.pop("_hadThinking", None)
-                                assistant.pop("_hadNativeToolCall", None)
-                                try:
-                                    await self._inject_pending_steering()
-                                    await self._preflight_compact()
-                                    nudged = await self._invoke_provider(
-                                        self._flatten_messages_for_provider()
-                                        + [
-                                            {
-                                                "role": "user",
-                                                "content": self._tool_nudge_prompt(),
-                                            }
-                                        ],
-                                        allow_live_stream=False,
-                                        count_output_generation=False,
-                                        purpose="nudge",
-                                    )
-                                except _AbortSignal:
-                                    self._abort_requested = True
-                                    final_assistant = self._abort_assistant_message()
-                                    break
-                                if nudged.get("outputTruncation"):
-                                    self.messages[-1] = nudged
-                                    final_assistant = nudged
-                                    break
-                                nudged_text = self._assistant_text(nudged)
-                                nudged_tool_calls, nudged_native = self._native_tool_calls(nudged, step)
-                                if not nudged_native:
-                                    nudged_parsed = self._try_parse_tool_call(
-                                        nudged_text, nudged.pop("_providerToolCallId", None)
-                                    )
-                                    nudged_tool_calls = [nudged_parsed] if nudged_parsed else []
-                                if nudged_tool_calls:
-                                    tool_calls = nudged_tool_calls
-                                    assistant = nudged
-                                    self.messages[-1] = assistant
-                                    assistant_text = nudged_text
-                                    self._nudge_conversions["true"] += 1
-                                    self._emit(
-                                        {"type": "tool_call_nudge_end", "used": True, "fireCount": self._nudge_fires}
-                                    )
-                                else:
-                                    # One nudge per turn bounds this graceful non-tool fallback.
-                                    nudged["content"] = [{"type": "text", "text": nudged_text}]
-                                    assistant = nudged
-                                    assistant_text = nudged_text
-                                    tool_call_source = "nudge"
-                                    # The nudge response replaces the candidate. Its native
-                                    # and text framing must be classified afresh rather than
-                                    # inheriting the ordinary first response's flags.
-                                    native_present = nudged_native
-                                    pseudo_recipient = self._is_pseudo_recipient(assistant_text)
-                                    toolish = self._is_explicit_tool_candidate(assistant_text)
-                                    flat_toolish = toolish
-                                    self._nudge_conversions["false"] += 1
-                                    self._emit(
-                                        {"type": "tool_call_nudge_end", "used": False, "fireCount": self._nudge_fires}
-                                    )
-                            # Classification is needed only at this first-response
-                            # decision point. Keep it out of later in-memory history
-                            # as well as persistence and provider requests.
-                            assistant.pop("_hadThinking", None)
-                            assistant.pop("_hadNativeToolCall", None)
-                            repaired_native = False
-                            if (
-                                not tool_calls
-                                and not format_repair_attempted
-                                and (self._should_repair_tool_response(tool_results) or pseudo_recipient or native_present or toolish)
-                            ):
-                                # This is intentionally independent of the short-text nudge.
-                                # One repair request per post-tool interval bounds recovery
-                                # and lets an ordinary final response still end the turn if
-                                # repair does not produce a tool call.
-                                format_repair_attempted = True
-                                self._emit({"type": "tool_response_repair_start"})
-                                try:
-                                    await self._inject_pending_steering()
-                                    await self._preflight_compact()
-                                    repaired = await self._invoke_provider(
-                                        self._flatten_messages_for_provider()
-                                        + [{"role": "user", "content": self._tool_response_repair_prompt()}],
-                                        allow_live_stream=False,
-                                        count_output_generation=False,
-                                        purpose="repair",
-                                    )
-                                except _AbortSignal:
-                                    self._abort_requested = True
-                                    final_assistant = self._abort_assistant_message()
-                                    break
-                                if repaired.get("outputTruncation"):
-                                    self.messages[-1] = repaired
-                                    final_assistant = repaired
-                                    break
-                                repaired_text = self._assistant_text(repaired)
-                                repaired_tool_calls, repaired_native = self._native_tool_calls(repaired, step)
-                                if not repaired_native:
-                                    repaired_parsed = self._try_parse_tool_call(
-                                        repaired_text, repaired.pop("_providerToolCallId", None)
-                                    )
-                                    repaired_tool_calls = [repaired_parsed] if repaired_parsed else []
-                                if repaired_tool_calls:
-                                    tool_calls = repaired_tool_calls
-                                    assistant = repaired
-                                    self.messages[-1] = assistant
-                                    assistant_text = repaired_text
-                                    self._emit({"type": "tool_response_repair_end", "used": True})
-                                else:
-                                    # No recursive repair: this is the bounded failure path.
-                                    repaired["content"] = [{"type": "text", "text": repaired_text}]
-                                    assistant = repaired
-                                    assistant_text = repaired_text
-                                    tool_call_source = "format_repair"
-                                    self._emit({"type": "tool_response_repair_end", "used": False})
-                            if not tool_calls:
-                                # A bounded repair may have replaced the response.
-                                # Reclassify only for the safe diagnostic, never to
-                                # start another repair cycle.
-                                final_toolish = repaired_native or self._is_explicit_tool_candidate(assistant_text)
-                                if final_toolish:
-                                    self._emit(
-                                        {
-                                            "type": "tool_call_parse_failed",
-                                            "source": tool_call_source,
-                                            "category": self._tool_call_parse_failure_category(assistant_text),
-                                        }
-                                    )
-                                    # A repair which remains an explicit invalid
-                                    # tool candidate is not an ordinary answer.
-                                    # Do not persist raw model JSON as a success.
-                                    if format_repair_attempted:
-                                        invalid_tool_call_failure = True
-                                        final_assistant = self._invalid_tool_call_assistant_message()
+            self._is_streaming = True
+            self._abort_requested = False
+            self._turn_sequence += 1
+            self._active_turn_id = f"turn-{self._turn_sequence}"
+            request_id = options.get("requestId")
+            self._active_request_id = str(request_id)[:128] if request_id is not None and str(request_id) else None
+            start_event: dict[str, Any] = {"type": "agent_start", "turnId": self._active_turn_id}
+            if self._active_request_id:
+                start_event["requestId"] = self._active_request_id
+            self._emit(start_event)
+            # Images are transient — stored on the session, never persisted
+            # to JSONL or emitted in events (no internal refs / paths leak).
+            self._images = images
+            self._tool_images = []
+            user_msg = {"role": "user", "content": text, "timestamp": int(time.time() * 1000)}
+            # Titles are local metadata, derived once from the first real prompt.
+            # Queued steering and plan custom messages intentionally do not name a
+            # session.
+            self.session_manager.set_automatic_name_from_prompt(text)
+            self.messages.append(user_msg)
+            self.session_manager.append_message(user_msg)
+            self._emit({"type": "message_start", "message": user_msg})
+            self._emit({"type": "message_end", "message": user_msg})
+            if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
+                await self._invoke_extension_chat_message(user_msg)
 
-                            if tool_calls:
-                                for tool_call in tool_calls:
-                                    self._omit_write_call_from_assistant_context(assistant, tool_call)
-                                # Persist native tool-turn assistant messages before
-                                # their results for every adapter that opts in.
-                                # Adapters consume private metadata internally;
-                                # it is never emitted as a public message payload.
-                                provider = self.providers.get(self.model.provider)
-                                native_batch = (
-                                    getattr(provider, "supports_native_tools", False)
-                                    and isinstance(assistant.get("_nativeToolCalls"), list)
-                                )
-                                if (
-                                    native_batch
-                                ):
-                                    self.session_manager.append_message(assistant)
-                                terminal_payload: dict[str, Any] | None = None
-                                for call_index, tool_call in enumerate(tool_calls):
-                                    budget_hit = None if self._abort_requested else self._budget_exceeded()
-                                    if self._abort_requested or budget_hit is not None:
-                                        aborted = self._abort_requested
-                                        # A native replay must have one output per accepted
-                                        # call even when a terminal condition stops the batch.
-                                        for skipped in tool_calls[call_index:]:
-                                            tool_results.append(self._record_cancelled_tool_call(
-                                                skipped, native_batch=native_batch, aborted=aborted,
-                                            ))
-                                        if aborted:
-                                            final_assistant = self._abort_assistant_message()
-                                        else:
-                                            assert budget_hit is not None
-                                            kind, message = budget_hit
-                                            self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
-                                            final_assistant = self._budget_exceeded_assistant_message(message)
-                                        break
-                                    # spawn_subagent owns its child watchdog timeout.  Do not
-                                    # pass the normal tools.timeoutSec into it: direct callers
-                                    # may still pass timeout_sec as an intentional child override.
-                                    sub_timeout = None if tool_call["tool"] in {"ask_user", "spawn_subagent"} else tool_timeout_sec
-                                    tool_payload = await self._run_tool_call(
-                                        tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout,
-                                        tool_call_id=tool_call.get("toolCallId"),
-                                        native_replay_call_id=tool_call["toolCallId"] if native_batch else None,
-                                    )
-                                    tool_results.append(tool_payload)
-                                    if tool_call["tool"] == "finish" and tool_payload.get("ok"):
-                                        terminal_payload = tool_payload
-                                        break
-                                if terminal_payload is not None:
-                                    # Terminal tool: end the turn with the summary as the
-                                    # final assistant message; no further provider calls.
-                                    # (Plan cleanup is handled inside _execute_tool_by_name.)
-                                    finished_with_tool = True
-                                    final_assistant = self._finish_assistant_message(terminal_payload)
-                                    break
-                                if final_assistant is not None:
-                                    break
-                                # Any completed non-terminal tool is a recovery boundary,
-                                # including a failed tool result. The next post-tool response
-                                # gets one repair attempt; positive maxSteps, abort, and budget
-                                # checks still bound all following iterations.
-                                format_repair_attempted = False
+            # Fail-closed outer wrapper: if anything unexpected escapes the retry
+            # loop (provider timeouts, unexpected exceptions, etc.), emit terminal
+            # events, reset streaming/retry flags, and re-raise.  This prevents the
+            # session from being stuck in _is_streaming=True forever when a
+            # provider call hangs or SSE keep-alives reset httpx timers.
+            finished_with_tool = False
+            terminal_error = False
+            context_recovery_attempted = False
+            try:
+                attempt = 0
+                # A format repair is scoped to the post-tool interval. A completed
+                # non-terminal tool starts a fresh interval and restores its one
+                # repair opportunity. This remains bounded: each interval has one
+                # repair, and maxSteps (when positive), abort, and budget limits
+                # still bound the enclosing tool loop.
+                format_repair_attempted = False
+                while True:
+                        try:
+                            self._emit({"type": "turn_start", "attempt": attempt + 1})
+                            # Nudge counters accumulate across turns (reported in get_session_stats);
+                            # fireCount in nudge events reflects per-turn fires (always 1 since _should_tool_nudge fires only at step 0).
+                            # self._nudge_fires and self._nudge_conversions are NOT reset here — they persist for session stats.
+                            tool_results: list[dict[str, Any]] = []
+                            tool_max = self.settings_manager.get_tool_max_steps()
+                            is_unlimited = tool_max == 0
+                            tool_timeout_sec = self.settings_manager.get_tool_timeout_sec()
+                            final_assistant: dict[str, Any] | None = None
+                            invalid_tool_call_failure = False
+                            # Unlimited mode (maxSteps=0): infinite iterator → loop only
+                            # exits via break (abort, budget, finish, no-tool-call).
+                            # Bounded mode (maxSteps>0): finite range → exits when exhausted.
+                            step_iter: Any = (
+                                itertools.count() if is_unlimited else range(max(1, tool_max))
+                            )
+                            for step in step_iter:
                                 if self._abort_requested:
                                     final_assistant = self._abort_assistant_message()
                                     break
-                                # A completed non-terminal tool is a safe
-                                # transaction boundary. Deliver queued steering
-                                # before the next provider request, rather than
-                                # after the whole turn.
-                                await self._inject_pending_steering()
-                                continue
-
-                            final_assistant = final_assistant or assistant
-                            break
-
-                        if final_assistant is None and not is_unlimited:
-                            final_assistant = {
-                                "role": "assistant",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": "I ran tools but reached the step limit. Please refine your next instruction.",
-                                    }
-                                ],
-                                "provider": self.model.provider if self.model else None,
-                                "model": self.model.id if self.model else None,
-                                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                                "stopReason": "tool_step_limit",
-                                "timestamp": int(time.time() * 1000),
-                            }
-                        else:
-                            assistant_text = self._assistant_text(final_assistant).strip()
-                            if not assistant_text:
-                                final_assistant["content"] = [
-                                    {
-                                        "type": "text",
-                                        "text": "The model returned an empty response. Please try again or change the model.",
-                                    }
-                                ]
-                                final_assistant["stopReason"] = final_assistant.get("stopReason") or "empty_response"
-
-                        if final_assistant not in self.messages:
-                            self.messages.append(final_assistant)
-                        # Response classification is never persisted or sent
-                        # in public message events.
-                        final_assistant.pop("_hadThinking", None)
-                        final_assistant.pop("_hadNativeToolCall", None)
-                        self.session_manager.append_message(final_assistant)
-                        streamed_started = bool(final_assistant.pop("_streamedStart", False))
-                        streamed_suppressed = bool(final_assistant.pop("_streamedSuppressed", False))
-                        streamed_msg = final_assistant.pop("_streamedMessage", None)
-                        if streamed_started and isinstance(streamed_msg, dict):
-                            event: dict[str, Any] = {"type": "message_end", "message": final_assistant}
-                            if streamed_suppressed:
-                                event["suppressed"] = True
-                            self._emit(event)
-                        elif not streamed_suppressed:
-                            # Only emit message events when content was NOT suppressed.
-                            # Suppressed content (tool JSON detected early) is rendered
-                            # via tool_call_start / tool_call_end, not as assistant text.
-                            self._emit({"type": "message_start", "message": final_assistant})
-                            for chunk in final_assistant.get("content", []):
-                                if chunk.get("type") == "text":
-                                    self._emit(
-                                        {
-                                            "type": "message_update",
-                                            "assistantMessageEvent": {"type": "text_delta", "delta": chunk.get("text", "")},
-                                        }
+                                budget_hit = self._budget_exceeded()
+                                if budget_hit is not None:
+                                    kind, message = budget_hit
+                                    self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
+                                    final_assistant = self._budget_exceeded_assistant_message(message)
+                                    break
+                                try:
+                                    # Capability gate: if images are present but the model does not
+                                    # support image input, fail immediately (no provider call).
+                                    images = self._all_images()
+                                    if images and self.model and not self.model.input_image:
+                                        if self.approval_callback is not None:
+                                            raise _CapabilityErrorCooperative(
+                                                f"Model '{self.model.id}' does not support image input"
+                                            )
+                                        raise _CapabilityError(
+                                            f"Model '{self.model.id}' does not support image input"
+                                        )
+                                    await self._preflight_compact()
+                                    assistant = await self._invoke_provider(
+                                        self._flatten_messages_for_provider(),
+                                        allow_live_stream=True,
+                                        count_output_generation=attempt == 0,
+                                        purpose="response",
                                     )
-                            self._emit({"type": "message_end", "message": final_assistant})
-                        else:
-                            # Suppressed — emit only message_end with suppressed=True so
-                            # the TUI knows to skip creating an assistant block.
-                            self._emit({"type": "message_end", "message": final_assistant, "suppressed": True})
-                        self._emit(
-                            {
-                                "type": "turn_end",
-                                "ok": not invalid_tool_call_failure and not bool(final_assistant.get("outputTruncation")),
-                                "attempt": attempt + 1,
-                                "aborted": final_assistant.get("stopReason") == "abort",
-                                "reason": final_assistant.get("stopReason") or "completed",
-                                **({"errorType": "invalid_tool_call", "error": "Invalid tool-call candidate; no tool was executed."} if invalid_tool_call_failure else {}),
-                                "message": final_assistant,
-                                "toolResults": tool_results,
-                            }
-                        )
-                        self._agent_event("agent_end", [user_msg, final_assistant])
-                        if invalid_tool_call_failure or final_assistant.get("outputTruncation"):
-                            terminal_error = True
-                        break
-                    except _CapabilityError as e:
-                        terminal_error = True
-                        # Capability errors: emit turn_end, then either raise
-                        # _CapabilityErrorCooperative (cooperation) or emit a
-                        # controlled assistant message (autonomous).  No retry.
-                        self._emit(
-                            {
-                                "type": "turn_end",
-                                "ok": False,
-                                "attempt": attempt + 1,
-                                "reason": "error",
-                                "error": str(e),
-                                "willRetry": False,
-                            }
-                        )
-                        if self.approval_callback is not None:
-                            # Cooperation mode: do NOT cache an assistant error message.
-                            # The caller (TUI / RPC / CLI) renders the error and offers
-                            # the user a way to switch models.
-                            # Reset streaming state and clear transient image refs so
-                            # the session is ready for the next prompt.
-                            self._is_streaming = False
-                            self._images = None
-                            self._tool_images = []
-                            self._agent_event("agent_end", [user_msg])
-                            raise _CapabilityErrorCooperative(str(e)) from e
-                        # Autonomous mode: emit a controlled assistant message.
-                        error_msg = {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": str(e)}],
-                            "provider": self.model.provider if self.model else None,
-                            "model": self.model.id if self.model else None,
-                            "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                            "stopReason": "unsupported_vision",
-                            "timestamp": int(time.time() * 1000),
-                        }
-                        self.messages.append(error_msg)
-                        self.session_manager.append_message(error_msg)
-                        self._emit({"type": "message_start", "message": error_msg})
-                        self._emit({"type": "message_end", "message": error_msg})
-                        self._agent_event("agent_end", [user_msg, error_msg])
-                        break
-                    except Exception as e:
-                        # Read settings at each failure rather than retaining a
-                        # turn-start snapshot: Ctrl+R and /retry must take effect
-                        # for an already-running request.
-                        retry_cfg = self.settings_manager.get_retry_settings()
-                        retries_enabled = self.settings_manager.get_retry_enabled()
-                        max_retries = int(retry_cfg.get("maxRetries", 3))
-                        retry_mode = self.settings_manager.get_retry_mode()
-                        error_text = str(e).strip() or e.__class__.__name__
-                        is_ctx_limit = self._is_context_limit_error(error_text)
-                        if is_ctx_limit:
-                            self._record_context_limit_details(error_text)
-                        # A real context overflow gets one independent recovery
-                        # attempt. Repeated overflows do not consume generic
-                        # retries while automatic compaction is enabled.
-                        recovery_retry = (
-                            is_ctx_limit
-                            and self.auto_compaction_enabled
-                            and not context_recovery_attempted
-                        )
-                        # ``unlimited`` deliberately ignores the finite cap,
-                        # while ``on`` retains the explicit zero=no-retry
-                        # semantics and the finite default from settings.
-                        generic_retry = retries_enabled and self._is_retryable_error(error_text) and (
-                            getattr(getattr(e, "response", None), "status_code", None) not in {400, 401, 403, 404}
-                        ) and (
-                            retry_mode == "unlimited" or attempt < max_retries
-                        )
-                        will_retry = recovery_retry or (
-                            generic_retry and not (is_ctx_limit and self.auto_compaction_enabled)
-                        )
-                        self._emit(
-                            {
-                                "type": "turn_end",
-                                "ok": False,
-                                "attempt": attempt + 1,
-                                "reason": "error",
-                                "error": error_text,
-                                "willRetry": will_retry,
-                            }
-                        )
-                        if not will_retry:
-                            terminal_error = True
-                            status = getattr(getattr(e, "response", None), "status_code", None)
-                            if status in {401, 403, 404} or not self._is_retryable_error(error_text):
-                                self._subagent_provider_failure = self._redact_provider_error(
-                                    f"Provider/model unavailable: {self.model.provider}/{self.model.id}. "
-                                    "Check the model ID, provider credentials and model access. "
-                                    f"{error_text}"
-                                )
-                                error_text = self._subagent_provider_failure
-                            error_msg = {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": error_text}],
-                                "provider": self.model.provider if self.model else None,
-                                "model": self.model.id if self.model else None,
-                                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                                "stopReason": "error",
-                                "timestamp": int(time.time() * 1000),
-                            }
-                            self.messages.append(error_msg)
-                            self.session_manager.append_message(error_msg)
-                            self._emit({"type": "message_start", "message": error_msg})
-                            self._emit(
-                                {
-                                    "type": "message_update",
-                                    "assistantMessageEvent": {"type": "text_delta", "delta": error_text},
-                                }
-                            )
-                            self._emit({"type": "message_end", "message": error_msg})
-                            self._agent_event("agent_end", [user_msg, error_msg])
-                            break
-                        # Context-limit error: compact *before* retrying so the same
-                        # logical turn/retry uses a smaller context without duplicating
-                        # the user message (user_msg was already added at prompt start).
-                        if recovery_retry:
-                            context_recovery_attempted = True
-                            try:
-                                await self.compact(reason="context_limit_retry", allow_during_prompt=True)
-                            except Exception:
-                                pass  # compaction failure → fall through to normal retry
-                        attempt += 1
-                        # Cap the exponent before computing it.  Unlimited
-                        # retries must not create an enormous intermediate int
-                        # after a long-lived connection outage.
-                        base_delay_ms = max(0, int(retry_cfg.get("baseDelayMs", 1500)))
-                        max_delay_ms = max(0, int(retry_cfg.get("maxDelayMs", 20000)))
-                        delay_ms = min(base_delay_ms * (2 ** min(attempt - 1, 30)), max_delay_ms)
-                        self._retrying = True
-                        self._emit(
-                            {
-                                "type": "auto_retry_start",
-                                "attempt": attempt,
-                                "maxAttempts": max_retries,
-                                "delayMs": delay_ms,
-                                "errorMessage": error_text,
-                            }
-                        )
-                        if self._abort_requested:
-                            abort_msg = self._abort_assistant_message()
-                            self.messages.append(abort_msg)
-                            self.session_manager.append_message(abort_msg)
-                            self._emit({"type": "message_start", "message": abort_msg})
-                            self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
-                            self._emit({"type": "message_end", "message": abort_msg})
-                            self._emit(
-                                {
-                                    "type": "turn_end",
-                                    "ok": True,
-                                    "attempt": attempt,
-                                    "aborted": True,
-                                    "reason": "abort",
-                                    "message": abort_msg,
-                                    "toolResults": [],
-                                }
-                            )
-                            self._agent_event("agent_end", [user_msg, abort_msg])
-                            self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
-                            self._retrying = False
-                            break
-                        # Interruptible backoff: abort() during the delay must not
-                        # block the session for up to maxDelayMs.
-                        for _ in range(max(1, delay_ms // 25)):
-                            if self._abort_requested:
-                                break
-                            await asyncio.sleep(0.025)
-                        if self._abort_requested:
-                            abort_msg = self._abort_assistant_message()
-                            self.messages.append(abort_msg)
-                            self.session_manager.append_message(abort_msg)
-                            self._emit({"type": "message_start", "message": abort_msg})
-                            self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
-                            self._emit({"type": "message_end", "message": abort_msg})
-                            self._emit(
-                                {
-                                    "type": "turn_end",
-                                    "ok": True,
-                                    "attempt": attempt,
-                                    "aborted": True,
-                                    "reason": "abort",
-                                    "message": abort_msg,
-                                    "toolResults": [],
-                                }
-                            )
-                            self._agent_event("agent_end", [user_msg, abort_msg])
-                            self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
-                            self._retrying = False
-                            break
-                        # Settings can change while the interruptible delay is
-                        # in progress.  Do not launch one more provider request
-                        # after retries have been switched off.
-                        current_retry_cfg = self.settings_manager.get_retry_settings()
-                        current_retry_mode = self.settings_manager.get_retry_mode()
-                        current_max_retries = int(current_retry_cfg.get("maxRetries", 3))
-                        if not recovery_retry and (
-                            not self.settings_manager.get_retry_enabled()
-                            or (current_retry_mode != "unlimited" and attempt > current_max_retries)
-                        ):
-                            terminal_error = True
-                            error_msg = {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": error_text}],
-                                "provider": self.model.provider if self.model else None,
-                                "model": self.model.id if self.model else None,
-                                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
-                                "stopReason": "error",
-                                "timestamp": int(time.time() * 1000),
-                            }
-                            self.messages.append(error_msg)
-                            self.session_manager.append_message(error_msg)
-                            self._emit({"type": "message_start", "message": error_msg})
-                            self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": error_text}})
-                            self._emit({"type": "message_end", "message": error_msg})
-                            self._agent_event("agent_end", [user_msg, error_msg])
-                            self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": False})
-                            self._retrying = False
-                            break
-                        self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": True, "aborted": False})
-                        self._retrying = False
+                                except _AbortSignal:
+                                    self._abort_requested = True
+                                    final_assistant = self._abort_assistant_message()
+                                    break
+                                if self._abort_requested:
+                                    final_assistant = self._abort_assistant_message()
+                                    break
+                                provider_tool_call_id = assistant.pop("_providerToolCallId", None)
+                                self.messages.append(assistant)
+                                assistant_text = self._assistant_text(assistant)
+                                if assistant.get("outputTruncation"):
+                                    final_assistant = assistant
+                                    break
+                                tool_call_source = "response"
+                                # Consume tool-loaded images after the first provider call
+                                # in the tool loop — they were attached to the prompt and
+                                # should not be re-sent on subsequent provider calls.
+                                self._tool_images = []
+                                tool_calls, native_present = self._native_tool_calls(assistant, step)
+                                if not native_present:
+                                    parsed = self._try_parse_tool_call(assistant_text, provider_tool_call_id)
+                                    tool_calls = [parsed] if parsed else []
+                                # Codex recipient syntax is neither JSON nor a
+                                # native call.  It is deliberately non-executable;
+                                # hide it and allow exactly the existing bounded
+                                # format-repair request.
+                                pseudo_recipient = self._is_pseudo_recipient(assistant_text)
+                                if pseudo_recipient and not tool_calls:
+                                    assistant["content"] = [{"type": "text", "text": ""}]
+                                    assistant["_streamedSuppressed"] = True
+                                    assistant_text = ""
+                                # Keep the long-standing diagnostic shape for canonical
+                                # candidates. Flat candidates get the existing bounded
+                                # repair path, while malformed canonical JSON retains
+                                # its normal post-tool-only repair behavior.
+                                toolish = self._is_explicit_tool_candidate(assistant_text)
+                                flat_toolish = toolish
+                                if toolish and not tool_calls:
+                                    self._emit({
+                                        "type": "tool_call_parse_failed",
+                                        "source": "response",
+                                        "category": self._tool_call_parse_failure_category(assistant_text),
+                                    })
+                                if (
+                                    not tool_calls
+                                    and not native_present
+                                    and not pseudo_recipient
+                                    and self._should_tool_nudge(
+                                    assistant_text,
+                                    step=step,
+                                    tool_results=tool_results,
+                                    had_thinking=bool(assistant.get("_hadThinking")),
+                                    )
+                                ):
+                                    self._nudge_fires += 1
+                                    # fireCount is per-turn; currently always 1 since _should_tool_nudge fires only at step 0.
+                                    self._emit({"type": "tool_call_nudge_start", "fireCount": self._nudge_fires})
+                                    # The initial response stays in local history, but its
+                                    # ephemeral classification must not survive the nudge.
+                                    assistant.pop("_hadThinking", None)
+                                    assistant.pop("_hadNativeToolCall", None)
+                                    try:
+                                        await self._inject_pending_steering()
+                                        await self._preflight_compact()
+                                        nudged = await self._invoke_provider(
+                                            self._flatten_messages_for_provider()
+                                            + [
+                                                {
+                                                    "role": "user",
+                                                    "content": self._tool_nudge_prompt(),
+                                                }
+                                            ],
+                                            allow_live_stream=False,
+                                            count_output_generation=False,
+                                            purpose="nudge",
+                                        )
+                                    except _AbortSignal:
+                                        self._abort_requested = True
+                                        final_assistant = self._abort_assistant_message()
+                                        break
+                                    if nudged.get("outputTruncation"):
+                                        self.messages[-1] = nudged
+                                        final_assistant = nudged
+                                        break
+                                    nudged_text = self._assistant_text(nudged)
+                                    nudged_tool_calls, nudged_native = self._native_tool_calls(nudged, step)
+                                    if not nudged_native:
+                                        nudged_parsed = self._try_parse_tool_call(
+                                            nudged_text, nudged.pop("_providerToolCallId", None)
+                                        )
+                                        nudged_tool_calls = [nudged_parsed] if nudged_parsed else []
+                                    if nudged_tool_calls:
+                                        tool_calls = nudged_tool_calls
+                                        assistant = nudged
+                                        self.messages[-1] = assistant
+                                        assistant_text = nudged_text
+                                        self._nudge_conversions["true"] += 1
+                                        self._emit(
+                                            {"type": "tool_call_nudge_end", "used": True, "fireCount": self._nudge_fires}
+                                        )
+                                    else:
+                                        # One nudge per turn bounds this graceful non-tool fallback.
+                                        nudged["content"] = [{"type": "text", "text": nudged_text}]
+                                        assistant = nudged
+                                        assistant_text = nudged_text
+                                        tool_call_source = "nudge"
+                                        # The nudge response replaces the candidate. Its native
+                                        # and text framing must be classified afresh rather than
+                                        # inheriting the ordinary first response's flags.
+                                        native_present = nudged_native
+                                        pseudo_recipient = self._is_pseudo_recipient(assistant_text)
+                                        toolish = self._is_explicit_tool_candidate(assistant_text)
+                                        flat_toolish = toolish
+                                        self._nudge_conversions["false"] += 1
+                                        self._emit(
+                                            {"type": "tool_call_nudge_end", "used": False, "fireCount": self._nudge_fires}
+                                        )
+                                # Classification is needed only at this first-response
+                                # decision point. Keep it out of later in-memory history
+                                # as well as persistence and provider requests.
+                                assistant.pop("_hadThinking", None)
+                                assistant.pop("_hadNativeToolCall", None)
+                                repaired_native = False
+                                if (
+                                    not tool_calls
+                                    and not format_repair_attempted
+                                    and (self._should_repair_tool_response(tool_results) or pseudo_recipient or native_present or toolish)
+                                ):
+                                    # This is intentionally independent of the short-text nudge.
+                                    # One repair request per post-tool interval bounds recovery
+                                    # and lets an ordinary final response still end the turn if
+                                    # repair does not produce a tool call.
+                                    format_repair_attempted = True
+                                    self._emit({"type": "tool_response_repair_start"})
+                                    try:
+                                        await self._inject_pending_steering()
+                                        await self._preflight_compact()
+                                        repaired = await self._invoke_provider(
+                                            self._flatten_messages_for_provider()
+                                            + [{"role": "user", "content": self._tool_response_repair_prompt()}],
+                                            allow_live_stream=False,
+                                            count_output_generation=False,
+                                            purpose="repair",
+                                        )
+                                    except _AbortSignal:
+                                        self._abort_requested = True
+                                        final_assistant = self._abort_assistant_message()
+                                        break
+                                    if repaired.get("outputTruncation"):
+                                        self.messages[-1] = repaired
+                                        final_assistant = repaired
+                                        break
+                                    repaired_text = self._assistant_text(repaired)
+                                    repaired_tool_calls, repaired_native = self._native_tool_calls(repaired, step)
+                                    if not repaired_native:
+                                        repaired_parsed = self._try_parse_tool_call(
+                                            repaired_text, repaired.pop("_providerToolCallId", None)
+                                        )
+                                        repaired_tool_calls = [repaired_parsed] if repaired_parsed else []
+                                    if repaired_tool_calls:
+                                        tool_calls = repaired_tool_calls
+                                        assistant = repaired
+                                        self.messages[-1] = assistant
+                                        assistant_text = repaired_text
+                                        self._emit({"type": "tool_response_repair_end", "used": True})
+                                    else:
+                                        # No recursive repair: this is the bounded failure path.
+                                        repaired["content"] = [{"type": "text", "text": repaired_text}]
+                                        assistant = repaired
+                                        assistant_text = repaired_text
+                                        tool_call_source = "format_repair"
+                                        self._emit({"type": "tool_response_repair_end", "used": False})
+                                if not tool_calls:
+                                    # A bounded repair may have replaced the response.
+                                    # Reclassify only for the safe diagnostic, never to
+                                    # start another repair cycle.
+                                    final_toolish = repaired_native or self._is_explicit_tool_candidate(assistant_text)
+                                    if final_toolish:
+                                        self._emit(
+                                            {
+                                                "type": "tool_call_parse_failed",
+                                                "source": tool_call_source,
+                                                "category": self._tool_call_parse_failure_category(assistant_text),
+                                            }
+                                        )
+                                        # A repair which remains an explicit invalid
+                                        # tool candidate is not an ordinary answer.
+                                        # Do not persist raw model JSON as a success.
+                                        if format_repair_attempted:
+                                            invalid_tool_call_failure = True
+                                            final_assistant = self._invalid_tool_call_assistant_message()
 
-        except BaseException as e:
-            # Fail-closed: if anything escapes the inner exception handlers
-            # (SystemExit, KeyboardInterrupt, etc.), reset state and emit
-            # terminal events so the session never stays stuck in
-            # _is_streaming=True.  Skip re-emitting agent_end for
-            # _CapabilityErrorCooperative since the inner handler already
-            # emitted it before re-raising.
-            self._is_streaming = False
-            self._retrying = False
-            self._abort_requested = False
-            if not isinstance(e, _CapabilityErrorCooperative):
-                attempt = self._active_attempt or 1
-                self._emit(
-                    {
-                        "type": "turn_end",
-                        "ok": False,
-                        "attempt": attempt,
-                        "reason": "error",
-                        "error": "session error — provider call or tool loop failed unexpectedly",
-                        "willRetry": False,
-                    }
-                )
-                self._agent_event("agent_end", [user_msg])
-            raise
+                                if tool_calls:
+                                    for tool_call in tool_calls:
+                                        self._omit_write_call_from_assistant_context(assistant, tool_call)
+                                    # Persist native tool-turn assistant messages before
+                                    # their results for every adapter that opts in.
+                                    # Adapters consume private metadata internally;
+                                    # it is never emitted as a public message payload.
+                                    provider = self.providers.get(self.model.provider)
+                                    native_batch = (
+                                        getattr(provider, "supports_native_tools", False)
+                                        and isinstance(assistant.get("_nativeToolCalls"), list)
+                                    )
+                                    if (
+                                        native_batch
+                                    ):
+                                        self.session_manager.append_message(assistant)
+                                    terminal_payload: dict[str, Any] | None = None
+                                    for call_index, tool_call in enumerate(tool_calls):
+                                        budget_hit = None if self._abort_requested else self._budget_exceeded()
+                                        if self._abort_requested or budget_hit is not None:
+                                            aborted = self._abort_requested
+                                            # A native replay must have one output per accepted
+                                            # call even when a terminal condition stops the batch.
+                                            for skipped in tool_calls[call_index:]:
+                                                tool_results.append(self._record_cancelled_tool_call(
+                                                    skipped, native_batch=native_batch, aborted=aborted,
+                                                ))
+                                            if aborted:
+                                                final_assistant = self._abort_assistant_message()
+                                            else:
+                                                assert budget_hit is not None
+                                                kind, message = budget_hit
+                                                self._emit({"type": "budget_exceeded", "kind": kind, "message": message})
+                                                final_assistant = self._budget_exceeded_assistant_message(message)
+                                            break
+                                        # spawn_subagent owns its child watchdog timeout.  Do not
+                                        # pass the normal tools.timeoutSec into it: direct callers
+                                        # may still pass timeout_sec as an intentional child override.
+                                        sub_timeout = None if tool_call["tool"] in {"ask_user", "spawn_subagent"} else tool_timeout_sec
+                                        tool_payload = await self._run_tool_call(
+                                            tool_call["tool"], tool_call["args"], timeout_sec=sub_timeout,
+                                            tool_call_id=tool_call.get("toolCallId"),
+                                            native_replay_call_id=tool_call["toolCallId"] if native_batch else None,
+                                        )
+                                        tool_results.append(tool_payload)
+                                        if tool_call["tool"] == "finish" and tool_payload.get("ok"):
+                                            terminal_payload = tool_payload
+                                            break
+                                    if terminal_payload is not None:
+                                        # Terminal tool: end the turn with the summary as the
+                                        # final assistant message; no further provider calls.
+                                        # (Plan cleanup is handled inside _execute_tool_by_name.)
+                                        finished_with_tool = True
+                                        final_assistant = self._finish_assistant_message(terminal_payload)
+                                        break
+                                    if final_assistant is not None:
+                                        break
+                                    # Any completed non-terminal tool is a recovery boundary,
+                                    # including a failed tool result. The next post-tool response
+                                    # gets one repair attempt; positive maxSteps, abort, and budget
+                                    # checks still bound all following iterations.
+                                    format_repair_attempted = False
+                                    if self._abort_requested:
+                                        final_assistant = self._abort_assistant_message()
+                                        break
+                                    # A completed non-terminal tool is a safe
+                                    # transaction boundary. Deliver queued steering
+                                    # before the next provider request, rather than
+                                    # after the whole turn.
+                                    await self._inject_pending_steering()
+                                    continue
+
+                                final_assistant = final_assistant or assistant
+                                break
+
+                            if final_assistant is None and not is_unlimited:
+                                final_assistant = {
+                                    "role": "assistant",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "I ran tools but reached the step limit. Please refine your next instruction.",
+                                        }
+                                    ],
+                                    "provider": self.model.provider if self.model else None,
+                                    "model": self.model.id if self.model else None,
+                                    "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                                    "stopReason": "tool_step_limit",
+                                    "timestamp": int(time.time() * 1000),
+                                }
+                            else:
+                                assistant_text = self._assistant_text(final_assistant).strip()
+                                if not assistant_text:
+                                    final_assistant["content"] = [
+                                        {
+                                            "type": "text",
+                                            "text": "The model returned an empty response. Please try again or change the model.",
+                                        }
+                                    ]
+                                    final_assistant["stopReason"] = final_assistant.get("stopReason") or "empty_response"
+
+                            if final_assistant not in self.messages:
+                                self.messages.append(final_assistant)
+                            # Response classification is never persisted or sent
+                            # in public message events.
+                            final_assistant.pop("_hadThinking", None)
+                            final_assistant.pop("_hadNativeToolCall", None)
+                            self.session_manager.append_message(final_assistant)
+                            streamed_started = bool(final_assistant.pop("_streamedStart", False))
+                            streamed_suppressed = bool(final_assistant.pop("_streamedSuppressed", False))
+                            streamed_msg = final_assistant.pop("_streamedMessage", None)
+                            if streamed_started and isinstance(streamed_msg, dict):
+                                event: dict[str, Any] = {"type": "message_end", "message": final_assistant}
+                                if streamed_suppressed:
+                                    event["suppressed"] = True
+                                self._emit(event)
+                            elif not streamed_suppressed:
+                                # Only emit message events when content was NOT suppressed.
+                                # Suppressed content (tool JSON detected early) is rendered
+                                # via tool_call_start / tool_call_end, not as assistant text.
+                                self._emit({"type": "message_start", "message": final_assistant})
+                                for chunk in final_assistant.get("content", []):
+                                    if chunk.get("type") == "text":
+                                        self._emit(
+                                            {
+                                                "type": "message_update",
+                                                "assistantMessageEvent": {"type": "text_delta", "delta": chunk.get("text", "")},
+                                            }
+                                        )
+                                self._emit({"type": "message_end", "message": final_assistant})
+                            else:
+                                # Suppressed — emit only message_end with suppressed=True so
+                                # the TUI knows to skip creating an assistant block.
+                                self._emit({"type": "message_end", "message": final_assistant, "suppressed": True})
+                            self._emit(
+                                {
+                                    "type": "turn_end",
+                                    "ok": not invalid_tool_call_failure and not bool(final_assistant.get("outputTruncation")),
+                                    "attempt": attempt + 1,
+                                    "aborted": final_assistant.get("stopReason") == "abort",
+                                    "reason": final_assistant.get("stopReason") or "completed",
+                                    **({"errorType": "invalid_tool_call", "error": "Invalid tool-call candidate; no tool was executed."} if invalid_tool_call_failure else {}),
+                                    "message": final_assistant,
+                                    "toolResults": tool_results,
+                                }
+                            )
+                            self._agent_event("agent_end", [user_msg, final_assistant])
+                            if invalid_tool_call_failure or final_assistant.get("outputTruncation"):
+                                terminal_error = True
+                            break
+                        except _CapabilityError as e:
+                            terminal_error = True
+                            # Capability errors: emit turn_end, then either raise
+                            # _CapabilityErrorCooperative (cooperation) or emit a
+                            # controlled assistant message (autonomous).  No retry.
+                            self._emit(
+                                {
+                                    "type": "turn_end",
+                                    "ok": False,
+                                    "attempt": attempt + 1,
+                                    "reason": "error",
+                                    "error": str(e),
+                                    "willRetry": False,
+                                }
+                            )
+                            if self.approval_callback is not None:
+                                # Cooperation mode: do NOT cache an assistant error message.
+                                # The caller (TUI / RPC / CLI) renders the error and offers
+                                # the user a way to switch models.
+                                # Reset streaming state and clear transient image refs so
+                                # the session is ready for the next prompt.
+                                self._is_streaming = False
+                                self._images = None
+                                self._tool_images = []
+                                self._agent_event("agent_end", [user_msg])
+                                raise _CapabilityErrorCooperative(str(e)) from e
+                            # Autonomous mode: emit a controlled assistant message.
+                            error_msg = {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": str(e)}],
+                                "provider": self.model.provider if self.model else None,
+                                "model": self.model.id if self.model else None,
+                                "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                                "stopReason": "unsupported_vision",
+                                "timestamp": int(time.time() * 1000),
+                            }
+                            self.messages.append(error_msg)
+                            self.session_manager.append_message(error_msg)
+                            self._emit({"type": "message_start", "message": error_msg})
+                            self._emit({"type": "message_end", "message": error_msg})
+                            self._agent_event("agent_end", [user_msg, error_msg])
+                            break
+                        except Exception as e:
+                            # Read settings at each failure rather than retaining a
+                            # turn-start snapshot: Ctrl+R and /retry must take effect
+                            # for an already-running request.
+                            retry_cfg = self.settings_manager.get_retry_settings()
+                            retries_enabled = self.settings_manager.get_retry_enabled()
+                            max_retries = int(retry_cfg.get("maxRetries", 3))
+                            retry_mode = self.settings_manager.get_retry_mode()
+                            error_text = str(e).strip() or e.__class__.__name__
+                            is_ctx_limit = self._is_context_limit_error(error_text)
+                            if is_ctx_limit:
+                                self._record_context_limit_details(error_text)
+                            # A real context overflow gets one independent recovery
+                            # attempt. Repeated overflows do not consume generic
+                            # retries while automatic compaction is enabled.
+                            recovery_retry = (
+                                is_ctx_limit
+                                and self.auto_compaction_enabled
+                                and not context_recovery_attempted
+                            )
+                            # ``unlimited`` deliberately ignores the finite cap,
+                            # while ``on`` retains the explicit zero=no-retry
+                            # semantics and the finite default from settings.
+                            generic_retry = retries_enabled and self._is_retryable_error(error_text) and (
+                                getattr(getattr(e, "response", None), "status_code", None) not in {400, 401, 403, 404}
+                            ) and (
+                                retry_mode == "unlimited" or attempt < max_retries
+                            )
+                            will_retry = recovery_retry or (
+                                generic_retry and not (is_ctx_limit and self.auto_compaction_enabled)
+                            )
+                            self._emit(
+                                {
+                                    "type": "turn_end",
+                                    "ok": False,
+                                    "attempt": attempt + 1,
+                                    "reason": "error",
+                                    "error": error_text,
+                                    "willRetry": will_retry,
+                                }
+                            )
+                            if not will_retry:
+                                terminal_error = True
+                                status = getattr(getattr(e, "response", None), "status_code", None)
+                                if status in {401, 403, 404} or not self._is_retryable_error(error_text):
+                                    self._subagent_provider_failure = self._redact_provider_error(
+                                        f"Provider/model unavailable: {self.model.provider}/{self.model.id}. "
+                                        "Check the model ID, provider credentials and model access. "
+                                        f"{error_text}"
+                                    )
+                                    error_text = self._subagent_provider_failure
+                                error_msg = {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": error_text}],
+                                    "provider": self.model.provider if self.model else None,
+                                    "model": self.model.id if self.model else None,
+                                    "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                                    "stopReason": "error",
+                                    "timestamp": int(time.time() * 1000),
+                                }
+                                self.messages.append(error_msg)
+                                self.session_manager.append_message(error_msg)
+                                self._emit({"type": "message_start", "message": error_msg})
+                                self._emit(
+                                    {
+                                        "type": "message_update",
+                                        "assistantMessageEvent": {"type": "text_delta", "delta": error_text},
+                                    }
+                                )
+                                self._emit({"type": "message_end", "message": error_msg})
+                                self._agent_event("agent_end", [user_msg, error_msg])
+                                break
+                            # Context-limit error: compact *before* retrying so the same
+                            # logical turn/retry uses a smaller context without duplicating
+                            # the user message (user_msg was already added at prompt start).
+                            if recovery_retry:
+                                context_recovery_attempted = True
+                                try:
+                                    await self.compact(reason="context_limit_retry", allow_during_prompt=True)
+                                except Exception:
+                                    pass  # compaction failure → fall through to normal retry
+                            attempt += 1
+                            # Cap the exponent before computing it.  Unlimited
+                            # retries must not create an enormous intermediate int
+                            # after a long-lived connection outage.
+                            base_delay_ms = max(0, int(retry_cfg.get("baseDelayMs", 1500)))
+                            max_delay_ms = max(0, int(retry_cfg.get("maxDelayMs", 20000)))
+                            delay_ms = min(base_delay_ms * (2 ** min(attempt - 1, 30)), max_delay_ms)
+                            self._retrying = True
+                            self._emit(
+                                {
+                                    "type": "auto_retry_start",
+                                    "attempt": attempt,
+                                    "maxAttempts": max_retries,
+                                    "delayMs": delay_ms,
+                                    "errorMessage": error_text,
+                                }
+                            )
+                            if self._abort_requested:
+                                abort_msg = self._abort_assistant_message()
+                                self.messages.append(abort_msg)
+                                self.session_manager.append_message(abort_msg)
+                                self._emit({"type": "message_start", "message": abort_msg})
+                                self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
+                                self._emit({"type": "message_end", "message": abort_msg})
+                                self._emit(
+                                    {
+                                        "type": "turn_end",
+                                        "ok": True,
+                                        "attempt": attempt,
+                                        "aborted": True,
+                                        "reason": "abort",
+                                        "message": abort_msg,
+                                        "toolResults": [],
+                                    }
+                                )
+                                self._agent_event("agent_end", [user_msg, abort_msg])
+                                self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
+                                self._retrying = False
+                                break
+                            # Interruptible backoff: abort() during the delay must not
+                            # block the session for up to maxDelayMs.
+                            for _ in range(max(1, delay_ms // 25)):
+                                if self._abort_requested:
+                                    break
+                                await asyncio.sleep(0.025)
+                            if self._abort_requested:
+                                abort_msg = self._abort_assistant_message()
+                                self.messages.append(abort_msg)
+                                self.session_manager.append_message(abort_msg)
+                                self._emit({"type": "message_start", "message": abort_msg})
+                                self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Request aborted."}})
+                                self._emit({"type": "message_end", "message": abort_msg})
+                                self._emit(
+                                    {
+                                        "type": "turn_end",
+                                        "ok": True,
+                                        "attempt": attempt,
+                                        "aborted": True,
+                                        "reason": "abort",
+                                        "message": abort_msg,
+                                        "toolResults": [],
+                                    }
+                                )
+                                self._agent_event("agent_end", [user_msg, abort_msg])
+                                self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": True})
+                                self._retrying = False
+                                break
+                            # Settings can change while the interruptible delay is
+                            # in progress.  Do not launch one more provider request
+                            # after retries have been switched off.
+                            current_retry_cfg = self.settings_manager.get_retry_settings()
+                            current_retry_mode = self.settings_manager.get_retry_mode()
+                            current_max_retries = int(current_retry_cfg.get("maxRetries", 3))
+                            if not recovery_retry and (
+                                not self.settings_manager.get_retry_enabled()
+                                or (current_retry_mode != "unlimited" and attempt > current_max_retries)
+                            ):
+                                terminal_error = True
+                                error_msg = {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": error_text}],
+                                    "provider": self.model.provider if self.model else None,
+                                    "model": self.model.id if self.model else None,
+                                    "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}},
+                                    "stopReason": "error",
+                                    "timestamp": int(time.time() * 1000),
+                                }
+                                self.messages.append(error_msg)
+                                self.session_manager.append_message(error_msg)
+                                self._emit({"type": "message_start", "message": error_msg})
+                                self._emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": error_text}})
+                                self._emit({"type": "message_end", "message": error_msg})
+                                self._agent_event("agent_end", [user_msg, error_msg])
+                                self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": False, "aborted": False})
+                                self._retrying = False
+                                break
+                            self._emit({"type": "auto_retry_end", "attempt": attempt, "willRetry": True, "aborted": False})
+                            self._retrying = False
+
+            except BaseException as e:
+                # Fail-closed: if anything escapes the inner exception handlers
+                # (SystemExit, KeyboardInterrupt, etc.), reset state and emit
+                # terminal events so the session never stays stuck in
+                # _is_streaming=True.  Skip re-emitting agent_end for
+                # _CapabilityErrorCooperative since the inner handler already
+                # emitted it before re-raising.
+                self._is_streaming = False
+                self._retrying = False
+                self._abort_requested = False
+                if not isinstance(e, _CapabilityErrorCooperative):
+                    attempt = self._active_attempt or 1
+                    self._emit(
+                        {
+                            "type": "turn_end",
+                            "ok": False,
+                            "attempt": attempt,
+                            "reason": "error",
+                            "error": "session error — provider call or tool loop failed unexpectedly",
+                            "willRetry": False,
+                        }
+                    )
+                    self._agent_event("agent_end", [user_msg])
+                raise
+            finally:
+                # Keep IDs available through every terminal event above, then clear
+                # them before post-turn queue handling or the next prompt.
+                self._active_turn_id = None
+                self._active_request_id = None
+                self._active_attempt = None
+                self._elapsed_attempt_started_at.clear()
+                self._elapsed_tool_started_at.clear()
+                self._elapsed_terminal_outcome = None
+
         finally:
-            # Keep IDs available through every terminal event above, then clear
-            # them before post-turn queue handling or the next prompt.
+            self._is_streaming = False
             self._active_turn_id = None
             self._active_request_id = None
             self._active_attempt = None
-            self._elapsed_attempt_started_at.clear()
-            self._elapsed_tool_started_at.clear()
-            self._elapsed_terminal_outcome = None
+            if checkpoint is not None:
+                checkpoint.end_task()
 
         self._is_streaming = False
 
@@ -5619,6 +5751,11 @@ class AgentSession:
         return result
 
     async def dispose(self) -> None:
+        checkpoint = getattr(self, "_checkpoint_manager", None)
+        if checkpoint is not None:
+            checkpoint.tokens.clear()
+            checkpoint.close()
+            self._checkpoint_manager = None
         self.subagent_monitor.history.close()
         if self._catalog_refresh_task is not None:
             self._catalog_refresh_task.cancel()

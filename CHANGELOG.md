@@ -35,6 +35,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Task checkpoints (opt-in)** — record direct `write`, `edit`, and `apply_patch`
+  changes in private session sidecars. TUI `/checkpoints` commands list records,
+  prepare selective undo, require explicit confirmation, and delete retained data.
+  Conflict checks protect intervening changes; shell, MCP, and child effects are
+  not covered. See [checkpoint usage and limitations](docs/CHECKPOINTS.md).
+
 - **Preset wildcards** — `tools: ['*']` and `mcp_servers: ['*']` dynamically
   select available tools or servers under inherited ceilings. Future tools and
   servers may become accessible; omission and empty server lists retain their

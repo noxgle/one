@@ -454,6 +454,8 @@ class TuiRuntimeHost:
 
     async def dispatch(self, command: str, payload: dict[str, Any]) -> dict[str, Any]:
         """The complete TUI command grammar; no reflective dispatch exists here."""
+        if command == "checkpoints":
+            return self.checkpoints(payload)
         if command == "snapshot" and not payload:
             return await self.snapshot()
         if command == "status_snapshot" and not payload:
@@ -759,6 +761,105 @@ class TuiRuntimeHost:
             "startup": _safe_startup_projection(getattr(self, "_startup", {})),
         }
         return _fit_snapshot(snapshot)
+
+    def list_checkpoints(self, epoch: int) -> dict[str, Any]:
+        return self.checkpoints({"action": "list", "epoch": epoch})
+
+    def prepare_checkpoint_undo(self, checkpoint_id: str, epoch: int,
+                                paths: list[str] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"action": "prepare", "id": checkpoint_id, "epoch": epoch}
+        if paths is not None:
+            payload["paths"] = paths
+        return self.checkpoints(payload)
+
+    def confirm_checkpoint_undo(self, token: str, epoch: int) -> dict[str, Any]:
+        return self.checkpoints({"action": "confirm", "token": token, "epoch": epoch})
+
+    def _checkpoint_idle(self) -> None:
+        session = self._session()
+        monitor = getattr(session, "subagent_monitor", None)
+        children = monitor.snapshot().get("children", []) if monitor else []
+        if (getattr(session, "is_streaming", False) or getattr(session, "_is_compacting", False)
+                or getattr(session, "_active_tool_tasks", None) or getattr(session, "_active_bash_tasks", None)
+                or getattr(session, "_pending_questions", None)
+                or any(child.get("status") == "running" for child in children)):
+            raise ValueError("Checkpoints require an idle session")
+
+    def checkpoints(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Owner-loop metadata/undo API. Never return engine records or saved bytes."""
+        action = payload.get("action")
+        fields = {"list": set(), "enable": set(), "prepare": {"id", "paths"},
+                  "confirm": {"token"}, "cancel": set(), "delete": {"id"}}
+        if (not isinstance(action, str) or action not in fields or set(payload) - {"action", "epoch"} - fields[action]
+                or payload.get("epoch") != self._epoch):
+            raise ValueError("Invalid checkpoint request or stale session epoch")
+        self._checkpoint_idle()
+        session = self._session()
+        manager = session.enable_checkpoints() if action == "enable" else session._get_checkpoint_manager()
+        result = {"epoch": self._epoch, "enabled": manager is not None}
+        if action in {"list", "enable"}:
+            rows = manager.list_checkpoints() if manager else []
+            # Keep the newest metadata within the detached DTO budget.
+            result["checkpoints"] = []
+            for row in reversed(rows):
+                item = {"id": row["id"], "status": row["status"],
+                        "paths": [entry["path"] for entry in row["paths"]]}
+                candidate = {**result, "checkpoints": result["checkpoints"] + [item]}
+                if _snapshot_size(candidate) > 40 * 1024:
+                    result["truncated"] = True
+                    break
+                result = candidate
+            return self._json(result)
+        if manager is None:
+            raise ValueError("Enable checkpoints first with /checkpoints enable")
+        if action == "cancel":
+            manager.tokens.clear()
+            return result
+        if action == "delete":
+            task_id = payload.get("id")
+            if not isinstance(task_id, str) or not task_id:
+                raise ValueError("A checkpoint ID is required")
+            manager.delete_checkpoint(task_id)
+            return result
+        from one.core.tool_policy import ToolPolicy
+
+        policy = getattr(session, "_tool_policy", ToolPolicy())
+        if policy.is_readonly or not policy.permits("write") or "write" not in session._active_tools:
+            manager.tokens.clear()
+            raise ValueError("Checkpoint undo requires file-write capability")
+        if action == "prepare":
+            task_id = payload.get("id")
+            row = next((r for r in manager.list_checkpoints() if r["id"] == task_id), None)
+            if row is None:
+                raise ValueError("Unknown checkpoint")
+            paths = payload.get("paths")
+            if paths is None:
+                paths = [p["path"] for p in row["paths"] if not p["undone"]]
+            if not isinstance(paths, list) or any(not isinstance(p, str) for p in paths):
+                raise ValueError("Undo paths must be a list of relative paths")
+            manager.tokens.clear()
+            prepared = manager.prepare_undo(task_id, paths)
+            # Bind the engine's one-use, expiring token to this owner and epoch.
+            self._checkpoint_request = (manager, self._epoch, session, prepared["token"])
+            record = next(r for r in manager.records if r["id"] == task_id)
+            result.update(token=prepared["token"], expires_in=prepared["expires_in"],
+                          paths=[{"path": p, "action": "restore" if record["paths"][p]["pre"]["exists"]
+                                  else "delete"} for p in prepared["paths"]],
+                          warning="Undo is irreversible. Only direct ONE file tools are covered. "
+                          "Concurrent writers can cause partial multi-file restore; this is not atomic.")
+            try:
+                return self._json(result)
+            except Exception:
+                manager.tokens.clear()
+                raise
+        request = getattr(self, "_checkpoint_request", None)
+        self._checkpoint_request = None
+        token = payload.get("token")
+        if request != (manager, self._epoch, session, token) or not isinstance(token, str):
+            manager.tokens.clear()
+            raise ValueError("Invalid or stale checkpoint confirmation")
+        result["restored"] = manager.confirm_undo(token)
+        return self._json(result)
 
     async def snapshot(self) -> dict[str, Any]:
         return self._snapshot()
@@ -1734,6 +1835,7 @@ TUI_COMMANDS = frozenset(
     {
         "snapshot",
         "status_snapshot",
+        "checkpoints",
         "monitor_snapshot",
         "agent_history_page",
         "agent_prompt_page",

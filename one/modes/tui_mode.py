@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import textwrap
@@ -1010,6 +1011,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/fork",
     "/new",
     "/sessions",
+    "/checkpoints",
     "/login",
     "/logout",
     "/reload",
@@ -3156,6 +3158,63 @@ if TEXTUAL_AVAILABLE:
                 await self._switch_to_session(info)
             finally:
                 self.query_one("#input", TextArea).text = draft
+
+        async def _checkpoints_command(self, cmd: str) -> None:
+            usage = ("Usage: /checkpoints [list|enable|undo ID [paths...]|confirm TOKEN|cancel|delete ID] "
+                     "(quote paths containing spaces)")
+            if not isinstance(self.session, TuiSessionView):
+                self._write("Checkpoints require the detached TUI runtime; restart ONE in TUI mode.", "error")
+                return
+            try:
+                args = shlex.split(cmd)[1:]
+            except ValueError as exc:
+                self._write(f"{usage}: {exc}", "error")
+                return
+            action = args[0] if args else "list"
+            payload: dict[str, Any] = {}
+            if action in {"list", "enable", "cancel"} and len(args) <= 1:
+                pass
+            elif action == "undo" and len(args) >= 2:
+                action = "prepare"
+                payload["id"] = args[1]
+                if len(args) > 2:
+                    payload["paths"] = args[2:]
+            elif action == "delete" and len(args) == 2:
+                payload["id"] = args[1]
+            elif action == "confirm" and len(args) == 2:
+                payload["token"] = args[1]
+            else:
+                self._write(usage, "error")
+                return
+            session = self.session
+            epoch = session.epoch
+            try:
+                result = await session.command("checkpoints", action=action, epoch=epoch, **payload)
+            except Exception as exc:
+                if self.session is session and session.epoch == epoch:
+                    self._write(f"Checkpoint {action} failed: {exc}", "error")
+                return
+            if (self.session is not session or session.epoch != epoch
+                    or ("epoch" in result and result["epoch"] != epoch)
+                    or (action in {"list", "prepare"} and result.get("epoch") != epoch)):
+                self._write("Checkpoint response discarded: session changed or response is stale.", "error")
+                return
+            if action == "list":
+                self._write(f"Checkpoint recording: {'enabled' if result.get('enabled') else 'disabled'}", "info")
+                self._write("Checkpoint data is retained locally and may contain secrets; delete old checkpoints explicitly.", "info")
+                for item in result.get("checkpoints", []):
+                    self._write(f"{item['id']} ({item['status']}): {', '.join(item['paths'])}", "info")
+                if not result.get("checkpoints"):
+                    self._write("No checkpoints.", "info")
+            elif action == "prepare":
+                self._write("Proposed checkpoint undo:", "info")
+                for item in result.get("paths", []):
+                    self._write(f"  {item['action']}: {item['path']}", "info")
+                self._write(str(result.get("warning", "")), "info")
+                self._write("Undo is irreversible; concurrent external writers can interfere and multi-file undo is not atomic.", "info")
+                self._write(f"To confirm: /checkpoints confirm {result['token']}\nTo cancel: /checkpoints cancel", "info")
+            else:
+                self._write(f"Checkpoint {action}: {json.dumps(result, ensure_ascii=False)}", "info")
 
         async def _list_sessions(self) -> None:
             if isinstance(self.session, TuiSessionView):
@@ -5928,6 +5987,9 @@ if TEXTUAL_AVAILABLE:
             # handled above so inspecting history never records itself.
             if original.startswith("/"):
                 self._record_input_history(original)
+            if cmd == "/checkpoints" or cmd.startswith("/checkpoints "):
+                await self._checkpoints_command(cmd)
+                return
             if cmd == "/help":
                 self._write("/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort", "info")
                 self._write(
@@ -5942,6 +6004,7 @@ if TEXTUAL_AVAILABLE:
                     "/sessions rename <number|full ID> <new title> | /sessions delete <number|full ID>",
                     "info",
                 )
+                self._write("/checkpoints [list|enable|undo ID [paths...]|confirm TOKEN|cancel|delete ID]", "info")
                 self._write(
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>",
                     "info",

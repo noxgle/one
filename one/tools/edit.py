@@ -19,31 +19,7 @@ def _line_of_first_diff(old: str, new: str) -> int | None:
     return None
 
 
-def edit_tool(cwd: str, path: str, edits: list[dict[str, str]]) -> dict:
-    # (a) Type-check: edits must be a list, not a dict or other type.
-    if not isinstance(edits, list):
-        raise ValueError(
-            "Edit tool input is invalid. edits must be a list of {oldString, newString} objects."
-        )
-
-    if not edits:
-        raise ValueError("Edit tool input is invalid. edits must contain at least one replacement.")
-
-    # (b) Recovery: if path is empty/missing, try to pull it from edits[0].
-    if not path and edits and isinstance(edits[0], dict):
-        path = edits[0].get("path") or edits[0].get("file") or ""
-
-    # (c) If path is still empty, raise a clear ValueError instead of a misleading FileNotFoundError.
-    if not path:
-        raise ValueError(
-            "Edit tool input is invalid. 'path' is required as a top-level argument (not inside edits)."
-        )
-
-    p = resolve_to_cwd(path, cwd)
-    if not p.exists() or not p.is_file():
-        raise FileNotFoundError(f"File not found: {path}")
-
-    old = p.read_text(encoding="utf-8", errors="ignore")
+def apply_edits(old: str, edits: list[dict[str, str]]) -> str:
     new = old
 
     seen_spans: list[tuple[int, int]] = []
@@ -86,6 +62,36 @@ def edit_tool(cwd: str, path: str, edits: list[dict[str, str]]) -> dict:
         prev_end = end
     parts.append(old[prev_end:])
     new = "".join(parts)
+
+    return new
+
+
+def edit_tool(cwd: str, path: str, edits: list[dict[str, str]]) -> dict:
+    # (a) Type-check: edits must be a list, not a dict or other type.
+    if not isinstance(edits, list):
+        raise ValueError(
+            "Edit tool input is invalid. edits must be a list of {oldString, newString} objects."
+        )
+
+    if not edits:
+        raise ValueError("Edit tool input is invalid. edits must contain at least one replacement.")
+
+    # (b) Recovery: if path is empty/missing, try to pull it from edits[0].
+    if not path and edits and isinstance(edits[0], dict):
+        path = edits[0].get("path") or edits[0].get("file") or ""
+
+    # (c) If path is still empty, raise a clear ValueError instead of a misleading FileNotFoundError.
+    if not path:
+        raise ValueError(
+            "Edit tool input is invalid. 'path' is required as a top-level argument (not inside edits)."
+        )
+
+    p = resolve_to_cwd(path, cwd)
+    if not p.exists() or not p.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    old = p.read_text(encoding="utf-8", errors="ignore")
+    new = apply_edits(old, edits)
 
     p.write_text(new, encoding="utf-8")
     diff = "".join(

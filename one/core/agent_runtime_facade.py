@@ -395,6 +395,19 @@ class AgentRuntimeFacade:
                 self._epoch = result["epoch"]
         return reply
 
+    async def list_checkpoints(self, epoch: int) -> dict[str, Any]:
+        return await self.command("checkpoints", {"action": "list", "epoch": epoch})
+
+    async def prepare_checkpoint_undo(self, checkpoint_id: str, epoch: int,
+                                      paths: list[str] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"action": "prepare", "id": checkpoint_id, "epoch": epoch}
+        if paths is not None:
+            payload["paths"] = paths
+        return await self.command("checkpoints", payload)
+
+    async def confirm_checkpoint_undo(self, token: str, epoch: int) -> dict[str, Any]:
+        return await self.command("checkpoints", {"action": "confirm", "token": token, "epoch": epoch})
+
     async def close(self) -> None:
         with self._space:
             self._accepting_events = False
