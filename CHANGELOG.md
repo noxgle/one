@@ -29,11 +29,25 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Changed
 
+- **Explore skill** — replace the duplicated investigation manual with a short
+  delegation guide that selects the system Explore preset and its configured
+  model. Existing installed skills remain untouched; refresh them manually after
+  reviewing local customizations.
+
+- **Explore preset** — focus local investigation on bounded assignments, efficient
+  reads, concise evidence-backed reports, and explicit gaps. Default tools no
+  longer include user questions or nested delegation; MCP servers are explicitly
+  disabled. Model selection and saved effective session snapshots are unchanged.
+
 - **Model picker layout** — a compact command-palette layout with inline search
   and provider filter, result counts, a highlighted list, separated model details,
   and labelled action buttons adapts to smaller terminals.
 
 ### Added
+
+- **Preset model overrides** — configure per-preset models in global or project
+  settings without editing preset files. Explicit model selections retain priority;
+  preset listings expose the configured model and its source.
 
 - **Task checkpoints (opt-in)** — record direct `write`, `edit`, and `apply_patch`
   changes in private session sidecars. TUI `/checkpoints` commands list records,

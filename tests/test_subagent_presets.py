@@ -43,6 +43,34 @@ async def test_child_preset_resolves_configuration_without_mutating_parent(tmp_p
     assert (agent.model, agent.temperature, agent.thinking_level, agent.active_tools) == original
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_model", [False, True])
+async def test_explore_child_uses_bounded_defaults_and_model_selection(tmp_path: Path, explicit_model: bool) -> None:
+    agent = _mk_agent(tmp_path, tools=["read", "finish", "spawn_subagent", "bash", "web_connect"])
+    agent.resource_loader.agent_dir = str(tmp_path)
+    captured: dict[str, Any] = {}
+    original = (agent.model, list(agent.active_tools))
+
+    async def capture(task: str, model: Any, tools: list[str], depth: int, **kwargs: Any) -> dict[str, Any]:
+        captured.update(model=model, tools=tools, **kwargs)
+        return {"ok": True, "summary": "found"}
+
+    agent._run_subagent = capture  # type: ignore[method-assign]
+    args = {"task": "Find timeout defaults", "preset": "explore"}
+    if explicit_model:
+        args["model"] = "openai/gpt-4o"
+    result = await agent._spawn_subagent(args)
+    assert result["ok"] is True
+    assert captured["tools"] == ["read", "finish"]
+    assert captured["preset"].mcp_servers == ()
+    assert "Search before reading" in captured["preset"].body
+    if explicit_model:
+        assert (captured["model"].provider, captured["model"].id) == ("openai", "gpt-4o")
+    else:
+        assert captured["model"] is agent.model
+    assert (agent.model, agent.active_tools) == original
+
+
 def test_flat_subagent_call_accepts_explicit_preset(tmp_path: Path) -> None:
     agent = _mk_agent(tmp_path, tools=["spawn_subagent", "finish"])
     assert agent._try_parse_tool_call('{"tool":"spawn_subagent","task":"child","preset":"focused"}') == {

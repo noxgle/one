@@ -380,6 +380,8 @@ async def test_explore_enforces_local_readonly_and_restore_ceiling(tmp_path: Pat
     session = _session(tmp_path)
     session.activate_preset("explore", str(tmp_path))
     assert session._is_readonly
+    assert set(session.active_tools) == {"read", "read_image", "grep", "find", "ls", "evidence_read", "finish"}
+    assert "# Child Presets" not in session._build_runtime_system_prompt()
     await session.bind_extensions()
     assert session.resource_loader.extension_reads == 0
     with pytest.raises(RuntimeError, match="disabled"):
@@ -411,3 +413,53 @@ def test_explore_reserved_ceiling_applies_to_untrusted_definition(tmp_path: Path
     definition = parse_preset("---\nversion: 1\nid: explore\nname: Explore\ntools: [read, finish, web_connect, bash]\n---\n")
     _, policy = session._resolve_preset_tools(definition, ["read", "finish", "web_connect", "bash"], ToolPolicy())
     assert policy.allowed == frozenset({"read", "finish"})
+
+
+def test_model_override_activation_is_atomic(tmp_path: Path) -> None:
+    _preset(tmp_path, "alpha", "model: openai/gpt-4.1\n")
+    session = _session(tmp_path)
+    session.settings_manager = SettingsManager.in_memory({
+        "presets": {"overrides": {"alpha": {"model": "openai/gpt-4o"}}}
+    })
+    session.activate_preset("alpha", str(tmp_path))
+    assert session.model.id == "gpt-4o"
+    before = session.model
+    session.settings_manager = SettingsManager.in_memory({
+        "presets": {"overrides": {"alpha": {"model": "unknown/missing"}}}
+    })
+    with pytest.raises(PresetError, match="unavailable"):
+        session.activate_preset("alpha", str(tmp_path))
+    assert session.model == before
+
+
+@pytest.mark.asyncio
+async def test_runtime_model_override_and_explicit_model(tmp_path: Path) -> None:
+    _preset(tmp_path, "alpha", "model: openai/gpt-4.1\n")
+    registry = ModelRegistry.create(AuthStorage.in_memory(), str(tmp_path / "models.json"))
+    explicit = registry.find("openai", "gpt-4.1")
+    settings = SettingsManager.in_memory({"presets": {"overrides": {"alpha": {"model": "openai/gpt-4o"}}}})
+    bootstrap = {"agentDir": str(tmp_path), "settingsManager": settings, "modelRegistry": registry,
+                 "model": explicit, "preset": "alpha", "explicitModel": False}
+    options = {"cwd": str(tmp_path), "sessionManager": SessionManager.in_memory(str(tmp_path)),
+               "resourceLoader": _Loader(str(tmp_path))}
+    runtime = await create_agent_session_runtime(bootstrap, options)
+    assert runtime.session.model.id == "gpt-4o"
+    bootstrap["explicitModel"] = True
+    options["sessionManager"] = SessionManager.in_memory(str(tmp_path))
+    runtime = await create_agent_session_runtime(bootstrap, options)
+    assert runtime.session.model.id == "gpt-4.1"
+
+
+def test_saved_model_override_survives_changed_settings(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.settings_manager = SettingsManager.in_memory({
+        "presets": {"overrides": {"explore": {"model": "openai/gpt-4o"}}}
+    })
+    session.activate_preset("explore", str(tmp_path))
+    state = session._preset_state(session._preset, session.model, session.temperature,
+                                  session.thinking_level, session._base_tools, session._tool_policy)
+    restored = _session(tmp_path)
+    restored.settings_manager = SettingsManager.in_memory({"presets": False})
+    restored.restore_preset_state(state)
+    assert restored.model.id == "gpt-4o"
+    assert restored.preset_effective_settings["model"] == "openai/gpt-4o"

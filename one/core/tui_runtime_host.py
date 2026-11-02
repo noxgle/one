@@ -1246,9 +1246,10 @@ class TuiRuntimeHost:
         if operation == "skills":
             return self._json(session.resource_loader.get_skills())
         if operation == "preset_list":
-            from one.core.presets import discover_presets
+            from one.core.presets import discover_presets, preset_model_details
             presets = discover_presets(getattr(session.resource_loader, "agent_dir", None))
-            return {"presets": [{"id": p.id, "name": p.name, "description": p.description or ""} for p in presets.values()]}
+            return {"presets": [{"id": p.id, "name": p.name, "description": p.description or "",
+                                 **preset_model_details(p, session.settings_manager)} for p in presets.values()]}
         if operation == "set_preset":
             session.activate_preset(str(payload["id"]), getattr(session.resource_loader, "agent_dir", None))
             return self._snapshot()

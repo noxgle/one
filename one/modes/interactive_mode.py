@@ -586,10 +586,12 @@ class InteractiveMode:
                 )
                 continue
             if line.strip() == "/preset":
-                from one.core.presets import discover_presets
+                from one.core.presets import discover_presets, preset_model_details
                 for preset in discover_presets(getattr(session.resource_loader, "agent_dir", None)).values():
                     current = " (current)" if preset.id == session.preset_id else ""
-                    print(f"{preset.id}: {preset.name} — {preset.description or ''}{current}")
+                    details = preset_model_details(preset, session.settings_manager)
+                    print(f"{preset.id}: {preset.name} — {preset.description or ''}{current} "
+                          f"[model: {details['model'] or 'inherited'}; source: {details['modelSource']}]")
                 continue
             if line.startswith("/preset "):
                 try:

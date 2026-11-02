@@ -40,7 +40,7 @@ from one.core.context_budget import (
 from one.core.model_catalog import REFRESH_TTL_SECONDS
 from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
-from one.core.presets import PresetDefinition, PresetError, discover_presets
+from one.core.presets import PresetDefinition, PresetError, apply_preset_overrides, discover_presets
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import THINKING_LEVELS, SettingsManager
 from one.core.subagent_monitor import SubagentMonitor
@@ -693,7 +693,7 @@ class AgentSession:
         if self._is_streaming or self._is_compacting or self._active_tool_tasks or self._active_bash_tasks or self._pending_questions or running:
             raise BusySessionError("Cannot change preset while work is active")
         try:
-            candidate = discover_presets(agent_dir)[preset_id]
+            candidate = apply_preset_overrides(discover_presets(agent_dir)[preset_id], self.settings_manager)
         except KeyError as exc:
             raise PresetError(f"Unknown preset: {preset_id}") from exc
         if candidate.sandboxes:
@@ -709,6 +709,8 @@ class AgentSession:
                 raise PresetError(f"Preset model is unavailable: {candidate.model}") from exc
             if model is None:
                 raise PresetError(f"Preset model is unavailable: {candidate.model}")
+            if model.provider not in self.providers:
+                raise PresetError(f"Preset model provider is unavailable: {model.provider}")
         if candidate.thinking and candidate.thinking not in THINKING_LEVELS:
             raise PresetError(f"Unsupported thinking level: {candidate.thinking}")
         # Resolve every fallible effective value before mutating session state.
@@ -2401,9 +2403,11 @@ class AgentSession:
             if not isinstance(preset_id, str) or not preset_id:
                 raise RuntimeError("'preset' must be a non-empty preset id")
             try:
-                preset = discover_presets(getattr(self.resource_loader, "agent_dir", None))[preset_id]
+                preset = apply_preset_overrides(
+                    discover_presets(getattr(self.resource_loader, "agent_dir", None))[preset_id], self.settings_manager
+                )
             except (KeyError, PresetError) as exc:
-                raise RuntimeError(f"Invalid preset: {preset_id}") from exc
+                raise RuntimeError(f"Invalid preset {preset_id}: {exc}") from exc
             if preset.sandboxes:
                 raise RuntimeError("Preset requests unsupported sandboxes")
             # Validate the complete definition before allocating a child. This

@@ -106,12 +106,22 @@ the preset to adopt the new tool list (subject to parent/CLI ceilings).
 `explore` is a focused project investigation role. It searches and reads local
 resources, traces relevant behavior, and reports findings with path and line
 evidence. Its app-enforced ceiling excludes shell, editing, HTTP, and MCP tools;
-it allows read-only delegation subject to the same inherited ceiling. As with
-Readonly, manual shell commands and extension hooks are blocked, and activation
+its default tool list omits user questions and nested delegation, and explicitly
+selects no MCP servers. It handles one bounded assignment, searches before bounded
+reads, and returns a concise answer with evidence and any gaps rather than a tool
+transcript. Missing information is reported to the requester. Explicit child tool
+overrides still follow the normal precedence rules: the reserved Explore ceiling
+continues to permit read-only questions and delegation, preserving saved snapshots.
+As with Readonly, manual shell commands and extension hooks are blocked, and activation
 requires a clean session if extensions have already executed. It is not an OS
 sandbox. Use `one --preset explore ...`, `/preset explore`, or request
 `preset: "explore"` when spawning a subagent. Existing session snapshots retain
 their saved effective settings; explicitly reapply the preset to adopt changes.
+Explore does not pin a provider or model: children inherit the parent model unless
+`spawn_subagent.model` explicitly selects another available model. For cheaper
+fact gathering, delegate a specific question and source scope before reading the
+whole material in the parent; avoid delegation for trivial reads. Instructions
+about concise output are guidance, not a hard token or cost budget.
 
 Use `one --preset readonly ...`, or `/preset` to list and `/preset readonly` to
 apply an idle session preset in TUI or interactive mode. RPC exposes
@@ -161,3 +171,30 @@ child model/tools values take precedence over corresponding preset configuration
 Parent and CLI capability ceilings always win, including for tools and MCP
 servers selected by a preset. Saved effective session snapshots retain their
 server ceilings; changing a preset file does not expand them automatically.
+
+### Per-preset model settings
+
+Global and project `settings.json` can configure only the model of a preset:
+
+```json
+{"presets": {"overrides": {"explore": {"model": "openai/gpt-4.1"}}}}
+```
+
+Project settings take precedence over global settings per field. A project `null`
+model cancels the global override and uses the model in the preset file (or the
+normal inherited/default model if the file has none). Unknown fields and invalid
+structures are errors. The provider/model must be available when selected; an
+unavailable selection is an error, not a fallback. Explicit CLI and subagent
+model arguments take precedence. Resume and fork use saved effective snapshots;
+reapply a preset to adopt changed settings. The configured model therefore comes
+from the project setting, global setting, or preset file in that order, unless
+an explicit model or saved snapshot takes precedence.
+
+The interactive `/preset` list shows the configured model and source. RPC
+`list_presets` and the TUI runtime `preset_list` DTO include `model` and
+`modelSource` (`project settings`, `global settings`, `preset`, or `inherited`).
+These describe the next preset selection, not a running session's saved model.
+External edits to settings files require restarting ONE to load them; reapplying
+a preset uses the settings currently loaded in memory. Overrides never change
+the preset's tools, instructions, or capability ceilings. Unknown preset IDs in
+the settings map remain dormant until a matching preset is selected.

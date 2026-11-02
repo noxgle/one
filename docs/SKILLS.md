@@ -29,6 +29,27 @@ are never overwritten. If a same-named skill is already available from
 `~/.agents/skills/` or `.one/skills/`, installation is skipped so first startup
 does not change that skill's discovery precedence.
 
+### Explore skill and preset
+
+The packaged `explore` skill is a short guide for the coordinating agent: when
+to delegate, how to scope the task, and how to check the returned evidence. The
+system `explore` preset supplies the worker's investigation instructions and
+default tools. Loading the skill does not activate a preset or grant permissions.
+Delegate with `spawn_subagent` arguments containing `preset: "explore"` and one
+`task`; normally omit `model` and `tools` so preset defaults and
+`presets.overrides.explore.model` apply. See [PRESETS.md](PRESETS.md).
+
+Older installed Explore skills may still contain a shell-tool example without
+the preset selection. Upgrading ONE does **not** replace these user files.
+To refresh intentionally, locate the active Explore skill using its displayed
+`filePath`, back it up outside skill discovery roots, and review/merge local
+customizations with the current packaged
+[`explore/SKILL.md`](../one/resources/default_skills/explore/SKILL.md). Replace
+only the intended copy, then restart ONE to refresh discovered metadata.
+Check platform-wide and project copies too: deleting a global copy alone may
+expose another older skill instead of installing the new default. No automatic
+migration or deletion of existing skills is performed.
+
 The resource loader scans for files named `SKILL.md` (case-sensitive). Each skill's **name** is the parent directory name.
 
 ## Frontmatter

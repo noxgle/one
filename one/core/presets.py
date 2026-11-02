@@ -7,15 +7,18 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from yaml.tokens import AliasToken, AnchorToken
 
 from one.config import get_agent_dir
 from one.core.temperature import normalize_temperature
+
+if TYPE_CHECKING:
+    from one.core.settings_manager import SettingsManager
 
 _ID = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _MAX_FILE = 256 * 1024
@@ -66,6 +69,40 @@ class PresetDefinition:
     sandboxes: tuple[str, ...] = ()
     content_hash: str = ""
     mcp_servers: tuple[str, ...] | None = None
+
+
+def validate_preset_overrides(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict) or set(value) - {"overrides"}:
+        raise PresetError("presets must be an object containing only overrides")
+    overrides = value.get("overrides", {})
+    if not isinstance(overrides, dict):
+        raise PresetError("presets.overrides must be an object keyed by preset ID")
+    for ident, entry in overrides.items():
+        if not isinstance(ident, str) or not _ID.fullmatch(ident):
+            raise PresetError(f"Invalid preset ID in presets.overrides: {ident!r}")
+        if not isinstance(entry, dict) or set(entry) - {"model"}:
+            raise PresetError(f"presets.overrides.{ident} must be an object containing only model")
+        model = entry.get("model")
+        if model is not None:
+            if (not isinstance(model, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*/[^\s/]+(?:/[^\s/]+)*", model)):
+                raise PresetError(f"presets.overrides.{ident}.model must be null or provider/model (without whitespace)")
+    return overrides
+
+
+def apply_preset_overrides(preset: PresetDefinition, settings: SettingsManager) -> PresetDefinition:
+    model = settings.get_preset_overrides().get(preset.id, {}).get("model")
+    return replace(preset, model=model) if model is not None else preset
+
+
+def preset_model_details(preset: PresetDefinition, settings: SettingsManager) -> dict[str, str | None]:
+    """Describe the next selection, not a running session's saved model."""
+    effective = apply_preset_overrides(preset, settings)
+    source = "preset" if preset.model else "inherited"
+    for scope, values in (("global", settings.get_global_settings()), ("project", settings.get_project_settings())):
+        entry = values.get("presets", {}).get("overrides", {}).get(preset.id, {})
+        if "model" in entry:
+            source = f"{scope} settings" if entry["model"] is not None else ("preset" if preset.model else "inherited")
+    return {"model": effective.model, "modelSource": source}
 
 
 def parse_preset(content: str, source: str = "<preset>") -> PresetDefinition:

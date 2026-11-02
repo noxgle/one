@@ -12,7 +12,7 @@ from one.config import get_agent_dir
 from one.core.agent_session import AgentSession
 from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
-from one.core.presets import PresetError, discover_presets
+from one.core.presets import PresetError, apply_preset_overrides, discover_presets
 from one.core.session_manager import SessionManager, get_default_session_dir
 from one.core.settings_manager import SettingsManager
 from one.core.temperature import normalize_temperature
@@ -167,17 +167,24 @@ async def create_agent_session_runtime(bootstrap: dict[str, Any], options: dict[
     # session recovery merely because old bootstrap metadata mentions it.
     if preset_id and not restored.get("presetStatePresent"):
         try:
-            preset = discover_presets(agent_dir)[str(preset_id)]
+            preset = apply_preset_overrides(discover_presets(agent_dir)[str(preset_id)], settings_manager)
         except (KeyError, PresetError) as exc:
-            raise ValueError(f"Invalid preset: {preset_id}") from exc
+            raise ValueError(f"Invalid preset {preset_id}: {exc}") from exc
         if preset.sandboxes:
             raise ValueError("Preset requests unsupported sandboxes")
         # Explicit bootstrap settings win over preset values.
         if not bootstrap.get("explicitModel", bootstrap.get("model") is not None) and preset.model:
             provider, model_id = preset.model.split("/", 1)
-            model = model_registry.resolve(provider, model_id)
+            try:
+                model = model_registry.resolve(provider, model_id)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"Preset model is unavailable: {preset.model}") from exc
             if model is None:
                 raise ValueError(f"Preset model is unavailable: {preset.model}")
+            from one.providers.registry import build_provider_registry
+
+            if model.provider not in build_provider_registry():
+                raise ValueError(f"Preset model provider is unavailable: {model.provider}")
         if not bootstrap.get("explicitTemperature", bootstrap.get("temperature") is not None) and preset.temperature is not None:
             temperature = preset.temperature
         if not bootstrap.get("explicitThinking", bootstrap.get("thinkingLevel") is not None) and preset.thinking:

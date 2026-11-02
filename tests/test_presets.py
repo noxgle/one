@@ -15,6 +15,17 @@ def test_packaged_presets_are_discoverable(tmp_path) -> None:
     assert presets["readonly"].tools and "bash" not in presets["readonly"].tools
 
 
+def test_packaged_explore_is_a_bounded_local_worker(tmp_path) -> None:
+    preset = discover_presets(str(tmp_path))["explore"]
+    assert preset.tools == ("read", "read_image", "grep", "find", "ls", "evidence_read", "finish")
+    assert preset.mcp_servers == ()
+    assert preset.model is None
+    assert len(preset.description) <= 160
+    assert "file:line" in preset.description
+    for instruction in ("one bounded assignment", "Search before reading", "Answer:", "Evidence:", "Gaps:"):
+        assert instruction in preset.body
+
+
 @pytest.mark.parametrize("header", ["thinking: true", "unknown: nope", "temperature: .nan"])
 def test_preset_parser_rejects_unsafe_or_unknown_values(header: str) -> None:
     content = f"---\nversion: 1\nid: safe\nname: Safe\n{header}\n---\nrole"

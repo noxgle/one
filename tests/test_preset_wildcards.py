@@ -82,7 +82,8 @@ def test_reserved_wildcard_snapshot_cannot_grant_mcp(tmp_path, ident):
     session.activate_preset(ident, str(tmp_path))
     state = session._preset_state(session._preset, session.model, session.temperature, session.thinking_level,
                                   session._base_tools, session._tool_policy)
-    state.update(wildcard_tools=True, wildcard_mcp_servers=True)
+    # A wildcard selection replaces an explicit list, including Explore's empty list.
+    state.update(wildcard_tools=True, wildcard_mcp_servers=True, preset_mcp_servers=None)
     session.restore_preset_state(state)
     assert "alpha_tool" not in session.active_tools
 

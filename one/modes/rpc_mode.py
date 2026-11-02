@@ -229,9 +229,10 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                     )
                 )
             elif ctype == "list_presets":
-                from one.core.presets import discover_presets
+                from one.core.presets import discover_presets, preset_model_details
                 presets = discover_presets(getattr(session.resource_loader, "agent_dir", None))
-                output(success(cid, ctype, {"presets": [{"id": p.id, "name": p.name, "description": p.description or "", "current": p.id == session.preset_id} for p in presets.values()]}))
+                output(success(cid, ctype, {"presets": [{"id": p.id, "name": p.name, "description": p.description or "", "current": p.id == session.preset_id,
+                                                       **preset_model_details(p, session.settings_manager)} for p in presets.values()]}))
             elif ctype == "set_preset":
                 # ``id`` is the RPC correlation key.  Keep the selected preset
                 # separate so numeric/string request ids cannot select it.

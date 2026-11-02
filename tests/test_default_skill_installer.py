@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import re
 
 import pytest
 
@@ -33,11 +35,26 @@ def test_installs_packaged_default_skills_exactly_once(tmp_path) -> None:
 
 def test_packaged_default_skill_resources_have_expected_contents() -> None:
     assert hashlib.sha256(default_skill_bytes("explore")).hexdigest() == (
-        "05169b8b285dc60408a6d6c54766b31b2bdbb7404dd38dbb82d16d13da83b3af"
+        "8ec62877338d4d2a35a244e774df2aeb4597a3b846fd84ea07c044dc12102171"
     )
     assert hashlib.sha256(default_skill_bytes("one")).hexdigest() == (
         "752db6ae1626fd7a66daee33de76c893f50d6d3ac118f76b4227c4fb496f0189"
     )
+
+
+def test_explore_skill_delegates_to_preset_without_overrides() -> None:
+    text = default_skill_bytes("explore").decode("utf-8")
+    examples = re.findall(r"```json\n(.*?)\n```", text, re.DOTALL)
+    assert len(examples) == 1
+    args = json.loads(examples[0])
+    assert set(args) == {"preset", "task"}
+    assert args["preset"] == "explore"
+    assert args["task"].strip()
+    assert len(text.splitlines()) <= 80
+    assert "presets.overrides.explore.model" in text
+    assert "Loading this skill does not activate" in text
+    assert "do not delegate further or reload this skill" in text
+    assert "## Allowed Tools" not in text
 
 
 def test_existing_file_or_unsafe_destination_is_never_overwritten(tmp_path, caplog) -> None:

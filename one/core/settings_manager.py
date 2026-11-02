@@ -197,6 +197,18 @@ class SettingsManager:
     def merged(self) -> dict[str, Any]:
         return _deep_merge(_deep_merge(DEFAULT_SETTINGS, self._global), self._project)
 
+    def get_preset_overrides(self) -> dict[str, dict[str, Any]]:
+        """Validate each settings scope before merging, including shadowed values."""
+        from one.core.presets import PresetError, validate_preset_overrides
+
+        for scope, settings in (("global", self._global), ("project", self._project)):
+            if "presets" in settings:
+                try:
+                    validate_preset_overrides(settings["presets"])
+                except PresetError as exc:
+                    raise PresetError(f"{scope} settings: {exc}") from exc
+        return validate_preset_overrides(self.merged().get("presets", {}))
+
     def get_global_settings(self) -> dict[str, Any]:
         return _deep_merge(DEFAULT_SETTINGS, self._global)
 
