@@ -16,6 +16,56 @@ from one.resources.default_skill_installer import install_default_skills
 from one.resources.resource_loader import DefaultResourceLoader
 
 
+def run_tree_page(session: Any, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    """Return a detached page for the current or most recently completed run."""
+    context = getattr(session, "_run_context", None) or getattr(session, "_last_run_context", None)
+    if context is None:
+        # Validate pagination even when there is no run.
+        from one.core.run_context import MAX_TREE_PAGE_SIZE
+
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= MAX_TREE_PAGE_SIZE:
+            raise ValueError("Invalid run tree pagination")
+        return {"available": False}
+    return {"available": True, **context.tree_snapshot(offset=offset, limit=limit)}
+
+
+def run_history_page(session: Any, run_id: str, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    """Read a bounded node page from a persisted run, without restoring execution."""
+    from one.core.run_context import MAX_TREE_PAGE_SIZE
+
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("run_id must be a nonempty string")
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= MAX_TREE_PAGE_SIZE:
+        raise ValueError("Invalid run history pagination")
+    manager = getattr(session, "session_manager", None)
+    history = manager.run_history() if manager is not None else None
+    for snapshot in history.read() if history is not None else []:
+        if snapshot["runId"] == run_id:
+            nodes = snapshot["nodes"]
+            metadata = {key: value for key, value in snapshot.items() if key != "nodes"}
+            return {"available": True, **metadata, "nodes": nodes[offset:offset + limit],
+                    "offset": offset, "totalNodes": len(nodes),
+                    "nextOffset": offset + limit if offset + limit < len(nodes) else None}
+    return {"available": False}
+
+
+def cancel_run(session: Any, run_id: str, node_id: str | None = None) -> bool:
+    """Cancel a matching live run or subtree; external effects are not rolled back."""
+    if not isinstance(run_id, str) or not run_id or (node_id is not None and
+                                                     (not isinstance(node_id, str) or not node_id)):
+        raise ValueError("runId and nodeId must be nonempty strings")
+    context = getattr(session, "_run_context", None)
+    if context is None or context.run_id != run_id:
+        return False
+    target = node_id if node_id is not None else context.root_id
+    try:
+        context.node(target)
+    except KeyError:
+        return False
+    context.cancel_tasks_subtree(target, "user_cancelled")
+    return True
+
+
 def _resolve_agent_dir(options: dict[str, Any]) -> str:
     """Resolve *agentDir* from options — explicit nonempty value wins, otherwise global helper."""
     explicit = options.get("agentDir")

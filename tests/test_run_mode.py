@@ -171,6 +171,9 @@ async def test_run_mode_json_output(tmp_path: Path, capsys):
     assert data["goalSuccess"] is True
     assert data["finished"] is True
     assert data["summary"] == "done"
+    assert data["run"]["runId"]
+    assert data["run"]["nodes"][0]["state"] == "completed"
+    assert "unknownCost" in data["run"]["nodes"][0]["subtreeUsage"]
 
 
 @pytest.mark.asyncio
@@ -328,3 +331,14 @@ async def test_run_mode_json_report_no_extra_output(tmp_path: Path, capsys):
     out = capsys.readouterr().out.strip()
     data = json.loads(out)
     assert data["goalSuccess"] is True
+
+
+@pytest.mark.asyncio
+async def test_print_json_exposes_last_run(tmp_path: Path, capsys):
+    from one.modes.print_mode import run_print_mode
+
+    host = _mk_host(tmp_path, ["DONE"])
+    assert await run_print_mode(host, {"initialMessage": "go", "mode": "json"}) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["run"]["runId"]
+    assert data["run"]["nodes"][0]["subtreeUsage"]["unknownCost"] >= 0

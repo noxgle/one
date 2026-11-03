@@ -460,6 +460,58 @@ class TuiRuntimeHost:
             return await self.snapshot()
         if command == "status_snapshot" and not payload:
             return self.status_snapshot()
+        if command == "run_history_page" and set(payload) == {"epoch", "run_id", "offset", "limit"}:
+            if type(payload["epoch"]) is not int or payload["epoch"] != self._epoch:
+                raise ValueError("Session changed")
+            from one.core.sdk import run_history_page
+
+            limit = payload["limit"]
+            while True:
+                page = run_history_page(self._session(), payload["run_id"], payload["offset"], limit)
+                try:
+                    return self._json({"epoch": self._epoch, **page})
+                except RuntimeError:
+                    if limit == 1:
+                        raise
+                    limit = max(1, limit // 2)
+        if command == "run_tree_page" and set(payload) == {"epoch", "offset", "limit"}:
+            if type(payload["epoch"]) is not int or payload["epoch"] != self._epoch:
+                raise ValueError("Session changed")
+            context = getattr(self._session(), "_run_context", None)
+            if context is None:
+                context = getattr(self._session(), "_last_run_context", None)
+            if context is None:
+                return {"epoch": self._epoch, "available": False}
+            # Keep the page below both the host and threaded transport budgets,
+            # even when individual fields contain multibyte characters.
+            limit = payload["limit"]
+            page = context.tree_snapshot(offset=payload["offset"], limit=limit)
+            while True:
+                try:
+                    return self._json({"epoch": self._epoch, "available": True, **page})
+                except RuntimeError:
+                    if limit == 1:
+                        raise
+                    limit = max(1, limit // 2)
+                    page = context.tree_snapshot(offset=payload["offset"], limit=limit)
+        if command in {"cancel_run", "cancel_run_subtree"}:
+            expected = {"epoch", "run_id"} | ({"node_id"} if command == "cancel_run_subtree" else set())
+            if set(payload) != expected:
+                raise ValueError("invalid TUI runtime command payload")
+            if type(payload["epoch"]) is not int or payload["epoch"] != self._epoch:
+                return {"epoch": self._epoch, "accepted": False}
+            context = getattr(self._session(), "_run_context", None)
+            if context is None or not isinstance(payload["run_id"], str) or payload["run_id"] != context.run_id:
+                return {"epoch": self._epoch, "accepted": False}
+            node_id = payload.get("node_id", context.root_id)
+            if not isinstance(node_id, str):
+                return {"epoch": self._epoch, "accepted": False}
+            try:
+                context.node(node_id)
+            except KeyError:
+                return {"epoch": self._epoch, "accepted": False}
+            context.cancel_tasks_subtree(node_id, "user_cancelled")
+            return {"epoch": self._epoch, "accepted": True}
         if command == "agents_page" and set(payload) == {"offset", "epoch"}:
             if payload["epoch"] != self._epoch:
                 raise ValueError("Session changed")
@@ -1842,6 +1894,10 @@ TUI_COMMANDS = frozenset(
         "agent_prompt_page",
         "agent_inspector_page",
         "agents_page",
+        "run_tree_page",
+        "run_history_page",
+        "cancel_run",
+        "cancel_run_subtree",
         "prompt",
         "abort",
         "models_page",

@@ -9,6 +9,7 @@ import json
 from typing import Any
 
 from one.core.provider_login import _redact_credentials, validate_and_fetch
+from one.core.sdk import cancel_run, run_tree_page
 
 from .rpc_types import RpcResponse
 
@@ -189,6 +190,15 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
             elif ctype == "abort":
                 await session.abort()
                 output(success(cid, ctype))
+            elif ctype == "run_tree_page":
+                output(success(cid, ctype, run_tree_page(session, cmd.get("offset", 0), cmd.get("limit", 100))))
+            elif ctype in {"cancel_run", "cancel_run_subtree"}:
+                node_id = cmd.get("nodeId")
+                if ctype == "cancel_run_subtree" and (not isinstance(node_id, str) or not node_id):
+                    raise ValueError("nodeId is required")
+                if ctype == "cancel_run" and "nodeId" in cmd:
+                    raise ValueError("nodeId is only valid for cancel_run_subtree")
+                output(success(cid, ctype, {"accepted": cancel_run(session, cmd.get("runId"), node_id)}))
             elif ctype == "new_session":
                 result = await runtime_host.new_session({"parentSession": cmd.get("parentSession")})
                 await rebind()
@@ -224,6 +234,7 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
                             "activeTools": session.active_tools,
                             "autoRetryEnabled": session.auto_retry_enabled,
                             "lastSubagentTimeout": session.inspect_subagent_timeout(),
+                            "run": run_tree_page(session, limit=1),
                             "preset": {"id": session.preset_id, "name": session.preset_name, "modified": session.preset_modified, "effective": session.preset_effective_settings},
                         },
                     )

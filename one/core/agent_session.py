@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import sys
 import tempfile
 import time
 import uuid
@@ -3457,6 +3458,8 @@ class AgentSession:
     async def _run_operation(self, operation: Callable[[], Awaitable[Any]]) -> Any:
         """Own one node until its operation (including queue drains) has joined."""
         context = self._run_context
+        history = None
+        previous_run_id = None
         if context is not None and self._run_node_id is not None:
             node = context.node(self._run_node_id)
             if node.cleanup_timed_out:
@@ -3466,6 +3469,9 @@ class AgentSession:
             if node.state != NodeState.PENDING:
                 raise RuntimeError("Run no longer admits work")
         else:
+            history = self.session_manager.run_history()
+            runs = history.read() if history else []
+            previous_run_id = runs[-1]["runId"] if runs else self.session_manager.get_header().get("parentRunId")
             context = RunContext(self.session_id, self.settings_manager.get_run_limits())
             self._run_context = context
             self._run_node_id = context.root_id
@@ -3474,8 +3480,23 @@ class AgentSession:
         task: asyncio.Task[Any] | None = None
         cancel_wait: asyncio.Task[Any] | None = None
         state = NodeState.COMPLETED
+        history_error: Exception | None = None
+
+        def persist_change() -> None:
+            nonlocal history_error
+            if history is not None and history_error is None:
+                try:
+                    history.append(context.history_snapshot(previous_run_id))
+                except (OSError, ValueError) as exc:
+                    # Defer I/O failure until all work has been joined and finalized.
+                    history_error = exc
+
         try:
             context._owners[node_id] = asyncio.current_task()
+            if history is not None:
+                self.session_manager.ensure_run_session()
+                context._on_change = persist_change
+                persist_change()
             task = asyncio.create_task(operation())
             context.start(node_id, task)
             cancel_wait = asyncio.create_task(context.cancellation_event(node_id).wait())
@@ -3539,6 +3560,13 @@ class AgentSession:
             self._last_run_context = context
             self._run_context = None
             self._run_node_id = None
+            if history is not None:
+                context._on_change = None
+            if history_error is not None:
+                current_error = sys.exception()
+                if current_error is None:
+                    raise history_error
+                current_error.add_note("Run history persistence failed during this run.")
 
     async def _invoke_provider(
         self,

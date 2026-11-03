@@ -1074,3 +1074,32 @@ async def test_rpc_invoke_skill_during_streaming(tmp_path: Path, monkeypatch: py
     assert "BusySessionError" in r["error"]
     # Ensure the body does NOT get silently queued — the caller must know.
     assert "busy" in r["error"].lower() or "streaming" in r["error"].lower() or "idle" in r["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_tree_and_cancel_commands(tmp_path: Path, monkeypatch, capsys):
+    from one.core.run_context import RunContext, RunLimits
+
+    session = _mk_session(tmp_path)
+    context = RunContext(session.session_id, RunLimits())
+    session._run_context = context
+    child = context.register(context.root_id, "child")
+    sibling = context.register(context.root_id, "sibling")
+    commands = [
+        {"type": "run_tree_page", "offset": 1, "limit": 1},
+        {"type": "run_tree_page", "offset": True},
+        {"type": "cancel_run_subtree", "runId": "stale", "nodeId": child.node_id},
+        {"type": "cancel_run_subtree", "runId": context.run_id, "nodeId": "foreign"},
+        {"type": "cancel_run_subtree", "runId": context.run_id, "nodeId": child.node_id},
+        {"type": "cancel_run_subtree", "runId": context.run_id},
+    ]
+    responses = await _run_rpc(monkeypatch, capsys, session, [json.dumps(c) for c in commands])
+    assert responses[0]["data"]["nodes"][0]["nodeId"] == child.node_id
+    assert responses[0]["data"]["nextOffset"] == 2
+    assert not responses[1]["success"]
+    assert not responses[2]["data"]["accepted"]
+    assert not responses[3]["data"]["accepted"]
+    assert responses[4]["data"]["accepted"]
+    assert not responses[5]["success"]
+    assert context.node(child.node_id).state.value == "cancelling"
+    assert context.node(sibling.node_id).state.value == "pending"

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from one.core.persistence import append_private_text, ensure_private_dir
+from one.core.sdk import run_tree_page
 
 
 def _ask_user_queue(session: Any) -> asyncio.Queue:
@@ -140,12 +141,18 @@ async def run_run_mode(runtime_host: Any, options: dict[str, Any]) -> int:
                     "summary": summary,
                     "goalSuccess": result["goalSuccess"],
                     "finished": result["finished"],
+                    "run": run_tree_page(session, limit=1),
                 },
                 ensure_ascii=False,
             )
         )
     else:
         print(summary)
+        run = run_tree_page(session, limit=1)
+        if run.get("available"):
+            root = run["nodes"][0]
+            print(f"[run] {run['runId']} status={root['state']} reason={root['reason']} "
+                  f"limits={json.dumps(run['limits'])} usage={json.dumps(root['subtreeUsage'])}")
 
     # Write end-of-task report to reports.jsonl in the agent dir.
     report_path = None
@@ -161,6 +168,7 @@ async def run_run_mode(runtime_host: Any, options: dict[str, Any]) -> int:
                 "summary": summary,
                 "goalSuccess": result["goalSuccess"],
                 "finished": result["finished"],
+                "run": run_tree_page(session, limit=1),
                 "exitCode": 0 if result["finished"] and result["goalSuccess"] else 1,
                 "sessionId": getattr(session, "session_id", None),
                 "sessionFile": getattr(session, "session_file", None),

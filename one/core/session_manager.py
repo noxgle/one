@@ -139,6 +139,19 @@ class SessionManager:
             return None
         return Path(self._session_file + ".checkpoints")
 
+    def run_history(self):
+        """Return detached historical run storage, if this session is persistent."""
+        if not self._persist or not self._session_file:
+            return None
+        from one.core.run_history import RunHistory
+
+        return RunHistory(self._session_file, self.session_id)
+
+    def ensure_run_session(self) -> None:
+        """Persist the header before creating a run sidecar for an empty session."""
+        if self._persist and self._session_file and not Path(self._session_file).exists():
+            self._rewrite()
+
     def create_checkpoint_manager(self):
         from one.core.checkpoints import CheckpointManager
 
@@ -767,6 +780,10 @@ class SessionManager:
             "cwd": self._cwd,
             "parentSession": self._session_file,
         }
+        history = self.run_history()
+        runs = history.read() if history else []
+        if runs:
+            header["parentRunId"] = runs[-1]["runId"]
         if "subagentDepth" in self.get_header():
             header["subagentDepth"] = self.get_header()["subagentDepth"]
         self._entries = [header] + path
@@ -865,6 +882,10 @@ class SessionManager:
                 "parentSession": str(Path(source_path).resolve()),
             }
         ] + source.get_entries()
+        history = source.run_history()
+        runs = history.read() if history else []
+        if runs:
+            target._entries[0]["parentRunId"] = runs[-1]["runId"]
         target._reindex()
         target._rewrite()
         return target
@@ -933,6 +954,9 @@ class SessionManager:
         history = candidate.with_suffix(candidate.suffix + ".agents")
         if history.is_symlink() or (history.exists() and not history.is_file()):
             raise ValueError("Invalid subagent history sidecar")
+        runs = candidate.with_suffix(candidate.suffix + ".runs")
+        if runs.is_symlink() or (runs.exists() and not runs.is_file()):
+            raise ValueError("Invalid run history sidecar")
         checkpoints = candidate.with_suffix(candidate.suffix + ".checkpoints")
         if checkpoints.is_symlink():
             raise ValueError("Invalid checkpoint sidecar")
@@ -949,4 +973,5 @@ class SessionManager:
                 raise ValueError("Invalid session evidence sidecar")
             evidence.unlink()
         history.unlink(missing_ok=True)
+        runs.unlink(missing_ok=True)
         candidate.unlink()

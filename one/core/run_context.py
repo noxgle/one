@@ -13,7 +13,15 @@ from enum import StrEnum
 from fractions import Fraction
 from uuid import uuid4
 
+from one.core.provider_login import _redact_credentials
 from one.core.run_pricing import PriceSnapshot, TokenUsage
+from one.tools.common import sanitize_display_text
+
+MAX_TREE_PAGE_SIZE = 100
+SAFE_RUN_REASONS = frozenset({
+    "abort", "budget_exceeded", "cancelled", "deadline", "runtime_shutdown",
+    "spawn_not_started", "start_failed", "user_cancelled", "timeout", "parent_cancel", "user_cancel",
+})
 
 
 class NodeState(StrEnum):
@@ -125,10 +133,17 @@ class RunContext:
         self._signalled_nodes: set[str] = set()
         self._started_nodes: set[str] = set()
         self._attempts: dict[str, BudgetAttempt] = {}
+        self._revision = 0
+        self._on_change: Callable[[], None] | None = None
         self._deadline_fired = False
         self._deadline_timer: asyncio.TimerHandle | None = None
         if limits.max_time_sec:
             self._deadline_timer = (schedule or self._loop.call_later)(limits.max_time_sec, self._deadline_expired)
+
+    def _changed(self) -> None:
+        self._revision += 1
+        if self._on_change is not None:
+            self._on_change()
 
     def _deadline_expired(self) -> None:
         self._check_loop()
@@ -174,6 +189,7 @@ class RunContext:
             self.cancel_tasks_subtree(self._root_id, "budget_exceeded")
             raise ValueError("run cost budget exceeded")
         self._attempts[request_id] = BudgetAttempt(node_id, tokens, cost_usd)
+        self._changed()
 
     def reserve_priced(
         self, request_id: str, node_id: str, input_bound: int, output_bound: int, price: PriceSnapshot | None,
@@ -220,6 +236,7 @@ class RunContext:
                           tokens_known=tokens is not None, cost_known=cost_usd is not None,
                           state="uncertain" if tokens is None or cost_usd is None else "settled")
         self._attempts[request_id] = attempt
+        self._changed()
         # Reservations held by in-flight requests do not by themselves exhaust
         # the budget: they can still be released or settle below their bound.
         # Confirmed usage at the limit, however, must stop the whole tree.
@@ -237,6 +254,7 @@ class RunContext:
         attempt = self._attempts[request_id]
         if attempt.state == "reserved":
             self._attempts[request_id] = replace(attempt, tokens=0, cost_usd=Decimal(0), state="released")
+            self._changed()
         elif attempt.state != "released":
             raise ValueError("cannot release a settled attempt")
 
@@ -268,6 +286,102 @@ class RunContext:
         self._check_loop()
         return self._nodes[node_id]
 
+    def history_snapshot(self, previous_run_id: str | None = None) -> dict:
+        """Detach execution metadata without handles or monotonic timestamps."""
+        self._check_loop()
+        attempts = list(self._attempts.values())
+        tree = self.tree_snapshot()
+        nodes = tree["nodes"]
+        while tree["nextOffset"] is not None:
+            tree = self.tree_snapshot(offset=tree["nextOffset"])
+            nodes.extend(tree["nodes"])
+        return {
+            "runId": self._run_id,
+            "previousRunId": previous_run_id,
+            "rootNodeId": tree["rootNodeId"], "revision": tree["revision"],
+            "limits": tree["limits"], "nodes": nodes,
+            "aggregates": {
+                "tokens": sum(a.tokens for a in attempts if a.tokens_known),
+                "costUsd": str(sum((a.cost_usd for a in attempts if a.cost_known and a.cost_usd is not None),
+                                   Decimal(0))),
+                "unknownUsageAttempts": sum(not a.tokens_known or not a.cost_known for a in attempts
+                                            if a.state != "released"),
+            },
+        }
+
+    def tree_snapshot(self, *, offset: int = 0, limit: int = MAX_TREE_PAGE_SIZE) -> dict:
+        """Return a detached insertion-ordered page, aggregated over the entire tree.
+
+        Revision identifies changes to this view; callers paging across revisions
+        must restart. Usage includes confirmed dimensions only, reservations are
+        in-flight bounds, and uncertain bounds are reported separately.
+        """
+        self._check_loop()
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if type(limit) is not int or not 1 <= limit <= MAX_TREE_PAGE_SIZE:
+            raise ValueError(f"limit must be an integer between 1 and {MAX_TREE_PAGE_SIZE}")
+
+        def empty() -> dict:
+            return {"tokens": 0, "costUsd": Decimal(0), "reservedTokens": 0,
+                    "reservedCostUsd": Decimal(0), "unknownTokens": 0,
+                    "unknownCost": 0, "uncertainTokensBound": 0,
+                    "uncertainCostBoundUsd": Decimal(0)}
+
+        own = {node_id: empty() for node_id in self._nodes}
+        for attempt in self._attempts.values():
+            if attempt.state == "released":
+                continue
+            usage = own[attempt.node_id]
+            if attempt.state == "reserved":
+                usage["reservedTokens"] += attempt.tokens
+                if attempt.cost_usd is not None:
+                    usage["reservedCostUsd"] += attempt.cost_usd
+                else:
+                    usage["unknownCost"] += 1
+                continue
+            if attempt.tokens_known:
+                usage["tokens"] += attempt.tokens
+            else:
+                usage["unknownTokens"] += 1
+                usage["uncertainTokensBound"] += attempt.tokens
+            if attempt.cost_known:
+                usage["costUsd"] += attempt.cost_usd
+            else:
+                usage["unknownCost"] += 1
+                if attempt.cost_usd is not None:
+                    usage["uncertainCostBoundUsd"] += attempt.cost_usd
+
+        subtree = {node_id: values.copy() for node_id, values in own.items()}
+        nodes = list(self._nodes.values())
+        for node in reversed(nodes):
+            if node.parent_node_id is not None:
+                parent = subtree[node.parent_node_id]
+                for key, value in subtree[node.node_id].items():
+                    parent[key] += value
+
+        def detached(values: dict) -> dict:
+            return {key: str(value) if isinstance(value, Decimal) else value for key, value in values.items()}
+
+        def safe(value: str | None) -> str | None:
+            return _redact_credentials(sanitize_display_text(value))[:1024] if value is not None else None
+
+        return {
+            "runId": self._run_id, "rootNodeId": self._root_id, "revision": self._revision,
+            "offset": offset, "nextOffset": offset + limit if offset + limit < len(nodes) else None,
+            "totalNodes": len(nodes),
+            "limits": {"maxTokens": self._limits.max_tokens, "maxTimeSec": self._limits.max_time_sec,
+                       "maxCostUsd": str(self._limits.max_cost_usd),
+                       "maxActiveSubagents": self._limits.max_active_subagents},
+            "nodes": [
+                {"nodeId": safe(n.node_id), "parentNodeId": safe(n.parent_node_id),
+                 "sessionId": safe(n.session_id), "depth": n.depth, "state": n.state.value,
+                 "reason": n.reason if n.reason in SAFE_RUN_REASONS else None, "cleanupTimedOut": n.cleanup_timed_out,
+                 "ownUsage": detached(own[n.node_id]), "subtreeUsage": detached(subtree[n.node_id])}
+                for n in nodes[offset:offset + limit]
+            ],
+        }
+
     def register(self, parent_node_id: str, session_id: str, *, node_id: str | None = None) -> RunNode:
         return self.register_batch(parent_node_id, [(session_id, node_id)])[0]
 
@@ -292,6 +406,8 @@ class RunContext:
             ids.add(node_id)
             nodes.append(RunNode(self._run_id, node_id, parent_node_id, session_id, parent.depth + 1, NodeState.PENDING))
         self._nodes.update((node.node_id, node) for node in nodes)
+        if nodes:
+            self._changed()
         return nodes
 
     def start(self, node_id: str, task: asyncio.Task[object] | None = None) -> RunNode:
@@ -309,6 +425,7 @@ class RunContext:
         self._started_nodes.add(node_id)
         node = replace(node, state=NodeState.RUNNING)
         self._nodes[node_id] = node
+        self._changed()
         return node
 
     def cancel_pending_batch(self, node_ids: list[str], reason: str) -> None:
@@ -349,6 +466,7 @@ class RunContext:
             node = self._nodes[current]
             if node.state in (NodeState.PENDING, NodeState.RUNNING):
                 self._nodes[current] = replace(node, state=NodeState.CANCELLING, reason=reason)
+                self._changed()
                 self.cancellation_event(current).set()
 
     def cancellation_event(self, node_id: str) -> asyncio.Event:
@@ -361,8 +479,9 @@ class RunContext:
         self._check_loop()
         for current in self._subtree(node_id):
             node = self._nodes[current]
-            if node.state not in _TERMINAL:
+            if node.state not in _TERMINAL and not node.cleanup_timed_out:
                 self._nodes[current] = replace(node, cleanup_timed_out=True)
+                self._changed()
         if node_id == self._root_id and self._deadline_timer is not None:
             self._deadline_timer.cancel()
             self._deadline_timer = None
@@ -425,6 +544,7 @@ class RunContext:
         node = replace(node, state=state, reason=node.reason if node.state == NodeState.CANCELLING else reason,
                        finished_at=self._clock())
         self._nodes[node_id] = node
+        self._changed()
         self._tasks.pop(node_id, None)
         if node_id == self._root_id and self._deadline_timer is not None:
             self._deadline_timer.cancel()

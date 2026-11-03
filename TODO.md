@@ -4,7 +4,7 @@
 
 **P0: zarządzanie agentem głównym i wszystkimi potomkami jako jednym wykonaniem (`run`).** Wspólny budżet, hierarchiczny podgląd i anulowanie całego drzewa mają zachować autonomię delegowania bez mnożenia limitów ani pozostawiania osieroconej pracy.
 
-Stan dokumentu: fazy 1–2 (T001–T005) zaimplementowane; fazy 3–4 pozostają otwarte. Pełna weryfikacja offline: 2673 testy przeszły, 2 pominięto; Ruff i `git diff --check` zakończyły się powodzeniem (szczegóły poniżej). Ten dokument nie przenosi ani nie zmienia historycznej roadmapy z `tmp/subagents_TODO.md`.
+Stan dokumentu: fazy 1–3 (T001–T008) zaimplementowane; faza 4 pozostaje otwarta. Pełna weryfikacja offline: 2711 testów przeszło, 2 pominięto; Ruff i `git diff --check` zakończyły się powodzeniem (2026-11-03). Ten dokument nie przenosi ani nie zmienia historycznej roadmapy z `tmp/subagents_TODO.md`.
 
 ## Kontekst i dowody z repozytorium
 
@@ -171,32 +171,45 @@ Uruchomiono offline z tymczasowym `ONE_CODING_AGENT_DIR`:
 .venv/bin/python -m pytest -q tests/test_run_context.py tests/test_run_budget.py tests/test_run_pricing.py tests/test_run_usage.py tests/test_pricing_registry.py tests/test_run_budget_runtime.py tests/test_run_integration.py tests/test_run_cancellation.py
 ```
 
-Wynik ukierunkowany: **134 passed**. Następnie 2026-11-03 wykonano pełne bramki w wymaganej kolejności, z izolowanym `ONE_CODING_AGENT_DIR`: `.venv/bin/python -m pytest -q` — **2673 passed, 2 skipped**; `.venv/bin/ruff check .` — **All checks passed**; `git diff --check` — bez błędów. Pełny zestaw obejmuje regresje interfejsów, granicy runtime i zdarzeń. Przejście obecnych testów nie zamyka nowych scenariuszy i funkcji zaplanowanych w fazach 3–4.
+Wynik ukierunkowany: **134 passed**. Następnie wykonano pełne bramki w wymaganej kolejności, z izolowanym `ONE_CODING_AGENT_DIR`: `.venv/bin/python -m pytest -q` — **2673 passed, 2 skipped**; `.venv/bin/ruff check .` — **All checks passed**; `git diff --check` — bez błędów. Przejście obecnych testów nie zamyka nowych scenariuszy i funkcji zaplanowanych w fazach 3–4. Faza 3 ukończona, faza 4 otwarta.
 
-### Faza 3 — Historia i hierarchiczny monitoring
-- **Wynik:** spójne drzewo i liczniki dostępne bez dostępu UI do żywych sesji.
-- **Nakład / pewność:** L / średnia.
+### Faza 3 — Historia i hierarchiczny monitoring — zakończona
+- **Wynik:** spójne drzewo, liczniki i interfejsy zaimplementowane; faza 4 pozostaje otwarta.
+- **Nakład / pewność:** L / wysoka.
 
-- [ ] **T006 — Zapisać metadane run i bezpieczne odtworzenie historii**
+#### Weryfikacja fazy 3
+
+Uruchomiono offline z izolowanym `ONE_CODING_AGENT_DIR` (2026-11-03):
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+Wynik: **2711 passed, 2 skipped** (651.15 s); `.venv/bin/ruff check .` — **All checks passed**; `git diff --check` — bez błędów. Pełny zestaw obejmuje regresje interfejsów, granicy runtime i zdarzeń. Przejście obecnych testów nie zamyka nowych scenariuszy i funkcji zaplanowanych w fazach 3–4.
+
+- [x] **T006 — Zapisać metadane run i bezpieczne odtworzenie historii**
   - **Zmiany:** wersjonowane rekordy wykonania i agregatów w istniejącym systemie persistence/sidecar; nie nadpisywać jednego runId w nagłówku wielokrotnie używanej sesji. Po restarcie aktywne rekordy oznaczać `interrupted`; resume/fork rozpoczyna nowy run z odnośnikiem do historii, bez reaktywacji starych uchwytów.
   - **Pliki:** `one/core/session_manager.py`, `one/core/subagent_history.py`, `one/core/persistence.py`, `one/core/agent_session_runtime.py`; nowe `tests/test_run_history.py`, `tests/test_subagent_history.py`.
   - **Zależności:** T004, T005.
   - **Akceptacja:** stara sesja bez run metadata nadal się otwiera; częściowy zapis nie odtwarza aktywnego zadania; odczyt historii nie resetuje budżetu w aktywnym run; zachowane ceilings presetów i dotychczasowe sidecary.
   - **Weryfikacja:** `pytest -q tests/test_run_history.py tests/test_subagent_history.py tests/test_preset_sessions.py`; fixtures starych, uciętych i wielorunowych sesji, wyłącznie scratch state.
+  - **Dowody:** synchronous append/fsync metadata snapshots in `.runs` sidecars; interrupted runs persist safely; resume/fork links to history without reactivating old handles. No OS rollback. Ograniczenie: synchronous snapshot/fsync wprowadza opóźnienie I/O — brak asynchronicznej kolejki buforującej, przy wysokim obciążeniu zapisu może wpływać na czas odpowiedzi agenta.
 
-- [ ] **T007 — Udostępnić ograniczone snapshoty drzewa i kontrolę przez runtime**
+- [x] **T007 — Udostępnić ograniczone snapshoty drzewa i kontrolę przez runtime**
   - **Zmiany:** hierarchia, własne/agregowane usage, rezerwacje, limity i powody zatrzymania; stronicowanie węzłów i detali, revision/epoch, komendy cancel run/subtree z walidacją przynależności. Zdarzenia additive, sanitizowane; zachować istniejące bezpośrednie listy dzieci jako adapter zgodności.
   - **Pliki:** `one/core/subagent_monitor.py`, `one/core/agent_runtime_facade.py`, `one/core/tui_runtime_host.py`, `one/core/threaded_agent_runtime.py`; `tests/test_subagent_monitor.py`, `tests/test_agent_runtime_facade.py`, `tests/test_tui_runtime_boundary.py`.
   - **Zależności:** T005, T006.
   - **Akceptacja:** UI nie otrzymuje uchwytów sesji ani surowych wyników/sekretów; suma run zgadza się z ledgerem mimo retencji podglądów; stale epoch i obce nodeId nie anulują nowego run; drzewo nie powoduje nieograniczonego payloadu ani rekursji.
   - **Weryfikacja:** wskazane trzy moduły pytest; test szerokiego drzewa, paginacji, redakcji split credentials i przełączenia sesji w trakcie zdarzeń.
+  - **Dowody:** `one/core/run_context.py`, `one/core/tui_runtime_host.py`, `one/core/agent_runtime_facade.py`; `tests/test_subagent_monitor.py`, `tests/test_run_monitor.py`, `tests/test_run_runtime.py`; bounded epochs/revisions, SDK/runtime paging, uncertainty indicators, stale epoch protection, additive events, sanitized DTOs.
 
-- [ ] **T008 — Pokazać drzewo, budżet i anulowanie w interfejsach**
+- [x] **T008 — Pokazać drzewo, budżet i anulowanie w interfejsach**
   - **Zmiany:** rozwinąć istniejący inspector o hierarchię, postęp i pozostały budżet; anulowanie całości/wybranej gałęzi z czytelną informacją o nieodwracalności efektów. W headless/JSON/RPC udostępnić identyfikatory, status i podsumowanie; istniejący abort oznacza cały bieżący run. Utrzymać dotychczasowe exit codes i zdarzenia.
   - **Pliki:** `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `one/modes/run_mode.py`, `one/modes/print_mode.py`, `one/modes/interactive_mode.py`, `one/core/sdk.py`, `one/cli/main.py`; testy poszczególnych trybów w `tests/` (dokładne moduły ustalić w T001), `tests/test_tui_snapshots.py`.
   - **Zależności:** T007.
   - **Akceptacja:** użytkownik widzi wnuki i powód stopu; anulowanie gałęzi nie zatrzymuje innej; niepewny koszt jest oznaczony; opóźnione zdarzenie starego run nie zmienia aktualnego widoku. Pause inspektora i załadowana historia nie migoczą przy aktualizacji.
   - **Weryfikacja:** Textual pilot dla drzewa i cancel, snapshoty małego terminala, offline scenariusze RPC/JSON oraz regresja istniejącego inspektora i exit codes 0/1/2.
+  - **Dowody:** `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `one/core/sdk.py`; `tests/test_tui_run_tree.py`, `tests/test_tui_snapshots.py`, RPC/run/sdk test modules; TUI inspector `T` opens explicit refresh; run tree `C` branch, `W` whole, `Y` confirmation; headless/JSON/RPC expose IDs/status/summaries; exit codes 0/1/2 preserved.
 
 ### Faza 4 — Dowód działania i przygotowanie wydania
 - **Wynik:** kontrolowany rollout z udokumentowanymi ograniczeniami.
@@ -210,7 +223,7 @@ Wynik ukierunkowany: **134 passed**. Następnie 2026-11-03 wykonano pełne bramk
   - **Weryfikacja:** implementer ustawia `export ONE_CODING_AGENT_DIR="$(mktemp -d)"` w zachowanej powłoce; następnie `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check .`, `git diff --check` — w tej kolejności. Zero realnych API/MCP; explicit `@pytest.mark.asyncio`.
 
 - [ ] **T010 — Udokumentować i przygotować zgodne wydanie**
-  - **Zmiany:** opisać run lifetime, konfigurację opt-in i przykład budżetu, odrzucanie spawnów bez deadlocku, koszty estymowane, brak sandboxa/rollback efektów, resume i diagnostykę. Wersja jest już `0.1.127`, a snapshoty zaktualizowano wcześniej; nie wymaga to kolejnego bumpa. Unreleased i konfigurację fazy 2 opisano tutaj, ale końcowy przegląd dokumentacji/wydania i pełne bramki nadal są otwarte.
+  - **Zmiany:** opisać run lifetime, konfigurację opt-in i przykład budżetu, odrzucanie spawnów bez deadlocku, koszty estymowane, brak sandboxa/rollback efektów, resume i diagnostykę. Wersja jest już `0.1.128`, a snapshoty zaktualizowano wcześniej; nie wymaga to kolejnego bumpa. Unreleased i konfigurację fazy 2 opisano tutaj, ale końcowy przegląd dokumentacji/wydania i pełne bramki nadal są otwarte.
   - **Pliki:** `README.md`, nowe `docs/RUNS.md`, `CHANGELOG.md`, `one/config.py`, `tests/snapshots/tui/`, `tests/test_tui_snapshots.py`.
   - **Zależności:** T009.
   - **Akceptacja:** użytkownik odróżnia runBudget od legacy budget; dokumentacja nie obiecuje limitu faktury ani cofnięcia efektów; wersja pochodzi z `one/config.py`; brak publikacji/tagowania bez osobnej zgody.

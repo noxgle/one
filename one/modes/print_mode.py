@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from one.core.sdk import run_tree_page
+
 
 async def run_print_mode(runtime_host: Any, options: dict[str, Any]) -> int:
     session = runtime_host.session
@@ -34,7 +36,7 @@ async def run_print_mode(runtime_host: Any, options: dict[str, Any]) -> int:
     if options.get("mode") == "json":
         import json
 
-        print(json.dumps({"messages": session.messages}, ensure_ascii=False))
+        print(json.dumps({"messages": session.messages, "run": run_tree_page(session, limit=1)}, ensure_ascii=False))
     else:
         last = session.get_last_assistant_text()
         if last:

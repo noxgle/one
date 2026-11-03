@@ -10,10 +10,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Documentation
 
-- **Phase 2 status** — T003–T005 implementation and limitations are documented in
-  [TODO.md](TODO.md). Focused offline verification: 134 tests passed; full-suite
-  verification remains pending. History/monitoring and final regression/release
-  work (phases 3–4) remain open. Existing version `0.1.127` is unchanged.
+- **Phase 3 status** — T006–T008 implementation (run history, bounded monitoring snapshots, and UI/CLI/RPC/SDK interfaces) is documented in
+  [TODO.md](TODO.md). Phase 4 (end-to-end verification and release preparation) remains open; full offline verification completed 2026-11-03: `.venv/bin/python -m pytest -q` — **2711 passed, 2 skipped** (651.15 s); `.venv/bin/ruff check .` — **All checks passed**; `git diff --check` — no errors.
 
 - **Preset documentation** — document current frontmatter validation and file limits,
   MCP server selection, wildcard and omission behavior, reserved preset ID collisions,
@@ -72,6 +70,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   and labelled action buttons adapts to smaller terminals.
 
 ### Added
+
+- Run-tree inspection in the TUI, with budget and uncertainty indicators,
+  revision-pinned pagination, and confirmed cancellation. Programmatic run
+  summaries in headless and JSON output, and RPC/SDK run-tree
+  pagination and identity-checked run or subtree cancellation. Cancellation does
+  not undo external effects; unknown usage and cost remain explicitly marked.
 
 - **Preset model overrides** — configure per-preset models in global or project
   settings without editing preset files. Explicit model selections retain priority;

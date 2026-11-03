@@ -398,6 +398,19 @@ class AgentRuntimeFacade:
     async def list_checkpoints(self, epoch: int) -> dict[str, Any]:
         return await self.command("checkpoints", {"action": "list", "epoch": epoch})
 
+    async def run_tree_page(self, epoch: int, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+        return await self.command("run_tree_page", {"epoch": epoch, "offset": offset, "limit": limit})
+
+    async def run_history_page(self, epoch: int, run_id: str, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+        return await self.command("run_history_page", {"epoch": epoch, "run_id": run_id,
+                                                       "offset": offset, "limit": limit})
+
+    async def cancel_run(self, epoch: int, run_id: str) -> dict[str, Any]:
+        return await self.command("cancel_run", {"epoch": epoch, "run_id": run_id})
+
+    async def cancel_run_subtree(self, epoch: int, run_id: str, node_id: str) -> dict[str, Any]:
+        return await self.command("cancel_run_subtree", {"epoch": epoch, "run_id": run_id, "node_id": node_id})
+
     async def prepare_checkpoint_undo(self, checkpoint_id: str, epoch: int,
                                       paths: list[str] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {"action": "prepare", "id": checkpoint_id, "epoch": epoch}

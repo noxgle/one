@@ -17,6 +17,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -1132,6 +1133,187 @@ if TEXTUAL_AVAILABLE:
         def __init__(self, value: str) -> None:
             self.value = value
             super().__init__()
+
+    class _RunTreeInspector(ModalScreen[None]):
+        """Explicitly refreshed, detached view of the current run tree."""
+
+        BINDINGS = [
+            ("escape", "back", "Back"), ("r", "refresh_tree", "Refresh"),
+            ("n", "next_page", "Next"), ("p", "previous_page", "Previous"),
+            ("c", "cancel_node", "Cancel subtree"), ("w", "cancel_all", "Cancel run"),
+            ("y", "confirm_cancel", "Confirm"),
+        ]
+        DEFAULT_CSS = """
+        _RunTreeInspector { align: center middle; background: $background 75%; }
+        #run-tree { width: 95%; height: 90%; border: round $primary; padding: 0 1; background: $panel; }
+        #run-tree-list { height: 1fr; }
+        #run-tree-details { height: auto; max-height: 9; overflow-y: auto; }
+        #run-tree-notice { height: auto; color: $warning; }
+        """
+
+        def __init__(self, session: TuiSessionView) -> None:
+            super().__init__()
+            self.session = session
+            self.epoch = session.epoch
+            self.page: dict[str, Any] = {}
+            self.page_offset = 0
+            self.previous: list[int] = []
+            self.pending: tuple[str, str, str | None] | None = None
+            self._request = 0
+            self.root_usage: dict[str, Any] = {}
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="run-tree"):
+                yield Static("Run tree · ↑/↓ select · N/P pages · R refresh · C subtree · W whole run · Esc back")
+                yield Static("", id="run-tree-summary", markup=False)
+                yield OptionList(id="run-tree-list", markup=False)
+                yield Static("", id="run-tree-details", markup=False)
+                yield Static("", id="run-tree-notice", markup=False)
+
+        async def on_mount(self) -> None:
+            await self._load(0)
+            self.query_one("#run-tree-list", OptionList).focus()
+
+        async def _load(self, offset: int, *, pinned: bool = False) -> bool:
+            self.pending = None
+            self._request += 1
+            request = self._request
+            try:
+                reply = await self.session._facade.run_tree_page(self.epoch, offset, 20)
+                if (request != self._request or self.session.epoch != self.epoch
+                        or getattr(self.app, "session", self.session) is not self.session or not self.is_attached):
+                    return False
+                page = reply.get("result")
+                if not isinstance(page, dict) or page.get("epoch") != self.epoch:
+                    raise ValueError(str(reply.get("error") or "Session changed or run tree unavailable"))
+                if pinned and (page.get("runId"), page.get("revision")) != (
+                    self.page.get("runId"), self.page.get("revision")
+                ):
+                    raise ValueError("Run or revision changed; press R to restart from the first page")
+                if not offset:
+                    self.previous.clear()
+                    nodes = page.get("nodes", [])
+                    self.root_usage = nodes[0].get("subtreeUsage", {}) if nodes else {}
+                self.page = page
+                self.page_offset = offset
+                self._render_page()
+                self.query_one("#run-tree-notice", Static).update("")
+                return True
+            except Exception as exc:
+                if (request == self._request and self.session.epoch == self.epoch and self.is_attached
+                        and getattr(self.app, "session", self.session) is self.session):
+                    self.query_one("#run-tree-notice", Static).update(f"Run tree refresh failed: {exc}")
+                return False
+
+        def _render_page(self) -> None:
+            listing = self.query_one("#run-tree-list", OptionList)
+            nodes = self.page.get("nodes", [])
+            listing.set_options([
+                Option(f"{'  ' * min(node['depth'], 40)}{node['sessionId']} · {node['state']}"
+                       + (f" · {node['reason']}" if node.get("reason") else ""))
+                for node in nodes
+            ])
+            if nodes:
+                listing.highlighted = 0
+            limits = self.page.get("limits", {})
+            usage = self.root_usage
+
+            def budget(label: str, limit_key: str, used_key: str, reserved_key: str, uncertain_key: str) -> str:
+                limit = Decimal(str(limits.get(limit_key, 0)))
+                used = Decimal(str(usage.get(used_key, 0)))
+                reserved = Decimal(str(usage.get(reserved_key, 0)))
+                uncertain = Decimal(str(usage.get(uncertain_key, 0)))
+                remaining = str(max(Decimal(0), limit - used - reserved - uncertain)) if limit else "unlimited"
+                return f"{label}: {used} used, {reserved} reserved, {uncertain} uncertain bound; remaining {remaining}*"
+
+            summary = (f"Run {self.page.get('runId')} · nodes {self.page_offset + 1}–{self.page_offset + len(nodes)}"
+                       f" / {self.page.get('totalNodes')}\n"
+                       f"{budget('Tokens', 'maxTokens', 'tokens', 'reservedTokens', 'uncertainTokensBound')}\n"
+                       f"{budget('USD', 'maxCostUsd', 'costUsd', 'reservedCostUsd', 'uncertainCostBoundUsd')}\n"
+                       "*Based on reported bounds; unknown usage may be unbounded.\n"
+                       f"Time limit: {limits.get('maxTimeSec', 0) or 'unlimited'} s · "
+                       f"Active subagent limit: {limits.get('maxActiveSubagents', 0) or 'unlimited'}") if self.page.get("available") else "No run available."
+            self.query_one("#run-tree-summary", Static).update(summary)
+            self._details()
+
+        def _details(self) -> None:
+            index = self.query_one("#run-tree-list", OptionList).highlighted
+            nodes = self.page.get("nodes", [])
+            node = nodes[index] if index is not None and index < len(nodes) else None
+            def describe(usage: dict[str, Any]) -> str:
+                return (f"{usage['tokens']} tokens / ${usage['costUsd']} used; "
+                        f"{usage['reservedTokens']} tokens / ${usage['reservedCostUsd']} reserved; "
+                        f"unknown tokens {usage['unknownTokens']}, cost {usage['unknownCost']} "
+                        f"(bounds {usage['uncertainTokensBound']} tokens / ${usage['uncertainCostBoundUsd']})")
+
+            text = (f"Node {node['nodeId']} · depth {node['depth']} · parent {node['parentNodeId']}\n"
+                    f"State: {node['state']} · reason: {node.get('reason') or 'none'}\n"
+                    f"Own: {describe(node['ownUsage'])}\nSubtree: {describe(node['subtreeUsage'])}") if node else ""
+            self.query_one("#run-tree-details", Static).update(text)
+
+        def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+            self.pending = None
+            self._details()
+
+        async def action_refresh_tree(self) -> None:
+            await self._load(0)
+
+        async def action_next_page(self) -> None:
+            next_offset = self.page.get("nextOffset")
+            old_offset = self.page_offset
+            if next_offset is not None and await self._load(next_offset, pinned=True):
+                self.previous.append(old_offset)
+
+        async def action_previous_page(self) -> None:
+            if self.previous and await self._load(self.previous[-1], pinned=True) and self.previous:
+                self.previous.pop()
+
+        def _prepare_cancel(self, whole: bool) -> None:
+            index = self.query_one("#run-tree-list", OptionList).highlighted
+            nodes = self.page.get("nodes", [])
+            if not self.page.get("runId") or (not whole and (index is None or index >= len(nodes))):
+                return
+            node_id = None if whole else nodes[index]["nodeId"]
+            self.pending = ("run" if whole else "subtree", self.page["runId"], node_id)
+            self.query_one("#run-tree-notice", Static).update(
+                f"Cancel {'whole run' if whole else 'subtree ' + str(node_id)}? "
+                "External effects are irreversible and are not rolled back. Press Y to confirm; R to abort."
+            )
+
+        def action_cancel_node(self) -> None:
+            self._prepare_cancel(False)
+
+        def action_cancel_all(self) -> None:
+            self._prepare_cancel(True)
+
+        async def action_confirm_cancel(self) -> None:
+            if self.pending is None:
+                return
+            kind, run_id, node_id = self.pending
+            self.pending = None
+            request = self._request
+            try:
+                if kind == "run":
+                    reply = await self.session._facade.cancel_run(self.epoch, run_id)
+                else:
+                    reply = await self.session._facade.cancel_run_subtree(self.epoch, run_id, node_id)
+                if (request != self._request or self.session.epoch != self.epoch or not self.is_attached
+                        or getattr(self.app, "session", self.session) is not self.session):
+                    return
+                result = reply.get("result") if isinstance(reply, dict) else None
+                if not isinstance(result, dict):
+                    self.query_one("#run-tree-notice", Static).update("Cancellation failed: invalid response from runtime.")
+                    return
+                message = "Cancellation requested." if result.get("accepted") else "Cancellation rejected (run or session changed)."
+                if await self._load(0):
+                    self.query_one("#run-tree-notice", Static).update(message)
+            except Exception as exc:
+                if (request == self._request and self.session.epoch == self.epoch and self.is_attached
+                        and getattr(self.app, "session", self.session) is self.session):
+                    self.query_one("#run-tree-notice", Static).update(f"Cancellation failed: {exc}")
+
+        def action_back(self) -> None:
+            self.dismiss()
 
     class _McpBrowser(ModalScreen[None]):
         """Safe status browser; Enter inspects, only a button changes state."""
@@ -5527,10 +5709,15 @@ if TEXTUAL_AVAILABLE:
 
         def _handle_agents_panel_key(self, event: events.Key) -> bool:
             """Handle panel navigation from either the input or the app."""
-            if not self._agents_panel_open or event.key not in {"left", "right", "up", "down", "escape", "home", "end", "pageup", "pagedown", "n", "p", "tab", "shift+tab"}:
+            if isinstance(self.screen, _RunTreeInspector):
+                return False
+            if not self._agents_panel_open or event.key not in {"left", "right", "up", "down", "escape", "home", "end", "pageup", "pagedown", "n", "p", "tab", "shift+tab", "t"}:
                 return False
             if event.key == "escape":
                 self._close_agents_panel()
+            elif event.key == "t":
+                if isinstance(self.session, TuiSessionView):
+                    self.push_screen(_RunTreeInspector(self.session))
             elif event.key in {"tab", "shift+tab"}:
                 pass
             elif event.key in {"left", "right"}:
@@ -5720,7 +5907,7 @@ if TEXTUAL_AVAILABLE:
                             if item.get("output"):
                                 text += ("\nResult:\n" if item.get("ok") else "\nError:\n") + str(item["output"])
                             self._append_agent_entry(content, {"kind": "tool", "text": text})
-            footer = "←/→: agent · ↑/↓: scroll\nHome/End · PgUp/PgDn · N/P · Esc: close"
+            footer = "←/→: agent · ↑/↓: scroll\nHome/End · PgUp/PgDn · N/P · T: run tree · Esc: close"
             try:
                 for selector, rendered in (("#agents_help", header), ("#agents_content", content),
                                            ("#agents_footer", Text(footer, style="dim"))):

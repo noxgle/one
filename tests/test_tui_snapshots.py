@@ -348,6 +348,38 @@ async def test_tui_snapshot_widget_panel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tui_snapshot_run_tree_narrow() -> None:
+    from one.modes.tui_mode import TuiSessionView, _OneTextualApp, _RunTreeInspector
+
+    usage = {"tokens": 12, "costUsd": "0.1", "reservedTokens": 3, "reservedCostUsd": "0.02",
+             "unknownTokens": 1, "unknownCost": 1, "uncertainTokensBound": 5,
+             "uncertainCostBoundUsd": "0.03"}
+
+    class Facade:
+        async def run_tree_page(self, epoch, offset, limit):
+            return {"result": {"epoch": epoch, "available": True, "runId": "run-1", "revision": 1,
+                    "totalNodes": 1, "nextOffset": None,
+                    "limits": {"maxTokens": 100, "maxCostUsd": "1", "maxTimeSec": 0,
+                               "maxActiveSubagents": 0},
+                    "nodes": [{"nodeId": "node-1", "parentNodeId": None, "sessionId": "root",
+                               "depth": 0, "state": "running", "reason": None,
+                               "ownUsage": usage, "subtreeUsage": usage}]}}
+
+    app = _OneTextualApp(_DummySession())
+    async with app.run_test(size=(60, 30)) as pilot:
+        await pilot.pause()
+        original = app.session
+        app.session = TuiSessionView(Facade())
+        app.push_screen(_RunTreeInspector(app.session))
+        await _settle_snapshot(pilot, app)
+        content = _capture_content(app)
+        assert "remaining" in content
+        _check_snapshot("run_tree_narrow", content, update=UPDATE)
+        await pilot.press("escape")
+        app.session = original
+
+
+@pytest.mark.asyncio
 async def test_tui_snapshot_agents() -> None:
     """Current-session direct-child monitor with a selected preview."""
     from one.modes.tui_mode import _OneTextualApp
