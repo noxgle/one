@@ -11,6 +11,7 @@ from one.config import get_models_path
 from one.core.auth_storage import AuthStorage
 from one.core.model_catalog import ModelCatalog
 from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_private_file, load_json_text_safe
+from one.core.run_pricing import PriceSnapshot
 from one.core.types import ModelInfo
 
 
@@ -149,6 +150,7 @@ class ModelRegistry:
                                 ModelInfo(
                                     provider=provider,
                                     id=model["id"],
+                                    pricing=self._load_pricing(provider, model["id"], model),
                                     reasoning=model.get("reasoning", True),
                                     context_window=_positive_limit(model.get("contextWindow")),
                                     base_url=model.get("url") or model.get("baseUrl"),
@@ -187,6 +189,31 @@ class ModelRegistry:
         out = self._errors[:]
         self._errors = []
         return out
+
+    def _load_pricing(self, provider: str, model: str, entry: dict[str, Any]) -> PriceSnapshot | None:
+        if "pricing" not in entry:
+            return None
+        try:
+            return PriceSnapshot.from_config(provider, model, entry["pricing"])
+        except (ValueError, TypeError) as error:
+            self._errors.append({"scope": "models", "error": ValueError(
+                f"Invalid pricing for {provider}/{model}: {error}"
+            )})
+            return None
+
+    def get_price_snapshot(self, model: ModelInfo) -> PriceSnapshot | None:
+        """Exact registered identity/endpoint only; no catalogue or alias fallback.
+
+        The immutable result is captured at reservation so later registry
+        changes cannot reprice an in-flight request.
+        """
+        registered = self.find(model.provider, model.id)
+        if registered is None or registered.base_url != model.base_url:
+            return None
+        price = registered.pricing
+        if price is None or (price.provider, price.model) != (model.provider, model.id):
+            return None
+        return price
 
     @staticmethod
     def _dedupe_models(models: list[ModelInfo]) -> list[ModelInfo]:
@@ -229,6 +256,7 @@ class ModelRegistry:
                         catalog_baseline=m.catalog_baseline,
                         catalog_values=m.catalog_values,
                         endpoint_fields=m.endpoint_fields,
+                        pricing=m.pricing,
                     )
                 else:
                     out[idx] = m

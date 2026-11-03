@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from one.core.run_pricing import PriceSnapshot
+
 ThinkingLevel = Literal["off", "on", "minimal", "low", "medium", "high", "xhigh"]
 
 
@@ -36,6 +38,7 @@ class ModelInfo:
     catalog_baseline: dict[str, int | None] = field(default_factory=dict)
     catalog_values: dict[str, int] = field(default_factory=dict)
     endpoint_fields: frozenset[str] = field(default_factory=frozenset)
+    pricing: PriceSnapshot | None = None
 
 
 @dataclass

@@ -41,6 +41,8 @@ from one.core.model_catalog import REFRESH_TTL_SECONDS
 from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.presets import PresetDefinition, PresetError, apply_preset_overrides, discover_presets
+from one.core.run_context import NodeState, RunContext
+from one.core.run_usage import normalize_usage
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import THINKING_LEVELS, SettingsManager
 from one.core.subagent_monitor import SubagentMonitor
@@ -63,6 +65,7 @@ approval_callback_origin: ContextVar[AgentSession | None] = ContextVar("approval
 
 # Grace period added to the effective tool timeout for the outer asyncio.wait_for backstop.
 _TOOL_TIMEOUT_GRACE_SEC = 5
+_RUN_CLEANUP_TIMEOUT_SEC = 1.0
 
 # Fallback is an internal estimate only: API/TUI metadata continues to say
 # unknown.  The reserve prevents an unknown-output model from consuming all of
@@ -75,8 +78,16 @@ DEFAULT_OUTPUT_RESERVE = _DEFAULT_OUTPUT_RESERVE  # compatibility export
 # Session exceptions
 # ---------------------------------------------------------------------------
 
+class _RunAdmissionError(RuntimeError):
+    """A request cannot safely be admitted to the shared run budget."""
+
+
 class BusySessionError(Exception):
     """Raised when an action is attempted during an active streaming session."""
+
+
+class RunCleanupTimeoutError(RuntimeError):
+    """Cancellation grace expired; external effects and session state are unknown."""
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +275,9 @@ class AgentSession:
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self.subagent_monitor = SubagentMonitor(self.session_manager.session_file)
         self._activity_callback = activity_callback
+        self._run_context: RunContext | None = None
+        self._run_node_id: str | None = None
+        self._last_run_context: RunContext | None = None
         self._is_streaming = False
         self._is_compacting = False
         self._retrying = False
@@ -2255,6 +2269,12 @@ class AgentSession:
                 "timedOut": True,
             }
         except asyncio.CancelledError:
+            # Cancellation of the owning prompt must reach _run_operation so
+            # it closes admission and joins the execution tree. Only a locally
+            # cancelled tool (e.g. abort()) is converted into a tool result.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
             payload: dict[str, Any] = {
                 "ok": False,
                 "tool": tool_name,
@@ -2497,9 +2517,39 @@ class AgentSession:
         if tool_names is not None and (preset is not None or self._preset is not None):
             preset = replace(preset or self._preset, tools=tuple(sub_tools))
 
+        requested_tasks = [task] if task else tasks
+        context = self._run_context
+        if context is None:
+            return await self._run_operation(lambda: self._spawn_subagent(args, timeout_sec))
+        assert self._run_node_id is not None
+        managers = [SessionManager(self.session_manager.cwd, self.session_manager.session_dir, None,
+                                   self.session_manager.session_file is not None) for _ in requested_tasks]
+        try:
+            nodes = context.register_batch(self._run_node_id, [(manager.session_id, None) for manager in managers])
+        except ValueError as error:
+            raise _RunAdmissionError(str(error)) from error
+        jobs: list[asyncio.Task[Any]] = []
+        try:
+            for child_task, manager, node in zip(requested_tasks, managers, nodes, strict=True):
+                jobs.append(asyncio.create_task(self._run_subagent(
+                    child_task, sub_model, sub_tools, depth, temperature=child_temperature,
+                    thinking_level=child_thinking, timeout_sec=timeout_sec, preset=preset,
+                    mcp_server_ceiling=child_servers, run_manager=manager, run_node_id=node.node_id,
+                )))
+            results = await asyncio.gather(*jobs)
+        finally:
+            for job in jobs:
+                if not job.done():
+                    job.cancel()
+            if jobs:
+                await asyncio.gather(*jobs, return_exceptions=True)
+            pending = [node.node_id for node in nodes
+                       if context.node(node.node_id).state in (NodeState.PENDING, NodeState.CANCELLING)
+                       and context.task(node.node_id) is None]
+            if pending:
+                context.cancel_pending_batch(pending, "spawn_not_started")
         if task:
-            return await self._run_subagent(task, sub_model, sub_tools, depth, temperature=child_temperature, thinking_level=child_thinking, timeout_sec=timeout_sec, preset=preset, mcp_server_ceiling=child_servers)
-        results = await asyncio.gather(*(self._run_subagent(t, sub_model, sub_tools, depth, temperature=child_temperature, thinking_level=child_thinking, timeout_sec=timeout_sec, preset=preset, mcp_server_ceiling=child_servers) for t in tasks))
+            return results[0]
         # Aggregate: per-child results + top-level ok + error when any fails.
         all_ok = all(r.get("ok") for r in results)
         combined = "\n".join(f"- {r.get('summary', '(no summary)')}" for r in results)
@@ -2576,13 +2626,13 @@ class AgentSession:
         self._tool_images.append(image)
 
     async def _run_subagent(
-        self, task: str, sub_model: Any, sub_tools: list[str], depth: int, temperature: float | None = None, thinking_level: str | None = None, *, timeout_sec: int | None = None, preset: PresetDefinition | None = None, mcp_server_ceiling: frozenset[str] | None = None
+        self, task: str, sub_model: Any, sub_tools: list[str], depth: int, temperature: float | None = None, thinking_level: str | None = None, *, timeout_sec: int | None = None, preset: PresetDefinition | None = None, mcp_server_ceiling: frozenset[str] | None = None, run_manager: SessionManager | None = None, run_node_id: str | None = None
     ) -> dict[str, Any]:
         # Use the parent's session_dir so subagent files go to the same directory.
         # Use __init__ directly to bypass SessionManager.create()'s "session_dir or
         # get_default_session_dir()" fallback (empty string would be treated as falsy).
         persist = self.session_manager.session_file is not None
-        manager = SessionManager(
+        manager = run_manager or SessionManager(
             self.session_manager.cwd,
             self.session_manager.session_dir,
             None,  # new session file
@@ -2630,6 +2680,12 @@ class AgentSession:
             tool_policy=self._tool_policy.intersect(set(sub_tools)),
         )
         sub.providers = self.providers
+        if self._run_context is not None:
+            if run_node_id is None:
+                assert self._run_node_id is not None
+                run_node_id = self._run_context.register(self._run_node_id, manager.session_id).node_id
+            sub._run_context = self._run_context
+            sub._run_node_id = run_node_id
 
         last_event = "started"
         last_tool_name = "unknown"
@@ -2713,7 +2769,7 @@ class AgentSession:
         watchdog_task: asyncio.Task[str] | None = None
         self._emit({"type": "subagent_start", "sessionId": sub_id, "task": task_id})
         try:
-            child_task = asyncio.create_task(sub.prompt(task_id))
+            child_task = asyncio.create_task(sub._run_operation(lambda: sub.prompt(task_id)))
             watchdog_task = asyncio.create_task(watchdog.wait_for_expiry())
             done, _ = await asyncio.wait({child_task, watchdog_task}, return_when=asyncio.FIRST_COMPLETED)
             if watchdog_task in done and not child_task.done():
@@ -2871,6 +2927,13 @@ class AgentSession:
             # Preserve the existing lifecycle event payload while recording the
             # distinct monitor outcome and propagating cancellation unchanged.
             cancelled = True
+            # Signal the child before cancelling its prompt task: abort also
+            # stops shell work and wakes pending questions, and cancellation of
+            # its active spawn tool propagates the same cleanup to descendants.
+            try:
+                await sub.abort()
+            except Exception:
+                pass
             raise
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
@@ -2894,6 +2957,10 @@ class AgentSession:
         finally:
             for pending in (watchdog_task, child_task):
                 if pending is not None and not pending.done():
+                    if (pending is child_task and sub._run_context is not None
+                            and sub._run_node_id is not None
+                            and sub._run_context.node(sub._run_node_id).state == NodeState.CANCELLING):
+                        continue
                     pending.cancel()
             pending_tasks = [pending for pending in (watchdog_task, child_task) if pending is not None]
             if pending_tasks:
@@ -3387,7 +3454,106 @@ class AgentSession:
         await self.set_model(nxt)
         return ModelCycleResult(model=nxt, thinkingLevel=self.thinking_level, isScoped=False)
 
+    async def _run_operation(self, operation: Callable[[], Awaitable[Any]]) -> Any:
+        """Own one node until its operation (including queue drains) has joined."""
+        context = self._run_context
+        if context is not None and self._run_node_id is not None:
+            node = context.node(self._run_node_id)
+            if node.cleanup_timed_out:
+                raise RunCleanupTimeoutError("Run cleanup timed out; session cannot safely admit work")
+            if node.state == NodeState.RUNNING:
+                return await operation()
+            if node.state != NodeState.PENDING:
+                raise RuntimeError("Run no longer admits work")
+        else:
+            context = RunContext(self.session_id, self.settings_manager.get_run_limits())
+            self._run_context = context
+            self._run_node_id = context.root_id
+        node_id = self._run_node_id
+        assert node_id is not None
+        task: asyncio.Task[Any] | None = None
+        cancel_wait: asyncio.Task[Any] | None = None
+        state = NodeState.COMPLETED
+        try:
+            context._owners[node_id] = asyncio.current_task()
+            task = asyncio.create_task(operation())
+            context.start(node_id, task)
+            cancel_wait = asyncio.create_task(context.cancellation_event(node_id).wait())
+            await asyncio.wait({task, cancel_wait}, return_when=asyncio.FIRST_COMPLETED)
+            # A completed operation owns its outcome, including admission errors.
+            # abort() wakes/cancels its active work through the legacy paths;
+            # let those paths persist the abort message and lifecycle events.
+            if not task.done() and cancel_wait.done():
+                if context.node(node_id).reason == "abort":
+                    await asyncio.wait({task}, timeout=_RUN_CLEANUP_TIMEOUT_SEC)
+                if not task.done():
+                    raise asyncio.CancelledError
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            state = NodeState.CANCELLED
+            context.cancel_tasks_subtree(node_id, "cancelled")
+            self._abort_requested = True
+            self.abort_bash()
+            for active in (*self._active_tool_tasks, *self._active_chat_tasks):
+                if not active.done():
+                    active.cancel()
+            for entry in self._pending_questions.values():
+                entry["event"].set()
+            current = asyncio.current_task()
+            if context.node(node_id).reason != "abort" or (current is not None and current.cancelling()):
+                raise
+        except BaseException:
+            state = NodeState.FAILED
+            raise
+        finally:
+            if cancel_wait is not None:
+                cancel_wait.cancel()
+                await asyncio.gather(cancel_wait, return_exceptions=True)
+            if context.node(node_id).state == NodeState.CANCELLING:
+                unfinished = await context.cancel_and_wait_subtree(
+                    node_id, context.node(node_id).reason or "cancelled", timeout=_RUN_CLEANUP_TIMEOUT_SEC,
+                )
+                active = {t for t in (*self._active_tool_tasks, *self._active_chat_tasks) if not t.done()}
+                if active and not unfinished:
+                    _, active = await asyncio.wait(active, timeout=_RUN_CLEANUP_TIMEOUT_SEC)
+                if unfinished or active:
+                    context.mark_cleanup_timeout(node_id)
+                    self._last_run_context = context
+                    for pending in ({task} if task is not None else set()) | active:
+                        pending.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+                    raise RunCleanupTimeoutError(
+                        "Run cleanup timed out; external state is unknown and this session is blocked"
+                    )
+            if task is not None and task.done() and not task.cancelled():
+                task.exception()
+            node = context.node(node_id)
+            if node.state == NodeState.CANCELLING:
+                state = NodeState.CANCELLED
+            elif getattr(self, "_subagent_provider_failure", None):
+                state = NodeState.FAILED
+            if node.state == NodeState.PENDING:
+                context.cancel_subtree(node_id, "start_failed")
+                state = NodeState.CANCELLED
+            context.finalize(node_id, state)
+            context._owners.pop(node_id, None)
+            self._last_run_context = context
+            self._run_context = None
+            self._run_node_id = None
+
     async def _invoke_provider(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        allow_live_stream: bool = True,
+        count_output_generation: bool = True,
+        purpose: str = "response",
+    ) -> dict[str, Any]:
+        return await self._run_operation(lambda: self._invoke_provider_impl(
+            messages, allow_live_stream=allow_live_stream,
+            count_output_generation=count_output_generation, purpose=purpose,
+        ))
+
+    async def _invoke_provider_impl(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -3570,9 +3736,34 @@ class AgentSession:
         # Listeners may mutate their event argument. Keep this captured request
         # metadata separate so provider end events and durable timing retain
         # their original correlation fields.
+        context = self._run_context
+        assert context is not None and self._run_node_id is not None
+        input_bound = 0
+        output_bound = chat_kwargs.get("max_tokens", 0)
+        if context.limits.max_tokens or context.limits.max_cost_usd:
+            # Estimates are not enforceable bounds. Only a known endpoint total
+            # or input cap can bound a paid request without adapter changes.
+            capacity = valid_limit(self.model.input_limit)
+            total = self._context_budget().selected_context_window
+            if total is not None:
+                capacity = min(capacity, total) if capacity else total
+            if not capacity or not output_bound:
+                raise _RunAdmissionError("runBudget requires known input capacity and an enforceable output limit")
+            input_bound = capacity
+        else:
+            input_bound = self._current_request_tokens(messages)
+        try:
+            # Capture an explicit registry schedule for this exact identity.
+            price_lookup = getattr(self.model_registry, "get_price_snapshot", None)
+            price = price_lookup(self.model) if callable(price_lookup) else None
+            context.reserve_priced(provider_request_id, self._run_node_id, input_bound, output_bound,
+                                   price, price_is_applicable=price is not None)
+        except ValueError as error:
+            raise _RunAdmissionError(str(error)) from error
         self._emit(dict(provider_event))
         provider_outcome = "success"
         task: asyncio.Task[Any] | None = None
+        res = None
         try:
             task = asyncio.create_task(provider.chat(**chat_kwargs))
             self._active_chat_tasks.add(task)
@@ -3647,6 +3838,12 @@ class AgentSession:
             provider_outcome = "error"
             raise
         finally:
+            if task is None:
+                context.release(provider_request_id)
+            else:
+                source = provider.__class__.__module__.rsplit(".", 1)[-1]
+                usage = normalize_usage(source, res.usage).usage if res is not None else None
+                context.settle_usage(provider_request_id, usage)
             if task is not None:
                 self._active_chat_tasks.discard(task)
             elapsed_ms = self._elapsed_ms(provider_started_at)
@@ -4052,6 +4249,19 @@ class AgentSession:
             await self._invoke_extension_chat_message(user_msg)
 
     async def prompt(
+        self,
+        text: str,
+        options: dict[str, Any] | None = None,
+        images: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if self._is_streaming:
+            await self._prompt_impl(text, options, images)
+            return
+        if self._is_compacting:
+            raise BusySessionError("Cannot prompt while compaction is running")
+        await self._run_operation(lambda: self._prompt_impl(text, options, images))
+
+    async def _prompt_impl(
         self,
         text: str,
         options: dict[str, Any] | None = None,
@@ -4583,7 +4793,7 @@ class AgentSession:
                             # ``unlimited`` deliberately ignores the finite cap,
                             # while ``on`` retains the explicit zero=no-retry
                             # semantics and the finite default from settings.
-                            generic_retry = retries_enabled and self._is_retryable_error(error_text) and (
+                            generic_retry = not isinstance(e, _RunAdmissionError) and retries_enabled and self._is_retryable_error(error_text) and (
                                 getattr(getattr(e, "response", None), "status_code", None) not in {400, 401, 403, 404}
                             ) and (
                                 retry_mode == "unlimited" or attempt < max_retries
@@ -4639,6 +4849,8 @@ class AgentSession:
                                 context_recovery_attempted = True
                                 try:
                                     await self.compact(reason="context_limit_retry", allow_during_prompt=True)
+                                except _RunAdmissionError:
+                                    raise
                                 except Exception:
                                     pass  # compaction failure → fall through to normal retry
                             attempt += 1
@@ -4800,6 +5012,10 @@ class AgentSession:
         if terminal_error:
             return
 
+        if self._run_context is not None and self._run_node_id is not None:
+            if self._run_context.node(self._run_node_id).state != NodeState.RUNNING:
+                return
+
         # Auto-compaction: shrink the context between turns when it grows past
         # the configured threshold. Runs before draining queued messages so they
         # get a freshly compacted context. Emits the standard compaction events.
@@ -4828,11 +5044,11 @@ class AgentSession:
         if self._steering:
             msg = self._steering.pop(0)
             self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
-            await self.prompt(msg)
+            await self._prompt_impl(msg)
         elif self._follow_up:
             msg = self._follow_up.pop(0)
             self._emit({"type": "queue_update", "steering": list(self._steering), "followUp": list(self._follow_up)})
-            await self.prompt(msg)
+            await self._prompt_impl(msg)
 
     async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> None:
         """Queue a steering message. Text-only; images are not supported."""
@@ -4870,6 +5086,21 @@ class AgentSession:
         return snapshot
 
     async def compact(
+        self,
+        custom_instructions: str | None = None,
+        reason: str = "manual",
+        *,
+        allow_during_prompt: bool = False,
+    ) -> dict[str, Any]:
+        if self._is_compacting:
+            raise BusySessionError("Compaction is already running")
+        async def operation() -> dict[str, Any]:
+            return await self._compact_impl(custom_instructions, reason, allow_during_prompt=allow_during_prompt)
+        if self._is_streaming and not allow_during_prompt:
+            return await operation()
+        return await self._run_operation(operation)
+
+    async def _compact_impl(
         self,
         custom_instructions: str | None = None,
         reason: str = "manual",
@@ -5051,6 +5282,8 @@ class AgentSession:
             )
             text = self._assistant_text(res).strip()
             return text or None
+        except _RunAdmissionError:
+            raise
         except Exception:
             return None
 
@@ -5145,6 +5378,11 @@ class AgentSession:
 
     async def abort(self) -> None:
         self._abort_requested = True
+        if self._run_context is not None and self._run_node_id is not None:
+            context = self._run_context
+            node = context.node(self._run_node_id)
+            if node.state in (NodeState.PENDING, NodeState.RUNNING, NodeState.CANCELLING):
+                context.cancel_subtree(self._run_node_id, node.reason or "abort")
         self.abort_bash()
         for task in list(self._active_tool_tasks):
             if not task.done():

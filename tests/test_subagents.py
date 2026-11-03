@@ -893,6 +893,39 @@ class _StreamingSubagentProvider:
 
 
 @pytest.mark.asyncio
+async def test_cancel_spawn_aborts_child_before_dispose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = _mk_agent(tmp_path, tools=["spawn_subagent", "finish"])
+    started = asyncio.Event()
+    calls: list[tuple[str, AgentSession]] = []
+    original_abort = AgentSession.abort
+    original_dispose = AgentSession.dispose
+
+    class WaitingProvider:
+        async def chat(self, **kwargs: Any) -> Any:
+            started.set()
+            await asyncio.Event().wait()
+
+    async def abort(session: AgentSession) -> None:
+        calls.append(("abort", session))
+        await original_abort(session)
+
+    async def dispose(session: AgentSession) -> None:
+        calls.append(("dispose", session))
+        await original_dispose(session)
+
+    monkeypatch.setattr(AgentSession, "abort", abort)
+    monkeypatch.setattr(AgentSession, "dispose", dispose)
+    parent.providers = {"openai": WaitingProvider()}
+    spawn = asyncio.create_task(parent._spawn_subagent({"task": "wait"}))
+    await asyncio.wait_for(started.wait(), timeout=3)
+    spawn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(spawn, timeout=3)
+    assert [name for name, _ in calls] == ["abort", "dispose"]
+    assert calls[0][1] is calls[1][1] and calls[0][1] is not parent
+
+
+@pytest.mark.asyncio
 async def test_spawn_subagent_direct_timeout_sec_overrides_child_idle_timeout(tmp_path: Path):
     """A direct timeout_sec remains an intentional child idle-timeout override."""
     session_dir = str(tmp_path / "sessions")

@@ -8,11 +8,14 @@ import math
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from one.config import get_agent_dir
 from one.core.persistence import atomic_write_text, ensure_private_dir, ensure_private_file, load_json_text_safe
 from one.core.temperature import DEFAULT_TEMPERATURE, normalize_temperature
+
+if TYPE_CHECKING:
+    from one.core.run_context import RunLimits
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "defaultProvider": None,
@@ -539,6 +542,21 @@ class SettingsManager:
 
     def get_budget_settings(self) -> dict[str, Any]:
         return self.merged().get("budget", {}) or {}
+
+    def get_run_limits(self) -> RunLimits:
+        """Validate each scope, including values shadowed by project settings."""
+        from one.core.run_context import RunLimits
+
+        for scope, locked in (("global", self._global_is_locked), ("project", self._project_is_locked)):
+            if locked:
+                raise ValueError(f"Cannot validate runBudget: {scope} settings could not be read as an object")
+        for scope, settings in (("global", self._global), ("project", self._project)):
+            if "runBudget" in settings:
+                try:
+                    RunLimits.from_config(settings["runBudget"])
+                except ValueError as exc:
+                    raise ValueError(f"{scope} settings: {exc}") from exc
+        return RunLimits.from_config(self.merged().get("runBudget", {}))
 
     def get_budget_max_tokens(self) -> int:
         return int(self.get_budget_settings().get("maxTokens") or 0)

@@ -10,11 +10,39 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Documentation
 
+- **Phase 2 status** — T003–T005 implementation and limitations are documented in
+  [TODO.md](TODO.md). Focused offline verification: 134 tests passed; full-suite
+  verification remains pending. History/monitoring and final regression/release
+  work (phases 3–4) remain open. Existing version `0.1.127` is unchanged.
+
 - **Preset documentation** — document current frontmatter validation and file limits,
   MCP server selection, wildcard and omission behavior, reserved preset ID collisions,
   explicit subagent override precedence, and inherited capability ceilings.
 
 ### Fixed
+
+- **Shared run budgets and cancellation (phase 2, T003–T005)** — enforce opt-in
+  `runBudget.maxTokens`, `maxTimeSec`, `maxCostUsd` and `maxActiveSubagents`
+  across the root and all descendants using one frozen limit snapshot and ledger.
+  Retry, repair, summarization, automatic compaction and queued follow-ups share
+  the run; independent prompts and standalone compaction start new runs. Atomic
+  batch admission rolls back startup failures; existing local limits still apply.
+- **Conservative provider admission and pricing** — token/cost limits reserve
+  full known input capacity plus capped output, not estimated prompt size, and
+  require an enforceable adapter output cap. Unknown capacity or applicable
+  prices deny the corresponding admission, rather than assuming free usage.
+  Explicit, identity-bound `models.json` pricing uses schema version 1, a schedule
+  version/source, USD per million tokens and decimal rates; no builtin price
+  fallback. Missing or contradictory usage retains conservative reservations and
+  accounting uncertainty. See [configuration, pricing schema example and focused
+  test evidence](TODO.md#konfiguracja-i-jawny-schemat-cen).
+- **Execution-tree stop and bounded cleanup** — root abort, deadline and budget
+  exhaustion propagate through descendants; subtree cancellation preserves
+  siblings and pending questions are cleaned up. Cleanup waits are bounded
+  (1 second per wait stage); a timeout reports unknown external state and blocks
+  further work in that session. These are application controls, not billing or
+  OS-level termination/isolation guarantees, and do not roll back external effects.
+  The separate authentication login probe remains outside run budgets.
 
 - **Subagent inspector** — keep loaded history visible while activity refreshes,
   including when the inspector is paused.
