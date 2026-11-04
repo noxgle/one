@@ -20,6 +20,87 @@ from tests.support.tui import _mk_app_session, _submit
 
 
 @pytest.mark.asyncio
+async def test_tool_limit_keyboard_and_config(tmp_path: Path) -> None:
+    from textual.widgets import TextArea
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        editor = app.query_one("#input", TextArea)
+        editor.text = "keep this"
+        await pilot.press("ctrl+u")
+        assert editor.text == "keep this"
+        assert session.settings_manager.get_tool_max_steps() == 0
+        assert "Tool limit: unlimited (saved globally)." in "\n".join(app._stream_lines)
+        assert "Tool Limit: unlimited" in str(app.query_one("#sidebar").render())
+        assert "Tool Limit: unlimited" in str(app.query_one("#header").render())
+        await pilot.press("ctrl+u")
+        assert session.settings_manager.get_tool_max_steps() == 4
+        await _submit(app, pilot, "/config tools.maxSteps 9")
+        await pilot.press("ctrl+u", "ctrl+u")
+        assert session.settings_manager.get_tool_max_steps() == 9
+
+
+def test_tool_limit_config_precedence_and_fallback(tmp_path: Path) -> None:
+    session = _mk_app_session(tmp_path, settings_override={"tools": {"maxSteps": 0}})
+    settings = session.settings_manager
+    assert settings.toggle_tool_max_steps() == 100
+    settings._project = {"tools": {"maxSteps": 7}}
+    settings.set_config_value("tools.maxSteps", 12)
+    assert settings.get_tool_max_steps() == 7
+    assert settings.toggle_tool_max_steps() == 0
+    assert settings.get_tool_max_steps() == 7
+    assert settings.toggle_tool_max_steps() == 0
+
+
+@pytest.mark.asyncio
+async def test_tool_limit_project_override_reports_effective_value(tmp_path: Path) -> None:
+    session = _mk_app_session(tmp_path)
+    session.settings_manager._project = {"tools": {"maxSteps": 7}}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+u")
+        assert session.settings_manager.get_tool_max_steps() == 7
+        assert "project settings override it; effective limit: 7" in "\n".join(app._stream_lines)
+
+
+@pytest.mark.asyncio
+async def test_tool_limit_unlimited_project_override(tmp_path: Path) -> None:
+    session = _mk_app_session(tmp_path)
+    session.settings_manager._project = {"tools": {"maxSteps": 0}}
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+u")
+        assert session.settings_manager.get_tool_max_steps() == 0
+        assert "project settings override it; effective limit: unlimited" in "\n".join(app._stream_lines)
+
+
+def test_tool_limit_persists_across_restart_without_touching_project(tmp_path: Path) -> None:
+    from one.core.settings_manager import SettingsManager
+
+    project = tmp_path / "project"
+    project.mkdir()
+    agent = tmp_path / "agent"
+    settings = SettingsManager(str(project), str(agent))
+    settings.set_tool_settings(max_steps=23)
+    assert settings.toggle_tool_max_steps() == 0
+    settings = SettingsManager(str(project), str(agent))
+    assert settings.get_tool_max_steps() == 0
+    assert settings.toggle_tool_max_steps() == 23
+    settings = SettingsManager(str(project), str(agent))
+    assert settings.get_tool_max_steps() == 23
+    project_settings = project / ".one" / "settings.json"
+    project_settings.parent.mkdir()
+    original = '{"tools": {"maxSteps": 7}}\n'
+    project_settings.write_text(original)
+    settings = SettingsManager(str(project), str(agent))
+    assert settings.toggle_tool_max_steps() == 0
+    assert settings.get_tool_max_steps() == 7
+    assert project_settings.read_text() == original
+
+
+@pytest.mark.asyncio
 async def test_tui_hard_disabled_subagent_controls_do_not_persist(tmp_path: Path) -> None:
     session = _mk_app_session(tmp_path)
     session._subagents_hard_disabled = True  # noqa: SLF001

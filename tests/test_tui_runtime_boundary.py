@@ -34,6 +34,45 @@ class _TuiAdapter:
         raise ValueError("invalid TUI runtime command payload")
 
 
+@pytest.mark.asyncio
+async def test_detached_tool_limit_keyboard_uses_owner_loop(tmp_path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+    from tests.support.tui import _mk_app_session
+
+    owner_threads = []
+
+    async def factory(_spec):
+        session = _mk_app_session(tmp_path)
+        original = session.settings_manager.toggle_tool_max_steps
+
+        def toggle():
+            owner_threads.append(threading.get_ident())
+            return original()
+
+        session.settings_manager.toggle_tool_max_steps = toggle
+        return TuiRuntimeHost(SimpleNamespace(session=session, dispose=session.dispose), None)
+
+    facade = AgentRuntimeFacade(
+        RuntimeBootstrapSpec(cwd=str(tmp_path), agent_dir=str(tmp_path / "agent")),
+        factory, command_allowlist=TUI_COMMANDS,
+    )
+    await facade.start()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    try:
+        async with app.run_test() as pilot:
+            assert view.sidebar["toolMaxSteps"] == 4
+            await pilot.press("ctrl+u")
+            assert view.sidebar["toolMaxSteps"] == 0
+            await pilot.press("ctrl+u")
+            assert view.sidebar["toolMaxSteps"] == 4
+            assert len(owner_threads) == 2 and all(t != threading.get_ident() for t in owner_threads)
+    finally:
+        await facade.close()
+        assert facade.finalize()
+
+
 def test_model_context_refresh_replaces_usage_without_discarding_cached_stats() -> None:
     """A model switch must not retain a percentage from the old context window."""
     session = SimpleNamespace(get_context_usage=lambda: {

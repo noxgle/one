@@ -154,6 +154,16 @@ it is not an accepted CLI mode.
 
 ### TUI
 
+The Info panel shows **Tool Limit**, the effective `tools.maxSteps` value (0
+means unlimited). In the command input, Ctrl+U toggles unlimited and the last
+positive effective limit saved by the toggle, or 100 if none was saved. The
+toggle persists global settings, including the remembered limit, but never edits
+project settings; a project override still takes precedence and is reported.
+Each tool-loop attempt captures its limit at the start. A step is a model-loop
+iteration, not an individual tool call: a response can contain multiple tool
+calls in one step. Exhausting a positive limit ends the attempt with a
+`tool_step_limit` response; unlimited mode still respects aborts and budgets.
+
 ```bash
 one
 one --mode tui --provider openai --model gpt-4o-mini

@@ -461,7 +461,7 @@ def build_sidebar_snapshot(
             "deliveryMode": "idle",
             "queueSteer": 0, "queueFollow": 0, "queueTotal": 0, "tokenInput": 0,
             "tokenOutput": 0, "tokenCacheRead": 0, "tokenCacheWrite": 0,
-            "tokenTotal": 0, "cost": 0.0, "subagents": True, "bashOutput": True,
+            "tokenTotal": 0, "cost": 0.0, "subagents": True, "bashOutput": True, "toolMaxSteps": 100,
             "mcpEnabled": False, "mcpServers": [],
         }
         defaults.update(sidebar)
@@ -554,6 +554,7 @@ def build_sidebar_snapshot(
         "subagents": not bool(getattr(session, "subagents_hard_disabled", False))
         and bool(getattr(getattr(session, "settings_manager", None), "get_subagents_enabled", lambda: True)()),
         "bashOutput": bool(getattr(getattr(session, "settings_manager", None), "get_bash_show_output", lambda: True)()),
+        "toolMaxSteps": getattr(getattr(session, "settings_manager", None), "get_tool_max_steps", lambda: 100)(),
         "mcpEnabled": mcp_manager is not None,
         "mcpServers": mcp_servers,
     }
@@ -730,6 +731,7 @@ TUI_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Ctrl+Q", "Quit"),
     ("Ctrl+Z", "Toggle cooperation"),
     ("Ctrl+S", "Toggle subagents"),
+    ("Ctrl+U", "Toggle tool limit"),
     ("Ctrl+O", "Toggle details"),
     ("Ctrl+V", "Paste clipboard"),
     ("Ctrl+Shift+V", "Paste terminal"),
@@ -2108,6 +2110,11 @@ if TEXTUAL_AVAILABLE:
 
         async def _on_key(self, event: events.Key) -> None:
             if self.app._handle_agents_panel_key(event):
+                return
+            if event.key == "ctrl+u" and len(self.app.screen_stack) == 1 and not self.app.query(".visible"):
+                event.stop()
+                event.prevent_default()
+                await self.app._toggle_tool_limit()
                 return
             if (
                 event.key == "shift+tab"
@@ -5442,9 +5449,10 @@ if TEXTUAL_AVAILABLE:
             runtime_status = self._runtime_status(snapshot)
             preset = sanitize_display_text(str(snapshot.get("presetName", snapshot.get("preset", "Default"))))
             modified = " (modified)" if snapshot.get("presetModified") else ""
+            tool_limit = snapshot.get("toolMaxSteps", 100) or "unlimited"
             suffix = (
                 f" | Preset: {preset}{modified} | Temp: {snapshot['temperature']:.1f}"
-                f" | Think: {thinking} | Coop: {coop.lower()} | Status: {runtime_status}"
+                f" | Think: {thinking} | Tool Limit: {tool_limit} | Coop: {coop.lower()} | Status: {runtime_status}"
             )
             prefix = f"v{VERSION} | "
             # Account for main padding, header borders, and header padding.
@@ -5530,6 +5538,8 @@ if TEXTUAL_AVAILABLE:
             context = self._context_meter(s["contextPercent"]) if s["contextKnown"] else "unknown"
             info_block.append(f"Input budget: {context}\n")
             info_block.append(f"Retry: {sanitize_display_text(s['retry'])}\n")
+            limit = s.get("toolMaxSteps", 100)
+            info_block.append(f"Tool Limit: {limit if limit else 'unlimited'}\n")
             info_block.append(f"Status: {sanitize_display_text(status)}\n")
             info_block.append(f"Delivery: {sanitize_display_text(s['deliveryMode'])}\n")
             info_block.append(f"Coop: {'on' if s['coop'] == 'on' or self._approval_pending is not None else 'off'}\n")
@@ -8414,6 +8424,28 @@ if TEXTUAL_AVAILABLE:
             self._write(f"Model set to {rich_escape(model.provider)}/{rich_escape(model.id)}{saved}.", "info")
             self._refresh_sidebar()
             picker.finish_apply(None)
+
+        async def _toggle_tool_limit(self) -> None:
+            view = isinstance(self.session, TuiSessionView)
+            before = (self.session.sidebar.get("toolMaxSteps", 100) if view
+                      else self.session.settings_manager.get_tool_max_steps())
+            if view:
+                if not await self._run_view_command("toggle_tool_limit", {}):
+                    return
+            else:
+                try:
+                    self.session.settings_manager.toggle_tool_max_steps()
+                except Exception as exc:
+                    self._write(str(exc), "error")
+                    return
+            after = (self.session.sidebar.get("toolMaxSteps", 100) if view
+                     else self.session.settings_manager.get_tool_max_steps())
+            label = "unlimited" if after == 0 else str(after)
+            if after == before:
+                self._write(f"Global tool limit saved, but project settings override it; effective limit: {label}.", "warn")
+            else:
+                self._write(f"Tool limit: {label} (saved globally).", "info")
+            self._refresh_sidebar()
 
         def action_toggle_subagents(self) -> None:
             asyncio.create_task(self._toggle_subagents())

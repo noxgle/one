@@ -169,6 +169,7 @@ def test_tui_shortcuts_are_single_source_of_truth() -> None:
         ("Ctrl+Q", "Quit"),
         ("Ctrl+Z", "Toggle cooperation"),
         ("Ctrl+S", "Toggle subagents"),
+        ("Ctrl+U", "Toggle tool limit"),
         ("Ctrl+O", "Toggle details"),
         ("Ctrl+V", "Paste clipboard"),
         ("Ctrl+Shift+V", "Paste terminal"),

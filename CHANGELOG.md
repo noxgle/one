@@ -80,6 +80,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **TUI tool limit** — display the effective tool step limit and toggle unlimited
+  with Ctrl+U in the command input.
+
 - Run-tree inspection in the TUI, with budget and uncertainty indicators,
   revision-pinned pagination, and confirmed cancellation. Programmatic run
   summaries in headless and JSON output, and RPC/SDK run-tree

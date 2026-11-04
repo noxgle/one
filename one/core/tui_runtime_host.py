@@ -638,6 +638,7 @@ class TuiRuntimeHost:
             "streaming": bool(session.is_streaming),
             "compacting": bool(getattr(session, "is_compacting", False)),
             "bashOutput": bool(session.settings_manager.get_bash_show_output()),
+            "toolMaxSteps": getattr(session.settings_manager, "get_tool_max_steps", lambda: 100)(),
             "theme": str(session.settings_manager.get_theme()),
             "infoPanel": str(getattr(session.settings_manager, "get_tui_info_panel", lambda: "top")()),
             "cooperation": bool(session.approval_callback is not None),
@@ -1232,6 +1233,7 @@ class TuiRuntimeHost:
             "mcp_disable": {"name"},
             "config_get": {"key"},
             "config_set": {"key", "value"},
+            "toggle_tool_limit": set(),
             "cooperation_status": set(),
             "preset_list": set(),
             "set_preset": {"id"},
@@ -1389,6 +1391,9 @@ class TuiRuntimeHost:
             return await self._mcp_enable(str(payload["name"]))
         if operation == "mcp_disable":
             return await self._mcp_disable(str(payload["name"]))
+        if operation == "toggle_tool_limit":
+            session.settings_manager.toggle_tool_max_steps()
+            return self._snapshot()
         if operation == "config_get":
             key = str(payload["key"])
             current: Any = session.settings_manager.merged()

@@ -417,6 +417,22 @@ class SettingsManager:
     def get_tool_max_steps(self) -> int:
         return int(self.get_tool_settings().get("maxSteps", 100))
 
+    def toggle_tool_max_steps(self) -> int:
+        """Persist the requested global limit, respecting project precedence."""
+        current = self.get_tool_max_steps()
+        self._require_writable_global()
+        tools = dict(self._global.get("tools", {}))
+        if current > 0:
+            tools["lastPositiveMaxSteps"] = current
+            target = 0
+        else:
+            remembered = tools.get("lastPositiveMaxSteps", 100)
+            target = remembered if isinstance(remembered, int) and not isinstance(remembered, bool) and remembered > 0 else 100
+        tools["maxSteps"] = target
+        self._global["tools"] = tools
+        self._save_global()
+        return target
+
     def get_tool_timeout_sec(self) -> int:
         return int(self.get_tool_settings().get("timeoutSec", 30))
 
