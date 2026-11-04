@@ -6,9 +6,9 @@
   console command are `one`.
 - `main` is the integration branch. Create a feature branch for changes. Do not
   commit, push, merge, tag, or create a PR unless explicitly requested.
-- Read `TODO.md` for current open work, `CHANGELOG.md` for user-facing changes,
-  Git history for implementation details, and `CONTRIBUTING.md` for
-  contributor/release guidance before substantial changes.
+- If present, read `TODO.md` for current open work. Before substantial changes,
+  also read `CHANGELOG.md` for user-facing changes, Git history for implementation
+  details, and `CONTRIBUTING.md` for contributor/release guidance.
 
 ## Commands
 
@@ -76,6 +76,18 @@
   `toolOutputPruning`.
 - Compaction retains a rolling summary plus recent messages; preserve its event
   contract when changing context handling.
+- Runs and descendants share an opt-in `runBudget`, frozen at run start; legacy
+  session `budget` and local tool limits remain separate. Manual compaction is
+  a separate run. See `docs/RUNS.md` and `one/core/run_context.py`,
+  `run_usage.py`, `run_pricing.py`, and `run_history.py` before changing
+  accounting, admission, cancellation, or inspection. Test the relevant
+  `tests/test_run_*.py` modules with fake providers.
+- `tools.maxSteps` defaults to 100; 0 means unlimited model-loop steps. A step
+  can contain multiple tool calls, and other budgets still apply. Each attempt captures
+  its limit at the start. TUI Info displays the effective limit and Ctrl+U in
+  the command input toggles it, persisting global settings while project
+  overrides retain precedence. See `tests/test_tui_commands.py` and
+  `tests/test_tui_runtime_boundary.py` for this behavior.
 - Extension hook failures emit `extension_load_error` rather than crashing the
   session; contract details are in `docs/EXTENSIONS.md`.
 
