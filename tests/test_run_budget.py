@@ -103,6 +103,33 @@ async def test_confirmed_exhaustion_signals_all_registered_tasks(limits, tokens,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["budget", "deadline"])
+async def test_competing_global_stops_keep_first_cause(first: str) -> None:
+    now = [0.0]
+    ctx = RunContext("root", RunLimits(max_tokens=10, max_time_sec=5), clock=lambda: now[0])
+    child = ctx.register(ctx.root_id, "child")
+    grandchild = ctx.register(child.node_id, "grandchild")
+    ctx.reserve("request", grandchild.node_id, 10, Decimal(0))
+    if first == "budget":
+        ctx.settle("request", 10, Decimal(0))
+        now[0] = 5
+        with pytest.raises(ValueError, match="deadline"):
+            ctx.reserve("late", ctx.root_id, 0, Decimal(0))
+    else:
+        now[0] = 5
+        with pytest.raises(ValueError, match="deadline"):
+            ctx.reserve("late", ctx.root_id, 0, Decimal(0))
+        ctx.settle("request", 10, Decimal(0))
+    reason = "budget_exceeded" if first == "budget" else "deadline"
+    assert all(ctx.node(node).reason == reason for node in (ctx.root_id, child.node_id, grandchild.node_id))
+    assert len(ctx._attempts) == 1
+    assert ctx.history_snapshot()["aggregates"]["tokens"] == 10
+    for node in (grandchild.node_id, child.node_id, ctx.root_id):
+        ctx.finalize(node, NodeState.CANCELLED)
+    assert not ctx._tasks and ctx._deadline_timer is None
+
+
+@pytest.mark.asyncio
 async def test_boundary_release_and_deadline() -> None:
     now = [0.0]
     ctx = RunContext("root", RunLimits(10, 5, Decimal("1")), clock=lambda: now[0])

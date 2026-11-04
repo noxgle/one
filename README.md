@@ -616,6 +616,10 @@ Larger budgets may increase latency and usage. Changes affect subsequent
 requests. See [model capacity and truncated responses](docs/MODEL_CATALOG.md#generation-limit-and-truncated-responses)
 for reserve behavior and output-truncation diagnostics.
 
+For a shared, opt-in budget across a prompt and its subagents, see
+[runs and diagnostics](docs/RUNS.md). `runBudget` is separate from the legacy
+session `budget`; estimated usage is not a provider billing guarantee.
+
 ### Subagent timeouts
 
 Subagents use `subagents.idleTimeoutSec` (default `1800`) for time without
@@ -877,5 +881,6 @@ future target, while Windows 10 support is deferred.
 - [docs/SKILLS.md](docs/SKILLS.md) — skills contract
 - [docs/PRESETS.md](docs/PRESETS.md) — presets and capability policy
 - [docs/MODEL_CATALOG.md](docs/MODEL_CATALOG.md) — model capacity and generation budgets
+- [docs/RUNS.md](docs/RUNS.md) — shared run budgets, cancellation and diagnostics
 - [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) — release verification
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community guidelines

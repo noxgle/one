@@ -4,7 +4,7 @@
 
 **P0: zarządzanie agentem głównym i wszystkimi potomkami jako jednym wykonaniem (`run`).** Wspólny budżet, hierarchiczny podgląd i anulowanie całego drzewa mają zachować autonomię delegowania bez mnożenia limitów ani pozostawiania osieroconej pracy.
 
-Stan dokumentu: fazy 1–3 (T001–T008) zaimplementowane; faza 4 pozostaje otwarta. Pełna weryfikacja offline: 2711 testów przeszło, 2 pominięto; Ruff i `git diff --check` zakończyły się powodzeniem (2026-11-03). Ten dokument nie przenosi ani nie zmienia historycznej roadmapy z `tmp/subagents_TODO.md`.
+Stan dokumentu: fazy 1–4 (T001–T010) zamknięte; pełna weryfikacja offline: 2719 testów przeszło, 2 pominięto; Ruff i `git diff --check` zakończyły się powodzeniem (2026-11-04). Ten dokument nie przenosi ani nie zmienia historycznej roadmapy z `tmp/subagents_TODO.md`.
 
 ## Kontekst i dowody z repozytorium
 
@@ -211,23 +211,33 @@ Wynik: **2711 passed, 2 skipped** (651.15 s); `.venv/bin/ruff check .` — **All
   - **Weryfikacja:** Textual pilot dla drzewa i cancel, snapshoty małego terminala, offline scenariusze RPC/JSON oraz regresja istniejącego inspektora i exit codes 0/1/2.
   - **Dowody:** `one/modes/tui_mode.py`, `one/modes/rpc_mode.py`, `one/core/sdk.py`; `tests/test_tui_run_tree.py`, `tests/test_tui_snapshots.py`, RPC/run/sdk test modules; TUI inspector `T` opens explicit refresh; run tree `C` branch, `W` whole, `Y` confirmation; headless/JSON/RPC expose IDs/status/summaries; exit codes 0/1/2 preserved.
 
-### Faza 4 — Dowód działania i przygotowanie wydania
-- **Wynik:** kontrolowany rollout z udokumentowanymi ograniczeniami.
+### Faza 4 — Dowód działania i przygotowanie wydania — zakończona
+- **Wynik:** kontrolowany rollout z udokumentowanymi ograniczeniami; pełna weryfikacja offline zakończona.
 - **Nakład / pewność:** M / wysoka po zakończeniu wcześniejszych faz.
 
-- [ ] **T009 — Zabezpieczyć scenariusze end-to-end i wyścigi**
+- [x] **T009 — Zabezpieczyć scenariusze end-to-end i wyścigi**
   - **Zmiany:** deterministyczna macierz trzech poziomów, równoległych gałęzi, wyczerpania każdego limitu, przerwania streamu, timeout rodzica, finish kontra cancel i restartu; sprawdzać brak double-count i task leaks. Nowe moduły uruchamiać jawnie, nie polegać na stałych listach helpera.
-  - **Pliki:** `tests/test_run_integration.py`, `tests/test_run_budget.py`, `tests/test_run_cancellation.py`, `tests/test_run_history.py`, `tests/test_event_snapshots.py`, odpowiednie testy CLI/RPC/TUI z T001.
+  - **Pliki:** `tests/test_run_integration.py`, `tests/test_run_budget.py`, `tests/test_run_cancellation.py`, `tests/test_run_history.py`, `tests/test_event_snapshots.py`, `tests/test_tui_run_tree.py`.
   - **Zależności:** T008.
   - **Akceptacja:** jedna pula i jedna przyczyna globalnego zatrzymania; brak pracy po zamknięciu admission; zarchiwizowane liczniki i UI zgodne z ledgerem; dawne kontrakty presetów i zdarzeń zachowane lub jawnie rozszerzone.
-  - **Weryfikacja:** implementer ustawia `export ONE_CODING_AGENT_DIR="$(mktemp -d)"` w zachowanej powłoce; następnie `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check .`, `git diff --check` — w tej kolejności. Zero realnych API/MCP; explicit `@pytest.mark.asyncio`.
+  - **Weryfikacja:** `export ONE_CODING_AGENT_DIR="$(mktemp -d)"`; `.venv/bin/python -m pytest -q` — 2719 passed, 2 skipped (643.04 s); `.venv/bin/ruff check .` — All checks passed; `git diff --check` — bez błędów. Zero realnych API/MCP; explicit `@pytest.mark.asyncio`.
 
-- [ ] **T010 — Udokumentować i przygotować zgodne wydanie**
-  - **Zmiany:** opisać run lifetime, konfigurację opt-in i przykład budżetu, odrzucanie spawnów bez deadlocku, koszty estymowane, brak sandboxa/rollback efektów, resume i diagnostykę. Wersja jest już `0.1.128`, a snapshoty zaktualizowano wcześniej; nie wymaga to kolejnego bumpa. Unreleased i konfigurację fazy 2 opisano tutaj, ale końcowy przegląd dokumentacji/wydania i pełne bramki nadal są otwarte.
+- [x] **T010 — Udokumentować i przygotować zgodne wydanie**
+  - **Zmiany:** opisać run lifetime, konfigurację opt-in i przykład budżetu, odrzucanie spawnów bez deadlocku, koszty estymowane, brak sandboxa/rollback efektów, resume i diagnostykę. Wersja jest już `0.1.128`, a snapshoty zaktualizowano wcześniej; nie wymaga to kolejnego bumpa. Unreleased i konfigurację fazy 2 opisano tutaj; końcowy przegląd dokumentacji/wydania i pełne bramki zamknięte.
   - **Pliki:** `README.md`, nowe `docs/RUNS.md`, `CHANGELOG.md`, `one/config.py`, `tests/snapshots/tui/`, `tests/test_tui_snapshots.py`.
   - **Zależności:** T009.
   - **Akceptacja:** użytkownik odróżnia runBudget od legacy budget; dokumentacja nie obiecuje limitu faktury ani cofnięcia efektów; wersja pochodzi z `one/config.py`; brak publikacji/tagowania bez osobnej zgody.
-  - **Weryfikacja:** przegląd przykładów względem walidatora; `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py`, review diffów i ponowne pełne bramki z T009.
+  - **Weryfikacja:** przegląd przykładów względem walidatora; `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py` — 6 passed (snapshot data unchanged, test adds existing blank SVG line normalization); pełne bramki z T009 zamknięte.
+
+#### Dowody testów fazy 4
+
+- `tests/test_run_integration.py` — `test_parallel_three_level_tree_accounting` sprawdza rozliczanie równoległego drzewa, `test_followup_drain_same_run_next_prompt_and_manual_compaction_new_runs` i `test_auto_compaction_and_queue_share_original_run` kolejkę, a `test_nested_active_limit_is_global_not_per_parent` wspólny limit zagnieżdżonych zadań.
+- `tests/test_run_budget.py` — `test_competing_global_stops_keep_first_cause` sprawdza pierwszą przyczynę zatrzymania, a `test_confirmed_exhaustion_signals_all_registered_tasks` sygnalizację potwierdzonego wyczerpania.
+- `tests/test_run_cancellation.py` — `test_finish_and_cancel_order_preserves_terminal_outcome`, `test_interrupted_stream_keeps_one_uncertain_attempt`, `test_parent_timeout_joins_blocked_grandchild` oraz `test_cancel_subtree_stops_grandchild_but_sibling_completes` obejmują wyścig zakończenia z anulowaniem, przerwany strumień, limit czasu rodzica i niezależność rodzeństwa.
+- `tests/test_run_history.py` — `test_intermediate_snapshot_and_resume_after_crash` obejmuje wznowienie po awarii, a `test_restored_accounting_pages_through_sdk_host_and_facade` stronicowanie odtworzonych rozliczeń przez SDK, host i fasadę.
+- `tests/test_tui_run_tree.py` — `test_reopened_history_ledger_renders_in_run_tree` sprawdza wyświetlenie strony zarchiwizowanych rozliczeń w TUI.
+- `tests/test_tui_runtime_boundary.py` i `tests/test_agent_runtime_facade.py` obejmują granicę środowiska wykonawczego i fasadę; `tests/test_presets.py`, `tests/test_preset_runtime.py`, `tests/test_preset_sessions.py` i `tests/test_subagent_presets.py` — kontrakty presetów; `tests/test_event_snapshots.py` — kontrakty zdarzeń.
+- `tests/test_tui_snapshots.py` — 6 testów zakończonych powodzeniem; dane snapshotów bez zmian.
 
 ## Wdrożenie i wycofanie
 
@@ -239,14 +249,14 @@ Najpierw wspólna tożsamość/ledger i testy, następnie egzekwowanie opt-in ru
 - **Nieanulowalny kod rozszerzeń/MCP lub zewnętrzny proces:** ograniczony cleanup i status niepewności; to kontrola aplikacyjna, nie izolacja OS.
 - **Deadlock zagnieżdżonych agentów:** odmowa admission zamiast kolejki trzymającej sloty; test pełnego globalnego limitu.
 - **Wyciek danych i eksplozja monitoringu:** istniejąca redakcja, globalny limit podglądów i stronicowanie; finansowy ledger nie zależy od retencji widoków.
-- **Różne granice wykonania między trybami:** testy fazy 2 pokrywają granice sesji, kolejkę i samodzielną kompakcję; pełna regresja CLI/RPC/TUI/SDK i nowe widoki pozostają w fazach 3–4.
+- **Różne granice wykonania między trybami:** testy fazy 2 pokrywają granice sesji, kolejkę i samodzielną kompakcję; pełna regresja CLI/RPC/TUI/SDK i nowe widoki zamknięte w fazach 3–4.
 - **Kalibracja limitów:** brak ustalonego domyślnego limitu pieniężnego; wybrano zero/opt-in zamiast zgadywania budżetu użytkownika. Cleanup ma ograniczone oczekiwania po 1 s; nie jest to gwarancja czasu zatrzymania niekooperującego kodu ani procesów zewnętrznych.
 
 ## Kryteria końcowe projektu
 
-- [ ] Jeden `runId` obejmuje korzeń, dzieci i wnuki; kolejne polecenie ma odrębny run.
-- [ ] Globalne tokeny/czas/koszt i aktywni potomkowie nie mnożą się przez delegowanie; niepewność rozliczeń jest jawna.
-- [ ] Cancel korzenia i wyczerpanie globalnego budżetu propagują się na wszystkie poziomy; cancel poddrzewa nie narusza rodzeństwa.
-- [ ] Monitoring pokazuje hierarchię oraz własne i agregowane zużycie bez double-count i bez dostępu UI do żywych sesji.
-- [ ] Stare sesje i polityki presetów nadal działają; restart nie reaktywuje pracy ani starego budżetu.
-- [ ] Offline regresje, granica runtime i snapshoty przechodzą; ograniczenia kosztu i anulowania są udokumentowane.
+- [x] Jeden `runId` obejmuje korzeń, dzieci i wnuki; kolejne polecenie ma odrębny run.
+- [x] Globalne tokeny/czas/koszt i aktywni potomkowie nie mnożą się przez delegowanie; niepewność rozliczeń jest jawna.
+- [x] Cancel korzenia i wyczerpanie globalnego budżetu propagują się na wszystkie poziomy; cancel poddrzewa nie narusza rodzeństwa.
+- [x] Monitoring pokazuje hierarchię oraz własne i agregowane zużycie bez double-count i bez dostępu UI do żywych sesji.
+- [x] Stare sesje i polityki presetów nadal działają; restart nie reaktywuje pracy ani starego budżetu.
+- [x] Offline regresje, granica runtime i snapshoty przechodzą; ograniczenia kosztu i anulowania są udokumentowane.

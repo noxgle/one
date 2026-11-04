@@ -24,6 +24,69 @@ async def reap(task: asyncio.Task) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_first", [True, False])
+async def test_finish_and_cancel_order_preserves_terminal_outcome(tmp_path: Path, cancel_first: bool) -> None:
+    agent, provider = agent_with_script(tmp_path, [FINISH])
+    provider.block = True
+    task = asyncio.create_task(agent.prompt("finish or cancel"))
+    try:
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        context = agent._run_context
+        if cancel_first:
+            await agent.abort()
+            provider.release.set()
+        else:
+            provider.release.set()
+            await asyncio.wait_for(task, 2)
+            await agent.abort()
+        await asyncio.wait_for(task, 2)
+        root = context.node(context.root_id)
+        assert root.state == (NodeState.CANCELLED if cancel_first else NodeState.COMPLETED)
+        assert root.reason == ("abort" if cancel_first else None)
+        assert len(context._attempts) == 1
+        attempt = next(iter(context._attempts.values()))
+        assert attempt.state == ("uncertain" if cancel_first else "settled")
+        assert_joined(context)
+    finally:
+        provider.release.set()
+        await reap(task)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_keeps_one_uncertain_attempt(tmp_path: Path) -> None:
+    agent, provider = agent_with_script(tmp_path, [])
+    entered, stopped = asyncio.Event(), asyncio.Event()
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    async def chat(on_delta, max_tokens: int | None = None, **kwargs: Any):
+        on_delta("partial streamed response")
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    provider.chat = chat
+    task = asyncio.create_task(agent.prompt("stream"))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        context = agent._run_context
+        await agent.abort()
+        await asyncio.wait_for(task, 2)
+        assert stopped.is_set()
+        assert any(e["type"] == "message_update" for e in events)
+        assert len(context._attempts) == 1
+        assert next(iter(context._attempts.values())).state == "uncertain"
+        assert context.history_snapshot()["aggregates"]["unknownUsageAttempts"] == 1
+        assert context.node(context.root_id).reason == "abort"
+        assert not agent._active_chat_tasks
+        assert_joined(context)
+    finally:
+        await reap(task)
+
+
+@pytest.mark.asyncio
 async def test_abort_cleanup_timeout_blocks_readmission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from one.core.agent_session import RunCleanupTimeoutError
 
@@ -74,6 +137,42 @@ async def test_direct_subagent_timeouts_release_owners_between_runs(tmp_path: Pa
         context = agent._last_run_context
         assert not context._owners
         assert_joined(context)
+
+
+@pytest.mark.asyncio
+async def test_parent_timeout_joins_blocked_grandchild(tmp_path: Path) -> None:
+    agent, provider = agent_with_script(tmp_path, [], subagents={"maxDepth": 3, "maxDurationSec": 1})
+    ready, stopped = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def chat(max_tokens: int | None = None, **kwargs: Any):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ChatResult(text=tool("spawn_subagent", task="grandchild"), raw={}, usage={}, stop_reason="stop")
+        ready.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    provider.chat = chat
+    task = asyncio.create_task(agent._spawn_subagent({"task": "parent"}, timeout_sec=1))
+    try:
+        await asyncio.wait_for(ready.wait(), 2)
+        result = await asyncio.wait_for(task, 4)
+        assert result["timedOut"] is True
+        context = agent._last_run_context
+        nodes = sorted(context._nodes.values(), key=lambda node: node.depth)
+        assert [node.depth for node in nodes] == [0, 1, 2]
+        assert nodes[2].parent_node_id == nodes[1].node_id
+        assert nodes[1].state == NodeState.CANCELLED
+        assert nodes[2].state == NodeState.CANCELLED
+        assert stopped.is_set() and calls == 2
+        assert not context._owners
+        assert_joined(context)
+    finally:
+        await reap(task)
 
 
 @pytest.mark.asyncio

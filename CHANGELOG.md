@@ -10,8 +10,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Documentation
 
-- **Phase 3 status** — T006–T008 implementation (run history, bounded monitoring snapshots, and UI/CLI/RPC/SDK interfaces) is documented in
-  [TODO.md](TODO.md). Phase 4 (end-to-end verification and release preparation) remains open; full offline verification completed 2026-11-03: `.venv/bin/python -m pytest -q` — **2711 passed, 2 skipped** (651.15 s); `.venv/bin/ruff check .` — **All checks passed**; `git diff --check` — no errors.
+- **Run documentation and phase 4** — [runs and diagnostics](docs/RUNS.md)
+  describes shared limits, estimated costs, cancellation, resume and public
+  inspection interfaces. End-to-end regression coverage and release preparation
+  are complete; final full verification passed on 2026-11-04: 2719 tests (2 skipped),
+  Ruff and `git diff --check` all passed (see [TODO.md](TODO.md)).
 
 - **Preset documentation** — document current frontmatter validation and file limits,
   MCP server selection, wildcard and omission behavior, reserved preset ID collisions,

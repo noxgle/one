@@ -98,6 +98,39 @@ async def test_tree_render_pagination_and_cancellation():
 
 
 @pytest.mark.asyncio
+async def test_reopened_history_ledger_renders_in_run_tree(tmp_path):
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from one.core.sdk import run_history_page
+    from one.core.session_manager import SessionManager
+
+    manager = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    manager.ensure_run_session()
+    context = RunContext(manager.session_id, RunLimits())
+    child = context.register(context.root_id, "child")
+    context.reserve("request", child.node_id, 20, Decimal("2"))
+    context.settle("request", 7, Decimal("0.25"))
+    manager.run_history().append(context.history_snapshot())
+    reopened = SessionManager.open(manager.session_file, manager.session_dir)
+    session = SimpleNamespace(session_manager=reopened)
+    archived = run_history_page(session, context.run_id)
+
+    class ArchivedFacade:
+        async def run_tree_page(self, epoch, offset, limit):
+            page = run_history_page(session, context.run_id, offset, limit)
+            return {"result": {"epoch": epoch, **page}}
+
+    app = Harness(TuiSessionView(ArchivedFacade()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert screen.page["nodes"] == archived["nodes"]
+        assert "7 tokens / $0.25 used" in str(screen.query_one("#run-tree-details", Static).content)
+        assert "Tokens: 7 used" in str(screen.query_one("#run-tree-summary", Static).content)
+
+
+@pytest.mark.asyncio
 async def test_open_from_agents_panel(tmp_path):
     app = _OneTextualApp(_mk_app_session(tmp_path))
     async with app.run_test(size=(120, 40)) as pilot:

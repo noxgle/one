@@ -199,6 +199,15 @@ async def test_intermediate_snapshot_and_resume_after_crash(tmp_path):
     assert second != first
     assert records[1]["previousRunId"] == first
     assert records[0]["aggregates"]["tokens"] == 7
+    assert records[0]["aggregates"]["costUsd"] == "0.25"
+    assert records[1]["aggregates"]["tokens"] == 0
+    from one.core.sdk import run_history_page, run_tree_page
+    archived = run_history_page(resumed, first)
+    current = run_tree_page(resumed)
+    assert archived["aggregates"] == records[0]["aggregates"]
+    assert archived["nodes"][0]["subtreeUsage"]["tokens"] == 7
+    assert current["runId"] == second
+    assert current["nodes"][0]["subtreeUsage"]["tokens"] == 0
 
 
 @pytest.mark.asyncio

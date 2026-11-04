@@ -99,6 +99,58 @@ async def test_root_child_grandchild_share_pool_and_identity(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_parallel_three_level_tree_accounting(tmp_path: Path) -> None:
+    agent, provider = agent_with_script(tmp_path, [], subagents={"maxDepth": 3},
+                                        runBudget={"maxActiveSubagents": 4})
+    ready, release = asyncio.Event(), asyncio.Event()
+    seen: set[str] = set()
+    leaves: set[str] = set()
+
+    async def chat(max_tokens: int | None = None, **kwargs: Any) -> ChatResult:
+        user = next(m["content"] for m in kwargs["messages"] if m["role"] == "user")
+        if user not in seen:
+            seen.add(user)
+            if user == "root":
+                text = tool("spawn_subagent", tasks=["left", "right"])
+            elif user in {"left", "right"}:
+                text = tool("spawn_subagent", task=f"{user}-leaf")
+            else:
+                leaves.add(user)
+                if len(leaves) == 2:
+                    ready.set()
+                await release.wait()
+                text = FINISH
+        else:
+            text = FINISH
+        return ChatResult(text=text, raw={}, usage={"prompt_tokens": 2, "completion_tokens": 1,
+                          "prompt_tokens_details": {"cached_tokens": 0}}, stop_reason="stop")
+
+    provider.chat = chat
+    task = asyncio.create_task(agent.prompt("root"))
+    try:
+        await asyncio.wait_for(ready.wait(), 3)
+        context = agent._run_context
+        assert {n.depth for n in context._nodes.values()} == {0, 1, 2}
+        assert len(context._nodes) == 5
+        release.set()
+        await asyncio.wait_for(task, 3)
+        tree = context.tree_snapshot()
+        root = next(n for n in tree["nodes"] if n["depth"] == 0)
+        total = sum(a.tokens for a in context._attempts.values())
+        assert len(context._attempts) == 8
+        assert total == 24
+        assert sum(n["ownUsage"]["tokens"] for n in tree["nodes"]) == total
+        assert root["subtreeUsage"]["tokens"] == total
+        assert context.history_snapshot()["aggregates"]["tokens"] == total
+        assert_joined(context)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_followup_drain_same_run_next_prompt_and_manual_compaction_new_runs(tmp_path: Path) -> None:
     agent, provider = agent_with_script(tmp_path, ["first" * 100, "queued" * 100, "second" * 100, "summary"])
     provider.block = True

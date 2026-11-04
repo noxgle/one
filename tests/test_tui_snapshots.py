@@ -372,7 +372,7 @@ async def test_tui_snapshot_run_tree_narrow() -> None:
         app.session = TuiSessionView(Facade())
         app.push_screen(_RunTreeInspector(app.session))
         await _settle_snapshot(pilot, app)
-        content = _capture_content(app)
+        content = _normalize_svg_whitespace_only_lines(_capture_content(app))
         assert "remaining" in content
         _check_snapshot("run_tree_narrow", content, update=UPDATE)
         await pilot.press("escape")
