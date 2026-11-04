@@ -86,6 +86,15 @@ class SubagentHistory:
             child["timeline"] = []
         return children
 
+    def child_offset(self, child: str) -> int | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) FROM children WHERE rowid < (SELECT rowid FROM children WHERE id=?)",
+                (child,),
+            ).fetchone()
+            exists = self._db.execute("SELECT 1 FROM children WHERE id=?", (child,)).fetchone()
+        return (row[0] // 20) * 20 if exists else None
+
     def save_prompt(self, child: str, text: Any) -> None:
         with self._lock, self._db:
             self._db.execute("INSERT OR REPLACE INTO prompts VALUES (?, ?)", (child, self.safe(text)))

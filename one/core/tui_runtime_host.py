@@ -516,6 +516,13 @@ class TuiRuntimeHost:
             if payload["epoch"] != self._epoch:
                 raise ValueError("Session changed")
             return self._json({"epoch": self._epoch, **self._session().subagent_monitor.list_children(payload["offset"])}, maximum=192 * 1024)
+        if command == "agent_link_page" and set(payload) == {"session_id", "epoch"}:
+            if type(payload["epoch"]) is not int or payload["epoch"] != self._epoch:
+                raise ValueError("Session changed")
+            if not isinstance(payload["session_id"], str):
+                raise ValueError("Invalid agent ID")
+            page = self._session().subagent_monitor.page_for_child(payload["session_id"])
+            return self._json({"epoch": self._epoch, "page": page}, maximum=192 * 1024)
         if command == "agent_inspector_page" and set(payload) == {"session_id", "cursor", "part", "epoch"}:
             if payload["epoch"] != self._epoch:
                 raise ValueError("Session changed")
@@ -1894,6 +1901,7 @@ TUI_COMMANDS = frozenset(
         "agent_prompt_page",
         "agent_inspector_page",
         "agents_page",
+        "agent_link_page",
         "run_tree_page",
         "run_history_page",
         "cancel_run",

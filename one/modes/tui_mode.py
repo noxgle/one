@@ -2722,6 +2722,7 @@ if TEXTUAL_AVAILABLE:
             # A link token is generated only for an application-created stream
             # label. It is never inferred from transcript text.
             self._agent_link_tokens: dict[int, tuple[int, str, int, int]] = {}
+            self._agent_link_request = 0
             self._agent_link_labels: dict[int, str] = {}
             self._agent_links_by_line: dict[int, tuple[int, ...]] = {}
             self._next_agent_link_token = 0
@@ -5670,11 +5671,11 @@ if TEXTUAL_AVAILABLE:
                 indexed.setdefault(line_index, []).append(token)
             self._agent_links_by_line = {line: tuple(tokens) for line, tokens in indexed.items()}
 
-        def _open_agents_panel(self, session_id: str | None = None) -> None:
+        def _open_agents_panel(self, session_id: str | None = None, *, resolved: bool = False) -> None:
             # A lifecycle event can reach the main stream before the coalesced
             # monitor refresh tick. Exact child links therefore check a fresh
             # authoritative snapshot rather than the cached one.
-            if session_id is not None:
+            if session_id is not None and not resolved:
                 self._refresh_monitor_snapshot()
             if session_id is not None and self._monitor_child(session_id) is None:
                 self._write("Agent preview is no longer available.", "info")
@@ -5752,6 +5753,7 @@ if TEXTUAL_AVAILABLE:
             return True
 
         def _select_agent_offset(self, offset: int) -> None:
+            self._agent_link_request += 1
             children = self._monitor_snapshot.get("children", [])
             if not children:
                 return
@@ -5768,9 +5770,11 @@ if TEXTUAL_AVAILABLE:
             self._render_agents_panel()
 
         def _load_agent_list(self, offset: int) -> None:
+            self._agent_link_request += 1
             if not isinstance(self.session, TuiSessionView) and not callable(getattr(getattr(self.session, "subagent_monitor", None), "list_children", None)):
                 return
             session, generation = self.session, self._monitor_generation
+            panel_generation = self._agent_panel_generation
 
             async def load() -> None:
                 try:
@@ -5781,7 +5785,8 @@ if TEXTUAL_AVAILABLE:
                             return
                     else:
                         result = session.subagent_monitor.list_children(offset)
-                    if self.session is not session or self._monitor_generation != generation:
+                    if (self.session is not session or self._monitor_generation != generation
+                            or self._agent_panel_generation != panel_generation):
                         return
                     if not result.get("children"):
                         return
@@ -8134,10 +8139,39 @@ if TEXTUAL_AVAILABLE:
                 or not isinstance(call_id, int)
             ):
                 return
-            self._refresh_monitor_snapshot()
-            if not any(child.get("sessionId") == session_id for child in self._monitor_snapshot.get("children", [])):
-                return
-            self._open_agents_panel(session_id)
+            self._agent_link_request += 1
+            request = self._agent_link_request
+            session = self.session
+            epoch = session.epoch if isinstance(session, TuiSessionView) else None
+            panel_generation = self._agent_panel_generation
+
+            async def load() -> None:
+                try:
+                    if isinstance(session, TuiSessionView):
+                        result = await session.command("agent_link_page", session_id=session_id, epoch=epoch)
+                        if result.get("epoch") != epoch or session.epoch != epoch:
+                            return
+                        page = result.get("page")
+                    else:
+                        page = session.subagent_monitor.page_for_child(session_id)
+                    if (self.session is not session or self._monitor_generation != generation
+                            or self._agent_link_request != request or self._agent_panel_generation != panel_generation
+                            or self._agent_link_tokens.get(token) != target
+                            or token not in self._agent_links_by_line.get(line_index, ())
+                            or token not in self._agent_link_labels
+                            or not 0 <= line_index < len(self._stream_lines)):
+                        return
+                    if not page or not any(child.get("sessionId") == session_id for child in page["children"]):
+                        return
+                    self._agent_list_offset = page["offset"]
+                    self._agent_list_has_more = page["hasMore"]
+                    self._monitor_snapshot = page
+                    self._open_agents_panel(session_id, resolved=True)
+                except Exception:
+                    if self.session is session and self._monitor_generation == generation and self._agent_link_request == request:
+                        self._write("Agent preview is unavailable.", "warn")
+
+            asyncio.create_task(load())
 
         def action_open_evidence_link(self, token: int) -> None:
             """Fetch one bounded, session/epoch-bound safe evidence page."""

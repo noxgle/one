@@ -22,6 +22,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Subagent View links** — open the exact agent beyond the first inspector
+  page without accepting stale session or link results.
+
 - **Shared run budgets and cancellation (phase 2, T003–T005)** — enforce opt-in
   `runBudget.maxTokens`, `maxTimeSec`, `maxCostUsd` and `maxActiveSubagents`
   across the root and all descendants using one frozen limit snapshot and ledger.

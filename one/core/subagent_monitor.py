@@ -400,6 +400,11 @@ class SubagentMonitor:
             return {"revision": self._revision, "children": archived, "offset": offset,
                     "hasMore": bool(self.history.children(offset + 20, 1))}
 
+    def page_for_child(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            offset = self.history.child_offset(session_id)
+            return self.list_children(offset) if offset is not None else None
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             children = copy.deepcopy(list(self._children.values()))

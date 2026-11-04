@@ -25,6 +25,27 @@ from tests.support.tui import _mk_app_session, _submit
 
 
 @pytest.mark.asyncio
+async def test_view_link_opens_agent_beyond_first_page(tmp_path: Path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    for number in range(25):
+        session.subagent_monitor.register(f"child-{number}", "task", "model")
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        session._emit({"type": "tool_call_start", "tool": "spawn_subagent", "args": {"task": "task"}})
+        session._emit({"type": "subagent_start", "sessionId": "child-24", "task": "task"})
+        await pilot.pause()
+        token = next(iter(app._agent_link_tokens))
+        app.action_open_agent_link(token)
+        await pilot.pause()
+        assert app._agents_panel_open
+        assert app._selected_agent_id == "child-24"
+        assert app._agent_list_offset == 20
+        assert app._agent_page is not None
+
+
+@pytest.mark.asyncio
 async def test_tui_next_assistant_start_keeps_predecessor_awaiting_final_paint(tmp_path: Path) -> None:
     """A lifecycle barrier must not discard a completed live tail before its frame."""
     from one.modes.tui_mode import _OneTextualApp

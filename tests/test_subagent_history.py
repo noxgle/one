@@ -173,6 +173,24 @@ async def test_runtime_pages_are_epoch_bound_detached_and_parent_scoped() -> Non
     monitor.history.close()
 
 
+@pytest.mark.asyncio
+async def test_runtime_link_page_finds_later_children_and_checks_epoch() -> None:
+    monitor = SubagentMonitor()
+    for number in range(45):
+        monitor.register(f"child-{number}", "task", "model")
+    host = object.__new__(TuiRuntimeHost)
+    host._epoch = 2
+    host._session = lambda: SimpleNamespace(subagent_monitor=monitor)
+    for number, offset in [(0, 0), (20, 20), (44, 40)]:
+        result = await host.dispatch("agent_link_page", {"session_id": f"child-{number}", "epoch": 2})
+        assert result["page"]["offset"] == offset
+        assert f"child-{number}" in [child["sessionId"] for child in result["page"]["children"]]
+    assert (await host.dispatch("agent_link_page", {"session_id": "missing", "epoch": 2}))["page"] is None
+    with pytest.raises(ValueError, match="Session changed"):
+        await host.dispatch("agent_link_page", {"session_id": "child-20", "epoch": 1})
+    monitor.history.close()
+
+
 def test_result_visibility_and_child_isolation() -> None:
     monitor = SubagentMonitor()
     monitor.register("one", "task", "model")

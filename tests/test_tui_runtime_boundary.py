@@ -2249,3 +2249,55 @@ async def test_detached_agent_history_stays_visible_during_refresh_and_revision_
         facade.releases[1].set()
         await pilot.pause()
         assert "history 3" in str(content.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["open", "token", "epoch", "panel"])
+async def test_agent_link_detached_response_races(outcome: str) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    class Facade:
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def command(self, command, _payload=None):
+            if command == "snapshot":
+                return {"result": {"epoch": 1, "sidebar": {"sessionId": "s"}, "messages": [],
+                                   "monitor": {"revision": 1, "children": []}}}
+            if command == "status_snapshot":
+                return {"result": {"epoch": 1, "sidebar": {"sessionId": "s"}, "mcp": []}}
+            if command == "monitor_snapshot":
+                return {"result": {"epoch": 1, "monitor": {"revision": 1, "children": []}}}
+            if command == "agent_inspector_page":
+                return {"result": {"epoch": 1, "durable": True, "entries": []}}
+            assert command == "agent_link_page"
+            self.entered.set()
+            await self.release.wait()
+            return {"result": {"epoch": 1, "page": {"offset": 20, "hasMore": False,
+                                                       "children": [{"sessionId": "child"}]}}}
+
+        def subscribe(self, listener, **_kwargs):
+            return lambda: None
+
+    facade = Facade()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    async with app.run_test() as pilot:
+        app._stream_lines = ["Tool: spawn_subagent"]
+        app._agent_link_tokens[1] = (app._monitor_generation, "child", 0, 1)
+        app._agent_link_labels[1] = "[view]"
+        app._agent_links_by_line[0] = (1,)
+        app.action_open_agent_link(1)
+        await asyncio.wait_for(facade.entered.wait(), 2)
+        if outcome == "token":
+            app._clear_agent_link_metadata()
+        elif outcome == "epoch":
+            view._snapshot["epoch"] = 2
+        elif outcome == "panel":
+            app._close_agents_panel()
+        facade.release.set()
+        await pilot.pause()
+        assert app._agents_panel_open is (outcome == "open")
+        assert app._selected_agent_id == ("child" if outcome == "open" else None)
