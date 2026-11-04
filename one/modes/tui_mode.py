@@ -3653,7 +3653,7 @@ if TEXTUAL_AVAILABLE:
                 if line.startswith(_THINKING_MARK):
                     return Content.from_markup(line[len(_THINKING_MARK) :] + "\n")
                 if line.startswith(_THINKING_TEXT_MARK):
-                    return Content.from_markup(line[len(_THINKING_TEXT_MARK) :] + "\n")
+                    return Content(line[len(_THINKING_TEXT_MARK) :] + "\n").stylize(f"italic {self._theme.info}")
                 if line in {"Thinking:", "Thought:"}:
                     return Content.from_markup("[i]$line[/]\n", line=line)
                 return self._cached_stream_content_line(line_index, line, width)
@@ -4518,8 +4518,7 @@ if TEXTUAL_AVAILABLE:
                 self._thinking_buffer = ""
                 self._thinking_line_idx = None
             self._thinking_buffer = _truncate_display_bytes(self._thinking_buffer + sanitize_display_text(delta))
-            escaped = rich_escape(self._thinking_buffer)
-            line_text = f"{_THINKING_TEXT_MARK}[i {self._theme.info}]{escaped}[/]"
+            line_text = f"{_THINKING_TEXT_MARK}{self._thinking_buffer}"
             if (
                 self._thinking_line_idx is not None
                 and 0 <= self._thinking_line_idx < len(self._stream_lines)

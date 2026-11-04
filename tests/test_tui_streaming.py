@@ -1363,6 +1363,24 @@ async def test_tui_thinking_two_segments_separated_by_tool(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_tui_thinking_markup_is_literal_across_streamed_deltas(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+    from one.modes.tui_transcript import TranscriptWidget
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({"type": "turn_start"})
+        for delta in ("partial [", "bold]text[/bold] ", "[link=https://example.com]x[/link] ", "\\[unfinished"):
+            session._emit({"type": "thinking_delta", "delta": delta})
+            await pilot.pause()
+        app._render_stream()
+        widget = app.query_one("#stream", TranscriptWidget)
+        assert "partial [bold]text[/bold] [link=https://example.com]x[/link] \\[unfinished" in widget.content.plain
+
+
+@pytest.mark.asyncio
 async def test_tui_many_deltas_same_segment_one_marked_line(tmp_path: Path):
     """Many deltas in one segment produce exactly one _THINKING_TEXT_MARK line."""
     from one.modes.tui_mode import _THINKING_TEXT_MARK, _OneTextualApp

@@ -22,6 +22,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI thinking output** — render streamed reasoning as literal text so markup-like
+  content or an incomplete bracket cannot terminate the application.
+
 - **Subagent View links** — open the exact agent beyond the first inspector
   page without accepting stale session or link results.
 
