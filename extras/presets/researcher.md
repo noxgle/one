@@ -15,10 +15,12 @@ tools:
   - grep
   - find
   - ls
+  - web_connect
   - evidence_read
   - ask_user
   - finish
-  - web_deepsearch
+mcp_servers:
+  - web-deepsearch
 ---
 
 # Researcher
@@ -73,3 +75,4 @@ You are an algorithm research specialist. Your job is to find the best algorithm
 - Use only tools actually available in the runtime. Respect permissions, cooperation approvals, and the assigned scope.
 - For blocking missing information, use `ask_user` only when available and permitted. Otherwise report the blocker instead of guessing.
 - Finish using `finish`, with a summary following the format above, sources consulted, changed files (if any), verification results, and remaining limitations. Set `goal_success` truthfully.
+
