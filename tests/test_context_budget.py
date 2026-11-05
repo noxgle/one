@@ -75,7 +75,7 @@ def test_legacy_models_json_context_is_a_manual_smaller_cap():
 
 def test_generation_limit_is_separate_from_reserve_default_and_clamped():
     model = ModelInfo("chatgpt", "large", context_window=200_000, output_limit=80_000)
-    assert resolve_context_budget(model).outgoing_max_tokens == 16_384
+    assert resolve_context_budget(model).outgoing_max_tokens == 80_000
     budget = resolve_context_budget(model, max_output_tokens=65_536, request_tokens=10_000)
     assert budget.outgoing_max_tokens == budget.output_reserve == 65_536
     assert budget.input_budget == 200_000 - 65_536
@@ -94,3 +94,35 @@ def test_generation_setting_validation_and_fallback():
             settings.set_config_value("generation.maxOutputTokens", value)
     settings = SettingsManager.in_memory({"generation": {"maxOutputTokens": 65_536}})
     assert settings.get_generation_max_output_tokens() == 65_536
+
+
+def test_catalog_sol_default_and_explicit_output_limits(tmp_path):
+    from one.core.model_catalog import ModelCatalog
+
+    model = ModelCatalog(tmp_path).apply(ModelInfo("openai", "gpt-6.1-sol"))
+    assert model.output_limit == 128_000
+    settings = SettingsManager.in_memory()
+    def budget():
+        return resolve_context_budget(model, max_output_tokens=settings.get_explicit_generation_max_output_tokens())
+
+    assert budget().outgoing_max_tokens == 128_000
+    for configured, expected in ((16_384, 16_384), (200_000, 128_000)):
+        settings.set_config_value("generation.maxOutputTokens", configured)
+        assert budget().outgoing_max_tokens == expected
+    assert resolve_context_budget(model, request_tokens=1_049_000).outgoing_max_tokens == 1000
+    assert resolve_context_budget(ModelInfo("openai", "unknown")).outgoing_max_tokens == 16_384
+
+
+def test_explicit_generation_scope_precedence(tmp_path):
+    import json
+
+    agent = tmp_path / "agent"
+    project = tmp_path / "project"
+    agent.mkdir()
+    (project / ".one").mkdir(parents=True)
+    (agent / "settings.json").write_text(json.dumps({"generation": {"maxOutputTokens": 30_000}}))
+    (project / ".one" / "settings.json").write_text(json.dumps({"generation": {"maxOutputTokens": 16_384}}))
+    settings = SettingsManager(str(project), str(agent))
+    assert settings.get_explicit_generation_max_output_tokens() == 16_384
+    settings.set_config_value("generation.maxOutputTokens", 50_000)
+    assert settings.get_explicit_generation_max_output_tokens() == 16_384

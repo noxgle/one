@@ -5,10 +5,17 @@ total-context values.  They are not input budgets.  Additional diagnostics may
 include `inputLimit`, `outputLimit`, `effectiveInputBudget`,
 `maxContextWindow`, `serverContextWindow`, and metadata source/time.
 
+Local catalogue metadata is applied synchronously at session creation, before
+background discovery. ChatGPT/Codex can use the OpenAI catalogue's `outputLimit`
+for an exact model ID when its own catalogue omits that field. This is an
+output-only capability fallback: API input/context limits are never copied onto
+Codex. Manual limits and advertised backend output limits take precedence;
+unknown IDs retain the conservative generation fallback.
+
 `context.policy` defaults to `endpoint-max`: the selected total is the endpoint
 capacity, constrained by an observed server cap and any smaller manual total.
-It reserves up to 16,384 output tokens (and no more than one eighth of a small
-window), then compacts/gauges against the remainder. Set
+It reserves the known model output limit, or up to 16,384 output tokens when
+unknown (at most one eighth of a small window), then compacts/gauges against the remainder. Set
 `context.policy` to `provider-default` for a safe rollback to the provider's
 advertised default input budget. Explicit smaller manual context/input/effective
 input budgets and known input limits always remain hard constraints.
@@ -41,7 +48,7 @@ snapshot is used only before a cache exists or when refresh fails.
 
 ## Generation limit and truncated responses
 
-`generation.maxOutputTokens` is a positive integer (default: `16384`). For example:
+`generation.maxOutputTokens` is an optional positive integer. For example:
 
 ```sh
 one config generation.maxOutputTokens 65536
@@ -50,9 +57,10 @@ one config generation.maxOutputTokens 65536
 This requests a larger per-response generation budget; it is not the model's
 advertised `outputLimit`. The shared context resolver clamps it to that limit
 and available total context. The reserved output and effective input budget used
-by the gauge and compaction reflect the selected generation budget. The default
-retains the conservative small-context reserve (at most one eighth of total);
-non-default budgets can reserve more, up to the total context. No total-context
+by the gauge and compaction reflect the selected generation budget. Without an
+explicit setting the known output limit is used; otherwise the fallback is 16384
+and retains the conservative small-context reserve (at most one eighth of total).
+Known or explicitly configured budgets can reserve more, up to the total context. No total-context
 estimate can guarantee backend acceptance when capacity metadata is unknown.
 
 Reasoning tokens can consume the output budget even when visible text is short.

@@ -120,7 +120,15 @@ class ModelCatalog:
             return {}
 
     def facts_for(self, provider: str, model_id: str) -> dict[str, int] | None:
-        return self.facts.get((provider, model_id))
+        facts = self.facts.get((provider, model_id))
+        # Codex serves OpenAI model IDs but has its own context capacities.
+        # Share only the output capability for an exact ID, never API context
+        # or input limits. Explicit backend facts take precedence per field.
+        if provider == "chatgpt":
+            output = self.facts.get(("openai", model_id), {}).get("outputLimit")
+            if output is not None:
+                return {"outputLimit": output, **(facts or {})}
+        return facts
 
     def apply(self, model: ModelInfo) -> ModelInfo:
         """Apply authoritative facts while reversibly tracking catalogue fields."""

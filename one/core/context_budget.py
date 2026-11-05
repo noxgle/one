@@ -44,7 +44,9 @@ class ContextBudget:
 def resolve_context_budget(model: ModelInfo | None, policy: object = "endpoint-max", *, request_tokens: int | None = None, max_output_tokens: int | None = None) -> ContextBudget:
     """Resolve total/input/output limits without treating defaults as endpoint facts."""
     selected_policy = policy if isinstance(policy, str) and policy in POLICIES else "endpoint-max"
-    requested = valid_limit(max_output_tokens) or DEFAULT_OUTPUT_RESERVE
+    explicit = valid_limit(max_output_tokens)
+    output_limit = valid_limit(model.output_limit) if model else None
+    requested = explicit or output_limit or DEFAULT_OUTPUT_RESERVE
     if model is None:
         return ContextBudget(selected_policy, None, FALLBACK_CONTEXT_WINDOW, requested,
                              requested, "unknown estimate", (), True)
@@ -65,10 +67,9 @@ def resolve_context_budget(model: ModelInfo | None, policy: object = "endpoint-m
     total = min(endpoint, manual_total) if endpoint and manual_total else endpoint or manual_total
     if manual_total:
         constraints.append("manualContextWindow")
-    output_limit = valid_limit(model.output_limit)
     reserve = min(requested, output_limit) if output_limit else requested
     if total:
-        reserve = min(reserve, total if requested != DEFAULT_OUTPUT_RESERVE else max(1, total // 8))
+        reserve = min(reserve, total if explicit or output_limit else max(1, total // 8))
     if output_limit:
         constraints.append("outputLimit")
 

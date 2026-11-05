@@ -613,7 +613,8 @@ see [model capacity metadata](docs/MODEL_CATALOG.md) for diagnostics and caveats
 ### Generation budget
 
 `generation.maxOutputTokens` sets the requested per-response output budget
-(default: **16384**, positive integer). For example, from the TUI:
+(positive integer). Without an explicit setting, the model's known output limit
+is used, or **16384** if unknown. For example, from the TUI:
 
 ```text
 /config generation.maxOutputTokens 32768

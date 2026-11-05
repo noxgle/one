@@ -144,3 +144,74 @@ async def test_successful_refresh_is_authoritative_but_outage_keeps_last_cache(t
     catalog.fetcher = outage
     assert not await catalog.refresh()
     assert catalog.facts_for("openai", "other")
+
+
+def test_codex_output_only_exact_id_fallback_and_precedence(tmp_path):
+    catalog = ModelCatalog(tmp_path)
+    catalog.facts = {("openai", "demo"): {
+        "contextWindow": 1_000_000, "inputLimit": 900_000, "outputLimit": 100_000,
+    }}
+    model = catalog.apply(ModelInfo("chatgpt", "demo"))
+    assert model.output_limit == 100_000
+    assert model.context_window is None and model.input_limit is None
+    assert catalog.apply(ModelInfo("chatgpt", "demo-other")).output_limit is None
+    assert catalog.apply(ModelInfo("ollama", "demo")).output_limit is None
+    manual = catalog.apply(ModelInfo("chatgpt", "demo", output_limit=5000, metadata_source="models.json"))
+    assert manual.output_limit == 5000
+    catalog.facts[("chatgpt", "demo")] = {"outputLimit": 50_000}
+    assert catalog.apply(model).output_limit == 50_000
+    catalog.facts = {}
+    assert catalog.apply(model).output_limit is None
+
+
+def _catalog_agent(tmp_path, model, settings=None):
+    from one.core.agent_session import AgentSession
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+    from tests.support.agents import _Loader
+
+    registry = ModelRegistry(AuthStorage.in_memory(), str(tmp_path / "models.json"))
+    return AgentSession(SessionManager.in_memory(str(tmp_path)),
+                        SettingsManager.in_memory(settings), registry, _Loader(), model, "off")
+
+
+def test_all_bundled_output_limits_reach_initial_status(tmp_path):
+    catalog = ModelCatalog(tmp_path)
+    # Exercise every supported provider/model in the pinned package, not just Sol.
+    for (provider, model_id), facts in catalog.facts.items():
+        if "outputLimit" not in facts:
+            continue
+        agent = _catalog_agent(tmp_path, ModelInfo(provider, model_id))
+        usage = agent.get_context_usage()
+        assert usage["outputLimit"] == facts["outputLimit"], (provider, model_id)
+        assert agent._context_budget().output_reserve == min(
+            facts["outputLimit"], facts.get("contextWindow", facts["outputLimit"])
+        )
+
+
+def test_codex_initial_status_uses_output_without_api_context(tmp_path):
+    agent = _catalog_agent(tmp_path, ModelInfo("chatgpt", "gpt-6.1-sol", context_window=872_000))
+    usage = agent.get_context_usage()
+    assert usage["outputLimit"] == usage["outputReserve"] == 128_000
+    assert usage["selectedContextWindow"] == 872_000
+    assert usage["inputLimit"] is None
+    agent.settings_manager.set_config_value("generation.maxOutputTokens", 20_000)
+    assert agent.get_context_usage()["outputReserve"] == 20_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [None, 800_000])
+@pytest.mark.parametrize("manual", [False, True])
+async def test_endpoint_output_updates_selected_model_even_without_context(tmp_path, window, manual):
+    model = ModelInfo("chatgpt", "demo", output_limit=5000 if manual else None,
+                      manual_fields=frozenset({"output_limit"}) if manual else frozenset())
+    agent = _catalog_agent(tmp_path, model)
+
+    class Adapter:
+        async def list_models_detailed(self, *args):
+            return [{"id": "demo", "contextWindow": window, "outputLimit": 42_000}]
+
+    agent.providers = {"chatgpt": Adapter()}
+    agent.model_registry.get_api_key_and_headers = lambda model: {"ok": True, "apiKey": "fake"}
+    await agent.refresh_context_window_metadata()
+    assert agent.get_context_usage()["outputLimit"] == (5000 if manual else 42_000)

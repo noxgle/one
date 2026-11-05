@@ -22,6 +22,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Model output limits** — use advertised output limits by default, while respecting
+  explicit generation settings and available context.
+  Apply local metadata before the first status request and use exact-ID OpenAI
+  output capabilities for Codex when absent, without copying API context limits.
+
 - **TUI thinking output** — render streamed reasoning as literal text so markup-like
   content or an incomplete bracket cannot terminate the application.
 

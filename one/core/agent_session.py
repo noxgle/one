@@ -256,8 +256,10 @@ class AgentSession:
         self.settings_manager = settings_manager
         self.model_registry = model_registry
         self.resource_loader = resource_loader
-        self.model = model
-        self._effective_context_window = _effective_context_window(model)
+        # Local metadata must be available to status and admission immediately,
+        # even when no asynchronous discovery worker has started yet.
+        self.model = model_registry.catalog.apply(model) if model else None
+        self._effective_context_window = _effective_context_window(self.model)
         if thinking_level not in THINKING_LEVELS:
             raise ValueError(f"Invalid thinking level: {thinking_level}")
         self.thinking_level = "off" if self.model and not self.model.reasoning else thinking_level
@@ -388,7 +390,7 @@ class AgentSession:
         """Resolve live settings/metadata; never use a stale cached policy."""
         return resolve_context_budget(
             self.model, self.settings_manager.get_context_policy(), request_tokens=request_tokens,
-            max_output_tokens=self.settings_manager.get_generation_max_output_tokens()
+            max_output_tokens=self.settings_manager.get_explicit_generation_max_output_tokens()
         )
 
     def _current_request_tokens(self, request: list[dict[str, Any]]) -> int:
@@ -3350,6 +3352,22 @@ class AgentSession:
                     window = entry.get("contextWindow")
                     maximum = entry.get("maxContextWindow")
                     default_budget = entry.get("defaultInputBudget")
+                    # Merge all advertised capacity fields, not only context.
+                    # register_models alone does not update this detached model.
+                    capacity_changes: dict[str, Any] = {}
+                    manual_capacity = set(model.manual_fields)
+                    if not manual_capacity:
+                        manual_capacity.update(legacy_models_json_manual_fields(
+                            model, ("input_limit", "output_limit")
+                        ))
+                    endpoint_capacity = set(model.endpoint_fields)
+                    for key, attr in (("inputLimit", "input_limit"), ("outputLimit", "output_limit")):
+                        if _valid_limit(entry.get(key)) and attr not in manual_capacity:
+                            capacity_changes[attr] = entry[key]
+                            endpoint_capacity.add(attr)
+                    model = replace(model, **capacity_changes,
+                                    manual_fields=frozenset(manual_capacity),
+                                    endpoint_fields=frozenset(endpoint_capacity))
                     if isinstance(window, int) and not isinstance(window, bool) and window > 0:
                         self.model_registry.register_models(model.provider, [entry])
                         manual = set(model.manual_fields)

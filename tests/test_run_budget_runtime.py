@@ -16,6 +16,7 @@ from one.core.auth_storage import AuthStorage
 from one.core.model_registry import ModelRegistry
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import SettingsManager
+from one.core.types import ModelInfo
 from one.providers.base import ChatResult
 
 
@@ -43,6 +44,25 @@ def make_agent(tmp_path: Path, settings: SettingsManager) -> tuple[AgentSession,
     provider = Provider()
     agent.providers = {"openai": provider}
     return agent, provider
+
+
+@pytest.mark.asyncio
+async def test_catalog_output_limit_reaches_provider_and_explicit_setting_wins(tmp_path: Path) -> None:
+    settings = SettingsManager.in_memory()
+    agent, provider = make_agent(tmp_path, settings)
+    agent.model = agent.model_registry.catalog.apply(ModelInfo("openai", "gpt-6.1-sol"))
+    assert agent.model is not None and agent.model.output_limit == 128_000
+    limits = []
+
+    async def chat(max_tokens: int | None = None, **kwargs: Any) -> ChatResult:
+        limits.append(max_tokens)
+        return await Provider.chat(provider, **kwargs)
+
+    provider.chat = chat
+    await agent.prompt("hello")
+    settings.set_config_value("generation.maxOutputTokens", 16_384)
+    await agent.prompt("continue")
+    assert limits == [128_000, 16_384]
 
 
 @pytest.mark.asyncio

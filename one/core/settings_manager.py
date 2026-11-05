@@ -364,6 +364,14 @@ class SettingsManager:
         value = generation.get("maxOutputTokens") if isinstance(generation, dict) else None
         return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 16384
 
+    def get_explicit_generation_max_output_tokens(self) -> int | None:
+        """Return the configured cap, excluding the built-in fallback."""
+        global_settings = self._initial if self._in_memory else self._global
+        configured = _deep_merge(global_settings or {}, self._project)
+        generation = configured.get("generation", {})
+        value = generation.get("maxOutputTokens") if isinstance(generation, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
     def get_context_policy(self) -> str:
         context = self.merged().get("context", {})
         policy = context.get("policy") if isinstance(context, dict) else None
@@ -698,6 +706,13 @@ class SettingsManager:
                 cur[part] = {}
             cur = cur[part]
         cur[parts[-1]] = value
+        if self._initial is not None:
+            cur = self._initial
+            for part in parts[:-1]:
+                if not isinstance(cur.get(part), dict):
+                    cur[part] = {}
+                cur = cur[part]
+            cur[parts[-1]] = deepcopy(value)
         self._save_global()
 
     @classmethod

@@ -663,7 +663,7 @@ def test_agent_keeps_missing_context_window_unknown(tmp_path):
     from one.core.agent_session import FALLBACK_CONTEXT_WINDOW
     from one.core.types import ModelInfo
 
-    model = ModelInfo(provider="ollama-cloud", id="nemotron-3-ultra", context_window=None)
+    model = ModelInfo(provider="ollama-cloud", id="unknown-capacity-model", context_window=None)
     agent = _mk_agent(tmp_path, {}, model=model)
     assert agent.model is not None and agent.model.context_window is None
 
