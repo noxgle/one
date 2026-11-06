@@ -47,7 +47,7 @@ def make_agent(tmp_path: Path, settings: SettingsManager) -> tuple[AgentSession,
 
 
 @pytest.mark.asyncio
-async def test_catalog_output_limit_reaches_provider_and_explicit_setting_wins(tmp_path: Path) -> None:
+async def test_catalog_output_limit_reaches_provider_despite_settings_fallback(tmp_path: Path) -> None:
     settings = SettingsManager.in_memory()
     agent, provider = make_agent(tmp_path, settings)
     agent.model = agent.model_registry.catalog.apply(ModelInfo("openai", "gpt-6.1-sol"))
@@ -62,7 +62,7 @@ async def test_catalog_output_limit_reaches_provider_and_explicit_setting_wins(t
     await agent.prompt("hello")
     settings.set_config_value("generation.maxOutputTokens", 16_384)
     await agent.prompt("continue")
-    assert limits == [128_000, 16_384]
+    assert limits == [128_000, 128_000]
 
 
 @pytest.mark.asyncio

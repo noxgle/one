@@ -26,7 +26,8 @@ def legacy_models_json_manual_fields(model: ModelInfo, fields: Iterable[str]) ->
     """
     if model.metadata_source != "models.json":
         return frozenset()
-    return frozenset(field for field in fields if valid_limit(getattr(model, field, None)))
+    return frozenset(field for field in fields if field not in model.endpoint_fields
+                     and field not in model.catalog_fields and valid_limit(getattr(model, field, None)))
 
 
 @dataclass(frozen=True)
@@ -39,18 +40,28 @@ class ContextBudget:
     reason: str
     constraints: tuple[str, ...]
     estimated: bool
+    selected_output_limit: int | None = None
+    output_limit_source: str = "settings"
+    output_limit_reason: str = "generation.maxOutputTokens fallback"
+    outgoing_limit_reason: str = "generation.maxOutputTokens fallback"
 
 
 def resolve_context_budget(model: ModelInfo | None, policy: object = "endpoint-max", *, request_tokens: int | None = None, max_output_tokens: int | None = None) -> ContextBudget:
     """Resolve total/input/output limits without treating defaults as endpoint facts."""
     selected_policy = policy if isinstance(policy, str) and policy in POLICIES else "endpoint-max"
-    explicit = valid_limit(max_output_tokens)
+    manual = set(model.manual_fields) if model else set()
+    if model and not manual:
+        manual.update(legacy_models_json_manual_fields(model, ("context_window", "output_limit")))
     output_limit = valid_limit(model.output_limit) if model else None
-    requested = explicit or output_limit or DEFAULT_OUTPUT_RESERVE
+    if output_limit and "output_limit" in manual:
+        requested, source, output_reason = output_limit, "models.json", "manual outputLimit"
+    elif output_limit and model and ("output_limit" in model.catalog_fields or "output_limit" not in model.endpoint_fields):
+        requested, source, output_reason = output_limit, "catalog", "catalog outputLimit"
+    else:
+        requested, source, output_reason = valid_limit(max_output_tokens) or DEFAULT_OUTPUT_RESERVE, "settings", "generation.maxOutputTokens fallback"
     if model is None:
         return ContextBudget(selected_policy, None, FALLBACK_CONTEXT_WINDOW, requested,
-                             requested, "unknown estimate", (), True)
-    manual = set(model.manual_fields)
+                             requested, "unknown estimate", (), True, requested, source, output_reason, output_reason)
     # Older persisted models predate per-field provenance. Their models.json
     # capacity is still an explicit user configuration, never a catalogue hint.
     if not manual:
@@ -67,10 +78,15 @@ def resolve_context_budget(model: ModelInfo | None, policy: object = "endpoint-m
     total = min(endpoint, manual_total) if endpoint and manual_total else endpoint or manual_total
     if manual_total:
         constraints.append("manualContextWindow")
-    reserve = min(requested, output_limit) if output_limit else requested
-    if total:
-        reserve = min(reserve, total if explicit or output_limit else max(1, total // 8))
-    if output_limit:
+    server_output = valid_limit(model.server_output_limit)
+    effective = min(requested, server_output) if server_output else requested
+    effective_reason = "server output hard cap" if server_output and server_output < requested else output_reason
+    if server_output:
+        constraints.append("serverOutputLimit")
+    # Compaction needs a usable input budget even for models advertising an
+    # output limit close to their entire context. This is not the request cap.
+    reserve = min(effective, DEFAULT_OUTPUT_RESERVE, max(1, total // 8)) if total else min(effective, DEFAULT_OUTPUT_RESERVE)
+    if source != "settings":
         constraints.append("outputLimit")
 
     hard_input = valid_limit(model.input_limit)
@@ -97,12 +113,13 @@ def resolve_context_budget(model: ModelInfo | None, policy: object = "endpoint-m
     if "input_limit" in manual and hard_input and "inputLimit" not in constraints:
         constraints.append("manualInputLimit")
     request = valid_limit(request_tokens)
-    outgoing = reserve
+    outgoing = effective
     if total:
-        remaining = total - request if request else reserve if total_input else 0
-        outgoing = min(reserve, max(0, remaining))
-    if output_limit:
-        outgoing = min(outgoing, output_limit)
+        remaining = max(0, total - (request or 0)) if request or total_input else 0
+        if remaining < outgoing:
+            outgoing = remaining
+            effective_reason = "available context"
     return ContextBudget(selected_policy, total, budget, reserve, outgoing, reason,
                           tuple(dict.fromkeys(constraints)),
-                          total is None and not (hard_input or valid_limit(model.effective_input_budget)))
+                          total is None and not (hard_input or valid_limit(model.effective_input_budget)),
+                          requested, source, output_reason, effective_reason)

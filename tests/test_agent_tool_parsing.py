@@ -40,7 +40,7 @@ class _RecordingCodex(CodexResponsesAdapter):
         tools: list[dict[str, Any]] | None = None,
         stream_transport_timeout: float | None = None,
     ) -> ChatResult:
-        self.payloads.append(self._build_payload(model, messages, thinking_level, True, tools=tools))
+        self.payloads.append(self._build_payload(model, messages, thinking_level, True, tools=tools, max_tokens=max_tokens))
         return self.responses.pop(0)
 
 

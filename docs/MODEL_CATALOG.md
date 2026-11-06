@@ -9,13 +9,14 @@ Local catalogue metadata is applied synchronously at session creation, before
 background discovery. ChatGPT/Codex can use the OpenAI catalogue's `outputLimit`
 for an exact model ID when its own catalogue omits that field. This is an
 output-only capability fallback: API input/context limits are never copied onto
-Codex. Manual limits and advertised backend output limits take precedence;
-unknown IDs retain the conservative generation fallback.
+Codex. Explicit `models.json` output limits take precedence over the catalogue;
+unknown IDs use the shared settings fallback. Endpoint discovery does not
+supersede a manual or catalogue output limit.
 
 `context.policy` defaults to `endpoint-max`: the selected total is the endpoint
 capacity, constrained by an observed server cap and any smaller manual total.
-It reserves the known model output limit, or up to 16,384 output tokens when
-unknown (at most one eighth of a small window), then compacts/gauges against the remainder. Set
+It reserves up to 16,384 output tokens, at most one eighth of the total window
+and no more than the effective output limit, then compacts/gauges against the remainder. Set
 `context.policy` to `provider-default` for a safe rollback to the provider's
 advertised default input budget. Explicit smaller manual context/input/effective
 input budgets and known input limits always remain hard constraints.
@@ -54,14 +55,37 @@ snapshot is used only before a cache exists or when refresh fails.
 one config generation.maxOutputTokens 65536
 ```
 
-This requests a larger per-response generation budget; it is not the model's
-advertised `outputLimit`. The shared context resolver clamps it to that limit
-and available total context. The reserved output and effective input budget used
-by the gauge and compaction reflect the selected generation budget. Without an
-explicit setting the known output limit is used; otherwise the fallback is 16384
-and retains the conservative small-context reserve (at most one eighth of total).
-Known or explicitly configured budgets can reserve more, up to the total context. No total-context
-estimate can guarantee backend acceptance when capacity metadata is unknown.
+This setting is only a fallback. For every model the outgoing output budget is
+selected in this order, using positive integers only:
+
+1. `models.json` `outputLimit` for the exact provider/model.
+2. Model catalogue `outputLimit` for that identity (cache or bundled snapshot).
+3. `settings.json` `generation.maxOutputTokens` (default 16384).
+
+For example, a catalogue limit of 128000 wins over a settings fallback of 8192.
+A manual limit of 64000 wins over both. To override a known model, use its entry
+in `models.json`, not the global generation fallback:
+
+```json
+{"providers":{"chatgpt":[{"id":"gpt-6.1-sol","outputLimit":64000}]}}
+```
+
+The loader and model persistence support `outputLimit`; existing explicit values
+are preserved. No private settings or historical sessions are migrated. Global
+and project settings retain their existing precedence for the fallback.
+The compaction reserve is independent of the outgoing limit; it does not cap
+generation. Outgoing generation is clamped to available total context and any
+independently verified server output hard cap. An endpoint's advertised output
+capability is not by itself proof of such a hard cap, and does not override the
+selection order above. No current adapter supplies a verified output hard cap.
+
+`/stats` → `contextUsage` exposes `selectedOutputLimit`, `outputLimitSource`
+(`models.json`, `catalog`, or `settings`), `outgoingMaxTokens`, and
+`outputLimitReason`. `lastRequest` separately records the last limit passed to
+the adapter for the currently selected provider/model, not a recalculation from
+current settings or the reply's token usage. It is runtime-only and is unknown
+until a new request is made after resume. These diagnostics do not prove server
+acceptance or a backend's actual capacity.
 
 Reasoning tokens can consume the output budget even when visible text is short.
 Larger limits may increase latency and subscription/API consumption. Lower thinking

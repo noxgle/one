@@ -612,16 +612,18 @@ see [model capacity metadata](docs/MODEL_CATALOG.md) for diagnostics and caveats
 
 ### Generation budget
 
-`generation.maxOutputTokens` sets the requested per-response output budget
-(positive integer). Without an explicit setting, the model's known output limit
-is used, or **16384** if unknown. For example, from the TUI:
+Output limits are selected in this order: `models.json` `outputLimit`, then
+model catalogue `outputLimit`, then `settings.json` `generation.maxOutputTokens`.
+The last setting is a shared positive-integer fallback for models without known
+output capacity (default **16384**), not an override of known limits. For example,
+from the TUI:
 
 ```text
 /config generation.maxOutputTokens 32768
 ```
 
 This is not the model's context-window size or a guarantee of backend capacity.
-The request is clamped to known model output limits and available context;
+The selected limit is clamped to available context;
 reasoning tokens can consume the budget even when the visible answer is short.
 Larger budgets may increase latency and usage. Changes affect subsequent
 requests. See [model capacity and truncated responses](docs/MODEL_CATALOG.md#generation-limit-and-truncated-responses)

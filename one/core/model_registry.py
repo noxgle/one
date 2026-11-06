@@ -256,6 +256,7 @@ class ModelRegistry:
                         catalog_baseline=m.catalog_baseline,
                         catalog_values=m.catalog_values,
                         endpoint_fields=m.endpoint_fields,
+                        server_output_limit=m.server_output_limit,
                         pricing=m.pricing,
                     )
                 else:
@@ -403,9 +404,8 @@ class ModelRegistry:
     def register_models(self, provider: str, model_ids: list[str | dict[str, Any]]) -> int:
         """Register fetched models in memory (dedupe); returns how many were added.
 
-        Entries may be plain ids or ``{"id", "contextWindow"}`` dicts. Existing
-        registered entries without a context window get enriched when a real
-        one arrives (e.g. on refresh).
+        Entries may be plain ids or dictionaries with endpoint capacity facts.
+        Refresh endpoint facts without overwriting explicit manual fields.
 
         When a fetched model id matches a builtin that declares
         ``input_image=True``, the builtin capability is preserved.
@@ -416,8 +416,8 @@ class ModelRegistry:
             mid = raw.get("id")
             if not isinstance(mid, str) or not mid:
                 continue
-            window = _positive_limit(raw.get("contextWindow"))
             fields = {
+                "context_window": _positive_limit(raw.get("contextWindow")),
                 "input_limit": _positive_limit(raw.get("inputLimit")),
                 "output_limit": _positive_limit(raw.get("outputLimit")),
                 "max_context_window": _positive_limit(raw.get("maxContextWindow")),
@@ -427,11 +427,14 @@ class ModelRegistry:
             }
             existing = next((item for item in self._models if item.provider == provider and item.id == mid), None)
             if existing is not None:
-                if not existing.context_window and isinstance(window, int) and not isinstance(window, bool) and window > 0:
-                    existing.context_window = window
+                endpoint = set(existing.endpoint_fields)
                 for name, value in fields.items():
-                    if value and not getattr(existing, name):
+                    if value and name not in existing.manual_fields:
                         setattr(existing, name, value)
+                        endpoint.add(name)
+                existing.endpoint_fields = frozenset(endpoint)
+                if endpoint and not existing.manual_fields and existing.metadata_source != "models.json":
+                    existing.metadata_source = "provider endpoint"
                 # Preserve builtin vision capability when the id matches.
                 builtin = next(
                     (b for b in BUILTIN_MODELS if b.provider == provider and b.id == mid),
@@ -451,7 +454,7 @@ class ModelRegistry:
                     provider=provider,
                     id=mid,
                     reasoning=True,
-                    context_window=window,
+                    context_window=fields["context_window"],
                     base_url=None,
                     tool_parser=None,
                     input_image=has_vision,
@@ -461,6 +464,8 @@ class ModelRegistry:
                     default_context_window=fields["default_context_window"],
                     default_input_budget=fields["default_input_budget"],
                     server_context_window=fields["server_context_window"],
+                    endpoint_fields=frozenset(name for name, value in fields.items() if value),
+                    metadata_source="provider endpoint" if any(fields.values()) else None,
                 )
             )
             added += 1
@@ -470,9 +475,8 @@ class ModelRegistry:
         """Merge fetched models into models.json (providers.<provider>).
 
         Entries may be plain ids or ``{"id", "contextWindow"}`` dicts. Existing
-        entries keep their fields (url/toolParser/contextWindow); only missing
-        ids are added with defaults, and a known contextWindow is filled in
-        when the stored entry lacks one. Creates the file when absent.
+        entries keep their fields; only missing ids are added with defaults.
+        Discovered capacity facts are not persisted as manual configuration.
 
         When a model is known to support ``input_image`` (via builtins or
         previously persisted), the stored entry keeps ``"inputImage": true``.
@@ -512,24 +516,13 @@ class ModelRegistry:
         for m in providers.get(provider, []) or []:
             if isinstance(m, dict) and m.get("id"):
                 existing[m["id"]] = m
-        for mid, window in self._normalize_entries(model_ids):
+        for mid, _window in self._normalize_entries(model_ids):
             entry = existing.setdefault(mid, {"id": mid, "reasoning": True, "inputImage": False})
-            if window and not entry.get("contextWindow"):
-                entry["contextWindow"] = window
             # Preserve vision capability: if the in-memory model has input_image=True
             # (from builtins or prior login), mark it in the persisted entry.
             mem_model = self.find(provider, mid)
             if mem_model and mem_model.input_image:
                 entry["inputImage"] = True
-            if mem_model:
-                for attr, key in (("input_limit", "inputLimit"), ("output_limit", "outputLimit"),
-                                   ("max_context_window", "maxContextWindow"),
-                                   ("server_context_window", "serverContextWindow"),
-                                  ("default_context_window", "defaultContextWindow"),
-                                  ("default_input_budget", "defaultInputBudget")):
-                    value = _positive_limit(getattr(mem_model, attr))
-                    if value and key not in entry:
-                        entry[key] = value
         providers[provider] = list(existing.values())
         atomic_write_text(self._models_path, json.dumps(data, indent=2) + "\n")
         # After a successful write the file is known-good again.

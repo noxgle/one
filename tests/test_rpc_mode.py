@@ -678,8 +678,9 @@ async def test_rpc_login_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     # models.json persisted correctly
     persisted = json.loads(models_path.read_text(encoding="utf-8"))
     entries = {e["id"]: e for e in persisted["providers"]["openai"]}
-    assert entries["nemotron-3-ultra"]["contextWindow"] == 262_144
-    # contextWindow=None means key absent (persist_models skips falsy values)
+    # Discovered capacity stays endpoint metadata and is not promoted to manual config.
+    assert entries["nemotron-3-ultra"].get("contextWindow") is None
+    # contextWindow=None means key absent
     assert entries["glm-5.2"].get("contextWindow") is None
 
 

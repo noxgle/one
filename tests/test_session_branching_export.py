@@ -254,3 +254,55 @@ def test_parse_args_export_format():
     assert p.export_format == "jsonl"
     p2 = parse_args(["--export", "x.jsonl"])
     assert p2.export_format == "html"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_limit", [None, 8192])
+async def test_resumed_sol_recomputes_output_limit_not_historical_warning(tmp_path, monkeypatch, configured_limit):
+    from one.core.agent_session import AgentSession
+    from one.providers.base import ChatResult
+
+    # All discovery remains offline, including the automatic endpoint worker.
+    monkeypatch.setattr(AgentSession, "start_catalog_refresh", lambda self: None)
+    host, sm = await _make_host(tmp_path)
+    registry = host.session.model_registry
+    registry.register_models("chatgpt", [{"id": "gpt-6.1-sol", "contextWindow": 872_000}])
+    registry._auth.set_runtime_api_key("chatgpt", "dummy")
+    sm.append_model_change("chatgpt", "gpt-6.1-sol")
+    sm.append_message({"role": "user", "content": "previous task"})
+    sm.append_message({
+        "role": "assistant", "content": "[warning] Output token limit reached (requested: 8192).",
+        "provider": "chatgpt", "model": "gpt-6.1-sol",
+        "outputTruncation": {"reason": "max_output_tokens", "requestedMaxTokens": 8192},
+    })
+    if configured_limit is not None:
+        host.session.settings_manager.set_config_value("generation.maxOutputTokens", configured_limit)
+    limits = []
+
+    from one.providers.codex_responses import CodexResponsesAdapter
+
+    class Provider(CodexResponsesAdapter):
+        async def chat(self, model, messages, thinking_level, max_tokens=None, **kwargs):
+            payload = self._build_payload(model, messages, thinking_level, True, max_tokens=max_tokens)
+            limits.append(payload["max_output_tokens"])
+            return ChatResult(text="A complete offline answer. " * 20, raw={}, usage={}, stop_reason="stop")
+
+    try:
+        await host.switch_session(sm.session_file)
+        agent = host.session
+        agent.providers = {"chatgpt": Provider()}
+        usage = agent.get_context_usage()
+        assert agent.model.id == "gpt-6.1-sol"
+        assert usage["outputLimit"] == 128_000
+        assert usage["outputReserve"] == 16_384
+        assert usage["outgoingMaxTokens"] == 128_000
+        # Old warning text is history, not the cap of the next request.
+        assert "requested: 8192" in agent.get_last_assistant_text()
+        await agent.prompt("continue")
+        assert limits and all(limit == 128_000 for limit in limits)
+        assert agent.get_context_usage()["lastRequest"]["outgoingMaxTokens"] == 128_000
+        other = registry.find("openai", "gpt-4.1")
+        await agent.set_model(other)
+        assert agent.get_context_usage()["lastRequest"] is None
+    finally:
+        await host.dispose()

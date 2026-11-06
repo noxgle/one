@@ -324,6 +324,7 @@ class AgentSession:
         self._images: list[dict[str, Any]] | None = None
         self._tool_images: list[dict[str, Any]] = []
         self._active_chat_tasks: set[asyncio.Task] = set()
+        self._last_output_request: dict[str, Any] | None = None
         self._active_bash_tasks: set[asyncio.Task] = set()
         self._active_tool_tasks: set[asyncio.Task] = set()
         self._extension_ui_pending: dict[str, dict[str, Any]] = {}
@@ -3349,9 +3350,9 @@ class AgentSession:
                 return model
             for entry in entries or []:
                 if isinstance(entry, dict) and entry.get("id") == model.id:
+                    self.model_registry.register_models(model.provider, [entry])
                     window = entry.get("contextWindow")
                     maximum = entry.get("maxContextWindow")
-                    default_budget = entry.get("defaultInputBudget")
                     # Merge all advertised capacity fields, not only context.
                     # register_models alone does not update this detached model.
                     capacity_changes: dict[str, Any] = {}
@@ -3363,13 +3364,17 @@ class AgentSession:
                     endpoint_capacity = set(model.endpoint_fields)
                     for key, attr in (("inputLimit", "input_limit"), ("outputLimit", "output_limit")):
                         if _valid_limit(entry.get(key)) and attr not in manual_capacity:
-                            capacity_changes[attr] = entry[key]
+                            if attr == "output_limit" and attr in model.catalog_fields:
+                                baseline = dict(model.catalog_baseline)
+                                baseline[attr] = entry[key]
+                                capacity_changes["catalog_baseline"] = baseline
+                            else:
+                                capacity_changes[attr] = entry[key]
                             endpoint_capacity.add(attr)
                     model = replace(model, **capacity_changes,
                                     manual_fields=frozenset(manual_capacity),
                                     endpoint_fields=frozenset(endpoint_capacity))
                     if isinstance(window, int) and not isinstance(window, bool) and window > 0:
-                        self.model_registry.register_models(model.provider, [entry])
                         manual = set(model.manual_fields)
                         if not manual:
                             manual.update(legacy_models_json_manual_fields(
@@ -3384,9 +3389,12 @@ class AgentSession:
                         if _valid_limit(maximum) and "max_context_window" not in manual:
                             changes["max_context_window"] = maximum
                             endpoint.add("max_context_window")
+                        for key, attr in (("defaultContextWindow", "default_context_window"),
+                                          ("defaultInputBudget", "default_input_budget")):
+                            if _valid_limit(entry.get(key)) and attr not in manual:
+                                changes[attr] = entry[key]
+                                endpoint.add(attr)
                         return replace(model, **changes,
-                                       default_context_window=entry.get("defaultContextWindow") if _valid_limit(entry.get("defaultContextWindow")) else model.default_context_window,
-                                       default_input_budget=default_budget if _valid_limit(default_budget) else model.default_input_budget,
                                        manual_fields=frozenset(manual), endpoint_fields=frozenset(endpoint),
                                         metadata_source="mixed" if manual else "provider endpoint")
             return model
@@ -3726,8 +3734,8 @@ class AgentSession:
             chat_kwargs["images"] = images
         # The resolver is shared with the gauge and compaction.  Do not submit a
         # dishonest one-token request when this exact request has no room.
+        budget = self._context_budget(request_tokens=self._current_request_tokens(messages))
         if "max_tokens" in sig.parameters:
-            budget = self._context_budget(request_tokens=self._current_request_tokens(messages))
             if budget.selected_context_window and budget.outgoing_max_tokens == 0:
                 raise RuntimeError("Context window has no room for output; compact context before retrying")
             chat_kwargs["max_tokens"] = budget.outgoing_max_tokens or budget.output_reserve
@@ -3811,6 +3819,14 @@ class AgentSession:
         task: asyncio.Task[Any] | None = None
         res = None
         try:
+            self._last_output_request = {
+                "provider": self.model.provider, "model": self.model.id,
+                "selectedOutputLimit": budget.selected_output_limit,
+                "outputLimitSource": budget.output_limit_source,
+                "outputLimitReason": budget.outgoing_limit_reason if "max_tokens" in chat_kwargs else "provider managed",
+                "outgoingMaxTokens": chat_kwargs.get("max_tokens"),
+                "selectedContextWindow": budget.selected_context_window,
+            }
             task = asyncio.create_task(provider.chat(**chat_kwargs))
             self._active_chat_tasks.add(task)
             if not is_streaming:
@@ -3926,13 +3942,22 @@ class AgentSession:
         if getattr(res, "output_truncated", False):
             limit = chat_kwargs.get("max_tokens")
             notice = (
-                f"Output token limit reached (requested: {limit}). Response may be incomplete. "
-                "Increase generation.maxOutputTokens, lower thinking, or split the task. "
-                "No tools from this response were executed; no automatic retry was made."
+                f"Output token limit reached (selected: {budget.selected_output_limit}, source: "
+                f"{budget.output_limit_source}, effective: {limit}"
+                f"{' after context clipping' if limit is not None and budget.outgoing_limit_reason == 'available context' else ''}). "
+                "Response may be incomplete. "
+                + ("Compact context, lower thinking, or split the task. "
+                   if limit is not None and budget.outgoing_limit_reason == "available context"
+                   else "Increase generation.maxOutputTokens, lower thinking, or split the task. "
+                   if limit is not None and budget.outgoing_limit_reason == budget.output_limit_reason and budget.output_limit_source == "settings" else "Lower thinking or split the task. ")
+                + "No tools from this response were executed; no automatic retry was made."
             )
             assistant_message["outputTruncation"] = {
                 "reason": "max_output_tokens", "requestedMaxTokens": limit,
                 "outputTokens": assistant_message["usage"]["output"],
+                "selectedOutputLimit": budget.selected_output_limit,
+                "outputLimitSource": budget.output_limit_source,
+                "outputLimitReason": budget.outgoing_limit_reason if limit is not None else "provider managed",
             }
             assistant_message["content"] = [{"type": "text", "text": res.text + "\n\n[warning] " + notice}]
             assistant_message["_streamedSuppressed"] = False
@@ -5556,6 +5581,13 @@ class AgentSession:
             "contextPolicy": resolved.policy,
             "selectedContextWindow": resolved.selected_context_window,
             "outputReserve": resolved.output_reserve,
+            "selectedOutputLimit": resolved.selected_output_limit,
+            "outputLimitSource": resolved.output_limit_source,
+            "outputLimitReason": resolved.outgoing_limit_reason,
+            "outgoingMaxTokens": resolved.outgoing_max_tokens,
+            "lastRequest": dict(self._last_output_request) if self._last_output_request and (
+                self._last_output_request["provider"], self._last_output_request["model"]
+            ) == (self.model.provider, self.model.id) else None,
             "budgetReason": resolved.reason,
             "constraints": list(resolved.constraints),
             "inputLimit": _valid_limit(self.model.input_limit),

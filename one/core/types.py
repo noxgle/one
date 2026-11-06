@@ -39,6 +39,8 @@ class ModelInfo:
     catalog_values: dict[str, int] = field(default_factory=dict)
     endpoint_fields: frozenset[str] = field(default_factory=frozenset)
     pricing: PriceSnapshot | None = None
+    # Only populate from a verified serving hard cap, not advertised capability.
+    server_output_limit: int | None = None
 
 
 @dataclass

@@ -137,7 +137,8 @@ class ModelCatalog:
         manual = set(model.manual_fields)
         # Older direct callers used metadata_source alone; retain that contract.
         if model.metadata_source == "models.json" and not manual:
-            manual = {attr for attr in names.values() if _limit(getattr(model, attr))}
+            manual = {attr for attr in names.values() if attr not in model.endpoint_fields
+                      and attr not in model.catalog_fields and _limit(getattr(model, attr))}
         catalog_fields = set(model.catalog_fields)
         baseline = dict(model.catalog_baseline)
         catalog_values = dict(model.catalog_values)
@@ -148,13 +149,15 @@ class ModelCatalog:
             if attr in catalog_fields and (not facts or fact_name not in facts):
                 # Remove only an unchanged catalogue overlay. An endpoint may
                 # have legitimately superseded it since the prior application.
-                if attr not in manual and attr not in model.endpoint_fields and current == previous_catalog:
+                if (attr not in manual and (attr not in model.endpoint_fields or attr == "output_limit")
+                        and current == previous_catalog):
                     changes[attr] = baseline.get(attr)
                 catalog_fields.discard(attr)
                 baseline.pop(attr, None)
                 catalog_values.pop(attr, None)
                 continue
-            if not facts or fact_name not in facts or attr in manual or attr in model.endpoint_fields:
+            if (not facts or fact_name not in facts or attr in manual
+                    or (attr in model.endpoint_fields and attr != "output_limit")):
                 continue
             if attr in catalog_fields and current != previous_catalog:
                 catalog_fields.discard(attr)
@@ -179,7 +182,8 @@ class ModelCatalog:
                 model.metadata_source if model.metadata_source == "models.json"
                 else ("catalog cache" if self.updated_at else "catalog snapshot")
             ) if catalog_fields else (
-                None if model.metadata_source in {"catalog", "catalog snapshot", "catalog cache"} else model.metadata_source
+                ("provider endpoint" if model.endpoint_fields else None)
+                if model.metadata_source in {"catalog", "catalog snapshot", "catalog cache"} else model.metadata_source
             ),
             metadata_updated_at=(self.updated_at or self.snapshot_updated_at) if catalog_fields else model.metadata_updated_at,
         )

@@ -22,6 +22,16 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **Output-limit precedence** — outgoing generation limits now prefer the model's
+  explicit `models.json` `outputLimit`, then catalogue capacity, and only then
+  `settings.json` `generation.maxOutputTokens` as a fallback. `/stats` exposes
+  the chosen source, effective limit and last request limit; truncation warnings
+  distinguish configured capacity from available-context clipping. This also
+  applies when resuming older sessions.
+  Compaction uses a separate bounded reserve; independently verified server
+  output hard caps and available context constrain the actual request and are
+  distinguished in diagnostics.
+
 - **Model output limits** — use advertised output limits by default, while respecting
   explicit generation settings and available context.
   Apply local metadata before the first status request and use exact-ID OpenAI

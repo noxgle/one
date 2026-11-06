@@ -184,19 +184,20 @@ def test_all_bundled_output_limits_reach_initial_status(tmp_path):
         agent = _catalog_agent(tmp_path, ModelInfo(provider, model_id))
         usage = agent.get_context_usage()
         assert usage["outputLimit"] == facts["outputLimit"], (provider, model_id)
-        assert agent._context_budget().output_reserve == min(
-            facts["outputLimit"], facts.get("contextWindow", facts["outputLimit"])
-        )
+        budget = agent._context_budget()
+        assert budget.output_reserve <= min(facts["outputLimit"], 16_384)
+        assert budget.outgoing_max_tokens == min(facts["outputLimit"], facts.get("contextWindow", facts["outputLimit"]))
 
 
 def test_codex_initial_status_uses_output_without_api_context(tmp_path):
     agent = _catalog_agent(tmp_path, ModelInfo("chatgpt", "gpt-6.1-sol", context_window=872_000))
     usage = agent.get_context_usage()
-    assert usage["outputLimit"] == usage["outputReserve"] == 128_000
+    assert usage["outputLimit"] == 128_000
+    assert usage["outputReserve"] == 16_384
     assert usage["selectedContextWindow"] == 872_000
     assert usage["inputLimit"] is None
     agent.settings_manager.set_config_value("generation.maxOutputTokens", 20_000)
-    assert agent.get_context_usage()["outputReserve"] == 20_000
+    assert agent.get_context_usage()["outputReserve"] == 16_384
 
 
 @pytest.mark.asyncio
@@ -215,3 +216,219 @@ async def test_endpoint_output_updates_selected_model_even_without_context(tmp_p
     agent.model_registry.get_api_key_and_headers = lambda model: {"ok": True, "apiKey": "fake"}
     await agent.refresh_context_window_metadata()
     assert agent.get_context_usage()["outputLimit"] == (5000 if manual else 42_000)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_provenance_survives_catalog_removal(tmp_path):
+    agent = _catalog_agent(tmp_path, ModelInfo("chatgpt", "demo"))
+    catalog = agent.model_registry.catalog
+    catalog.facts = {("chatgpt", "demo"): {"outputLimit": 80_000}}
+    agent.model = catalog.apply(agent.model)
+
+    class Adapter:
+        async def list_models_detailed(self, *args):
+            return [{"id": "demo", "outputLimit": 42_000}]
+
+    agent.providers = {"chatgpt": Adapter()}
+    agent.model_registry.get_api_key_and_headers = lambda model: {"ok": True, "apiKey": "fake"}
+    await agent.refresh_context_window_metadata()
+    catalog.facts = {}
+    restored = catalog.apply(agent.model)
+    assert restored.output_limit == 42_000
+    assert "output_limit" in restored.endpoint_fields
+    from one.core.context_budget import resolve_context_budget
+    assert resolve_context_budget(restored, max_output_tokens=8192).outgoing_max_tokens == 8192
+    await agent.dispose()
+
+
+@pytest.mark.parametrize("manual,catalog_value,expected,source", [
+    (64_000, 128_000, 64_000, "models.json"),
+    (None, 128_000, 128_000, "catalog"),
+    (None, None, 8192, "settings"),
+    (True, 128_000, 128_000, "catalog"),
+    (0, None, 8192, "settings"),
+])
+@pytest.mark.asyncio
+async def test_output_precedence_reaches_codex_payload(tmp_path, manual, catalog_value, expected, source):
+    from one.core.agent_session import AgentSession
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+    from one.providers.base import ChatResult
+    from one.providers.codex_responses import CodexResponsesAdapter
+    from tests.support.agents import _Loader
+
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps({"providers": {"chatgpt": [{
+        "id": "demo", "contextWindow": 872_000, "outputLimit": manual,
+    }]}}))
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("chatgpt", "fake")
+    registry = ModelRegistry(auth, str(path))
+    registry.catalog.facts = {("chatgpt", "demo"): {"outputLimit": catalog_value}} if catalog_value else {}
+    agent = AgentSession(SessionManager.in_memory(str(tmp_path)),
+                         SettingsManager.in_memory({"generation": {"maxOutputTokens": 8192}}),
+                         registry, _Loader(), registry.find("chatgpt", "demo"), "off")
+    payloads = []
+
+    class Adapter(CodexResponsesAdapter):
+        async def chat(self, model, messages, thinking_level, max_tokens=None, **kwargs):
+            payloads.append(self._build_payload(model, messages, thinking_level, True, max_tokens=max_tokens))
+            return ChatResult(text="A complete offline answer. " * 20, raw={}, usage={}, stop_reason="stop")
+
+    agent.providers = {"chatgpt": Adapter()}
+    try:
+        await agent.prompt("hello")
+        assert payloads and all(p["max_output_tokens"] == expected for p in payloads)
+        usage = agent.get_session_stats()["contextUsage"]
+        assert usage["selectedOutputLimit"] == expected
+        assert usage["outputLimitSource"] == source
+        assert usage["lastRequest"]["outgoingMaxTokens"] == expected
+        usage["lastRequest"]["outgoingMaxTokens"] = 1
+        assert agent.get_context_usage()["lastRequest"]["outgoingMaxTokens"] == expected
+    finally:
+        await agent.dispose()
+
+
+def test_catalog_output_beats_endpoint_but_preserves_manual(tmp_path):
+    catalog = ModelCatalog(tmp_path)
+    catalog.facts = {("openai", "demo"): {"outputLimit": 128_000}}
+    model = ModelInfo("openai", "demo", output_limit=8192, endpoint_fields=frozenset({"output_limit"}))
+    assert catalog.apply(model).output_limit == 128_000
+    manual = replace(model, output_limit=64_000, manual_fields=frozenset({"output_limit"}))
+    assert catalog.apply(manual).output_limit == 64_000
+
+
+def test_manual_output_limit_survives_persist_and_reload(tmp_path):
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps({"providers": {"openai": [{"id": "gpt-6.1-sol", "outputLimit": 64_000}]}}))
+    registry = ModelRegistry(AuthStorage.in_memory(), str(path))
+    registry.persist_models("openai", ["gpt-6.1-sol"])
+    restored = ModelRegistry(AuthStorage.in_memory(), str(path)).find("openai", "gpt-6.1-sol")
+    assert restored.output_limit == 64_000
+    assert "output_limit" in restored.manual_fields
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_registered_endpoint_provenance_refresh_removal_and_resume(tmp_path, existing):
+    from one.core.context_budget import resolve_context_budget
+
+    path = tmp_path / "models.json"
+    if existing:
+        path.write_text(json.dumps({"providers": {"openai": [{"id": "demo", "inputLimit": 9000}]}}))
+    registry = ModelRegistry(AuthStorage.in_memory(), str(path))
+    registry.catalog.facts = {}
+    entry = {"id": "demo", "contextWindow": 10000, "inputLimit": 8000, "outputLimit": 1000}
+    assert registry.register_models("openai", [entry]) == (0 if existing else 1)
+    model = registry.find("openai", "demo")
+    assert model.output_limit == 1000
+    assert "output_limit" in model.endpoint_fields
+    assert resolve_context_budget(model, max_output_tokens=3000).selected_output_limit == 3000
+    assert model.input_limit == (9000 if existing else 8000)
+
+    registry.catalog.facts = {("openai", "demo"): {"outputLimit": 5000, "contextWindow": 20000}}
+    overlaid = registry.find("openai", "demo")
+    assert (overlaid.output_limit, overlaid.context_window) == (5000, 10000)
+    registry.register_models("openai", [{"id": "demo", "outputLimit": 1200}])
+    refreshed = registry.find("openai", "demo")
+    registry.catalog.facts = {}
+    removed = registry.catalog.apply(refreshed)
+    assert removed.output_limit == 1200
+    assert "output_limit" not in removed.catalog_fields
+    assert resolve_context_budget(removed, max_output_tokens=3000).selected_output_limit == 3000
+
+    registry.persist_models("openai", [entry])
+    saved = json.loads(path.read_text())["providers"]["openai"][0]
+    assert "outputLimit" not in saved and "contextWindow" not in saved
+    assert saved.get("inputLimit") == (9000 if existing else None)
+    resumed = ModelRegistry(AuthStorage.in_memory(), str(path))
+    resumed.catalog.facts = {}
+    resumed.register_models("openai", [{"id": "demo", "outputLimit": 1400}])
+    model = resumed.find("openai", "demo")
+    assert "output_limit" in model.endpoint_fields and "output_limit" not in model.manual_fields
+    assert resolve_context_budget(model, max_output_tokens=3000).selected_output_limit == 3000
+
+
+@pytest.mark.asyncio
+async def test_selected_limit_reaches_openai_http_body(tmp_path, monkeypatch):
+    import httpx
+
+    from one.core.context_budget import resolve_context_budget
+    from one.providers import openai_compatible as module
+
+    bodies = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, json, **kwargs):
+            bodies.append(json)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", Client)
+    adapter = module.OpenAICompatibleAdapter("openai", "https://offline.invalid")
+    catalog = ModelCatalog(tmp_path)
+    model = catalog.apply(ModelInfo("openai", "gpt-6.1-sol"))
+    selected = resolve_context_budget(model, max_output_tokens=8192)
+    await adapter.chat("fake", model.id, [{"role": "user", "content": "hi"}], "off",
+                       max_tokens=selected.outgoing_max_tokens)
+    assert bodies[0]["max_tokens"] == 128_000
+
+
+@pytest.mark.asyncio
+async def test_context_clipping_is_reported_with_actual_payload_limit(tmp_path):
+    from one.providers.base import ChatResult
+    from one.providers.codex_responses import CodexResponsesAdapter
+
+    agent = _catalog_agent(tmp_path, ModelInfo("chatgpt", "gpt-6.1-sol", context_window=200_000))
+    agent.model_registry._auth.set_runtime_api_key("chatgpt", "fake")
+    agent._current_request_tokens = lambda request: 199_000
+    payloads = []
+
+    class Adapter(CodexResponsesAdapter):
+        async def chat(self, model, messages, thinking_level, max_tokens=None, **kwargs):
+            payloads.append(self._build_payload(model, messages, thinking_level, True, max_tokens=max_tokens))
+            return ChatResult(text="partial", raw={}, usage={}, stop_reason="max_output_tokens", output_truncated=True)
+
+    agent.providers = {"chatgpt": Adapter()}
+    try:
+        result = await agent._invoke_provider([{"role": "user", "content": "hi"}])
+        assert payloads[0]["max_output_tokens"] == 1000
+        assert result["outputTruncation"]["selectedOutputLimit"] == 128_000
+        assert result["outputTruncation"]["outputLimitReason"] == "available context"
+        assert "after context clipping" in agent._assistant_text(result)
+        assert "Increase generation.maxOutputTokens" not in agent._assistant_text(result)
+        assert agent.get_context_usage()["lastRequest"]["outgoingMaxTokens"] == 1000
+    finally:
+        await agent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_server_cap_is_reported_in_stats_and_truncation(tmp_path):
+    from one.providers.base import ChatResult
+
+    agent = _catalog_agent(tmp_path, ModelInfo("chatgpt", "demo", context_window=100_000,
+                                              server_output_limit=4000))
+    agent.model_registry._auth.set_runtime_api_key("chatgpt", "fake")
+    agent._current_request_tokens = lambda request: 1000
+
+    class Adapter:
+        async def chat(self, api_key, model, messages, thinking_level, headers=None, max_tokens=None):
+            assert max_tokens == 4000
+            return ChatResult(text="partial", raw={}, usage={}, stop_reason="max_output_tokens", output_truncated=True)
+
+    agent.providers = {"chatgpt": Adapter()}
+    try:
+        result = await agent._invoke_provider([{"role": "user", "content": "hi"}])
+        assert result["outputTruncation"]["outputLimitReason"] == "server output hard cap"
+        assert "after context clipping" not in agent._assistant_text(result)
+        assert "Increase generation.maxOutputTokens" not in agent._assistant_text(result)
+        assert agent.get_context_usage()["lastRequest"]["outputLimitReason"] == "server output hard cap"
+    finally:
+        await agent.dispose()

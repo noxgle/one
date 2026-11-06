@@ -77,8 +77,9 @@ def test_generation_limit_is_separate_from_reserve_default_and_clamped():
     model = ModelInfo("chatgpt", "large", context_window=200_000, output_limit=80_000)
     assert resolve_context_budget(model).outgoing_max_tokens == 80_000
     budget = resolve_context_budget(model, max_output_tokens=65_536, request_tokens=10_000)
-    assert budget.outgoing_max_tokens == budget.output_reserve == 65_536
-    assert budget.input_budget == 200_000 - 65_536
+    assert budget.outgoing_max_tokens == 80_000
+    assert budget.output_reserve == 16_384
+    assert budget.input_budget == 200_000 - 16_384
     assert resolve_context_budget(model, max_output_tokens=100_000).outgoing_max_tokens == 80_000
     assert resolve_context_budget(model, max_output_tokens=65_536, request_tokens=199_000).outgoing_max_tokens == 1000
     assert resolve_context_budget(model, max_output_tokens=65_536, request_tokens=200_001).outgoing_max_tokens == 0
@@ -106,7 +107,7 @@ def test_catalog_sol_default_and_explicit_output_limits(tmp_path):
         return resolve_context_budget(model, max_output_tokens=settings.get_explicit_generation_max_output_tokens())
 
     assert budget().outgoing_max_tokens == 128_000
-    for configured, expected in ((16_384, 16_384), (200_000, 128_000)):
+    for configured, expected in ((16_384, 128_000), (200_000, 128_000)):
         settings.set_config_value("generation.maxOutputTokens", configured)
         assert budget().outgoing_max_tokens == expected
     assert resolve_context_budget(model, request_tokens=1_049_000).outgoing_max_tokens == 1000
@@ -126,3 +127,33 @@ def test_explicit_generation_scope_precedence(tmp_path):
     assert settings.get_explicit_generation_max_output_tokens() == 16_384
     settings.set_config_value("generation.maxOutputTokens", 50_000)
     assert settings.get_explicit_generation_max_output_tokens() == 16_384
+
+
+def test_output_fallback_and_remaining_context_diagnostics():
+    for invalid in (None, 0, -1, True, "8192"):
+        assert resolve_context_budget(ModelInfo("openai", "unknown"), max_output_tokens=invalid).selected_output_limit == 16_384
+    model = ModelInfo("openai", "demo", context_window=200_000, output_limit=128_000,
+                      manual_fields=frozenset({"output_limit"}))
+    resolved = resolve_context_budget(model, max_output_tokens=8192, request_tokens=199_000)
+    assert resolved.selected_output_limit == 128_000
+    assert resolved.output_limit_source == "models.json"
+    assert resolved.outgoing_max_tokens == 1000
+
+
+def test_verified_server_output_cap_and_context_reason_are_independent():
+    model = ModelInfo("openai", "demo", context_window=100_000, output_limit=80_000,
+                      manual_fields=frozenset({"output_limit"}), server_output_limit=12_000)
+    budget = resolve_context_budget(model, request_tokens=1000)
+    assert (budget.selected_output_limit, budget.outgoing_max_tokens) == (80_000, 12_000)
+    assert budget.output_limit_source == "models.json"
+    assert budget.outgoing_limit_reason == "server output hard cap"
+    assert resolve_context_budget(model, request_tokens=99_000).outgoing_limit_reason == "available context"
+    model.server_output_limit = True
+    assert resolve_context_budget(model, request_tokens=1000).outgoing_max_tokens == 80_000
+
+
+def test_reserve_does_not_cap_outgoing_for_small_context():
+    model = ModelInfo("openai", "demo", context_window=32_000, output_limit=32_000)
+    budget = resolve_context_budget(model, request_tokens=1000)
+    assert (budget.output_reserve, budget.input_budget, budget.outgoing_max_tokens) == (4000, 28_000, 31_000)
+    assert budget.outgoing_limit_reason == "available context"

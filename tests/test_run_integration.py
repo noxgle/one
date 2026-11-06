@@ -311,13 +311,15 @@ async def test_auto_compaction_and_queue_share_original_run(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_child_admission_uses_root_spend_not_a_fresh_token_budget(tmp_path: Path) -> None:
-    agent, provider = agent_with_script(tmp_path, ["root response", FINISH], runBudget={"maxTokens": 10018})
+    # Known catalogue output capacity wins over the fixture's generation
+    # fallback of 16. Leave room for exactly one input+output reservation.
+    agent, provider = agent_with_script(tmp_path, ["root response", FINISH], runBudget={"maxTokens": 42770})
     agent.model.input_limit = 10000
     async def operation():
         context = agent._run_context
         await agent._invoke_provider([])
         assert sum(a.tokens for a in context._attempts.values()) == 3
-        # A 10016-token child reservation fits a fresh pool but not the 10015
+        # A 42768-token child reservation fits a fresh pool but not the 42767
         # remaining after the root's settled request.
         result = await agent._spawn_subagent({"task": "cannot afford another request"})
         assert not result["ok"]

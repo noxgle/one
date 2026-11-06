@@ -175,6 +175,10 @@ For example, a project `.one/settings.json` may contain:
 }
 ```
 
+`generation.maxOutputTokens` is only a fallback: `models.json` `outputLimit`
+wins, then catalogue `outputLimit`, then this setting. A lower settings value
+does not cap a model with known output capacity.
+
 The `/config <key> <value>` setter writes global settings, not the project file;
 a project override can therefore continue to mask a changed global value.
 Do not put provider credentials in project settings or commit them to Git.
