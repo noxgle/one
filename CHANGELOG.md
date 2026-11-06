@@ -22,6 +22,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI session lists** — load persisted sessions in bounded pages so large lists
+  no longer exceed the runtime command result limit when listing or selecting sessions.
+
 - **Output-limit precedence** — outgoing generation limits now prefer the model's
   explicit `models.json` `outputLimit`, then catalogue capacity, and only then
   `settings.json` `generation.maxOutputTokens` as a fallback. `/stats` exposes

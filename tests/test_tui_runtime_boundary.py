@@ -898,7 +898,8 @@ async def test_detached_sessions_full_id_uses_fresh_runtime_host_list_without_nu
             calls.append((command, payload))
             if command == "snapshot":
                 return {"result": self.snapshot}
-            if command == "session_list":
+            if command == "session_list_page":
+                assert payload == {"offset": 0, "limit": 100}
                 return {"result": {"sessions": [
                     {
                         "id": "target", "name": "Exact Name", "path": target_path,
@@ -908,7 +909,7 @@ async def test_detached_sessions_full_id_uses_fresh_runtime_host_list_without_nu
                         "id": "other", "name": "Duplicate", "path": str(tmp_path / "other.jsonl"),
                         "cwd": str(tmp_path), "modified": datetime.now(UTC).isoformat(), "messageCount": 1,
                     },
-                ]}}
+                ], "nextOffset": None}}
             assert command == "ui"
             assert payload == {"operation": "rename_session", "payload": {"path": target_path, "name": "Duplicate"}}
             return {"result": self.snapshot}
@@ -930,7 +931,7 @@ async def test_detached_sessions_full_id_uses_fresh_runtime_host_list_without_nu
 
     assert ("ui", {"operation": "rename_session", "payload": {"path": target_path, "name": "Duplicate"}}) in calls
     assert app._session_list_snapshot is None
-    assert ("session_list", {}) in calls
+    assert ("session_list_page", {"offset": 0, "limit": 100}) in calls
 
 
 @pytest.mark.asyncio
@@ -959,8 +960,9 @@ async def test_detached_session_number_uses_displayed_snapshot_and_full_id_needs
             calls.append((command, payload))
             if command == "snapshot":
                 return {"result": self.snapshot}
-            if command == "session_list":
-                return {"result": {"sessions": lists.pop(0)}}
+            if command == "session_list_page":
+                assert payload == {"offset": 0, "limit": 100}
+                return {"result": {"sessions": lists.pop(0), "nextOffset": None}}
             if command == "switch_session":
                 assert payload == {"path": first["path"], "id": "first-id"}
                 return {"result": self.snapshot}
@@ -987,7 +989,79 @@ async def test_detached_session_number_uses_displayed_snapshot_and_full_id_needs
         assert "Session from the last /sessions list is no longer available. Run /sessions again." in "\n".join(app._stream_lines)
         await pilot.pause()
 
-    assert [command for command, _payload in calls].count("session_list") == 6
+    assert [command for command, _payload in calls].count("session_list_page") == 6
+
+
+@pytest.mark.asyncio
+async def test_detached_sessions_multipage_number_and_fresh_id(tmp_path) -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    timestamp = datetime.now(UTC).isoformat()
+    items = [
+        {"id": f"id-{i}", "path": str(tmp_path / f"{i}.jsonl"), "modified": timestamp}
+        for i in range(105)
+    ]
+    calls = []
+
+    class Facade:
+        snapshot = {"epoch": 1, "sidebar": {"sessionId": "current", "theme": "default"}, "messages": []}
+
+        async def command(self, command, payload=None):
+            payload = payload or {}
+            calls.append((command, payload))
+            if command == "snapshot":
+                return {"result": self.snapshot}
+            if command == "session_list_page":
+                offset = payload["offset"]
+                assert payload["limit"] == 100
+                return {"result": {"sessions": items[offset:offset + 40],
+                                   "nextOffset": offset + 40 if offset + 40 < len(items) else None}}
+            if command == "switch_session":
+                return {"result": self.snapshot}
+            raise AssertionError(command)
+
+        def subscribe(self, _listener):
+            return lambda: None
+
+    view = TuiSessionView(Facade())
+    await view.refresh()
+    app = _OneTextualApp(view, runtime_host=object())
+    async with app.run_test():
+        await app._handle_command("/sessions")
+        assert len(app._session_list_snapshot or []) == 105
+        await app._handle_command("/sessions 105")
+        await app._handle_command("/sessions id-104")
+    assert [payload["offset"] for command, payload in calls if command == "session_list_page"] == [0, 40, 80] * 3
+    assert [payload for command, payload in calls if command == "switch_session"] == [
+        {"path": items[104]["path"], "id": "id-104"},
+    ] * 2
+
+
+@pytest.mark.asyncio
+async def test_detached_sessions_discards_pages_after_epoch_change() -> None:
+    from one.modes.tui_mode import _OneTextualApp
+
+    class Facade:
+        snapshot = {"epoch": 1, "sidebar": {"sessionId": "current", "theme": "default"}, "messages": []}
+
+        async def command(self, command, payload=None):
+            if command == "snapshot":
+                return {"result": self.snapshot}
+            assert command == "session_list_page"
+            if payload["offset"] == 0:
+                return {"result": {"sessions": [], "nextOffset": 1}}
+            view.apply_status_snapshot({"epoch": 2})
+            return {"result": {"sessions": [], "nextOffset": None}}
+
+        def subscribe(self, _listener):
+            return lambda: None
+
+    view = TuiSessionView(Facade())
+    await view.refresh()
+    app = _OneTextualApp(view)
+    with pytest.raises(ValueError, match="Session changed while loading list"):
+        await app._list_sessions()
+    assert app._session_list_snapshot is None
 
 
 @pytest.mark.asyncio

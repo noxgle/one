@@ -3297,8 +3297,7 @@ if TEXTUAL_AVAILABLE:
         async def _fresh_detached_session_infos(self) -> list[SessionInfo]:
             """Read the owner-loop session list without changing UI numbering."""
             assert isinstance(self.session, TuiSessionView)
-            result = await self.session.command("session_list")
-            return self._session_infos_from_result(result)
+            return await self._browser_session_infos()
 
         @staticmethod
         def _session_infos_from_result(result: dict[str, Any]) -> list[SessionInfo]:
@@ -3330,16 +3329,17 @@ if TEXTUAL_AVAILABLE:
                 return self._session_infos()
             infos: list[SessionInfo] = []
             offset = 0
-            epoch = self.session.epoch
+            session = self.session
+            epoch = session.epoch
             while True:
-                result = await self.session.command("session_list_page", offset=offset, limit=100)
-                if self.session.epoch != epoch:
+                result = await session.command("session_list_page", offset=offset, limit=100)
+                if self.session is not session or session.epoch != epoch:
                     raise ValueError("Session changed while loading list")
                 infos.extend(self._session_infos_from_result(result))
                 next_offset = result.get("nextOffset")
                 if next_offset is None:
                     return infos
-                if not isinstance(next_offset, int) or next_offset <= offset:
+                if not isinstance(next_offset, int) or isinstance(next_offset, bool) or next_offset <= offset:
                     raise ValueError("Invalid session page")
                 offset = next_offset
 
