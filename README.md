@@ -11,6 +11,15 @@
  ╚═════╝ ╚═╝  ╚═══╝╚══════╝
 ```
 
+## Why ONE?
+
+I believe the future of AI is **local-first**.
+
+- **Local-first.** Most everyday AI tasks should run on your own hardware.
+- **You decide.** Local, cloud, or hybrid — the choice is yours.
+- **The future is local.** Local models will power the future of everyday work.
+
+**Your hardware. Your models. Your rules. Not theirs.**
 
 
 [Full TUI logo artwork](https://github.com/noxgle/one/blob/main/one/assets/logo.txt)
