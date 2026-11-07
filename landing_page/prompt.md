@@ -354,6 +354,36 @@ If the website already exists, adapt the following architecture to the current s
 
 Do not duplicate sections that already exist and work well.
 
+## Core manifesto — required landing-page content
+
+ONE is built around a **local-first** philosophy. Make this message visible to visitors, not just buried in documentation or metadata.
+
+Use the following manifesto copy **verbatim** in a distinct, concise, visually prominent section near the top of the landing page (ideally directly below the hero/terminal demo, before the detailed features):
+
+```markdown
+## Why ONE?
+
+I believe the future of AI is **local-first**.
+
+- **Local-first.** Most everyday AI tasks should run on your own hardware.
+- **You decide.** Local, cloud, or hybrid — the choice is yours.
+- **The future is local.** Local models will power the future of everyday work.
+
+**Your hardware. Your models. Your rules. Not theirs.**
+```
+
+Implementation guidance:
+
+* Preserve the manifesto's direct, independent, developer-focused tone; avoid diluting it into generic marketing copy.
+* Give the final line special typographic emphasis as the project's signature statement.
+* The manifesto should be readable at a glance and look good on mobile as well as desktop.
+* It should reinforce, not compete with, the hero's immediate explanation of what the agent actually does.
+* The manifesto expresses the creator's vision; do not misrepresent it as a proven benchmark or claim that all tasks already run locally.
+* Clearly distinguish the ability to **choose** local/cloud/hybrid workflows from automatic model routing; do not claim automatic switching unless repository code supports it.
+* If an equivalent manifesto already exists on the site, refine or reposition it instead of duplicating it.
+
+---
+
 ## 1. Navigation
 
 Minimal sticky navigation.
