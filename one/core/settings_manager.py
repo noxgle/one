@@ -117,6 +117,26 @@ class SettingsManager:
             self._global, self._global_is_locked = self._load_global(self._global_path)
             self._project, self._project_is_locked = self._load_project(self._project_path)
 
+    @classmethod
+    def read_only(cls, cwd: str, agent_dir: str) -> SettingsManager:
+        """Load both layers without permission changes or persistent writes.
+
+        Errors have the same scope and shape as normal loading. Subsequent
+        mutations affect only this in-memory instance.
+        """
+        manager = cls(cwd, agent_dir, in_memory=True)
+        # Use the normal two-layer getter semantics while keeping save paths
+        # unset. In-memory initial settings have different alias precedence.
+        manager._in_memory = False
+        manager._initial = None
+        manager._global, manager._global_is_locked = manager._load_layer(
+            Path(agent_dir) / "settings.json", "global"
+        )
+        manager._project, manager._project_is_locked = manager._load_layer(
+            Path(cwd) / ".one" / "settings.json", "project"
+        )
+        return manager
+
     def _load_global(self, path: Path | None) -> tuple[dict[str, Any], bool]:
         """Load global settings and return (parsed, is_locked).
 
@@ -150,15 +170,20 @@ class SettingsManager:
         Project settings are repository content, so their permissions are not
         changed while loading.
         """
-        if not path or not path.exists():
+        return self._load_layer(path, "project")
+
+    def _load_layer(self, path: Path | None, scope: str) -> tuple[dict[str, Any], bool]:
+        if not path:
             return {}, False
         data, err = load_json_text_safe(path)
+        if isinstance(err, FileNotFoundError):
+            return {}, False
         if err is not None:
-            self._errors.append({"scope": "project", "error": err})
+            self._errors.append({"scope": scope, "error": err})
             return {}, True
         if isinstance(data, dict):
             return data, False
-        self._errors.append({"scope": "project", "error": ValueError("project settings is not a JSON object")})
+        self._errors.append({"scope": scope, "error": ValueError(f"{scope} settings is not a JSON object")})
         return {}, True
 
     def _save_global(self) -> None:

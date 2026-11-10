@@ -13,6 +13,15 @@ from .ollama import OllamaCloudAdapter
 from .openai_compatible import OpenAICompatibleAdapter
 
 
+def supported_provider_names() -> frozenset[str]:
+    """Providers available locally, without constructing adapters."""
+    names = {"openai", "anthropic", "gemini", "chatgpt", "openrouter", "ollama-cloud",
+             "llama.cpp", "ollama", "xai", "deepseek", "mistral", "groq"}
+    if os.getenv("AZURE_OPENAI_BASE_URL"):
+        names.add("azure-openai")
+    return frozenset(names)
+
+
 def build_provider_registry() -> dict[str, ProviderAdapter]:
     openai_base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com")
     azure_base = os.getenv("AZURE_OPENAI_BASE_URL")
@@ -56,7 +65,7 @@ def build_provider_registry() -> dict[str, ProviderAdapter]:
         "groq": OpenAICompatibleAdapter("groq", groq_base, endpoint="/chat/completions"),
     }
 
-    if azure_base:
+    if "azure-openai" in supported_provider_names():
         registry["azure-openai"] = OpenAICompatibleAdapter("azure-openai", azure_base, supports_native_tools=True)
 
     return registry

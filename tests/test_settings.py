@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -548,3 +549,82 @@ def test_web_connect_defaults_and_project_merge_are_validated() -> None:
 def test_web_connect_malformed_settings_fail_closed(value: object, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         SettingsManager.in_memory({"webConnect": value}).get_web_connect_settings()
+
+
+def test_read_only_layers_preserve_alias_and_files(tmp_path: Path) -> None:
+    agent = tmp_path / "agent"
+    project = tmp_path / "project"
+    agent.mkdir()
+    (project / ".one").mkdir(parents=True)
+    global_path = agent / "settings.json"
+    project_path = project / ".one" / "settings.json"
+    global_path.write_text('{"subagents":{"idleTimeoutSec":0}}', encoding="utf-8")
+    project_path.write_text('{"subagents":{"timeoutSec":42}}', encoding="utf-8")
+    global_path.chmod(0o644)
+    before = [(p.read_bytes(), p.stat().st_mode) for p in (global_path, project_path)]
+    settings = SettingsManager.read_only(str(project), str(agent))
+    assert settings.get_subagents_idle_timeout_sec() == 0
+    settings.set_theme("test")
+    assert [(p.read_bytes(), p.stat().st_mode) for p in (global_path, project_path)] == before
+
+
+def test_read_only_reports_invalid_layers(tmp_path: Path) -> None:
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    (agent / "settings.json").write_text('{', encoding="utf-8")
+    (tmp_path / ".one").mkdir()
+    (tmp_path / ".one" / "settings.json").write_text('[]', encoding="utf-8")
+    before = {
+        p.relative_to(tmp_path): (p.stat().st_mode, p.read_bytes() if p.is_file() else None)
+        for p in tmp_path.rglob("*")
+    }
+    settings = SettingsManager.read_only(str(tmp_path), str(agent))
+    assert [e["scope"] for e in settings.drain_errors()] == ["global", "project"]
+    assert before == {
+        p.relative_to(tmp_path): (p.stat().st_mode, p.read_bytes() if p.is_file() else None)
+        for p in tmp_path.rglob("*")
+    }
+
+
+def test_read_only_tree_and_normal_load_semantics(tmp_path: Path) -> None:
+    agent = tmp_path / "agent"
+    project = tmp_path / "project"
+    agent.mkdir(mode=0o755)
+    (project / ".one").mkdir(parents=True)
+    global_file = agent / "settings.json"
+    project_file = project / ".one" / "settings.json"
+    global_file.write_text('{"subagents":{"idleTimeoutSec":7},"generation":{"maxOutputTokens":100}}')
+    project_file.write_text('{"subagents":{"timeoutSec":42},"theme":"dark"}')
+    global_file.chmod(0o644)
+    project_file.chmod(0o640)
+
+    def snapshot():
+        return {str(p.relative_to(tmp_path)): (p.stat().st_mode, p.read_bytes() if p.is_file() else None)
+                for p in tmp_path.rglob('*')}
+
+    before = snapshot()
+    readonly = SettingsManager.read_only(str(project), str(agent))
+    assert readonly.drain_errors() == []
+    assert snapshot() == before
+    normal = SettingsManager(str(project), str(agent))
+    assert readonly.merged() == normal.merged()
+    assert readonly.get_subagents_idle_timeout_sec() == normal.get_subagents_idle_timeout_sec() == 7
+    assert readonly.get_explicit_generation_max_output_tokens() == normal.get_explicit_generation_max_output_tokens() == 100
+    assert global_file.stat().st_mode & 0o777 == 0o600
+    assert agent.stat().st_mode & 0o777 == 0o700
+
+
+def test_read_only_missing_and_io_errors(tmp_path: Path, monkeypatch) -> None:
+    import one.core.settings_manager as module
+
+    agent = tmp_path / "missing-agent"
+    project = tmp_path / "missing-project"
+    manager = SettingsManager.read_only(str(project), str(agent))
+    assert manager.drain_errors() == []
+    assert list(tmp_path.iterdir()) == []
+    failure = PermissionError("denied")
+    monkeypatch.setattr(module, "load_json_text_safe", lambda path: (None, failure))
+    manager = SettingsManager.read_only(str(project), str(agent))
+    errors = manager.drain_errors()
+    assert [(e["scope"], e["error"]) for e in errors] == [("global", failure), ("project", failure)]
+    assert list(tmp_path.iterdir()) == []

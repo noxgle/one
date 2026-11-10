@@ -835,6 +835,49 @@ the system prompt and load only when invoked with `/skill:<name>` or RPC
 
 ## Diagnostics
 
+### ONE Doctor
+
+`one doctor` checks installation and settings offline, without starting a model,
+provider, MCP server, or network check. It does **not** verify an endpoint,
+model availability, credentials, or provider connectivity. After an update,
+inspect and preview before approving a repair:
+
+The check assesses local model selection and authentication, including runtime
+fallbacks. Missing settings files alone do not imply a setup is needed; a local
+model may be selectable by default even when its server is not running. An
+unusable selection, uncertain assessment or fallback from configured defaults
+requires review and produces exit code 1.
+
+```bash
+one doctor --check
+one doctor --fix --dry-run --json
+one doctor --fix
+one doctor --setup
+```
+
+`--check` is the default; it, `--fix`, and `--setup` are mutually exclusive.
+`--fix` plans safe settings migrations and asks for confirmation on a terminal;
+`--yes` approves them without prompting and is valid only with `--fix`.
+`--dry-run` requires `--fix` or `--setup` and writes nothing; setup's preview
+describes the process rather than collecting choices. `--setup` requires an
+interactive terminal, asks for scope, provider and model, then shows a redacted
+diff and asks for confirmation. It does not collect credentials; use `/login`
+separately in the interactive UI when needed (OAuth requires network access).
+`-h`/`--help` shows all options. `--json` emits one report for check or fix,
+but cannot be combined with setup. Invalid combinations return exit code 2;
+0 means the report is OK (or setup succeeded), and 1 means action is required,
+setup was cancelled, or a repair failed. A preview can be OK even when it
+contains planned safe actions; it has not applied them.
+
+JSON has `formatVersion: 1`, `issues`, `actions`, and `result` (`ok` or
+`action_required`). Issues include ID, level, scope, description and status;
+actions add classification, file, redacted diff and preconditions. Reports
+avoid printing configuration values and paths. See
+[Doctor details](docs/DOCTOR.md) for migration rules, configuration sources,
+write limitations, backups and manual recovery. Writes are Linux-only and
+per-file, not a transaction: stop other editors before repair. Existing files
+get a private backup; a newly created settings file has no previous backup.
+
 The opt-in Docker diagnostic runner drives a persistent RPC session in an
 isolated disposable workspace and produces bounded telemetry and reports:
 

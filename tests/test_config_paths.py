@@ -454,3 +454,52 @@ def test_get_agent_dir_migrates_legacy_to_xdg(monkeypatch, tmp_path: Path) -> No
     assert out == str(xdg)
     assert (xdg / "settings.json").exists()
     assert (xdg / "models.json").exists()
+
+
+def test_agent_dir_candidates_do_not_migrate(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(config.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv(config.ENV_AGENT_DIR, raising=False)
+    legacy = tmp_path / ".one" / "agent"
+    legacy.mkdir(parents=True)
+    (legacy / "settings.json").write_text('{}', encoding="utf-8")
+    assert config.get_agent_dir_candidates() == (None, tmp_path / "xdg" / "one", legacy)
+    assert not (tmp_path / "xdg").exists()
+    monkeypatch.setenv(config.ENV_AGENT_DIR, str(tmp_path / "override"))
+    assert config.get_agent_dir_candidates()[0] == tmp_path / "override"
+    assert not (tmp_path / "override").exists()
+
+
+def test_candidates_and_startup_with_coexisting_paths(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv(config.ENV_AGENT_DIR, raising=False)
+    legacy = home / ".one" / "agent"
+    xdg = tmp_path / "xdg" / "one"
+    for directory, content in ((legacy, b'legacy'), (xdg, b'xdg')):
+        directory.mkdir(parents=True)
+        (directory / "settings.json").write_bytes(content)
+    def snapshot():
+        return {str(p.relative_to(tmp_path)): (p.stat().st_mode, p.read_bytes() if p.is_file() else None)
+                for p in tmp_path.rglob('*')}
+    before = snapshot()
+    assert config.get_agent_dir_candidates() == (None, xdg, legacy)
+    assert snapshot() == before
+    assert config.get_agent_dir() == str(xdg)
+    assert snapshot() == before
+    monkeypatch.setenv(config.ENV_AGENT_DIR, str(tmp_path / "override"))
+    assert config.get_agent_dir_candidates() == (tmp_path / "override", xdg, legacy)
+    assert config.get_agent_dir() == str(tmp_path / "override")
+    assert snapshot() == before
+
+
+def test_candidates_default_xdg_and_override_short_circuit(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv(config.ENV_AGENT_DIR, raising=False)
+    assert config.get_agent_dir_candidates() == (None, tmp_path / ".config" / "one", tmp_path / ".one" / "agent")
+    monkeypatch.setenv(config.ENV_AGENT_DIR, "/custom/agent")
+    monkeypatch.setattr(config.Path, "home", lambda: (_ for _ in ()).throw(RuntimeError("no home")))
+    assert config.get_agent_dir() == "/custom/agent"

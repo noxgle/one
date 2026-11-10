@@ -112,7 +112,7 @@ def _is_placeholder_key(key: str | None) -> bool:
 
 
 class ModelRegistry:
-    def __init__(self, auth_storage: AuthStorage, models_path: str | None = None) -> None:
+    def __init__(self, auth_storage: AuthStorage, models_path: str | None = None, *, read_only: bool = False) -> None:
         self._auth = auth_storage
         self._models: list[ModelInfo] = [ModelInfo(**vars(model)) for model in BUILTIN_MODELS]
         self._models_path = Path(models_path or get_models_path())
@@ -181,8 +181,9 @@ class ModelRegistry:
                 )
                 self._models_path_is_locked = True
             # Tighten existing file/dir on POSIX.
-            ensure_private_dir(p.parent)
-            ensure_private_file(p, 0o600)
+            if not read_only:
+                ensure_private_dir(p.parent)
+                ensure_private_file(p, 0o600)
         self._models = self._dedupe_models(self._models)
 
     def drain_errors(self) -> list[dict[str, Any]]:
@@ -333,6 +334,10 @@ class ModelRegistry:
         registered model, then the first available model. Never silently jumps
         to a different provider just because the default model id is stale.
         """
+        # Local servers expose user-selected IDs absent from the registry.
+        # Reuse explicit resolution without changing cloud fallback behavior.
+        if default_provider in NO_AUTH_PROVIDERS and default_model and default_model.strip():
+            return self.resolve(default_provider, default_model, allow_dynamic=True)
         avail = self.get_available()
         if not avail:
             allm = self.all()

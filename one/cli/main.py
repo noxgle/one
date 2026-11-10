@@ -102,6 +102,10 @@ def _resolve_default_mode(cwd: str, agent_dir: str) -> tuple[str, list[tuple[str
 
 async def _run(argv: list[str]) -> int:
     parsed = parse_args(argv)
+    if parsed.command == "doctor":
+        from one.core.doctor.cli import run_doctor
+
+        return run_doctor(parsed.command_args)
 
     if parsed.errors:
         for err in parsed.errors:
@@ -199,6 +203,18 @@ async def _run(argv: list[str]) -> int:
 
         for scope, exc in mode_errors:
             print(f"[warn] {scope} config load error: {type(exc).__name__}: {exc}", file=_sys.stderr)
+        if _sys.stdin.isatty() and _sys.stdout.isatty():
+            from one.core.doctor.startup import startup_hints
+
+            try:
+                hints = await asyncio.to_thread(
+                    startup_hints, cwd, agent_dir, explicit_selection=bool(parsed.provider or parsed.model)
+                )
+            except Exception:
+                # Diagnostics must not prevent TUI startup or expose file data.
+                hints = ("Startup readiness could not be checked; run `one doctor --check`.",)
+            for hint in hints:
+                print(f"[hint] {hint}", file=_sys.stderr)
         tui_bootstrap = TuiBootstrap(
             cwd=cwd,
             agent_dir=agent_dir,

@@ -8,7 +8,24 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Fixed
+
+- **Doctor diagnostics** — assess local model selection and authentication offline, reporting unusable or fallback defaults for review.
+- **Doctor setup** — select custom local model defaults at runtime and reject conflicting project overrides before global writes.
+- **Doctor diagnostics** — flag ignored or normalized configuration values without exposing their contents.
+- **Doctor repairs** — report interruptions and partial outcomes, and avoid unverified rollback after an interrupted settings replacement.
+
+### Added
+
+- **TUI startup hints** — interactive startup suggests offline Doctor setup or migration review when appropriate.
+- **ONE Doctor** — `one doctor` runs offline, read-only installation and settings checks; use `--json` for a report.
+- **Doctor repairs** — `one doctor --fix` can migrate approved safe settings changes with private backups; `--dry-run` previews them.
+  Repairs are per-file, not transactional; advisory locks cannot prevent races with non-cooperating editors.
+- **Doctor setup** — `one doctor --setup` configures a provider and model offline; login and provider verification remain separate.
+
 ### Documentation
+
+- **Doctor guide** — document diagnostics, schema migrations, write limitations and recovery in [docs/DOCTOR.md](docs/DOCTOR.md).
 
 - **Run documentation and phase 4** — [runs and diagnostics](docs/RUNS.md)
   describes shared limits, estimated costs, cancellation, resume and public

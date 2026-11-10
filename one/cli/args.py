@@ -70,6 +70,8 @@ class ParsedArgs:
 
 
 def parse_args(argv: list[str]) -> ParsedArgs:
+    if argv and argv[0] == "doctor":
+        return ParsedArgs(command="doctor", command_args=argv[1:])
     command = None
     command_args: list[str] = []
     run_task: str | None = None
@@ -330,6 +332,7 @@ Options:
   --version, -v
 
 Commands:
+  doctor [--check] [--json]
   install <package>
   remove <package>
   update [package]

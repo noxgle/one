@@ -10,7 +10,7 @@ from pathlib import Path
 
 APP_NAME = "one"
 LEGACY_CONFIG_DIR_NAME = ".one"
-VERSION = "0.1.134"
+VERSION = "0.1.135"
 ENV_AGENT_DIR = f"{APP_NAME.upper()}_CODING_AGENT_DIR"
 
 
@@ -74,13 +74,21 @@ def _tighten_migrated_state(agent_dir: Path) -> None:
                         pass
 
 
+def get_agent_dir_candidates() -> tuple[Path | None, Path, Path]:
+    """Return override, XDG and legacy candidates without migrating state."""
+    env = os.getenv(ENV_AGENT_DIR)
+    xdg_home = Path(_expand(os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")))
+    return Path(_expand(env)) if env else None, xdg_home / APP_NAME, Path.home() / LEGACY_CONFIG_DIR_NAME / "agent"
+
+
 def get_agent_dir() -> str:
+    # Preserve the override's short circuit, including when HOME is unavailable.
     env = os.getenv(ENV_AGENT_DIR)
     if env:
         return _expand(env)
-    xdg_home = Path(_expand(os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")))
-    xdg_agent_dir = xdg_home / APP_NAME
-    legacy_agent_dir = Path.home() / LEGACY_CONFIG_DIR_NAME / "agent"
+    override, xdg_agent_dir, legacy_agent_dir = get_agent_dir_candidates()
+    if override is not None:
+        return str(override)
     # One-time migration from legacy ~/.one/agent -> ~/.config/one.
     if not xdg_agent_dir.exists() and legacy_agent_dir.exists():
         try:

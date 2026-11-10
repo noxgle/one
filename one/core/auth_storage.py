@@ -33,7 +33,7 @@ class AuthStorage:
     def _default_env_var(provider: str) -> str:
         return provider.upper().replace("-", "_").replace(".", "_") + "_API_KEY"
 
-    def __init__(self, path: str | None = None, in_memory: bool = False) -> None:
+    def __init__(self, path: str | None = None, in_memory: bool = False, *, read_only: bool = False) -> None:
         self._path = Path(path or get_auth_path()) if not in_memory else None
         self._runtime: dict[str, str] = {}
         self._data: dict[str, Any] = {}
@@ -55,8 +55,9 @@ class AuthStorage:
                 )
                 self._data_is_locked = True
             # Tighten existing file/dir on POSIX.
-            ensure_private_dir(self._path.parent)
-            ensure_private_file(self._path, 0o600)
+            if not read_only:
+                ensure_private_dir(self._path.parent)
+                ensure_private_file(self._path, 0o600)
 
     # --- Writability guard ---
 
