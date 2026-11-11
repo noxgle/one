@@ -20,3 +20,7 @@ tmp/*
 *.tmp
 
 fix_bugs_idea.txt
+
+.env
+
+docker-data/

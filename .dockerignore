@@ -1,0 +1,9 @@
+# Only files required to install the package are sent to the builder.
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!one/
+!one/**
+one/**/__pycache__/
+one/**/*.pyc

@@ -1,0 +1,26 @@
+services:
+  one:
+    build: .
+    image: one-agent:local
+    user: "${ONE_UID:-1000}:${ONE_GID:-1000}"
+    init: true
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      HOME: /config
+      ONE_CODING_AGENT_DIR: /config
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - type: bind
+        source: ${ONE_WORKSPACE_DIR:-./docker-data/workspace}
+        target: /workspace
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ONE_CONFIG_DIR:-./docker-data/config}
+        target: /config
+        bind:
+          create_host_path: false

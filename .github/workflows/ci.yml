@@ -107,3 +107,10 @@ jobs:
           . .venv/bin/activate
           python -m one.cli.main --version
           python -m one.cli.main --help
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and smoke test container
+        run: scripts/test-docker.sh

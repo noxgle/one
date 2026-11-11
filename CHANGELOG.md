@@ -17,6 +17,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Docker** — build a non-root container with persistent configuration and workspace binds; see [the Docker guide](docs/DOCKER.md).
+
 - **TUI startup hints** — interactive startup suggests offline Doctor setup or migration review when appropriate.
 - **ONE Doctor** — `one doctor` runs offline, read-only installation and settings checks; use `--json` for a report.
 - **Doctor repairs** — `one doctor --fix` can migrate approved safe settings changes with private backups; `--dry-run` previews them.
