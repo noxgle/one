@@ -179,6 +179,15 @@ public outcome set. The TUI renders validated completed-tool elapsed values and
 emits one validated whole-turn summary at `agent_end`, accumulating uniquely
 identified, turn-scoped provider requests across retries.
 
+Provider-reported token counters (`inputTokens`, `cachedTokens`, `outputTokens`,
+`reasoningTokens`) are stored as typed integers on the same `provider_request`
+timing entries; missing counters are omitted, never written as zero.
+`SessionManager.get_provider_cache_stats()` summarizes the active branch as
+`providerCache` in `get_session_stats()`, including per-provider and
+per-purpose groups. Totals sum reported values only; `cacheRatio` covers
+requests that reported both input and cached counts, and `ratioRequests` /
+`usageComplete` expose that coverage.
+
 The `AgentSession` class is the central component. It implements a synchronous
 event-emitting loop that:
 
@@ -410,6 +419,8 @@ Settings are stored in `settings.json` and include:
 - `mcp.enabled` — enable/disable MCP servers.
 - `extensions` — enable/disable extensions.
 - `toolOutputPruning` — optional provider-context optimization.
+- `providerProfiles` — per-provider overrides; `providerProfiles.chatgpt.experimentalStableSessionId`
+  (default `true`) controls stable Codex `session-id`/`thread-id` affinity headers.
 - `subagents.timeoutSec` (default: 1800) — subagent task timeout.
 - `retry.mode` — `off`, `on`, or `unlimited`.
 - `maxSteps` — maximum tool steps (0 = unlimited).

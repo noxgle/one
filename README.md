@@ -537,6 +537,31 @@ does not revoke a provider account token or remove environment credentials.
 
 ## Sessions and configuration
 
+### ChatGPT cache affinity and usage telemetry
+
+ChatGPT/Codex requests send stable, official `session-id` and `thread-id`
+headers derived from one non-secret per-session lineage id; subagents and forks
+inherit it. This lets provider-side prompt caching key on the same identity
+across requests instead of a fresh random id per call. The legacy underscore
+`session_id` header remains per-request and unchanged. Because the Codex
+backend is private and may change, stable affinity can be disabled without
+rebuilding:
+
+```json
+{
+  "providerProfiles": {
+    "chatgpt": { "experimentalStableSessionId": false }
+  }
+}
+```
+
+Project `.one/settings.json` takes precedence over global settings. The flag
+affects only ChatGPT; other providers keep their existing behavior. `/stats`
+includes a `providerCache` section with request counts, provider-reported
+input, cached, output and reasoning totals, `cacheRatio`, and coverage
+(`requestsWithUsage`, `ratioRequests`, `usageComplete`). Missing provider usage
+is reported as `null` (unknown), never zero.
+
 ### Task checkpoints (opt-in)
 
 In the TUI, run `/checkpoints enable` before a task to retain undo records for

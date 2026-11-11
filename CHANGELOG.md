@@ -10,6 +10,16 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **ChatGPT cache affinity** — ChatGPT/Codex requests send stable, official
+  `session-id` and `thread-id` headers derived from one non-secret session
+  lineage id; subagents and forks inherit it. The legacy underscore
+  `session_id` header keeps its previous per-request behavior. Disable the new
+  affinity without rebuilding via
+  `providerProfiles.chatgpt.experimentalStableSessionId: false`.
+- **Provider cache telemetry** — `/stats` now includes `providerCache` with
+  request counts, provider-reported input/cached/output/reasoning totals,
+  `cacheRatio`, and coverage. Missing provider usage stays unknown (`null`),
+  never zero.
 - **Local provider setup** — Ctrl+K offers guided Ollama and llama.cpp configuration:
   preview global configuration paths, explicitly fetch server model IDs or enter one
   manually, then save the model URL and defaults. Opening setup does not contact a
