@@ -982,6 +982,7 @@ class TuiRuntimeHost:
             return {
                 "provider": str(item.provider), "id": str(item.id), "reasoning": item.reasoning,
                 "contextWindow": item.context_window, "inputImage": item.input_image,
+                "metadata_source": item.metadata_source,
             }
 
         models: list[dict[str, Any]] = []
@@ -1201,6 +1202,9 @@ class TuiRuntimeHost:
             "set_subagents": {"enabled"},
             "set_bash_output": {"enabled"},
             "set_model": {"provider", "model"},
+            "local_provider_config": {"provider", "epoch"},
+            "local_provider_models": {"provider", "url", "epoch"},
+            "local_provider_save": {"provider", "url", "model", "epoch"},
             "set_cooperation": {"enabled"},
             "cycle_model": set(),
             "steer": {"text"},
@@ -1277,6 +1281,21 @@ class TuiRuntimeHost:
         ):
             raise ValueError(f"invalid TUI operation payload: {operation}")
         session = self._session()
+        if operation in {"local_provider_config", "local_provider_models", "local_provider_save"}:
+            from one.core.local_provider_setup import local_provider_operation
+
+            if type(payload["epoch"]) is not int or payload["epoch"] != self._epoch:
+                return {"ok": False, "error": "Session changed; reopen local provider setup."}
+            epoch = self._epoch
+            if session.is_streaming:
+                return {"ok": False, "error": "Wait for the current response to finish before configuring a provider."}
+            result = await local_provider_operation(
+                session, operation, {k: v for k, v in payload.items() if k != "epoch"},
+                is_current=lambda: epoch == self._epoch and session is self._session() and not self._disposed,
+            )
+            if epoch != self._epoch or session is not self._session():
+                return {"ok": False, "error": "Session changed; reopen setup and review saved configuration."}
+            return result
         if operation == "status":
             return self._json(self._snapshot()["sidebar"])
         if operation == "stats":

@@ -493,6 +493,27 @@ OpenAI-compatible/local behavior.
 
 For local models, no key is required:
 
+In the TUI, press **Ctrl+K**, then choose **Configure Ollama** or
+**Configure llama.cpp**. Selecting an unconfigured `local` placeholder also opens
+setup. Enter the server URL, optionally click **Fetch server models** to
+list models already available on that server, then select a model or enter its
+exact ID manually. **Save & use** writes the model URL to global `models.json`,
+saves provider/model defaults in global `settings.json`, and activates the model.
+The dialog previews both paths and respects `ONE_CODING_AGENT_DIR` and XDG.
+To skip discovery, press Enter in the URL field to focus **Manual model ID**,
+type the exact model ID, and press Enter again to save. The form scrolls in
+compact terminals while Save/Cancel and progress/error feedback remain visible.
+
+Run Ollama or `llama-server` with a loaded model separately; ONE does not install
+servers or download model weights. Opening the dialog makes no network request,
+and saving a manually entered ID does not verify server/model availability.
+From a container, use an address that reaches the host rather than container
+localhost; see [Docker](docs/DOCKER.md). Existing unrelated configuration is
+preserved; repair malformed files or conflicting project defaults before saving.
+The two files are written individually, not as a cross-file transaction; a
+partial save or activation failure is reported so you can review and retry.
+`one doctor --setup` remains an offline alternative for selecting defaults.
+
 ```bash
 LLAMA_CPP_BASE_URL=http://127.0.0.1:8080 one --provider llama.cpp --model local
 one --provider ollama --model local --ollama-url http://localhost:11434/v1

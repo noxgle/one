@@ -3275,11 +3275,14 @@ class AgentSession:
     def set_session_name(self, name: str) -> None:
         self.session_manager.set_session_name(name)
 
-    async def set_model(self, model: ModelInfo) -> None:
+    async def set_model(self, model: ModelInfo, *, enrich: bool = True) -> None:
         self._model_metadata_epoch += 1
         metadata_epoch = self._model_metadata_epoch
         model = self.model_registry.catalog.apply(model)
-        model = await self._enrich_model_context(model)
+        # Offline setup commits configuration and activation without yielding on
+        # endpoint I/O; its owner-loop stale/idle check remains valid throughout.
+        if enrich:
+            model = await self._enrich_model_context(model)
         if metadata_epoch != self._model_metadata_epoch:
             return
         self.model = model

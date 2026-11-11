@@ -8,8 +8,24 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ## Unreleased
 
+### Added
+
+- **Local provider setup** — Ctrl+K offers guided Ollama and llama.cpp configuration:
+  preview global configuration paths, explicitly fetch server model IDs or enter one
+  manually, then save the model URL and defaults. Opening setup does not contact a
+  server or download models; malformed configuration and conflicting project defaults
+  are preserved and reported for review.
+
 ### Fixed
 
+- **Local provider initialization** — start configuration loading only after the
+  modal is mounted and active, preventing an early task from leaving setup stuck
+  on “Loading configuration”. Configuration-load timeouts offer a retry; saves
+  are not cancelled by that deadline.
+- **Local provider wizard** — keep Save/Cancel and operation feedback visible in
+  compact terminals, use theme-aware button colors, show fetch/save progress and
+  retryable errors, and allow manual model entry with Enter to save. Fetch lists
+  existing server models; it does not download model weights.
 - **Doctor diagnostics** — assess local model selection and authentication offline, reporting unusable or fallback defaults for review.
 - **Doctor setup** — select custom local model defaults at runtime and reject conflicting project overrides before global writes.
 - **Doctor diagnostics** — flag ignored or normalized configuration values without exposing their contents.

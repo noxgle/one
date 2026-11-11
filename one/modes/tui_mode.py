@@ -1919,7 +1919,8 @@ if TEXTUAL_AVAILABLE:
             color: $text-muted; overflow: hidden;
         }
         #model-picker-error { height: auto; color: $error; }
-        #model-picker-actions { height: 3; }
+        #model-picker-actions, #model-picker-configure { height: 3; }
+        #model-picker-configure Button { width: 1fr; min-width: 0; }
         #model-picker-actions Button { width: 1fr; height: 3; min-height: 3; min-width: 0; margin: 0 1 0 0; border: round $border; }
         #model-picker-actions Button {
             background: $panel; color: $foreground; background-tint: transparent;
@@ -1959,6 +1960,9 @@ if TEXTUAL_AVAILABLE:
                     yield Button("Session (Enter)", id="model-picker-session", variant="primary")
                     yield Button("Default (Ctrl+S)", id="model-picker-default")
                     yield Button("Cancel (Esc)", id="model-picker-cancel")
+                with Horizontal(id="model-picker-configure"):
+                    yield Button("Configure Ollama", id="model-picker-ollama")
+                    yield Button("Configure llama.cpp", id="model-picker-llama")
 
         def on_mount(self) -> None:
             self.call_after_refresh(self._initialize)
@@ -2040,15 +2044,33 @@ if TEXTUAL_AVAILABLE:
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "model-picker-cancel":
                 self.dismiss()
+            elif event.button.id in {"model-picker-ollama", "model-picker-llama"}:
+                self._configure("ollama" if event.button.id == "model-picker-ollama" else "llama.cpp")
             else:
                 self._choose(event.button.id == "model-picker-default")
 
         def _choose(self, save_default: bool) -> None:
             listing = self.query_one("#model-picker-list", OptionList)
             if not self._applying and listing.highlighted is not None and self._filtered:
+                model = self._filtered[listing.highlighted]
+                if (self._value(model, "provider") in {"ollama", "llama.cpp"}
+                        and self._value(model, "id") == "local"
+                        and self._value(model, "metadata_source") != "models.json"):
+                    self._configure(str(self._value(model, "provider")))
+                    return
                 self._applying = True
                 self.query_one("#model-picker-error", Static).update("")
                 self.app._choose_picker_model(self, self._filtered[listing.highlighted], save_default)
+
+        def _configure(self, provider: str) -> None:
+            from one.modes.local_provider_setup import LocalProviderSetup
+
+            if self._applying or self.app.session.is_streaming:
+                return
+            def configured(saved: bool | None) -> None:
+                if saved and self.is_mounted and self.app.screen is self:
+                    self.dismiss()
+            self.app.push_screen(LocalProviderSetup(provider), configured)
 
         def finish_apply(self, error: str | None) -> None:
             self._applying = False
@@ -8389,12 +8411,15 @@ if TEXTUAL_AVAILABLE:
             self._open_model_picker(list(self.session.model_registry.get_available()))
 
         async def _open_detached_model_picker(self) -> None:
+            session = self.session
+            epoch = session.epoch
             try:
-                models = await self.session.models()
+                models = await session.models()
             except Exception:
                 self._write("Unable to load the model catalog from the runtime. Retry Ctrl+K; if this persists, restart the TUI.", "error")
                 return
-            if len(self.screen_stack) == 1:
+            if (session is self.session and session.epoch == epoch
+                    and not session.is_streaming and len(self.screen_stack) == 1):
                 self._open_model_picker(models)
 
         def _open_model_picker(self, models: list[Any]) -> None:
