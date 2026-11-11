@@ -697,6 +697,29 @@ class TestCodexPayload:
         assert assistant_item["content"][0]["text"] == "a"
 
 
+class TestCodexAffinityHeaders:
+    def test_stable_official_headers_keep_legacy_session_id_random(self) -> None:
+        adapter = CodexResponsesAdapter()
+        first = adapter._headers("key", affinity_id="lineage-123")
+        second = adapter._headers("key", affinity_id="lineage-123")
+        assert first["session-id"] == first["thread-id"] == "lineage-123"
+        assert second["session-id"] == second["thread-id"] == "lineage-123"
+        assert first["session_id"] != second["session_id"]
+        assert first["session_id"] not in {"lineage-123", first["session-id"]}
+
+    def test_without_affinity_omits_official_headers(self) -> None:
+        headers = CodexResponsesAdapter()._headers("key")
+        assert "session-id" not in headers
+        assert "thread-id" not in headers
+        assert headers["session_id"]
+
+    @pytest.mark.parametrize("value", ["", "has space", "line\nbreak", "x" * 129, "ünicode", None, 42])
+    def test_unsafe_affinity_id_is_omitted(self, value: object) -> None:
+        headers = CodexResponsesAdapter()._headers("key", affinity_id=value)  # type: ignore[arg-type]
+        assert "session-id" not in headers
+        assert "thread-id" not in headers
+
+
 # ---------------------------------------------------------------------------
 # Anthropic cache_control breakpoint tests
 # ---------------------------------------------------------------------------

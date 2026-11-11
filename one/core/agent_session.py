@@ -249,11 +249,13 @@ class AgentSession:
         tool_policy: ToolPolicy | None = None,
         mcp_server_ceiling: frozenset[str] | None = None,
         checkpoint_manager: _CheckpointLifecycle | None = None,
+        codex_affinity_id: str | None = None,
     ) -> None:
         self._checkpoint_manager = checkpoint_manager
         self._checkpoint_owner = None
         self.session_manager = session_manager
         self.settings_manager = settings_manager
+        self._codex_affinity_id = codex_affinity_id or session_manager.get_effective_affinity_id()
         self.model_registry = model_registry
         self.resource_loader = resource_loader
         # Local metadata must be available to status and admission immediately,
@@ -2646,6 +2648,9 @@ class AgentSession:
         if self.session_manager.session_file:
             header["parentSession"] = self.session_manager.session_file
         header["subagentDepth"] = depth + 1
+        # Children keep the parent's provider cache affinity for their whole
+        # lifetime, including after a later resume of the child session.
+        header["affinityId"] = self.codex_affinity_id
         manager._rewrite()  # noqa: SLF001
         watchdog = ActivityWatchdog(
             timeout_sec if timeout_sec is not None else self.settings_manager.get_subagents_idle_timeout_sec(),
@@ -2682,6 +2687,7 @@ class AgentSession:
             # Default keeps the normal dynamic role rather than replacing it.
             preset=preset or self._preset or PresetDefinition("default", "Default", "", "runtime"),
             tool_policy=self._tool_policy.intersect(set(sub_tools)),
+            codex_affinity_id=self.codex_affinity_id,
         )
         sub.providers = self.providers
         if self._run_context is not None:
@@ -3153,6 +3159,11 @@ class AgentSession:
     @property
     def session_id(self) -> str:
         return self.session_manager.session_id
+
+    @property
+    def codex_affinity_id(self) -> str:
+        """Stable, non-secret identity used only for Codex cache affinity."""
+        return self._codex_affinity_id
 
     @property
     def session_name(self) -> str | None:
@@ -3745,6 +3756,15 @@ class AgentSession:
         # Pass storage_dir so providers can resolve blobs without leaking paths.
         if self._storage_dir and "storage_dir" in sig.parameters:
             chat_kwargs["storage_dir"] = self._storage_dir
+        # Official Codex clients send stable hyphenated affinity headers. Keep
+        # this ChatGPT-only and absent when the profile opts out, so other
+        # providers and the legacy underscore header stay untouched.
+        if (
+            self.model.provider == "chatgpt"
+            and "codex_affinity_id" in sig.parameters
+            and self.settings_manager.get_chatgpt_stable_session_id()
+        ):
+            chat_kwargs["codex_affinity_id"] = self.codex_affinity_id
         # Fake/legacy providers are intentionally untouched.  Native-capable
         # adapters opt in by exposing this additive keyword.
         if getattr(provider, "supports_native_tools", False) and "tools" in sig.parameters:

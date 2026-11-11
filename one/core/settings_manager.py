@@ -52,6 +52,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "followUpMode": "queue",
     "transport": "http",
     "thinkingBudgets": {},
+    # Per-provider overrides. Provider profiles are open-ended by design, so
+    # nested validation (and doctor discovery) must not assume a fixed map.
+    "providerProfiles": {},
     "shellCommandPrefix": None,
     "tools": {"maxSteps": 100, "timeoutSec": 30, "approval": False, "approvalTools": ["bash", "write", "edit", "plan", "apply_patch"]},
     "bash": {"showOutput": False},
@@ -538,6 +541,21 @@ class SettingsManager:
             return max(10, int((self.merged().get("providers") or {}).get("timeoutSec", 300) or 300))
         except (TypeError, ValueError):
             return 300
+
+    def get_chatgpt_stable_session_id(self) -> bool:
+        """Whether ChatGPT requests use stable official affinity headers.
+
+        Stable ``session-id``/``thread-id`` headers group a session's requests
+        for provider-side prompt caching.  This is the default because a fresh
+        random id per request defeats cache affinity; setting the profile flag
+        explicitly to ``false`` restores the legacy random ``session_id`` only.
+        """
+        profiles = self.merged().get("providerProfiles")
+        profile = profiles.get("chatgpt") if isinstance(profiles, dict) else None
+        if not isinstance(profile, dict):
+            return True
+        value = profile.get("experimentalStableSessionId", True)
+        return value if isinstance(value, bool) else True
 
     def get_bash_show_output(self) -> bool:
         bash = self.merged().get("bash", {})

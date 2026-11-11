@@ -729,6 +729,18 @@ class SessionManager:
     def get_header(self) -> dict[str, Any]:
         return self._entries[0]
 
+    def get_effective_affinity_id(self) -> str:
+        """Stable cache-affinity identity for this session lineage.
+
+        Normal sessions use their own id. Forks and subagents persist the
+        inherited lineage id in their header so reopening, forking, or spawning
+        again keeps the same provider-side cache affinity.
+        """
+        value = self.get_header().get("affinityId")
+        if isinstance(value, str) and value:
+            return value
+        return self.session_id
+
     def get_leaf_id(self) -> str | None:
         return self._leaf_id
 
@@ -877,6 +889,8 @@ class SessionManager:
             "timestamp": ts,
             "cwd": self._cwd,
             "parentSession": self._session_file,
+            # A fork shares the source lineage's provider cache affinity.
+            "affinityId": self.get_effective_affinity_id(),
         }
         history = self.run_history()
         runs = history.read() if history else []
@@ -978,6 +992,8 @@ class SessionManager:
                 "timestamp": _now_iso(),
                 "cwd": target_cwd,
                 "parentSession": str(Path(source_path).resolve()),
+                # Forked work shares the source lineage's cache affinity.
+                "affinityId": source.get_effective_affinity_id(),
             }
         ] + source.get_entries()
         history = source.run_history()

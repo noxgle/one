@@ -57,6 +57,37 @@ def test_tool_output_pruning_defaults_to_evidence_preservation_and_allows_opt_in
     assert enabled.get_tool_output_pruning_enabled() is True
 
 
+def test_chatgpt_stable_session_id_defaults_on_and_supports_rollback() -> None:
+    assert SettingsManager.in_memory().get_chatgpt_stable_session_id() is True
+    rollback = SettingsManager.in_memory(
+        {"providerProfiles": {"chatgpt": {"experimentalStableSessionId": False}}}
+    )
+    assert rollback.get_chatgpt_stable_session_id() is False
+    invalid = SettingsManager.in_memory(
+        {"providerProfiles": {"chatgpt": {"experimentalStableSessionId": "false"}}}
+    )
+    assert invalid.get_chatgpt_stable_session_id() is True
+    other_provider = SettingsManager.in_memory(
+        {"providerProfiles": {"openai": {"experimentalStableSessionId": False}}}
+    )
+    assert other_provider.get_chatgpt_stable_session_id() is True
+
+
+def test_chatgpt_stable_session_id_project_override_wins(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "agent"
+    project = tmp_path / "project"
+    agent_dir.mkdir()
+    (project / ".one").mkdir(parents=True)
+    (agent_dir / "settings.json").write_text(json.dumps(
+        {"providerProfiles": {"chatgpt": {"experimentalStableSessionId": True}}}
+    ))
+    (project / ".one" / "settings.json").write_text(json.dumps(
+        {"providerProfiles": {"chatgpt": {"experimentalStableSessionId": False}}}
+    ))
+    settings = SettingsManager(str(project), str(agent_dir))
+    assert settings.get_chatgpt_stable_session_id() is False
+
+
 @pytest.mark.parametrize(
     "tool_output_pruning",
     [{}, None, {"enabled": None}, {"enabled": "true"}, {"enabled": 1}],

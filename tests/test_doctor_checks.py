@@ -248,3 +248,25 @@ def test_invalid_shadowed_values_and_effective_getters(tmp_path, monkeypatch):
     assert manager.get_context_policy() == "endpoint-max"
     assert manager.get_generation_max_output_tokens() == 16384
     assert manager.get_explicit_generation_max_output_tokens() is None
+
+
+@pytest.mark.parametrize("scope", ["global", "project"])
+def test_provider_profiles_are_known_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str,
+) -> None:
+    agent = tmp_path / "agent"
+    project = tmp_path / "project"
+    agent.mkdir()
+    (project / ".one").mkdir(parents=True)
+    path = agent / "settings.json" if scope == "global" else project / ".one" / "settings.json"
+    monkeypatch.setenv("ONE_CODING_AGENT_DIR", str(agent))
+    path.write_text(json.dumps({
+        "providerProfiles": {"chatgpt": {"experimentalStableSessionId": False}},
+    }))
+    manager = SettingsManager.read_only(str(project), str(agent))
+    assert manager.get_chatgpt_stable_session_id() is False
+    issues = json.loads(DoctorEngine().check(project).to_json())["issues"]
+    ids = {issue["id"] for issue in issues}
+    assert "settings.unknown" not in ids
+    assert "settings.nested_unknown" not in ids
+    assert "settings.type.providerProfiles" not in ids

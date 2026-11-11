@@ -227,6 +227,35 @@ async def test_codex_responses_without_visible_callback_uses_sse_and_accumulates
 
 
 @pytest.mark.asyncio
+async def test_codex_responses_sends_stable_affinity_headers() -> None:
+    adapter = CodexResponsesAdapter()
+    captured: dict[str, Any] = {}
+    stream_ctx = _StreamContext(_sse(
+        {"type": "response.output_text.delta", "delta": "ok"},
+        {"type": "response.completed", "response": {"status": "completed"}},
+    ))
+    with patch.object(httpx, "AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        def stream(*args: Any, **kwargs: Any) -> _StreamContext:
+            captured.update(kwargs)
+            return stream_ctx
+
+        mock_client.stream = stream
+        mock_client_class.return_value = mock_client
+        result = await adapter.chat(
+            "key", "test-model", [{"role": "user", "content": "hello"}], "medium",
+            codex_affinity_id="lineage-123",
+        )
+    headers = captured["headers"]
+    assert headers["session-id"] == headers["thread-id"] == "lineage-123"
+    assert headers["session_id"] != "lineage-123"
+    assert result.text == "ok"
+
+
+@pytest.mark.asyncio
 async def test_codex_responses_correlates_function_call_item_and_call_ids() -> None:
     """Argument deltas use item_id while terminal items use call_id."""
     result, _, _ = await _stream_with(CodexResponsesAdapter(), _sse(

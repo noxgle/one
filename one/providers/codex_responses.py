@@ -16,7 +16,10 @@ mandatory quirks:
   every request
 - images are sent as ``input_image`` content parts on the user message
 - headers: Bearer access token + ``ChatGPT-Account-Id`` (injected by the
-  model registry from the stored OAuth record), ``originator``, ``session_id``
+  model registry from the stored OAuth record), ``originator``, and the
+  legacy random ``session_id``. When stable affinity is enabled, the official
+  hyphenated ``session-id`` and ``thread-id`` headers carry one stable,
+  non-secret lineage id so provider-side prompt caching can key on it.
 """
 # Copyright (c) 2026 picon
 # SPDX-License-Identifier: MIT
@@ -73,20 +76,47 @@ def _error_with_body(status_code: int, body: str) -> RuntimeError:
     return RuntimeError(f"chatgpt API error {status_code}: {snippet}")
 
 
+_AFFINITY_ID_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
+
+
+def _safe_affinity_id(value: str | None) -> str | None:
+    """Return a header-safe affinity id, or None when it is not trustworthy."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > 128:
+        return None
+    if any(char not in _AFFINITY_ID_CHARS for char in candidate):
+        return None
+    return candidate
+
+
 class CodexResponsesAdapter(ProviderAdapter):
     name = "chatgpt"
     supports_native_tools = True
 
-    def _headers(self, api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+    def _headers(
+        self,
+        api_key: str,
+        extra: dict[str, str] | None = None,
+        affinity_id: str | None = None,
+    ) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "content-type": "application/json",
             "originator": ORIGINATOR,
             "User-Agent": f"codex_cli_rs/{CLIENT_VERSION}",
-            # Stateless backend: a fresh session id per request enables
-            # server-side prompt caching alongside prompt_cache_key.
+            # Legacy underscore header kept for compatibility with earlier
+            # behavior. Official clients use the stable hyphenated headers
+            # below so provider-side prompt caching can key on the session.
             "session_id": str(uuid.uuid4()),
         }
+        stable_id = _safe_affinity_id(affinity_id)
+        if stable_id:
+            headers["session-id"] = stable_id
+            headers["thread-id"] = stable_id
         if extra:
             for k, v in extra.items():
                 if v:
@@ -349,6 +379,7 @@ class CodexResponsesAdapter(ProviderAdapter):
         storage_dir: str = "",
         tools: list[dict[str, Any]] | None = None,
         stream_transport_timeout: float | None = None,
+        codex_affinity_id: str | None = None,
     ) -> ChatResult:
         url = f"{BASE_URL}/responses"
         payload = self._build_payload(
@@ -359,7 +390,7 @@ class CodexResponsesAdapter(ProviderAdapter):
             stream=True, max_tokens=max_tokens,
             images=images, storage_dir=storage_dir, tools=tools,
         )
-        req_headers = self._headers(api_key, extra=headers)
+        req_headers = self._headers(api_key, extra=headers, affinity_id=codex_affinity_id)
         transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
 
         text_parts: list[str] = []
