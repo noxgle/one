@@ -43,7 +43,7 @@ from one.core.model_registry import ModelRegistry
 from one.core.oauth import OAuthError
 from one.core.presets import PresetDefinition, PresetError, apply_preset_overrides, discover_presets
 from one.core.run_context import NodeState, RunContext
-from one.core.run_usage import normalize_usage
+from one.core.run_usage import extract_usage_counts, normalize_usage
 from one.core.session_manager import SessionManager
 from one.core.settings_manager import THINKING_LEVELS, SettingsManager
 from one.core.subagent_monitor import SubagentMonitor
@@ -3903,6 +3903,7 @@ class AgentSession:
             provider_outcome = "error"
             raise
         finally:
+            usage_counts = extract_usage_counts(getattr(res, "usage", None) if res is not None else None)
             if task is None:
                 context.release(provider_request_id)
             else:
@@ -3915,11 +3916,23 @@ class AgentSession:
             provider_end = dict(provider_event)
             provider_end.update({"type": "provider_request_end", "elapsedMs": elapsed_ms,
                                  "outcome": provider_outcome, "ok": provider_outcome == "success"})
+            reported = {
+                "inputTokens": usage_counts.input_tokens,
+                "cachedTokens": usage_counts.cached_tokens,
+                "outputTokens": usage_counts.output_tokens,
+                "reasoningTokens": usage_counts.reasoning_tokens,
+            }
+            # Omit the whole group when the provider reported nothing; absence
+            # means unknown.  Inside a reported group, explicit null preserves
+            # "not supplied" instead of pretending a zero.
+            if any(value is not None for value in reported.values()):
+                provider_end.update(reported)
             self._append_timing(
                 "provider_request", elapsed_ms, provider_outcome,
                 providerRequestId=provider_request_id, parentRequestId=provider_event.get("parentRequestId"),
                 turnId=provider_event.get("turnId"), attempt=provider_event.get("attempt"),
                 provider=provider_event["provider"], model=provider_event["model"], purpose=provider_event["purpose"],
+                **reported,
             )
             self._emit(provider_end)
 
@@ -5776,6 +5789,7 @@ class AgentSession:
             "cost": total_cost,
             "contextUsage": self.get_context_usage(),
             "toolOutputPruning": dict(self._last_tool_output_pruning),
+            "providerCache": self.session_manager.get_provider_cache_stats(),
             "compaction": self.session_manager.get_compaction_stats(),
             "elapsedTiming": self.session_manager.get_lifecycle_timing_stats(),
             "outputGeneration": {

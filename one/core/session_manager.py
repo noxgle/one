@@ -334,13 +334,23 @@ class SessionManager:
         # Keep durable telemetry correlation-only. Do not permit request bodies,
         # prompts, results, errors, credentials, or arbitrary event payloads.
         allowed = {
-            "turnId", "attempt", "providerRequestId", "parentRequestId",
+            "turnId", "providerRequestId", "parentRequestId",
             "provider", "model", "purpose", "tool", "toolCallId",
         }
         for key in allowed:
             value = metadata.get(key)
             if value is not None:
-                entry[key] = str(value)[:128] if key not in {"attempt"} else int(value)
+                entry[key] = str(value)[:128]
+        attempt = metadata.get("attempt")
+        if attempt is not None:
+            entry["attempt"] = int(attempt)
+        # Provider-reported token counters are additive diagnostics.  They are
+        # stored as integers so later aggregation can distinguish a real zero
+        # from an unknown (missing) counter.  Never accept arbitrary numbers.
+        for key in ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens"):
+            value = metadata.get(key)
+            if type(value) is int and value >= 0:
+                entry[key] = value
         return self._append(entry)
 
     def append_thinking_level_change(self, level: str) -> str:
@@ -522,6 +532,94 @@ class SessionManager:
                 "byOutcome": by_outcome[scope],
             }
         return result
+
+    _PROVIDER_CACHE_COUNTERS = ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens")
+
+    def _provider_cache_summary(self, entries: list[dict[str, Any]]) -> dict[str, Any]:
+        """Aggregate provider cache counters without inventing zeroes.
+
+        Totals sum only counters the provider actually reported; a counter
+        nobody reported stays ``None`` (unknown), never zero.  The cache ratio
+        uses only requests that reported both input and cached counts with a
+        consistent ``cached <= input`` relationship, and ``ratioRequests``
+        exposes that coverage.  ``usageComplete`` means every counted request
+        contributed to the ratio.
+        """
+        requests = len(entries)
+        totals = {key: 0 for key in self._PROVIDER_CACHE_COUNTERS}
+        reported = {key: 0 for key in self._PROVIDER_CACHE_COUNTERS}
+        with_usage = 0
+        ratio_requests = 0
+        ratio_input = 0
+        ratio_cached = 0
+        for entry in entries:
+            present: set[str] = set()
+            for key in self._PROVIDER_CACHE_COUNTERS:
+                value = entry.get(key)
+                if type(value) is int and value >= 0:
+                    reported[key] += 1
+                    totals[key] += value
+                    present.add(key)
+            if present:
+                with_usage += 1
+            input_value = entry.get("inputTokens")
+            cached_value = entry.get("cachedTokens")
+            if (
+                type(input_value) is int
+                and type(cached_value) is int
+                and 0 <= cached_value <= input_value
+            ):
+                ratio_requests += 1
+                ratio_input += input_value
+                ratio_cached += cached_value
+        cache_ratio = (
+            ratio_cached / ratio_input
+            if ratio_requests and ratio_input > 0
+            else None
+        )
+
+        def total(key: str) -> int | None:
+            return totals[key] if reported[key] else None
+
+        return {
+            "requests": requests,
+            "requestsWithUsage": with_usage,
+            "requestsMissingUsage": requests - with_usage,
+            "ratioRequests": ratio_requests,
+            "usageComplete": requests > 0 and ratio_requests == requests,
+            "input": total("inputTokens"),
+            "cached": total("cachedTokens"),
+            "output": total("outputTokens"),
+            "reasoning": total("reasoningTokens"),
+            "cacheRatio": cache_ratio,
+        }
+
+    def get_provider_cache_stats(self) -> dict[str, Any]:
+        """Summarize durable provider cache counters on the active branch.
+
+        Each physical provider request appends exactly one ``provider_request``
+        timing entry, including retries, timeouts, cancellations and failed
+        attempts.  Unknown or legacy entries carry no counters and therefore
+        make the corresponding aggregate unknown rather than zero.
+        """
+        entries = [
+            entry
+            for entry in self.get_branch()
+            if entry.get("type") == "timing" and entry.get("scope") == "provider_request"
+        ]
+        summary = self._provider_cache_summary(entries)
+
+        def grouped(key: str) -> dict[str, dict[str, Any]]:
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for entry in entries:
+                value = entry.get(key)
+                name = value if isinstance(value, str) and value else "unknown"
+                groups.setdefault(name, []).append(entry)
+            return {name: self._provider_cache_summary(groups[name]) for name in sorted(groups)}
+
+        summary["byProvider"] = grouped("provider")
+        summary["byPurpose"] = grouped("purpose")
+        return summary
 
     def append_branch_summary(
         self,

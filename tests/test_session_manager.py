@@ -265,3 +265,121 @@ def test_delete_managed_session_removes_only_matching_sidecar(tmp_path: Path):
     assert Path(second.session_file).exists()
     with pytest.raises(ValueError, match="outside"):
         SessionManager.delete(str(tmp_path / "outside.jsonl"), str(directory))
+
+
+def test_provider_cache_stats_aggregates_reported_counters(tmp_path: Path):
+    sm = SessionManager.in_memory(str(tmp_path))
+    sm.append_timing(
+        "provider_request", 10, "success", provider="chatgpt", purpose="response",
+        inputTokens=1000, cachedTokens=800, outputTokens=50, reasoningTokens=20,
+    )
+    sm.append_timing(
+        "provider_request", 12, "success", provider="chatgpt", purpose="response",
+        inputTokens=500, cachedTokens=100, outputTokens=30, reasoningTokens=10,
+    )
+    stats = sm.get_provider_cache_stats()
+    assert stats["requests"] == 2
+    assert stats["requestsWithUsage"] == 2
+    assert stats["requestsMissingUsage"] == 0
+    assert stats["usageComplete"] is True
+    assert (stats["input"], stats["cached"], stats["output"], stats["reasoning"]) == (1500, 900, 80, 30)
+    assert stats["cacheRatio"] == 0.6
+    assert stats["byProvider"]["chatgpt"]["requests"] == 2
+    assert stats["byProvider"]["chatgpt"]["cacheRatio"] == 0.6
+    assert stats["byPurpose"]["response"]["input"] == 1500
+
+
+def test_provider_cache_stats_missing_usage_is_unknown_not_zero(tmp_path: Path):
+    sm = SessionManager.in_memory(str(tmp_path))
+    sm.append_timing("provider_request", 5, "error", provider="chatgpt", purpose="response")
+    sm.append_timing(
+        "provider_request", 8, "success", provider="chatgpt", purpose="response",
+        inputTokens=100, cachedTokens=40, outputTokens=5,
+    )
+    stats = sm.get_provider_cache_stats()
+    assert stats["requests"] == 2
+    assert stats["requestsWithUsage"] == 1
+    assert stats["requestsMissingUsage"] == 1
+    assert stats["ratioRequests"] == 1
+    assert stats["usageComplete"] is False
+    assert stats["input"] == 100
+    assert stats["cached"] == 40
+    assert stats["output"] == 5
+    assert stats["reasoning"] is None
+    assert stats["cacheRatio"] == 0.4
+    assert stats["byProvider"]["chatgpt"]["requests"] == 2
+
+
+def test_provider_cache_stats_partial_counters_and_zero_values(tmp_path: Path):
+    sm = SessionManager.in_memory(str(tmp_path))
+    sm.append_timing(
+        "provider_request", 3, "success", provider="openai", purpose="response",
+        inputTokens=100, outputTokens=1,
+    )
+    partial = sm.get_provider_cache_stats()
+    assert partial["requestsWithUsage"] == 1
+    assert partial["usageComplete"] is False
+    assert partial["input"] == 100
+    assert partial["cached"] is None
+    assert partial["cacheRatio"] is None
+
+    sm2 = SessionManager.in_memory(str(tmp_path / "zero"))
+    sm2.append_timing(
+        "provider_request", 3, "success", provider="chatgpt", purpose="response",
+        inputTokens=0, cachedTokens=0, outputTokens=0, reasoningTokens=0,
+    )
+    zero = sm2.get_provider_cache_stats()
+    assert (zero["input"], zero["cached"], zero["output"], zero["reasoning"]) == (0, 0, 0, 0)
+    assert zero["usageComplete"] is True
+    assert zero["cacheRatio"] is None
+
+
+def test_provider_cache_stats_groups_and_branch_reload(tmp_path: Path):
+    directory = tmp_path / "sessions"
+    sm = SessionManager(str(tmp_path), str(directory), None, True)
+    root = sm.append_message({"role": "user", "content": "branch point"})
+    sm.append_timing(
+        "provider_request", 4, "success", provider="chatgpt", purpose="compaction",
+        inputTokens=200, cachedTokens=100, outputTokens=10,
+    )
+    sm.append_timing(
+        "provider_request", 6, "success", provider="anthropic", purpose="response",
+        inputTokens=50, outputTokens=5,
+    )
+    path = sm.session_file
+    assert path
+    reloaded = SessionManager(str(tmp_path), str(directory), path, True)
+    stats = reloaded.get_provider_cache_stats()
+    assert stats["requests"] == 2
+    assert stats["ratioRequests"] == 1
+    assert stats["usageComplete"] is False
+    assert stats["input"] == 250
+    assert stats["cached"] == 100
+    assert stats["cacheRatio"] == 0.5
+    assert stats["byProvider"]["anthropic"]["requests"] == 1
+    assert stats["byProvider"]["chatgpt"]["cached"] == 100
+    assert stats["byPurpose"]["compaction"]["cacheRatio"] == 0.5
+
+    # A sibling branch must not contribute to the active branch totals.
+    reloaded.branch(root)
+    reloaded.append_timing(
+        "provider_request", 7, "success", provider="chatgpt", purpose="response",
+        inputTokens=10, cachedTokens=10, outputTokens=1,
+    )
+    branched = reloaded.get_provider_cache_stats()
+    assert branched["requests"] == 1
+    assert branched["input"] == 10
+    assert branched["cacheRatio"] == 1.0
+
+
+def test_append_timing_accepts_only_non_negative_integer_counters(tmp_path: Path):
+    sm = SessionManager.in_memory(str(tmp_path))
+    sm.append_timing(
+        "provider_request", 1, "success", provider="chatgpt",
+        inputTokens=10, cachedTokens="20", outputTokens=True, reasoningTokens=-1,
+    )
+    entry = next(e for e in sm.get_entries() if e.get("scope") == "provider_request")
+    assert entry["inputTokens"] == 10
+    assert "cachedTokens" not in entry
+    assert "outputTokens" not in entry
+    assert "reasoningTokens" not in entry
