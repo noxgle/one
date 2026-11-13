@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
 from one.core.doctor import settings_write as writer
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_idempotent_write_still_validates(tmp_path):
     path = tmp_path / "settings.json"
     path.write_bytes(b"old")
@@ -24,6 +26,7 @@ def test_idempotent_write_still_validates(tmp_path):
 
 
 @pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_change_during_rollback_is_not_reported_as_success(tmp_path, monkeypatch, existing):
     path = tmp_path / "settings.json"
     if existing:
@@ -61,6 +64,7 @@ def test_change_during_rollback_is_not_reported_as_success(tmp_path, monkeypatch
         assert error.value.backup is None
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_moved_parent_does_not_report_misleading_backup(tmp_path):
     parent = tmp_path / "parent"
     parent.mkdir()
@@ -80,6 +84,7 @@ def test_moved_parent_does_not_report_misleading_backup(tmp_path):
 
 
 @pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_post_replace_directory_fsync_failure(tmp_path, monkeypatch, existing):
     path = tmp_path / "settings.json"
     if existing:
@@ -115,6 +120,7 @@ def test_post_replace_directory_fsync_failure(tmp_path, monkeypatch, existing):
 
 
 @pytest.mark.parametrize("stage", ["before", "rename_before", "rename_after", "verification"])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_keyboard_interrupt_preserves_safe_recovery(tmp_path, monkeypatch, stage):
     path = tmp_path / "settings.json"
     path.write_bytes(b"old")
@@ -146,6 +152,7 @@ def test_keyboard_interrupt_preserves_safe_recovery(tmp_path, monkeypatch, stage
     assert error.value.backup.read_bytes() == b"old"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_interrupt_after_concurrent_change_never_overwrites(tmp_path):
     path = tmp_path / "settings.json"
     path.write_bytes(b"old")

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +17,19 @@ def valid(data):
     assert data == b'new'
 
 
+def test_darwin_writer_fails_closed(tmp_path, monkeypatch):
+    path = tmp_path / 'settings.json'
+    path.write_bytes(b'old')
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    monkeypatch.setattr(writer, 'sys', SimpleNamespace(platform='darwin'))
+    with pytest.raises(writer.WriteError, match='unsupported_target'):
+        writer.inspect(path)
+    with pytest.raises(writer.WriteError, match='unsupported_target'):
+        writer.apply(path, writer.Snapshot(True, b'old'), b'new', valid)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_existing_and_idempotent(tmp_path):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')
@@ -30,6 +45,7 @@ def test_existing_and_idempotent(tmp_path):
     assert len(list(tmp_path.glob('.settings.json.backup-*'))) == 1
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_conflict_and_unique_backups(tmp_path):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')
@@ -43,6 +59,7 @@ def test_conflict_and_unique_backups(tmp_path):
 
 
 @pytest.mark.parametrize('existing', [False, True])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_postvalidation_rollback(tmp_path, existing):
     path = tmp_path / 'settings.json'
     if existing:
@@ -60,6 +77,7 @@ def test_postvalidation_rollback(tmp_path, existing):
         assert path.read_bytes() == b'old' and error.value.backup.read_bytes() == b'old'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_race_prevents_rollback(tmp_path):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')
@@ -76,6 +94,7 @@ def test_race_prevents_rollback(tmp_path):
 
 
 @pytest.mark.parametrize('kind', ['symlink', 'directory', 'hardlink', 'xattr'])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_unsafe_target(tmp_path, kind):
     path = tmp_path / 'settings.json'
     if kind == 'symlink':
@@ -87,12 +106,15 @@ def test_unsafe_target(tmp_path, kind):
         if kind == 'hardlink':
             os.link(path, tmp_path / 'link')
         else:
+            if not hasattr(os, 'setxattr'):
+                pytest.skip('setting xattrs is unavailable')
             os.setxattr(path, 'user.test', b'value')
     with pytest.raises((writer.WriteError, OSError)):
         writer.inspect(path)
 
 
 @pytest.mark.parametrize('operation', ['fsync', 'replace', 'fchown'])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_injected_failure_preserves_original(tmp_path, monkeypatch, operation):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')
@@ -105,6 +127,7 @@ def test_injected_failure_preserves_original(tmp_path, monkeypatch, operation):
     assert path.read_bytes() == b'old'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_change_before_replace_detected(tmp_path):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')

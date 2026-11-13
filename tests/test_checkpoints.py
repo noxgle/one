@@ -20,6 +20,7 @@ def setup(tmp_path):
     manager.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_selective_undo_and_conflict(setup):
     manager, root = setup
     (root / 'a').write_text('old')
@@ -43,6 +44,7 @@ def test_selective_undo_and_conflict(setup):
         manager.confirm_undo(token)
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_move_pair_and_restart(setup, tmp_path):
     manager, root = setup
     (root / 'source').write_bytes(b'data')
@@ -67,6 +69,7 @@ def test_move_pair_and_restart(setup, tmp_path):
         reopened.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_unsafe_paths_and_interrupted_intent(setup, tmp_path):
     manager, root = setup
     (root / 'file').write_text('x')
@@ -97,6 +100,7 @@ def test_swapped_storage_directory_uses_open_descriptor(setup, tmp_path):
     assert not list(storage.glob('*.json'))
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_manifest_rejects_invalid_image_with_valid_envelope(setup, tmp_path):
     import hashlib
     import json
@@ -117,6 +121,7 @@ def test_manifest_rejects_invalid_image_with_valid_envelope(setup, tmp_path):
         CheckpointManager(tmp_path / 'private', root, 'session')
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_image_rejects_inode_swap_during_read(setup, monkeypatch):
     manager, root = setup
     (root / 'a').write_text('before')
@@ -132,6 +137,7 @@ def test_image_rejects_inode_swap_during_read(setup, monkeypatch):
         manager._image('a')
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_reservation_failure_leaves_no_intent(setup, monkeypatch):
     manager, root = setup
     (root / 'a').write_text('old')
@@ -144,6 +150,7 @@ def test_reservation_failure_leaves_no_intent(setup, monkeypatch):
     assert (root / 'a').read_text() == 'old'
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_undo_staging_failure_does_not_modify_targets(setup, monkeypatch):
     manager, root = setup
     for path in ('a', 'b'):
@@ -173,6 +180,7 @@ def test_undo_staging_failure_does_not_modify_targets(setup, monkeypatch):
     assert not list(root.glob('.one-undo-*'))
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_undo_rejects_parent_swapped_after_staging(setup, tmp_path, monkeypatch):
     manager, root = setup
     parent = root / 'dir'
@@ -221,6 +229,7 @@ def test_stale_manager_cannot_overwrite_manifest(setup, tmp_path):
         other.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_diff_uses_stored_images_and_rejects_incomplete(setup):
     manager, root = setup
     (root / 'a').write_text('old\n')
@@ -244,6 +253,7 @@ def test_diff_uses_stored_images_and_rejects_incomplete(setup):
         manager.diff('missing', 'a')
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_diff_binary_and_output_bound(setup):
     manager, root = setup
     (root / 'binary').write_bytes(b'\xffsecret')
@@ -262,6 +272,7 @@ def test_diff_binary_and_output_bound(setup):
     assert result.endswith('... diff truncated ...\n')
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_diff_reports_permission_only_change(setup):
     manager, root = setup
     path = root / 'permissions'
@@ -275,6 +286,7 @@ def test_diff_reports_permission_only_change(setup):
     assert manager.diff('mode', 'permissions') == 'Mode: 0600 -> 0644\n'
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_replace_file_records_original_and_restores(setup):
     manager, root = setup
     path = root / 'file'
@@ -290,6 +302,7 @@ def test_replace_file_records_original_and_restores(setup):
     assert path.stat().st_mode & 0o777 == 0o640
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_replace_file_rejects_external_change(setup, monkeypatch):
     manager, root = setup
     path = root / 'file'
@@ -312,6 +325,7 @@ def test_replace_file_rejects_external_change(setup, monkeypatch):
     assert not list(root.glob('.one-write-*'))
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_delete_file_restores_preimage_and_mode(setup):
     manager, root = setup
     (root / 'a').write_bytes(b'original')
@@ -325,6 +339,7 @@ def test_delete_file_restores_preimage_and_mode(setup):
     assert (root / 'a').stat().st_mode & 0o777 == 0o640
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_delete_checkpoint_invalidates_tokens(setup):
     manager, root = setup
     manager.begin_task('task')
@@ -342,6 +357,7 @@ def patch(*sections):
     return '*** Begin Patch\n' + '\n'.join(sections) + '\n*** End Patch'
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_patch_all_operations_and_restart(setup, tmp_path):
     manager, root = setup
     for path in ('update', 'delete', 'source'):
@@ -399,6 +415,7 @@ def test_patch_invalid_second_section_never_mutates(setup, section):
 
 
 @pytest.mark.parametrize('failure', ['stage', 'commit', 'rollback', 'manifest'])
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_patch_injected_failures_are_incomplete(setup, monkeypatch, failure):
     manager, root = setup
     for path in ('a', 'b'):
@@ -452,6 +469,7 @@ def test_patch_injected_failures_are_incomplete(setup, monkeypatch, failure):
         manager.prepare_undo('task', ['a'])
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_patch_parent_swap_after_staging(setup, tmp_path, monkeypatch):
     manager, root = setup
     parent = root / 'dir'
@@ -478,6 +496,7 @@ def test_patch_parent_swap_after_staging(setup, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('when', ['between_calls', 'prepare', 'confirm'])
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_identical_content_inode_replacement_is_conflict(setup, when):
     manager, root = setup
     manager.begin_task('task')
@@ -499,6 +518,7 @@ def test_identical_content_inode_replacement_is_conflict(setup, when):
     assert (root / 'a').read_bytes() == b'agent'
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_noop_and_invalid_replace_input(setup):
     manager, root = setup
     (root / 'a').write_bytes(b'same')
@@ -540,6 +560,7 @@ def test_reject_storage_inside_workspace_and_symlink_ancestor(tmp_path):
     assert not (real / 'private').exists()
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_token_expiration_and_new_task_invalidation(setup, monkeypatch):
     manager, _ = setup
     manager.begin_task('one')
@@ -569,6 +590,7 @@ def test_patch_quota_and_output_size_preflight(setup, monkeypatch):
     assert not list(root.iterdir())
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_explicit_delete_is_durable_and_does_not_touch_workspace(setup, tmp_path):
     manager, root = setup
     manager.begin_task('one')
@@ -589,6 +611,7 @@ def test_explicit_delete_is_durable_and_does_not_touch_workspace(setup, tmp_path
         reopened.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_interrupted_patch_never_auto_restores(setup, tmp_path):
     manager, root = setup
     (root / 'a').write_bytes(b'old')
@@ -605,6 +628,7 @@ def test_interrupted_patch_never_auto_restores(setup, tmp_path):
         reopened.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_undo_staging_conflict_blocks_entire_selection(setup, monkeypatch):
     manager, root = setup
     for path in ('a', 'b'):
@@ -662,6 +686,8 @@ def test_patch_unsupported_targets_fail_before_mutation(setup, tmp_path, kind):
     elif kind == 'setuid':
         (root / 'a').chmod(0o4600)
     elif kind == 'xattr':
+        if not hasattr(os, 'setxattr'):
+            pytest.skip('setting xattrs is unavailable')
         os.setxattr(root / 'a', 'user.checkpoint-test', b'unsupported')
     manager.begin_task('task')
     with pytest.raises(CheckpointError):
@@ -670,6 +696,7 @@ def test_patch_unsupported_targets_fail_before_mutation(setup, tmp_path, kind):
     assert manager.records[-1]['paths'] == {}
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_edit_rejects_invalid_utf8_without_loss(setup):
     manager, root = setup
     (root / 'a').write_bytes(b'\xffold')
@@ -677,3 +704,17 @@ def test_edit_rejects_invalid_utf8_without_loss(setup):
     with pytest.raises(UnicodeError):
         manager.edit_file('a', [{'oldString': 'old', 'newString': 'new'}])
     assert (root / 'a').read_bytes() == b'\xffold'
+
+
+def test_missing_xattr_enumeration_fails_closed(setup, monkeypatch):
+    manager, root = setup
+    path = root / 'a'
+    path.write_bytes(b'original')
+    manager.begin_task('task')
+    monkeypatch.delattr(os, 'listxattr', raising=False)
+    before = sorted((p.relative_to(root), p.read_bytes()) for p in root.rglob('*') if p.is_file())
+    with pytest.raises(CheckpointError, match='Unsupported extended metadata'):
+        manager.capture_preimage(['a'])
+    assert path.read_bytes() == b'original'
+    assert sorted((p.relative_to(root), p.read_bytes()) for p in root.rglob('*') if p.is_file()) == before
+    assert manager.records[-1]['paths'] == {}

@@ -4,11 +4,14 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from one.core.checkpoints import CheckpointError, CheckpointManager
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_empty_task_does_not_shadow_previous_undoable_task(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -52,6 +55,7 @@ def test_reopened_manager_rejects_reused_prompt_turn_id(tmp_path):
         reopened.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_incomplete_empty_task_still_blocks_previous_undo(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

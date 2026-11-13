@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 
 import pytest
 
@@ -30,6 +31,7 @@ def test_acl_is_rejected_without_modification(tmp_path):
 
 
 @pytest.mark.parametrize("operation", ["listxattr", "fchmod", "fchown"])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_metadata_failure_never_replaces_original(tmp_path, monkeypatch, operation):
     path = tmp_path / "settings.json"
     path.write_bytes(b"old")
@@ -40,7 +42,7 @@ def test_metadata_failure_never_replaces_original(tmp_path, monkeypatch, operati
     def fail(*args, **kwargs):
         raise OSError("metadata unavailable")
 
-    monkeypatch.setattr(writer.os, operation, fail)
+    monkeypatch.setattr(writer.os, operation, fail, raising=False)
     with pytest.raises(writer.WriteError):
         writer.apply(path, snapshot, b"new", lambda _: None)
     after = path.stat()
@@ -66,6 +68,7 @@ def test_inherited_default_acl_refuses_replacement(tmp_path):
 
 
 @pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_parent_replaced_after_inspection(tmp_path, existing):
     parent = tmp_path / "parent"
     parent.mkdir()
@@ -81,6 +84,7 @@ def test_parent_replaced_after_inspection(tmp_path, existing):
     assert (tmp_path / "old-parent" / "settings.json").exists() == existing
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_parent_replaced_before_rename(tmp_path):
     parent = tmp_path / "parent"
     parent.mkdir()
@@ -99,6 +103,7 @@ def test_parent_replaced_before_rename(tmp_path):
     assert (tmp_path / "old-parent" / "settings.json").read_bytes() == b"old"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_ancestor_symlink_rejected(tmp_path):
     real = tmp_path / "real"
     (real / "parent").mkdir(parents=True)

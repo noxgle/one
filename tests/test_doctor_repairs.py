@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +33,22 @@ def environment(tmp_path, monkeypatch):
     return agent / "settings.json", project / ".one" / "settings.json"
 
 
+def test_darwin_fix_reports_unsupported_without_writes(environment, tmp_path, monkeypatch, capsys):
+    from one.core.doctor import settings_write
+
+    global_file, _ = environment
+    global_file.write_text('{"subagents":{"timeoutSec":12}}')
+    before = snapshot(tmp_path)
+    monkeypatch.setattr(settings_write, "sys", SimpleNamespace(platform="darwin"))
+    assert run_doctor(["--fix", "--yes", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["result"] == "action_required"
+    assert any(action["id"] == "settings.review" and action["status"] == "not_available"
+               for action in report["actions"])
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_preview_is_deterministic_redacted_and_read_only(environment, tmp_path, capsys):
     global_file, project_file = environment
     global_file.write_text('{"subagents":{"timeoutSec":12},"secret-canary":"oauth-canary"}')
@@ -47,6 +65,7 @@ def test_preview_is_deterministic_redacted_and_read_only(environment, tmp_path, 
     assert snapshot(tmp_path) == before
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_text_preview_redacts_secrets_in_paths_and_contents(environment, tmp_path, capsys):
     global_file, project_file = environment
     global_file.write_text('{"subagents":{"timeoutSec":12},"secret-canary":"oauth-canary"}')
@@ -71,6 +90,7 @@ def test_bad_layer_blocks_both_files(environment, tmp_path, capsys, bad):
     assert snapshot(tmp_path) == before
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_conflict_not_approved_and_no_execution(environment, capsys):
     global_file, project_file = environment
     global_file.write_text('{"subagents":{"timeoutSec":10}}')
@@ -84,6 +104,7 @@ def test_conflict_not_approved_and_no_execution(environment, capsys):
 
 @pytest.mark.parametrize("json_output", [False, True])
 @pytest.mark.parametrize("tty", [False, True])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_preview_formats_no_prompts_or_filesystem_changes(environment, tmp_path, monkeypatch, capsys, json_output, tty):
     import sys
 
@@ -111,6 +132,7 @@ def test_preview_formats_no_prompts_or_filesystem_changes(environment, tmp_path,
 
 
 @pytest.mark.parametrize("args", [["--fix"], ["--fix", "--yes"], ["--fix", "--dry-run", "--yes"]])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_conflict_is_never_approved(environment, tmp_path, capsys, args):
     global_file, project_file = environment
     global_file.write_text('{"subagents":{"timeoutSec":10}}')
@@ -134,6 +156,7 @@ def test_symlink_target_blocks_all_migrations(environment, tmp_path, capsys):
     assert snapshot(tmp_path) == before
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_fix_yes_both_layers_backup_and_idempotence(environment, capsys):
     global_file, project_file = environment
     auth = global_file.parent / "auth.json"
@@ -155,6 +178,7 @@ def test_fix_yes_both_layers_backup_and_idempotence(environment, capsys):
     assert json.loads(capsys.readouterr().out)["actions"] == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_fix_non_tty_declines_and_tty_approves(environment, monkeypatch, capsys):
     import io
     import sys
@@ -174,6 +198,7 @@ def test_fix_non_tty_declines_and_tty_approves(environment, monkeypatch, capsys)
     assert "Apply safe repairs?" in output.err
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_plan_rechecks_other_layer(environment, monkeypatch):
     from one.core.doctor import DoctorEngine
     from one.core.doctor.repairs import execute_plan, make_plan
@@ -188,6 +213,7 @@ def test_plan_rechecks_other_layer(environment, monkeypatch):
     assert global_file.read_text() == '{}'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_partial_failure_redacted_and_rechecked(environment, monkeypatch, capsys):
     from one.core.doctor import settings_write
 
@@ -209,6 +235,7 @@ def test_partial_failure_redacted_and_rechecked(environment, monkeypatch, capsys
     assert project_file.read_text() == '{}'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_failure_stops_remaining_actions_without_claiming_conflict(environment, monkeypatch, capsys):
     from one.core.doctor import settings_write
 
@@ -227,6 +254,7 @@ def test_failure_stops_remaining_actions_without_claiming_conflict(environment, 
     assert global_file.read_text() == project_file.read_text() == '{}'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_interrupt_after_first_action_reports_partial_result(environment, monkeypatch, capsys):
     from one.core.doctor import settings_write
 

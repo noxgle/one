@@ -3,6 +3,8 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from one.core.agent_session import BusySessionError
@@ -12,6 +14,7 @@ from tests.test_checkpoint_prompt_lifecycle import make_agent
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 async def test_patch_result_and_undo(tmp_path):
     workspace = tmp_path / 'workspace'
     workspace.mkdir()

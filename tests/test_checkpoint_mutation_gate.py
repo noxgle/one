@@ -3,31 +3,39 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from tests.test_checkpoint_prompt_lifecycle import make_agent
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_patch_requires_active_task(tmp_path):
+@pytest.mark.parametrize("missing_xattr", [False, True], ids=["normal", "missing-xattr"])
+async def test_checkpoint_patch_requires_active_task(tmp_path, monkeypatch, missing_xattr):
     from one.core.checkpoints import CheckpointError, CheckpointManager
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     path = workspace / "file"
     path.write_text("before")
+    new_path = workspace / "new"
+    if missing_xattr:
+        monkeypatch.delattr(os, "listxattr", raising=False)
     manager = CheckpointManager(tmp_path / "storage", workspace, "session")
     try:
         agent, _ = make_agent(workspace, manager)
         with pytest.raises(CheckpointError, match="No active task"):
             await agent._execute_tool_by_name("apply_patch", {
-                "patchText": "*** Begin Patch\n*** Delete File: file\n*** End Patch"})
+                "patchText": "*** Begin Patch\n*** Add File: new\n+content\n*** End Patch"})
         assert path.read_text() == "before"
+        assert not new_path.exists()
     finally:
         manager.close()
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 async def test_checkpoint_write_records_and_undoes(tmp_path):
     from one.core.checkpoints import CheckpointManager
 
@@ -49,6 +57,7 @@ async def test_checkpoint_write_records_and_undoes(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 async def test_checkpoint_edit_preserves_original_for_undo(tmp_path):
     from one.core.checkpoints import CheckpointManager
 
@@ -70,6 +79,7 @@ async def test_checkpoint_edit_preserves_original_for_undo(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 async def test_checkpoint_edit_rejects_intervening_external_write(tmp_path, monkeypatch):
     from one.core.checkpoints import CheckpointError, CheckpointManager
 

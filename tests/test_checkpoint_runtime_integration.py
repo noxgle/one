@@ -3,6 +3,7 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -47,6 +48,7 @@ def make_checkpoint(host, workspace):
     return manager
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_selection_confirm_and_one_use(runtime):
     host, _, workspace, _ = runtime
     assert call(host, "list") == {"epoch": 0, "enabled": False, "checkpoints": []}
@@ -66,6 +68,7 @@ def test_selection_confirm_and_one_use(runtime):
     assert (workspace / "old").read_text() == "before"
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_cancel_conflict_expiry_and_new_task(runtime):
     host, _, workspace, _ = runtime
     manager = make_checkpoint(host, workspace)
@@ -92,6 +95,7 @@ def test_cancel_conflict_expiry_and_new_task(runtime):
     assert (workspace / "old").read_text() == "after"
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_epoch_idle_readonly_and_validation(runtime):
     host, agent, workspace, _ = runtime
     manager = make_checkpoint(host, workspace)
@@ -115,6 +119,7 @@ def test_epoch_idle_readonly_and_validation(runtime):
         call(host, "list", unexpected=True)
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 def test_session_sidecar_resume_fork_and_delete(runtime):
     host, agent, workspace, session = runtime
     manager = make_checkpoint(host, workspace)
@@ -156,6 +161,7 @@ def test_checkpoint_command_is_allowed():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="checkpoint transactions require descriptor xattr enumeration")
 async def test_checkpoint_facade_roundtrip_runs_on_owner_loop(tmp_path):
     import threading
 

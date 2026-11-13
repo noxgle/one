@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 
 import pytest
 
@@ -65,6 +66,7 @@ def test_dry_run_and_non_tty(environment, monkeypatch, capsys):
     assert list(environment.iterdir()) == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_cloud_missing_auth(environment, monkeypatch, capsys):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     tty(monkeypatch, ["global", "openai", "gpt-4o", "y"])
@@ -74,6 +76,7 @@ def test_cloud_missing_auth(environment, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("scope", ["global", "project"])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_fresh_local_setup_missing_directories(environment, monkeypatch, scope, capsys):
     tty(monkeypatch, [scope, "ollama", "local-model", "yes"])
     assert run_doctor(["--setup"]) == 0
@@ -107,6 +110,7 @@ def test_decline_or_invalid_at_each_prompt_writes_nothing(environment, monkeypat
     assert list(environment.iterdir()) == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_existing_settings_preserved_with_backup_and_idempotent_rerun(environment, monkeypatch):
     path = environment / "agent/settings.json"
     path.parent.mkdir()
@@ -135,6 +139,7 @@ def test_dry_run_existing_configuration_is_read_only(environment, monkeypatch, c
     assert {p.relative_to(environment): p.read_bytes() for p in environment.rglob("*") if p.is_file()} == before
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_fresh_setup_nested_missing_global_parent(environment, monkeypatch):
     agent = environment / "missing" / "nested" / "agent"
     monkeypatch.setenv("ONE_CODING_AGENT_DIR", str(agent))
@@ -156,6 +161,7 @@ def test_setup_requires_both_terminal_streams(environment, monkeypatch, stdin_tt
 
 @pytest.mark.parametrize("scope", ["global", "project"])
 @pytest.mark.parametrize("provider", ["ollama", "llama.cpp"])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_custom_local_model_selected_by_runtime(environment, monkeypatch, scope, provider):
     tty(monkeypatch, [scope, provider, "custom:latest", "y"])
     assert run_doctor(["--setup"]) == 0
@@ -173,6 +179,7 @@ def test_custom_local_model_selected_by_runtime(environment, monkeypatch, scope,
     {"defaultProvider": "llama.cpp"}, {"defaultModel": "other"},
     {"defaultProvider": "llama.cpp", "defaultModel": "other"},
 ])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_global_setup_rejects_project_override_without_writing(environment, monkeypatch, capsys, override):
     project = environment / ".one/settings.json"
     project.parent.mkdir()

@@ -123,10 +123,15 @@ def test_doctor_offline_check_and_invalid_argument(tmp_path: Path) -> None:
     assert before == sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
     invalid = subprocess.run([sys.executable, "-m", "one", "doctor", "--fix"], cwd=project,
                              env=env, capture_output=True, text=True, check=False)
-    assert invalid.returncode == 0
-    assert "Result: ok" in invalid.stdout
+    if sys.platform == "linux":
+        assert invalid.returncode == 0
+        assert "Result: ok" in invalid.stdout
+    else:
+        assert invalid.returncode == 1
+        assert "Result: action_required" in invalid.stdout
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_doctor_fix_dry_run_subprocess(tmp_path: Path) -> None:
     home = tmp_path / "home"
     agent = home / "agent"
@@ -146,6 +151,7 @@ def test_doctor_fix_dry_run_subprocess(tmp_path: Path) -> None:
     assert settings.read_bytes() == before
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_doctor_fix_subprocess_consent_backup_and_idempotence(tmp_path: Path) -> None:
     home = tmp_path / "home"
     agent = home / "agent"
@@ -181,6 +187,7 @@ def test_doctor_fix_subprocess_consent_backup_and_idempotence(tmp_path: Path) ->
     assert all(len(list(path.parent.glob(".settings.json.backup-*"))) == 1 for path in paths)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_doctor_fix_subprocess_conflicting_layers(tmp_path: Path) -> None:
     home = tmp_path / "home"
     agent = home / "agent"

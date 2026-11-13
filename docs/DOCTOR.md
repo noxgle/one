@@ -9,6 +9,10 @@ endpoint or model availability. A locally configured authentication method is
 not proof that it works. If Python is too old to import ONE, Doctor itself may
 not start and cannot report the problem.
 
+Read-only diagnostics are not Linux-specific. The secure settings writer used
+by repair and setup is Linux-only; on macOS and other unsupported platforms,
+write planning or application fails closed rather than changing settings.
+
 ## Sources and setup
 
 Doctor reads global `settings.json` from `ONE_CODING_AGENT_DIR` when set;

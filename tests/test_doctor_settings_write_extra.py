@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
 from one.core.doctor import settings_write as writer
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_post_replace_fsync_failure_rolls_back(tmp_path, monkeypatch):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')
@@ -28,6 +30,7 @@ def test_post_replace_fsync_failure_rolls_back(tmp_path, monkeypatch):
     assert error.value.backup.read_bytes() == b'old'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_replacement_after_rename_not_rolled_back(tmp_path, monkeypatch):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')
@@ -59,12 +62,14 @@ def test_auth_rejected(tmp_path):
     assert path.read_bytes() == b'secret'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_new_file_private(tmp_path):
     path = tmp_path / 'settings.json'
     assert writer.apply(path, writer.inspect(path), b'new', lambda _: None) is None
     assert os.stat(path).st_mode & 0o777 == 0o600
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_fifo_lock_rejected_without_blocking(tmp_path):
     path = tmp_path / 'settings.json'
     os.mkfifo(tmp_path / '.settings.json.lock')
@@ -73,6 +78,7 @@ def test_fifo_lock_rejected_without_blocking(tmp_path):
     assert not path.exists()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_lock_replaced_while_waiting(tmp_path, monkeypatch):
     path = tmp_path / 'settings.json'
     lock = tmp_path / '.settings.json.lock'
@@ -91,6 +97,7 @@ def test_lock_replaced_while_waiting(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('existing', [False, True])
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_prevalidation_failure_does_not_replace(tmp_path, existing):
     path = tmp_path / 'settings.json'
     if existing:
@@ -108,6 +115,7 @@ def test_prevalidation_failure_does_not_replace(tmp_path, existing):
     assert not list(tmp_path.glob('.settings.json.tmp-*'))
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_rollback_replace_failure_retains_backup_and_written_file(tmp_path, monkeypatch):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')
@@ -130,6 +138,7 @@ def test_rollback_replace_failure_retains_backup_and_written_file(tmp_path, monk
     assert not list(tmp_path.glob('.settings.json.restore-*'))
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_absent_file_created_by_other_writer_is_conflict(tmp_path):
     path = tmp_path / 'settings.json'
     snapshot = writer.inspect(path)
@@ -139,6 +148,7 @@ def test_absent_file_created_by_other_writer_is_conflict(tmp_path):
     assert path.read_bytes() == b'other'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_rollback_directory_fsync_failure_reports_uncertainty(tmp_path, monkeypatch):
     path = tmp_path / 'settings.json'
     path.write_bytes(b'old')
@@ -160,6 +170,7 @@ def test_rollback_directory_fsync_failure_reports_uncertainty(tmp_path, monkeypa
     assert error.value.backup.read_bytes() == b'old'
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="doctor settings writer is Linux-only")
 def test_symlink_substitution_before_replace_preserves_backup(tmp_path):
     path = tmp_path / 'settings.json'
     other = tmp_path / 'other'

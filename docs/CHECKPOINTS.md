@@ -64,6 +64,10 @@ The engine uses descriptor-relative no-follow traversal and staged replacements,
 checks workspace/parent identity, file identity, bytes, existence and mode, and
 rejects unsupported platforms. These restrictions are stricter than ordinary
 file tools. Existing policy/approval checks still precede tool dispatch.
+Existing files require Python descriptor-based xattr enumeration; where `os.listxattr`
+is unavailable (including standard macOS Python), they are rejected before
+mutation rather than assumed metadata-free. Checkpoint transactions on macOS are
+therefore limited; ordinary non-checkpoint file tools are unaffected.
 
 Before later mutations and before undo, the engine checks against the expected
 postimage. Intervening writes, mode changes, replacement identities and unsafe
