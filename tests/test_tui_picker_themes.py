@@ -115,6 +115,8 @@ async def test_commandpalette_default_theme(tmp_path: Path) -> None:
     ("hacker", "solarized"),
     ("solarized", "fallout"),
     ("fallout", "default"),
+    ("default", "cybertrunk"),
+    ("cybertrunk", "fallout"),
 ])
 async def test_theme_change_reflected_in_new_palette(
     tmp_path: Path, from_theme: str, to_theme: str
@@ -230,3 +232,112 @@ async def test_model_picker_sanitizes_malicious_provider(tmp_path: Path) -> None
             picker = app.screen_stack[-1]
             assert picker.__class__.__name__ == "_ModelPicker"
             assert "open[/b]" in picker.query_one("#model-picker-list").render_line(0).text
+
+
+# ---------------------------------------------------------------------------
+# 6.  Every TuiPalette field maps exactly (18 fields, keyword-arg safety)
+# ---------------------------------------------------------------------------
+
+
+PALETTE_FIELD_NAMES: tuple[str, ...] = (
+    "name",
+    "screen_bg",
+    "screen_fg",
+    "panel_bg",
+    "panel_border",
+    "input_bg",
+    "input_border",
+    "input_fg",
+    "sidebar_bg",
+    "info",
+    "warn",
+    "error",
+    "user",
+    "assistant",
+    "tool",
+    "user_bg",
+    "assistant_bg",
+    "tool_bg",
+)
+
+
+def test_all_builtin_palettes_have_all_18_fields() -> None:
+    """Every BUILTIN_TUI_THEMES entry must expose all 18 TuiPalette fields."""
+    for theme_name, palette in BUILTIN_TUI_THEMES.items():
+        for field in PALETTE_FIELD_NAMES:
+            assert hasattr(palette, field), f"{theme_name} missing field {field}"
+            value = getattr(palette, field)
+            assert isinstance(value, str) and value, (
+                f"{theme_name}.{field} must be a non-empty string, got {value!r}"
+            )
+
+
+def test_cybertrunk_palette_values(tmp_path: Path) -> None:
+    """Verify cybertrunk palette values are correct and distinct."""
+    palette = BUILTIN_TUI_THEMES["cybertrunk"]
+    assert palette.name == "cybertrunk"
+    assert palette.screen_bg == "#090B10"
+    assert palette.screen_fg == "#E6EDF3"
+    assert palette.panel_bg == "#101722"
+    assert palette.panel_border == "#28616C"
+    assert palette.input_bg == "#151D29"
+    assert palette.input_border == "#FCEE09"
+    assert palette.input_fg == "#F5F7FA"
+    assert palette.sidebar_bg == "#0D121B"
+    assert palette.info == "#00E5FF"
+    assert palette.warn == "#FCEE09"
+    assert palette.error == "#FF5370"
+    assert palette.user == "#FCEE09"
+    assert palette.assistant == "#00E5FF"
+    assert palette.tool == "#FF5CDB"
+    assert palette.user_bg == "#292810"
+    assert palette.assistant_bg == "#0C2630"
+    assert palette.tool_bg == "#28152C"
+    # Verify the Textual theme maps correctly
+    from textual.theme import Theme
+    textual_theme = _TEXTUAL_THEME_MAP["cybertrunk"]
+    assert isinstance(textual_theme, Theme)
+    assert textual_theme.name == "one-cybertrunk"
+    assert textual_theme.dark is True
+    assert textual_theme.primary == palette.screen_fg
+    assert textual_theme.background == palette.screen_bg
+    assert textual_theme.surface == palette.panel_bg
+    assert textual_theme.variables["border"] == palette.panel_border
+    assert textual_theme.variables["block-cursor-background"] == palette.info
+
+
+@pytest.mark.asyncio
+async def test_cybertrunk_theme_change_reflected_in_palette(tmp_path: Path) -> None:
+    """Switching to cybertrunk via command palette updates the CommandPalette colours."""
+    from one.modes.tui_mode import _CommandCenter
+
+    app = _OneTextualApp(_mk_app_session(tmp_path))
+    app._theme = BUILTIN_TUI_THEMES["default"]
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme == "one-default"
+        # Open palette with default theme
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert isinstance(app.screen, _CommandCenter)
+        palette1 = app.screen_stack[-1]
+        bg1 = palette1.styles.background
+        # Close palette
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, _CommandCenter)
+        # Change theme to cybertrunk
+        app.theme = "one-cybertrunk"
+        app._apply_theme("cybertrunk")
+        await pilot.pause()
+        assert app.theme == "one-cybertrunk"
+        # Reopen palette
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert isinstance(app.screen, _CommandCenter)
+        palette2 = app.screen_stack[-1]
+        bg2 = palette2.styles.background
+        assert bg1 != bg2, (
+            f"Palette bg should change when switching to cybertrunk: "
+            f"default={bg1} → cybertrunk={bg2}"
+        )

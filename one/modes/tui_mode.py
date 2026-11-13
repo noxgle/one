@@ -900,6 +900,26 @@ BUILTIN_TUI_THEMES: dict[str, TuiPalette] = {
         "#332811",
         "#4a3716",
     ),
+    "cybertrunk": TuiPalette(
+        name="cybertrunk",
+        screen_bg="#090B10",
+        screen_fg="#E6EDF3",
+        panel_bg="#101722",
+        panel_border="#28616C",
+        input_bg="#151D29",
+        input_border="#FCEE09",
+        input_fg="#F5F7FA",
+        sidebar_bg="#0D121B",
+        info="#00E5FF",
+        warn="#FCEE09",
+        error="#FF5370",
+        user="#FCEE09",
+        assistant="#00E5FF",
+        tool="#FF5CDB",
+        user_bg="#292810",
+        assistant_bg="#0C2630",
+        tool_bg="#28152C",
+    ),
 }
 
 

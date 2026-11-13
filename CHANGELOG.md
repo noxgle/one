@@ -10,6 +10,7 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Cybertrunk TUI theme** — a high-contrast dark palette with cyan, yellow, and magenta accents (`/theme cybertrunk`).
 - Compaction summary failures are recorded as bounded, content-free reason codes
   and included in session statistics; legacy placeholder behavior is unchanged. Additive
   normalized V2 settings and sanitized compaction metrics are available. Opt-in

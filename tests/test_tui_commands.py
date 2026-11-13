@@ -1071,27 +1071,27 @@ async def test_tui_agents_and_approval_overlay_colors_follow_every_builtin_theme
             actions = app.query_one("#approval_actions")
             approve = app.query_one("#approval-approve")
             reject = app.query_one("#approval-reject")
-            assert agents.styles.background.hex.lower() == theme.panel_bg
-            assert approval.styles.background.hex.lower() == theme.panel_bg
-            assert approval.styles.color.hex.lower() == theme.screen_fg
-            assert all(border[1].hex.lower() == theme.panel_border for border in approval.styles.border)
-            assert summary.styles.background.hex.lower() == theme.panel_bg
-            assert summary.styles.color.hex.lower() == theme.screen_fg
-            assert reason.styles.background.hex.lower() == theme.panel_bg
-            assert reason.styles.color.hex.lower() == theme.screen_fg
-            assert all(border[1].hex.lower() == theme.input_border for border in reason.styles.border)
-            assert actions.styles.background.hex.lower() == theme.panel_bg
-            assert actions.styles.color.hex.lower() == theme.screen_fg
-            assert approve.styles.background.hex.lower() == theme.user_bg
-            assert approve.styles.color.hex.lower() == theme.user
-            assert all(border[1].hex.lower() == theme.user for border in approve.styles.border)
-            assert reject.styles.background.hex.lower() == theme.panel_bg
-            assert reject.styles.color.hex.lower() == theme.error
-            assert all(border[1].hex.lower() == theme.error for border in reject.styles.border)
+            assert agents.styles.background.hex.lower() == theme.panel_bg.lower()
+            assert approval.styles.background.hex.lower() == theme.panel_bg.lower()
+            assert approval.styles.color.hex.lower() == theme.screen_fg.lower()
+            assert all(border[1].hex.lower() == theme.panel_border.lower() for border in approval.styles.border)
+            assert summary.styles.background.hex.lower() == theme.panel_bg.lower()
+            assert summary.styles.color.hex.lower() == theme.screen_fg.lower()
+            assert reason.styles.background.hex.lower() == theme.panel_bg.lower()
+            assert reason.styles.color.hex.lower() == theme.screen_fg.lower()
+            assert all(border[1].hex.lower() == theme.input_border.lower() for border in reason.styles.border)
+            assert actions.styles.background.hex.lower() == theme.panel_bg.lower()
+            assert actions.styles.color.hex.lower() == theme.screen_fg.lower()
+            assert approve.styles.background.hex.lower() == theme.user_bg.lower()
+            assert approve.styles.color.hex.lower() == theme.user.lower()
+            assert all(border[1].hex.lower() == theme.user.lower() for border in approve.styles.border)
+            assert reject.styles.background.hex.lower() == theme.panel_bg.lower()
+            assert reject.styles.color.hex.lower() == theme.error.lower()
+            assert all(border[1].hex.lower() == theme.error.lower() for border in reject.styles.border)
             content = summary.content
             assert str(content).startswith("PENDING TOOL APPROVAL\nAgent: Main\nTool: bash")
-            assert content.style == f"bold {theme.warn}"
-            assert content.spans[0].style == theme.screen_fg
+            assert content.style.lower() == f"bold {theme.warn.lower()}"
+            assert content.spans[0].style.lower() == theme.screen_fg.lower()
 
         app.action_reject_tool()
         assert await pending == (False, "Rejected by user")
@@ -1806,3 +1806,48 @@ async def test_ctrl_t_cycles_thinking_once_without_changing_draft(tmp_path: Path
         await pilot.press("ctrl+t")
         await pilot.pause()
         assert session.thinking_level == "high"
+
+
+@pytest.mark.asyncio
+async def test_theme_cybertrunk_command_persists(tmp_path: Path) -> None:
+    """Applying /theme cybertrunk via the command palette persists the theme."""
+    from one.modes.tui_mode import BUILTIN_TUI_THEMES
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Verify initial theme is the default (hacker)
+        assert app._theme.name == "hacker"
+        assert session.settings_manager.get_theme() == "hacker"
+        # Apply cybertrunk via the command-center path (same as Ctrl+P → Theme)
+        await app._apply_center_choice("theme", "cybertrunk")
+        await pilot.pause()
+        # Verify theme changed and persisted
+        assert app._theme.name == "cybertrunk"
+        assert session.settings_manager.get_theme() == "cybertrunk"
+        # Verify the palette entry is correct
+        palette = BUILTIN_TUI_THEMES["cybertrunk"]
+        assert palette.name == "cybertrunk"
+        assert palette.screen_bg == "#090B10"
+
+
+@pytest.mark.asyncio
+async def test_theme_cybertrunk_handle_command_persists(tmp_path: Path) -> None:
+    """Applying /theme cybertrunk via _handle_command persists the theme."""
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Verify initial theme is the default (hacker)
+        assert app._theme.name == "hacker"
+        assert session.settings_manager.get_theme() == "hacker"
+        # Apply cybertrunk via _handle_command (same as typing /theme cybertrunk)
+        await app._handle_command("/theme cybertrunk")
+        await pilot.pause()
+        # Verify theme changed and persisted
+        assert app._theme.name == "cybertrunk"
+        assert session.settings_manager.get_theme() == "cybertrunk"
+        # Verify the command wrote the confirmation message
+        output = "\n".join(app._stream_lines)
+        assert "Theme set to cybertrunk" in output

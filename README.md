@@ -313,6 +313,22 @@ and cancelling it preserves the conversation draft.
 Choose **Sessions** to open the [session browser](#tui-session-browser), or
 **Select model** to open the model picker below.
 
+#### Theme picker (Ctrl+P → Theme)
+
+The **Theme** submenu lists all built-in colour themes. Selecting one applies it
+immediately and persists it in `settings.json` (`tui.theme`). The built-in themes
+are `default`, `light`, `hacker`, `solarized`, `fallout`, and `cybertrunk`.
+
+`cybertrunk` is a dark theme with a deep navy background (`#090B10`), high-
+contrast light text (`#E6EDF3`), cyan accents (`#00E5FF`), and yellow highlights
+(`#FCEE09`). It is suitable for extended coding sessions.
+
+Set the theme via the slash command in the main input:
+
+```text
+/theme cybertrunk
+```
+
 #### Model picker (Ctrl+K)
 
 **Ctrl+K** opens a searchable list of available models with a provider filter.
