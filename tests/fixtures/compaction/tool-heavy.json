@@ -1,0 +1,8 @@
+[
+  {"role":"user","content":"Inspect synthetic files"},
+  {"role":"assistant","content":"I will read alpha.","_nativeToolCalls":[{"id":"call_read","name":"read","arguments":{"path":"alpha.txt"}}]},
+  {"role":"toolResult","content":"alpha <content>","_nativeToolCallId":"call_read"},
+  {"role":"assistant","content":"I will search beta.","_nativeToolCalls":[{"id":"call_grep","name":"grep","arguments":{"pattern":"beta","path":"."}}]},
+  {"role":"toolResult","content":"beta.txt:1:beta match","_nativeToolCallId":"call_grep"},
+  {"role":"assistant","content":"Inspection complete"}
+]

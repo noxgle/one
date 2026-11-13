@@ -34,6 +34,22 @@ class _TuiAdapter:
         raise ValueError("invalid TUI runtime command payload")
 
 
+def test_host_forwards_compaction_failure_and_invalidates_sidebar(tmp_path):
+    from tests.support.tui import _mk_app_session
+
+    session = _mk_app_session(tmp_path)
+    host = TuiRuntimeHost(SimpleNamespace(session=session), None)
+    events = []
+    refreshes = []
+    host.subscribe(events.append)
+    host._schedule_sidebar_refresh = refreshes.append
+    event = {"type": "compaction_failed", "reason": "manual", "failureReason": "error",
+             "strategy": "local_separate", "attempts": 1, "provider": "openai", "model": "gpt-4.1"}
+    session._emit(event)
+    assert refreshes == [0]
+    assert all(events[0][key] == value for key, value in event.items())
+
+
 @pytest.mark.asyncio
 async def test_detached_tool_limit_keyboard_uses_owner_loop(tmp_path) -> None:
     from one.modes.tui_mode import _OneTextualApp
@@ -68,6 +84,48 @@ async def test_detached_tool_limit_keyboard_uses_owner_loop(tmp_path) -> None:
             await pilot.press("ctrl+u")
             assert view.sidebar["toolMaxSteps"] == 4
             assert len(owner_threads) == 2 and all(t != threading.get_ident() for t in owner_threads)
+    finally:
+        await facade.close()
+        assert facade.finalize()
+
+
+@pytest.mark.asyncio
+async def test_detached_compact_hint_reaches_owner_checkpoint(tmp_path, monkeypatch):
+    from one.core.compaction.checkpoint import generate_checkpoint
+    from one.modes.tui_mode import _OneTextualApp
+    from tests.support.tui import _mk_app_session, _submit
+
+    seen = []
+
+    async def checkpoint(*args, **kwargs):
+        seen.append((kwargs["hint"], threading.get_ident()))
+        return await generate_checkpoint(*args, **kwargs)
+
+    monkeypatch.setattr("one.core.agent_session.generate_checkpoint", checkpoint)
+
+    async def factory(_spec):
+        session = _mk_app_session(tmp_path, settings_override={"compaction": {
+            "experimentalV2": True, "summarizeWithModel": False,
+        }})
+        session.session_manager.append_message({"role": "user", "content": "Never delete files."})
+        session.messages = session.session_manager.build_session_context()["messages"]
+        return TuiRuntimeHost(SimpleNamespace(session=session, dispose=session.dispose), None)
+
+    facade = AgentRuntimeFacade(
+        RuntimeBootstrapSpec(cwd=str(tmp_path), agent_dir=str(tmp_path / "agent")),
+        factory, command_allowlist=TUI_COMMANDS,
+    )
+    await facade.start()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view)
+    try:
+        async with app.run_test() as pilot:
+            await _submit(app, pilot, "/compact Focus on parser")
+            assert len(seen) == 1
+            assert seen[0][0] == "Focus on parser"
+            assert seen[0][1] != threading.get_ident()
+            assert "Never delete files." in "\n".join(app._stream_lines)
     finally:
         await facade.close()
         assert facade.finalize()

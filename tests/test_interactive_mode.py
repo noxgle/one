@@ -383,6 +383,29 @@ async def test_interactive_native_tool_parse_failure_shows_safe_reason(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_interactive_compact_v2_hint_reaches_checkpoint(tmp_path, monkeypatch, capsys):
+    from one.core.compaction.checkpoint import generate_checkpoint
+    from tests.test_compaction_v2 import agent_with_history
+
+    session = agent_with_history(tmp_path, model=False)
+    seen = []
+
+    async def checkpoint(*args, **kwargs):
+        seen.append(kwargs["hint"])
+        return await generate_checkpoint(*args, **kwargs)
+
+    monkeypatch.setattr("one.core.agent_session.generate_checkpoint", checkpoint)
+    monkeypatch.setattr("builtins.input", _mk_input(["/compact Focus on parser", "/exit"]))
+    await InteractiveMode(_DummyHost(session)).run()
+    assert seen == ["Focus on parser"]
+    entry = session.session_manager.get_last_compaction()
+    assert entry["summarySchema"] == "v2"
+    assert "Never delete files." in entry["summary"]
+    assert "Focus on parser" not in entry["summary"]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
 async def test_interactive_slash_commands_smoke(monkeypatch, capsys):
     session = _DummySession()
     mode = InteractiveMode(_DummyHost(session))

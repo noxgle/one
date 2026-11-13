@@ -36,6 +36,7 @@ class MissingBlobError(AttachmentStorageError):
 
 
 class GeminiAdapter(ProviderAdapter):
+    supports_cache_aware_compaction = True
     supports_native_tools = True
     name = "gemini"
 
@@ -139,6 +140,8 @@ class GeminiAdapter(ProviderAdapter):
         temperature: float | None = None,
         stream_transport_timeout: float | None = None,
         tools: list[dict[str, Any]] | None = None,
+        *,
+        disable_tool_calls: bool = False,
     ) -> ChatResult:
         # Validate all image blobs are present BEFORE building payload / making HTTP.
         if images:
@@ -215,6 +218,8 @@ class GeminiAdapter(ProviderAdapter):
                 for t in tools
             ]}]
 
+        if disable_tool_calls and tools:
+            payload["toolConfig"] = {"functionCallingConfig": {"mode": "NONE"}}
         h = {"Content-Type": "application/json"}
         if headers:
             h.update(headers)

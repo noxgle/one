@@ -10,6 +10,24 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- Compaction summary failures are recorded as bounded, content-free reason codes
+  and included in session statistics; legacy placeholder behavior is unchanged. Additive
+  normalized V2 settings and sanitized compaction metrics are available. Opt-in
+  V2 applies budget-aware retention and triggering, and produces validated
+  structured checkpoints with user-sourced constraints and a consecutive-failure
+  latch for automatic compaction. V2 commits validated checkpoints transactionally,
+  preserves history on failure or cancellation, and never installs a failure
+  placeholder; manual instructions are hints. Cache-aware local summaries reuse
+  eligible OpenAI official/Azure, Anthropic and Gemini request prefixes with
+  tool calls disabled; Codex, Ollama and unverified endpoints use separate
+  summaries. Codex V2 normal requests project summaries as a suffix without
+  changing canonical history. Prefix equality does not guarantee cache hits;
+  no live cache benchmark has been performed. Native Responses replay has an
+  offline-only implementation tested with fakes; production capability remains
+  disabled pending verification of the ChatGPT backend and models. This is not a
+  native rollout. V2 preserves bounded plan and ledger blocks and optionally
+  rereads policy-allowed workspace files within hard caps; file reread defaults
+  off. Precompute remains future work.
 - **ChatGPT cache affinity** — ChatGPT/Codex requests send stable, official
   `session-id` and `thread-id` headers derived from one non-secret session
   lineage id; subagents and forks inherit it. The legacy underscore

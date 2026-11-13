@@ -7,6 +7,13 @@ a new run. A subsequent independent prompt starts a new run; an explicit manual
 compaction is a separate run. A terminal finish, error or cancellation does not
 automatically drain remaining queued messages.
 
+Compaction provider attempts, including V2 validation repairs and cache-aware
+fallbacks, are admitted and accounted under `byPurpose.compaction` in that run;
+do not count them again. Missing provider usage remains unknown. Admission and
+cancellation still apply, and V2 keeps the active history on a failed commit.
+See [compaction](COMPACTION.md) for the legacy failure behavior and offline-only
+native gate.
+
 ## Shared limits
 
 `runBudget` is opt-in, shared by the root and all descendants, and frozen at run

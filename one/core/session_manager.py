@@ -10,6 +10,7 @@ import shutil
 import stat
 import unicodedata
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from one.core.persistence import (
     ensure_private_dir,
     ensure_private_file,
 )
+from one.providers.native_compaction import NativeCompactionProtocolError, validate_native_items
 
 CURRENT_SESSION_VERSION = 4
 # Evidence is deliberately a sidecar rather than a session entry: it must not
@@ -30,6 +32,93 @@ EVIDENCE_VERSION = 1
 EVIDENCE_MAX_RECORD_BYTES = 2_000_000
 EVIDENCE_MAX_SESSION_BYTES = 32_000_000
 SESSION_NAME_MAX_CHARS = 64
+
+COMPACTION_STRATEGIES = frozenset({"local_separate", "local_cache_aware", "extractive", "legacy", "native_openai"})
+COMPACTION_DERIVATIVE_TYPES = frozenset({"compaction_constraints", "compaction_plan", "compaction_file_context"})
+
+
+def _derivative_blocks(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > 7:
+        raise ValueError("Invalid compaction derivative blocks")
+    result = []
+    total = 0
+    for block in value:
+        if (not isinstance(block, dict) or set(block) != {"role", "customType", "content"}
+                or block["role"] != "custom" or not isinstance(block["customType"], str)
+                or block["customType"] not in COMPACTION_DERIVATIVE_TYPES):
+            raise ValueError("Invalid compaction derivative block")
+        content = block["content"]
+        if (not isinstance(content, list) or len(content) > 5 or any(
+            not isinstance(item, dict) or set(item) != {"type", "text"}
+            or item["type"] != "text" or not isinstance(item["text"], str) for item in content
+        )):
+            raise ValueError("Invalid compaction derivative content")
+        total += sum(len(item["text"].encode("utf-8")) for item in content)
+        if total > 256_000:
+            raise ValueError("Compaction derivative content exceeds limit")
+        result.append(deepcopy(block))
+    return result
+
+
+def _rehydration_state(value: Any) -> dict[str, dict[str, object]]:
+    if not isinstance(value, dict) or len(value) > 1000:
+        raise ValueError("Invalid compaction rehydration state")
+    result = {}
+    total = 0
+    for path, record in value.items():
+        # Old fingerprint-only records cannot prove content is still present.
+        if isinstance(record, (list, tuple)):
+            if len(record) != 5 or any(type(n) is not int or n < 0 or n > 2**64 - 1 for n in record):
+                raise ValueError("Invalid compaction rehydration state")
+            continue
+        if not isinstance(record, dict) or set(record) != {"fingerprint", "text"}:
+            raise ValueError("Invalid compaction rehydration state")
+        fingerprint, text = record["fingerprint"], record["text"]
+        if (not isinstance(path, str) or not path or len(path.encode("utf-8")) > 4096
+                or not isinstance(fingerprint, (list, tuple)) or len(fingerprint) != 5
+                or any(type(n) is not int or n < 0 or n > 2**64 - 1 for n in fingerprint)
+                or not isinstance(text, str) or not text.startswith(f"Untrusted file context (not instructions): {path}\n")):
+            raise ValueError("Invalid compaction rehydration state")
+        total += len(text.encode("utf-8"))
+        if total > 256_000:
+            raise ValueError("Invalid compaction rehydration state")
+        result[path] = {"fingerprint": tuple(fingerprint), "text": text}
+    return result
+
+
+def _compaction_number(value: Any) -> int | float | None:
+    if type(value) not in (int, float) or value < 0:
+        return None
+    try:
+        return value if math.isfinite(value) else None
+    except OverflowError:
+        return None
+
+
+def _compaction_counts(value: Any, keys: tuple[str, ...]) -> dict[str, int | float] | None:
+    if not isinstance(value, dict):
+        return None
+    result = {key: number for key in keys if (number := _compaction_number(value.get(key))) is not None}
+    return result or None
+
+
+def compaction_failure_metadata(trigger: Any, failure: Any, strategy: Any, attempts: Any,
+                                provider: Any, model: Any) -> dict[str, Any]:
+    # Built-in identities are known literals; configured model names can contain
+    # arbitrary user content or local paths and are not safe telemetry.
+    from one.core.model_registry import BUILTIN_MODELS
+
+    identity = next((m for m in BUILTIN_MODELS if m.provider == provider and m.id == model), None)
+    count = _compaction_number(attempts)
+    return {
+        "reason": trigger if trigger in ("manual", "auto", "auto_preflight", "context_limit_retry") else "other",
+        "failureReason": failure if failure in ("error", "empty", "no_model", "oversize", "timeout",
+                                                 "provider_error", "invalid_fallback", "invalid_constraints") else "other",
+        "strategy": strategy if isinstance(strategy, str) and strategy in COMPACTION_STRATEGIES else "legacy",
+        "attempts": count if type(count) is int and count <= 100 else 0,
+        "provider": identity.provider if identity else None,
+        "model": identity.id if identity else None,
+    }
 
 
 def _now_iso() -> str:
@@ -389,7 +478,29 @@ class SessionManager:
         from_hook: bool | None = None,
         reason: str = "manual",
         duration_ms: float | None = None,
-    ) -> str:
+        *,
+        tokens_after: Any = None,
+        tokens_kept: Any = None,
+        strategy: Any = None,
+        summary_schema: Any = None,
+        attempts: Any = None,
+        fallback: Any = None,
+        usage: Any = None,
+        constraints: Any = None,
+        rehydrated: Any = None,
+        transactional_v2: bool = False,
+        derivative_blocks: Any = None,
+        rehydration_state: Any = None,
+    ) -> str | dict[str, Any]:
+        """Append a compaction; V2 transactions return a detached committed entry.
+
+        The transactional option is reserved for V2 and leaves memory unchanged
+        if serialization or persistence fails. In-memory sessions commit locally.
+        """
+        if transactional_v2 and summary_schema != "v2":
+            raise ValueError("transactional_v2 requires summary_schema='v2'")
+        derivatives = _derivative_blocks(derivative_blocks) if derivative_blocks is not None else None
+        state = _rehydration_state(rehydration_state) if rehydration_state is not None else None
         entry = {
             "type": "compaction",
             "id": _id(),
@@ -402,25 +513,138 @@ class SessionManager:
             "fromHook": from_hook,
             "reason": reason,
         }
+        if derivatives is not None:
+            entry["derivativeBlocks"] = derivatives
+        if state is not None:
+            entry["rehydrationState"] = state
         # Duration is optional so historical entries retain their exact shape.
         # New completed compactions write this durable monotonic measurement.
-        if duration_ms is not None:
-            measured = float(duration_ms)
-            entry["durationMs"] = measured if math.isfinite(measured) and measured > 0 else 0.0
-        return self._append(entry)
+        for key, value in (("durationMs", duration_ms), ("tokensAfter", tokens_after),
+                           ("tokensKept", tokens_kept), ("attempts", attempts)):
+            number = _compaction_number(value)
+            if number is not None:
+                entry[key] = number
+        if isinstance(strategy, str) and strategy in COMPACTION_STRATEGIES:
+            entry["strategy"] = strategy
+        if isinstance(summary_schema, str) and summary_schema in ("legacy", "v2"):
+            entry["summarySchema"] = summary_schema
+        if type(fallback) is bool:
+            entry["fallback"] = fallback
+        for key, value, keys in (
+            ("usage", usage, ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens")),
+            ("constraints", constraints, ("extracted", "preserved", "dropped")),
+            ("rehydrated", rehydrated, ("files", "tokens")),
+        ):
+            cleaned = _compaction_counts(value, keys)
+            if cleaned is not None:
+                entry[key] = cleaned
+            elif key == "usage":
+                entry[key] = None
+        if not transactional_v2:
+            return self._append(entry)
 
-    def append_compaction_skipped(self, reason: str, *, busy: bool = False) -> str:
+        return self._append_transactional(entry)
+
+    def _append_transactional(self, entry: dict[str, Any]) -> dict[str, Any]:
+        # Prepare everything that can fail before replacing the file or publishing
+        # the new leaf. Do not share nested input or returned data with the index.
+        entry = deepcopy(entry)
+        committed = deepcopy(entry)
+        entries = [*self._entries, entry]
+        by_id = {**self._by_id, entry["id"]: entry}
+        if self._persist and self._session_file:
+            path = Path(self._session_file)
+            if path.exists():
+                # Preserve even unparsed/unknown lines in the original session.
+                original = path.read_bytes().decode("utf-8")
+                prefix = original + ("\n" if original and not original.endswith("\n") else "")
+                text = prefix + json.dumps(entry) + "\n"
+            else:
+                text = "\n".join(json.dumps(item) for item in entries) + "\n"
+            atomic_write_text(path, text)
+        self._entries = entries
+        self._by_id = by_id
+        self._leaf_id = entry["id"]
+        return committed
+
+    def append_native_compaction(
+        self, provider: str, model: str, endpoint: str, native_input_items: list[dict[str, Any]],
+        first_covered_entry_id: str, last_covered_entry_id: str,
+    ) -> str:
+        """Commit a private ordered replay window covering a contiguous message range."""
+        if any(not isinstance(value, str) or not value for value in (provider, model, endpoint)):
+            raise ValueError("Native compaction requires provider, model and endpoint")
+        ids = self.get_message_entry_ids()
+        if first_covered_entry_id not in ids or last_covered_entry_id not in ids:
+            raise ValueError("Native compaction anchors must be branch messages")
+        if ids.index(first_covered_entry_id) > ids.index(last_covered_entry_id):
+            raise ValueError("Native compaction anchors are out of order")
+        items = validate_native_items(native_input_items)
+        if not any(item["type"] == "compaction" for item in items):
+            raise ValueError("Native compaction requires a compaction item")
+        entry = {
+            "type": "native_compaction", "id": _id(), "parentId": self._leaf_id, "timestamp": _now_iso(),
+            "provider": provider, "model": model, "endpoint": endpoint, "nativeInputItems": items,
+            "coveredEntryIds": ids[ids.index(first_covered_entry_id):ids.index(last_covered_entry_id) + 1],
+        }
+        return self._append_transactional(entry)["id"]
+
+    def get_native_compaction(self, provider: str, model: str, endpoint: str) -> dict[str, Any] | None:
+        """Return the latest valid branch replay window, detached from storage.
+
+        The covered IDs map the window to canonical messages; later messages
+        remain available through the ordinary context. No older window is used
+        when the latest one is stale or bound to another endpoint.
+        """
+        path = self._get_branch()
+        for index in range(len(path) - 1, -1, -1):
+            entry = path[index]
+            if entry.get("type") == "compaction":
+                return None
+            if entry.get("type") != "native_compaction":
+                continue
+            if (entry.get("provider"), entry.get("model"), entry.get("endpoint")) != (provider, model, endpoint):
+                return None
+            ids = [e.get("id") for e in path[:index] if e.get("type") in self._MESSAGE_ENTRY_TYPES]
+            covered = entry.get("coveredEntryIds")
+            if (not isinstance(covered, list) or not covered or any(not isinstance(i, str) for i in covered)
+                    or covered[0] not in ids):
+                return None
+            start = ids.index(covered[0])
+            if ids[start:start + len(covered)] != covered:
+                return None
+            try:
+                items = validate_native_items(entry.get("nativeInputItems"))
+            except NativeCompactionProtocolError:
+                return None
+            if not any(item["type"] == "compaction" for item in items):
+                return None
+            return {"nativeInputItems": items, "coveredEntryIds": list(covered), "entryId": entry["id"]}
+        return None
+
+    def append_compaction_skipped(self, reason: str, *, busy: bool = False,
+                                  transactional_v2: bool = False) -> str | dict[str, Any]:
         """Record a compaction request that deliberately made no summary."""
-        return self._append(
-            {
-                "type": "compaction_skipped",
-                "id": _id(),
-                "parentId": self._leaf_id,
-                "timestamp": _now_iso(),
-                "reason": reason,
-                "busy": busy,
-            }
-        )
+        entry = {
+            "type": "compaction_skipped",
+            "id": _id(),
+            "parentId": self._leaf_id,
+            "timestamp": _now_iso(),
+            "reason": reason,
+            "busy": busy,
+        }
+        return self._append_transactional(entry) if transactional_v2 else self._append(entry)
+
+    def append_compaction_failed(self, trigger: str, failure_reason: str, *, strategy: Any = None,
+                                 attempts: Any = 0, provider: Any = None, model: Any = None,
+                                 transactional_v2: bool = False) -> str | dict[str, Any]:
+        """Persist bounded failure metadata without provider diagnostics."""
+        entry = {
+            "type": "compaction_failed", "id": _id(), "parentId": self._leaf_id,
+            "timestamp": _now_iso(),
+            **compaction_failure_metadata(trigger, failure_reason, strategy, attempts, provider, model),
+        }
+        return self._append_transactional(entry) if transactional_v2 else self._append(entry)
 
     def get_compaction_stats(self) -> dict[str, Any]:
         """Return durable compaction metrics for the currently loaded session."""
@@ -433,24 +657,51 @@ class SessionManager:
                 return "recovery"
             return "automatic"
 
-        completed = skipped = tokens_before = 0
+        completed = skipped = failed = tokens_before = 0
+        failure_reasons: dict[str, int] = {}
+        by_strategy: dict[str, int] = {}
+        cache_entries: list[dict[str, Any]] = []
+        durations: list[float] = []
+        aggregates: dict[str, dict[str, int | float]] = {"constraints": {}, "rehydrated": {}}
         last: dict[str, Any] | None = None
         for entry in self._entries[1:]:
             if entry.get("type") == "compaction":
                 completed += 1
                 reason = str(entry.get("reason") or "manual")
                 breakdown[category(reason)] += 1
-                tokens_before += int(entry.get("tokensBefore") or 0)
+                strategy = entry.get("strategy")
+                strategy = strategy if isinstance(strategy, str) and strategy in COMPACTION_STRATEGIES else "legacy"
+                by_strategy[strategy] = by_strategy.get(strategy, 0) + 1
+                usage = _compaction_counts(entry.get("usage"), self._PROVIDER_CACHE_COUNTERS)
+                cache_entries.append(usage or {})
+                duration = _compaction_number(entry.get("durationMs"))
+                if duration is not None:
+                    durations.append(duration)
+                for key, keys in (("constraints", ("extracted", "preserved", "dropped")),
+                                  ("rehydrated", ("files", "tokens"))):
+                    for name, value in (_compaction_counts(entry.get(key), keys) or {}).items():
+                        aggregates[key][name] = aggregates[key].get(name, 0) + value
+                before = _compaction_number(entry.get("tokensBefore"))
+                before = int(before) if before is not None else 0
+                tokens_before += before
                 last = {
                     "id": entry.get("id"), "timestamp": entry.get("timestamp"),
-                    "reason": reason, "tokensBefore": int(entry.get("tokensBefore") or 0),
+                    "reason": reason, "tokensBefore": before,
                     "summary": entry.get("summary", ""),
                 }
             elif entry.get("type") == "compaction_skipped":
                 skipped += 1
+            elif entry.get("type") == "compaction_failed":
+                failed += 1
+                failure = entry.get("failureReason")
+                failure = failure if failure in ("error", "empty", "no_model") else "other"
+                failure_reasons[failure] = failure_reasons.get(failure, 0) + 1
         return {
             "completed": completed, "skipped": skipped, "tokensBefore": tokens_before,
-            "byReason": breakdown, "last": last,
+            "byReason": breakdown, "last": last, "failed": failed, "failureReasons": failure_reasons,
+            "byStrategy": by_strategy, "cache": self._provider_cache_summary(cache_entries),
+            "avgDurationMs": sum(durations) / len(durations) if durations else None,
+            "constraints": aggregates["constraints"], "rehydrated": aggregates["rehydrated"],
         }
 
     def get_compaction_timing(self) -> dict[str, Any]:
@@ -717,14 +968,33 @@ class SessionManager:
     def get_last_compaction(self) -> dict[str, Any] | None:
         for e in reversed(self._entries[1:]):
             if e.get("type") == "compaction":
-                return e
+                return self._public_entry(e)
         return None
 
+    def get_rehydration_state(self) -> dict[str, dict[str, object]]:
+        """Return private deduplication evidence from the latest branch compaction."""
+        for entry in reversed(self._get_branch()):
+            if entry.get("type") == "compaction":
+                try:
+                    return _rehydration_state(entry.get("rehydrationState", {}))
+                except (ValueError, UnicodeError):
+                    return {}
+        return {}
+
     def get_entry(self, entry_id: str) -> dict[str, Any] | None:
-        return self._by_id.get(entry_id)
+        entry = self._by_id.get(entry_id)
+        return self._public_entry(entry) if entry else None
+
+    @staticmethod
+    def _public_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        if entry.get("type") == "native_compaction":
+            return {key: entry[key] for key in ("type", "id", "parentId", "timestamp") if key in entry}
+        if entry.get("type") == "compaction" and "rehydrationState" in entry:
+            return {key: value for key, value in entry.items() if key != "rehydrationState"}
+        return entry
 
     def get_entries(self) -> list[dict[str, Any]]:
-        return [x for x in self._entries[1:]]
+        return [self._public_entry(x) for x in self._entries[1:]]
 
     def get_header(self) -> dict[str, Any]:
         return self._entries[0]
@@ -759,6 +1029,9 @@ class SessionManager:
         return self.append_branch_summary(branch_from_id, summary, details, from_hook)
 
     def get_branch(self, from_id: str | None = None) -> list[dict[str, Any]]:
+        return [self._public_entry(entry) for entry in self._get_branch(from_id)]
+
+    def _get_branch(self, from_id: str | None = None) -> list[dict[str, Any]]:
         start = from_id if from_id is not None else self._leaf_id
         out: list[dict[str, Any]] = []
         cur = self._by_id.get(start) if start else None
@@ -773,13 +1046,12 @@ class SessionManager:
     def get_message_entry_ids(self, from_id: str | None = None) -> list[str]:
         """Entry ids of message-producing entries in branch order (root -> leaf).
 
-        Every such entry appends exactly one message to `build_session_context`,
-        so this list is index-aligned with `AgentSession.messages`.
+        Derivative blocks and synthetic summaries have no entry IDs.
         """
         return [e["id"] for e in self.get_branch(from_id) if e.get("type") in self._MESSAGE_ENTRY_TYPES]
 
     def get_tree(self) -> list[dict[str, Any]]:
-        nodes = {e["id"]: {"entry": e, "children": []} for e in self._entries[1:]}
+        nodes = {e["id"]: {"entry": self._public_entry(e), "children": []} for e in self._entries[1:]}
         roots: list[dict[str, Any]] = []
         for e in self._entries[1:]:
             pid = e.get("parentId")
@@ -789,8 +1061,8 @@ class SessionManager:
                 roots.append(nodes[e["id"]])
         return roots
 
-    def build_session_context(self) -> dict[str, Any]:
-        path = self.get_branch()
+    def build_session_context(self, *, raw_messages: bool = False) -> dict[str, Any]:
+        path = self._get_branch()
         messages: list[dict[str, Any]] = []
         thinking_level = "off"
         temperature = None
@@ -843,7 +1115,7 @@ class SessionManager:
                     }
                 )
 
-        if compaction:
+        if compaction and not raw_messages:
             messages.append(
                 {
                     "role": "custom",
@@ -853,6 +1125,7 @@ class SessionManager:
                     "timestamp": compaction.get("timestamp"),
                 }
             )
+            messages.extend(_derivative_blocks(compaction.get("derivativeBlocks", [])))
             cidx = next((i for i, x in enumerate(path) if x.get("id") == compaction.get("id")), -1)
             first_kept = compaction.get("firstKeptEntryId")
             seen = False
@@ -879,7 +1152,7 @@ class SessionManager:
     def create_branched_session(self, leaf_id: str) -> str | None:
         if leaf_id not in self._by_id:
             raise ValueError(f"Entry {leaf_id} not found")
-        path = self.get_branch(leaf_id)
+        path = self._get_branch(leaf_id)
         sid = str(uuid.uuid4())
         ts = _now_iso()
         header = {
@@ -917,7 +1190,7 @@ class SessionManager:
             output_path or f"session-{datetime.now(UTC).isoformat().replace(':', '-').replace('.', '-')}.jsonl"
         ).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("\n".join(json.dumps(e) for e in self._entries) + "\n", encoding="utf-8")
+        p.write_text("\n".join(json.dumps(self._public_entry(e)) for e in self._entries) + "\n", encoding="utf-8")
         return str(p)
 
     @property
@@ -995,7 +1268,7 @@ class SessionManager:
                 # Forked work shares the source lineage's cache affinity.
                 "affinityId": source.get_effective_affinity_id(),
             }
-        ] + source.get_entries()
+        ] + deepcopy(source._entries[1:])
         history = source.run_history()
         runs = history.read() if history else []
         if runs:

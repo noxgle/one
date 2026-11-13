@@ -27,6 +27,13 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from one.core.activity_watchdog import ActivityWatchdog
+from one.core.compaction.checkpoint import CheckpointFailure, generate_checkpoint
+from one.core.compaction.constraints import extract_constraints
+from one.core.compaction.native import NativeCompactionView, native_eligible, native_retryable
+from one.core.compaction.policy import should_compact, trigger_threshold
+from one.core.compaction.projection import project_compaction_summary
+from one.core.compaction.rehydrate import rehydrate_files, required_blocks
+from one.core.compaction.retention import native_replay_keep_start, plan_retention
 from one.core.context_budget import (
     DEFAULT_OUTPUT_RESERVE as _DEFAULT_OUTPUT_RESERVE,
 )
@@ -44,7 +51,7 @@ from one.core.oauth import OAuthError
 from one.core.presets import PresetDefinition, PresetError, apply_preset_overrides, discover_presets
 from one.core.run_context import NodeState, RunContext
 from one.core.run_usage import extract_usage_counts, normalize_usage
-from one.core.session_manager import SessionManager
+from one.core.session_manager import COMPACTION_DERIVATIVE_TYPES, SessionManager, compaction_failure_metadata
 from one.core.settings_manager import THINKING_LEVELS, SettingsManager
 from one.core.subagent_monitor import SubagentMonitor
 from one.core.temperature import nearest_temperature_mode, normalize_temperature, temperature_for_mode
@@ -52,7 +59,7 @@ from one.core.tool_output_pruning import prune_stale_tool_outputs
 from one.core.tool_policy import RESERVED_READONLY_POLICIES, ToolPolicy
 from one.core.types import ModelInfo
 from one.mcp import McpManager
-from one.providers.base import native_tool_replay_pairs
+from one.providers.native_compaction import NativeCompactionProtocolError
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
 from one.resources.extension_runtime import ExtensionContext, ExtensionRuntime, find_worktree
@@ -78,6 +85,10 @@ DEFAULT_OUTPUT_RESERVE = _DEFAULT_OUTPUT_RESERVE  # compatibility export
 # ---------------------------------------------------------------------------
 # Session exceptions
 # ---------------------------------------------------------------------------
+
+class _CompactionStale(Exception):
+    """A V2 attempt no longer describes the current context."""
+
 
 class _RunAdmissionError(RuntimeError):
     """A request cannot safely be admitted to the shared run budget."""
@@ -173,6 +184,14 @@ def _sanitise_runtime_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Capability-error exceptions (image input gate).
 # ---------------------------------------------------------------------------
+
+class _CompactionInputError(RuntimeError):
+    """A normal request cannot safely fit after V2 preflight."""
+
+
+class _CompactionSummaryTooLarge(RuntimeError):
+    """The V2 summary request cannot safely fit the input budget."""
+
 
 class _CapabilityError(RuntimeError):
     """Raised when the selected model lacks a required capability (e.g. image input)."""
@@ -274,6 +293,8 @@ class AgentSession:
         self._extensions_executed = False
         self.providers = build_provider_registry()
         self.messages: list[dict[str, Any]] = self.session_manager.build_session_context()["messages"]
+        self._native_view: NativeCompactionView | None = None
+        self._native_pending_output: list[dict[str, Any]] | None = None
         self._plan: list[dict[str, str]] | str | None = None
         self._plan_just_created = False
         self._restore_plan_from_messages(self.messages)
@@ -285,6 +306,8 @@ class AgentSession:
         self._last_run_context: RunContext | None = None
         self._is_streaming = False
         self._is_compacting = False
+        self._compaction_generation = 0
+        self._v2_compaction_failures = 0
         self._retrying = False
         self._pending_bash_messages: list[dict[str, Any]] = []
         self._steering: list[str] = []
@@ -400,6 +423,8 @@ class AgentSession:
         """Use an exact count only for this exact provider-shaped request."""
         if self._exact_context_tokens and self._exact_context_signature == self._request_signature(request):
             return self._exact_context_tokens
+        if self.settings_manager.get_compaction_experimental_v2():
+            return self._estimate_wire_request_tokens(request)
         return self._estimate_request_tokens()
 
     def _restore_plan_from_messages(self, messages: list[dict[str, Any]]) -> None:
@@ -424,6 +449,21 @@ class AgentSession:
                         plan_value = None
                 elif isinstance(content, str) and content:
                     plan_value = content
+        if not plan_indices and self.settings_manager.get_compaction_experimental_v2():
+            # Plans are runtime state, not part of the retained provider tail.
+            # Recover the latest durable marker even if compaction dropped it.
+            for entry in reversed(self.session_manager.get_branch()):
+                marker = entry.get("message", {}) if entry.get("type") == "message" else entry
+                if marker.get("customType") == "plan":
+                    content = marker.get("content")
+                    if isinstance(content, list) and content:
+                        try:
+                            plan_value = plan_tool(content)["plan"]
+                        except ValueError:
+                            plan_value = None
+                    elif isinstance(content, str) and content:
+                        plan_value = content
+                    break
         # The last plan message determines whether plan is active.
         # If the last plan message has empty/None content, plan is cleared.
         if plan_indices:
@@ -3296,6 +3336,9 @@ class AgentSession:
             model = await self._enrich_model_context(model)
         if metadata_epoch != self._model_metadata_epoch:
             return
+        if self._native_view is not None:
+            self.messages = self.session_manager.build_session_context(raw_messages=True)["messages"]
+            self._native_view.disabled = True
         self.model = model
         self._effective_context_window = _effective_context_window(model)
         self.session_manager.append_model_change(model.provider, model.id)
@@ -3515,6 +3558,8 @@ class AgentSession:
             context = RunContext(self.session_id, self.settings_manager.get_run_limits())
             self._run_context = context
             self._run_node_id = context.root_id
+            self._native_view = None
+            self._native_pending_output = None
         node_id = self._run_node_id
         assert node_id is not None
         task: asyncio.Task[Any] | None = None
@@ -3608,6 +3653,31 @@ class AgentSession:
                     raise history_error
                 current_error.add_note("Run history persistence failed during this run.")
 
+    def _get_native_view(self) -> NativeCompactionView | None:
+        if not self.model or self.model.base_url:
+            if self._native_view:
+                self._native_view.disabled = True
+            return None
+        provider = self.providers.get(self.model.provider)
+        settings = self.settings_manager.get_compaction_settings()
+        settings["enabled"] = self.auto_compaction_enabled
+        if not native_eligible(provider, self.model.id, settings):
+            if self._native_view:
+                self._native_view.disabled = True
+            return None
+        fingerprint = json.dumps({
+            "settings": settings, "contextPolicy": self.settings_manager.get_context_policy(),
+            "system": self._provider_system_prompt(), "preset": self.preset_id,
+            "tools": self._native_tool_definitions(), "thinking": self.thinking_level,
+            "model": self.model.id, "budget": str(self._context_budget()),
+        }, sort_keys=True, default=str)
+        if self._native_view is None:
+            self._native_view = NativeCompactionView(self.session_manager, provider, self.model.id, fingerprint)
+        elif (self._native_view.adapter is not provider or self._native_view.model != self.model.id
+              or self._native_view.fingerprint != fingerprint):
+            self._native_view.disabled = True
+        return None if self._native_view.disabled else self._native_view
+
     async def _invoke_provider(
         self,
         messages: list[dict[str, Any]],
@@ -3615,11 +3685,63 @@ class AgentSession:
         allow_live_stream: bool = True,
         count_output_generation: bool = True,
         purpose: str = "response",
+        disable_tool_calls: bool = False,
+        cache_prefix_length: int | None = None,
     ) -> dict[str, Any]:
-        return await self._run_operation(lambda: self._invoke_provider_impl(
-            messages, allow_live_stream=allow_live_stream,
-            count_output_generation=count_output_generation, purpose=purpose,
-        ))
+        async def invoke() -> dict[str, Any]:
+            # Buffer native attempts until validated: a failed stream must not
+            # leave partial UI output ahead of the canonical retry.
+            native = purpose == "response" and self._get_native_view() is not None
+            async def attempt(live: bool, *, safe: bool = False, buffered: bool = False) -> dict[str, Any]:
+                return await self._invoke_provider_impl(
+                    messages, allow_live_stream=live,
+                    count_output_generation=count_output_generation, purpose=purpose,
+                    disable_tool_calls=disable_tool_calls, cache_prefix_length=cache_prefix_length,
+                    safe_native_errors=safe, buffer_native_stream=buffered,
+                )
+            try:
+                return await attempt(allow_live_stream, safe=native, buffered=native)
+            except Exception as error:
+                if not native or self._abort_requested or isinstance(error, (_RunAdmissionError, _CompactionInputError, _AbortSignal)):
+                    raise
+                if not native_retryable(error):
+                    raise NativeCompactionProtocolError("Native compaction request failed") from None
+                if self._native_view:
+                    self._native_view.disabled = True
+                self._native_pending_output = None
+                self.messages = self.session_manager.build_session_context(raw_messages=True)["messages"]
+                messages[:] = self._flatten_messages_for_provider()
+                if self._current_request_tokens(messages) > self._context_budget().input_budget:
+                    raise _CompactionInputError("Canonical request exceeds the input budget; compact context before retrying")
+                try:
+                    return await attempt(allow_live_stream, safe=True)
+                except (_RunAdmissionError, _CompactionInputError, _AbortSignal, asyncio.CancelledError):
+                    raise
+                except Exception:
+                    raise NativeCompactionProtocolError("Native compaction request failed") from None
+
+        return await self._run_operation(invoke)
+
+    def _commit_native(self, assistant_id: str) -> None:
+        output = self._native_pending_output
+        self._native_pending_output = None
+        view = self._native_view
+        if view is None:
+            return
+        if output is None:
+            view.disabled = True
+            return
+        compacted = isinstance(output, list) and any(
+            isinstance(item, dict) and item.get("type") == "compaction" for item in output
+        )
+        try:
+            saved = view.commit(output, assistant_id)
+        except Exception:
+            view.disabled = True
+            return
+        if saved and compacted:
+            self._emit({"type": "compaction_end", "reason": "auto", "result": {"strategy": "native_openai"},
+                        "aborted": False, "willRetry": False})
 
     async def _invoke_provider_impl(
         self,
@@ -3628,6 +3750,10 @@ class AgentSession:
         allow_live_stream: bool = True,
         count_output_generation: bool = True,
         purpose: str = "response",
+        disable_tool_calls: bool = False,
+        cache_prefix_length: int | None = None,
+        safe_native_errors: bool = False,
+        buffer_native_stream: bool = False,
     ) -> dict[str, Any]:
         if not self.model:
             raise RuntimeError("No model selected")
@@ -3636,6 +3762,10 @@ class AgentSession:
             raise RuntimeError(f"Unsupported provider: {self.model.provider}")
         if self.model.base_url and isinstance(provider, OpenAICompatibleAdapter):
             provider = provider.with_base_url(self.model.base_url)
+
+        self._native_pending_output = None
+        if purpose in ("nudge", "repair") and self._native_view:
+            self._native_view.disabled = True
 
         # Subscription OAuth (Phase 18): refresh the token when nearing expiry.
         # getattr-guarded so injected test registries without OAuth support work.
@@ -3660,6 +3790,14 @@ class AgentSession:
         # In particular, a slow UI must not make a live provider look idle.
         stream_activity = asyncio.Event()
         stream_activity_generation = 0
+        buffered_events: list[dict[str, Any]] = []
+
+        def stream_emit(event: dict[str, Any]) -> None:
+            if buffer_native_stream:
+                buffered_events.append(copy.deepcopy(event))
+            else:
+                self._emit(event)
+
         streamed_msg = {
             "role": "assistant",
             "content": [],
@@ -3692,9 +3830,9 @@ class AgentSession:
                     if len(sample) < 220:
                         return
                 streamed_started = True
-                self._emit({"type": "message_start", "message": streamed_msg})
+                stream_emit({"type": "message_start", "message": streamed_msg})
                 if streamed_buffer:
-                    self._emit(
+                    stream_emit(
                         {
                             "type": "message_update",
                             "assistantMessageEvent": {"type": "text_delta", "delta": streamed_buffer},
@@ -3703,7 +3841,7 @@ class AgentSession:
                     streamed_buffer = ""
                 return
 
-            self._emit(
+            stream_emit(
                 {
                     "type": "message_update",
                     "assistantMessageEvent": {"type": "text_delta", "delta": delta},
@@ -3720,7 +3858,7 @@ class AgentSession:
                 self._report_activity("provider_reasoning")
             had_thinking = had_thinking or bool(delta.strip())
             # Emit exact original delta — no whitespace stripping.
-            self._emit({"type": "thinking_delta", "delta": delta})
+            stream_emit({"type": "thinking_delta", "delta": delta})
 
         chat_kwargs = {
             "api_key": auth["apiKey"],
@@ -3733,6 +3871,13 @@ class AgentSession:
         # Combines explicit prompt images and `read_image` tool results.
         images = self._all_images()
         sig = inspect.signature(provider.chat)
+        if safe_native_errors and "safe_errors" in sig.parameters:
+            chat_kwargs["safe_errors"] = True
+        if (disable_tool_calls and getattr(provider, "supports_cache_aware_compaction", False)
+                and "disable_tool_calls" in sig.parameters):
+            chat_kwargs["disable_tool_calls"] = True
+        if cache_prefix_length is not None and "cache_prefix_length" in sig.parameters:
+            chat_kwargs["cache_prefix_length"] = cache_prefix_length
         if "temperature" in sig.parameters:
             chat_kwargs["temperature"] = self.temperature
         elif self.model.provider in {"anthropic", "chatgpt"}:
@@ -3748,11 +3893,7 @@ class AgentSession:
             chat_kwargs["images"] = images
         # The resolver is shared with the gauge and compaction.  Do not submit a
         # dishonest one-token request when this exact request has no room.
-        budget = self._context_budget(request_tokens=self._current_request_tokens(messages))
-        if "max_tokens" in sig.parameters:
-            if budget.selected_context_window and budget.outgoing_max_tokens == 0:
-                raise RuntimeError("Context window has no room for output; compact context before retrying")
-            chat_kwargs["max_tokens"] = budget.outgoing_max_tokens or budget.output_reserve
+        budget = self._context_budget()
         # Pass storage_dir so providers can resolve blobs without leaking paths.
         if self._storage_dir and "storage_dir" in sig.parameters:
             chat_kwargs["storage_dir"] = self._storage_dir
@@ -3768,16 +3909,45 @@ class AgentSession:
         # Fake/legacy providers are intentionally untouched.  Native-capable
         # adapters opt in by exposing this additive keyword.
         if getattr(provider, "supports_native_tools", False) and "tools" in sig.parameters:
-            definitions = native_tool_definitions(self._model_visible_tools())
-            if self._mcp_manager is not None:
-                visible_tools = self._model_visible_tools()
-                for tool in self._mcp_manager.tools():
-                    if tool.name not in visible_tools or tool.name in all_tools:
-                        continue
-                    schema = getattr(tool, "input_schema", None)
-                    if isinstance(schema, dict):
-                        definitions.append({"name": tool.name, "description": getattr(tool, "description", ""), "parameters": schema})
-            chat_kwargs["tools"] = definitions
+            chat_kwargs["tools"] = self._native_tool_definitions()
+        view = self._get_native_view() if purpose == "response" else None
+        if view is not None:
+            settings = self.settings_manager.get_compaction_settings()
+            settings["enabled"] = self.auto_compaction_enabled
+            try:
+                native_input = view.prepare(
+                    self.session_manager.build_session_context(raw_messages=True)["messages"],
+                    self.session_manager.get_message_entry_ids(), settings,
+                    thinking_level=self.thinking_level, images=images, storage_dir=self._storage_dir or "",
+                )
+            except Exception as error:
+                if native_retryable(error):
+                    view.disable(error)
+                    raise NativeCompactionProtocolError("Native compaction request failed") from None
+                raise
+            if not view.disabled:
+                buffer = self.settings_manager.get_compaction_buffer()
+                chat_kwargs["native_compaction_threshold"] = max(1, int(trigger_threshold(
+                    budget.input_budget, budget.selected_context_window,
+                    self.settings_manager.get_compaction_threshold_percent(), buffer["percent"], buffer["minTokens"],
+                )))
+                if native_input is not None:
+                    chat_kwargs["native_input_items"] = native_input
+                else:
+                    raw = self.session_manager.build_session_context(raw_messages=True)["messages"]
+                    messages = [{"role": "system", "content": self._provider_system_prompt()},
+                                *self._flatten_conversation(raw)]
+                    chat_kwargs["messages"] = messages
+        request_tokens = self._current_request_tokens(messages)
+        if view is not None and not view.disabled:
+            request_tokens = self._native_input_bound(provider, messages, native_input, images)
+            if request_tokens > budget.input_budget:
+                raise _CompactionInputError("Native request exceeds the input budget; compact context or use a larger context window.")
+        budget = self._context_budget(request_tokens=request_tokens)
+        if "max_tokens" in sig.parameters:
+            if budget.selected_context_window and budget.outgoing_max_tokens == 0:
+                raise _CompactionInputError("Context window has no room for output; compact context before retrying")
+            chat_kwargs["max_tokens"] = budget.outgoing_max_tokens or budget.output_reserve
         is_streaming = allow_live_stream and "on_delta" in sig.parameters
         if is_streaming:
             chat_kwargs["on_delta"] = _on_delta
@@ -3828,7 +3998,7 @@ class AgentSession:
                 raise _RunAdmissionError("runBudget requires known input capacity and an enforceable output limit")
             input_bound = capacity
         else:
-            input_bound = self._current_request_tokens(messages)
+            input_bound = request_tokens
         try:
             # Capture an explicit registry schedule for this exact identity.
             price_lookup = getattr(self.model_registry, "get_price_snapshot", None)
@@ -3915,9 +4085,12 @@ class AgentSession:
             if self._abort_requested:
                 raise _AbortSignal() from None
             raise
-        except Exception:
+        except Exception as error:
             if provider_outcome != "timeout":
                 provider_outcome = "error"
+            if view is not None and native_retryable(error):
+                view.disable(error)
+                raise NativeCompactionProtocolError("Native compaction request failed") from None
             raise
         except BaseException:
             provider_outcome = "error"
@@ -3956,6 +4129,10 @@ class AgentSession:
             )
             self._emit(provider_end)
 
+        if view is not None and not view.disabled:
+            self._native_pending_output = copy.deepcopy(getattr(res, "native_output_items", None))
+        for event in buffered_events:
+            self._emit(event)
         assistant_message = {
             "role": "assistant",
             "content": [{"type": "text", "text": res.text}],
@@ -3975,6 +4152,14 @@ class AgentSession:
             "_streamedSuppressed": streamed_suppressed,
             "_providerToolCallId": self._provider_tool_call_id(res.raw),
         }
+        if purpose == "compaction":
+            normalized = usage
+            assistant_message["_compactionUsage"] = {
+                "inputTokens": normalized.input_tokens if normalized else usage_counts.input_tokens,
+                "cachedTokens": normalized.cache_read_tokens if normalized else usage_counts.cached_tokens,
+                "outputTokens": normalized.output_tokens if normalized else usage_counts.output_tokens,
+                "reasoningTokens": usage_counts.reasoning_tokens,
+            }
         if getattr(res, "output_truncated", False):
             limit = chat_kwargs.get("max_tokens")
             notice = (
@@ -4053,7 +4238,7 @@ class AgentSession:
             # or provider-native metadata, neither may enter provider context.
             if role == "bashExecution":
                 continue
-            is_tool_result = role == "toolResult"
+            is_tool_result = role == "toolResult" or (role == "custom" and m.get("customType") == "compaction_file_context")
             if role in {"custom", "toolResult"}:
                 role = "user"
             if role not in {"system", "user", "assistant"}:
@@ -4217,11 +4402,7 @@ class AgentSession:
     @staticmethod
     def _native_replay_keep_start(messages: list[dict[str, Any]], keep_start: int) -> int:
         """Do not compact away one half of a persisted Responses call pair."""
-        pairs, _ = native_tool_replay_pairs(messages)
-        for (call_index, _), output_index in pairs.items():
-            if call_index < keep_start <= output_index:
-                keep_start = call_index
-        return keep_start
+        return native_replay_keep_start(messages, keep_start)
 
     @staticmethod
     def _is_pseudo_recipient(text: str) -> bool:
@@ -4235,11 +4416,18 @@ class AgentSession:
 
     def _flatten_messages_for_provider(self) -> list[dict[str, Any]]:
         conversation, stats = self._pruned_provider_conversation(self.messages)
+        conversation = self._project_provider_conversation(conversation)
         self._last_tool_output_pruning = stats
         return [
             {"role": "system", "content": self._provider_system_prompt()},
             *self._flatten_conversation(conversation),
         ]
+
+    def _project_provider_conversation(self, conversation: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not self.settings_manager.get_compaction_experimental_v2():
+            return conversation
+        provider = self.providers.get(self.model.provider) if self.model else None
+        return project_compaction_summary(conversation, getattr(provider, "summary_position", "prefix"))
 
     def _pruned_provider_conversation(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Build the ephemeral provider view without changing session history."""
@@ -4267,15 +4455,38 @@ class AgentSession:
         """
         conversation = self.messages if messages is None else messages
         conversation, _ = self._pruned_provider_conversation(conversation)
+        conversation = self._project_provider_conversation(conversation)
         request = [
             {"role": "system", "content": self._provider_system_prompt()},
             *self._flatten_conversation(conversation),
         ]
+        return self._estimate_wire_request_tokens(request)
+
+    def _native_tool_definitions(self) -> list[dict[str, Any]]:
+        visible_tools = self._model_visible_tools()
+        definitions = native_tool_definitions(visible_tools)
+        if self._mcp_manager is not None:
+            for tool in self._mcp_manager.tools():
+                if tool.name not in visible_tools or tool.name in all_tools:
+                    continue
+                schema = getattr(tool, "input_schema", None)
+                if isinstance(schema, dict):
+                    definitions.append({"name": tool.name, "description": getattr(tool, "description", ""), "parameters": schema})
+        return definitions
+
+    def _estimate_wire_request_tokens(self, request: list[dict[str, Any]]) -> int:
+        """Estimate an already shaped request, including native tool definitions."""
         raw_tokens = sum(self._approx_message_tokens(message) for message in request)
+        if self.settings_manager.get_compaction_experimental_v2():
+            provider = self.providers.get(self.model.provider) if self.model else None
+            if getattr(provider, "supports_native_tools", False):
+                definitions = self._native_tool_definitions()
+                raw_tokens += (len(json.dumps(definitions, ensure_ascii=False)) + 3) // 4
         estimated = max(1, int(raw_tokens * 1.15) + 256)
         return max(estimated, int(estimated * self._context_calibration))
 
-    async def _exact_request_tokens(self) -> int | None:
+    async def _exact_request_tokens(self, messages: list[dict[str, Any]] | None = None, *,
+                                    wire_request: list[dict[str, Any]] | None = None) -> int | None:
         """Use llama.cpp's optional native endpoints without making them required."""
         if not self.model:
             return None
@@ -4285,7 +4496,15 @@ class AgentSession:
         count = getattr(provider, "count_request_tokens", None)
         if not callable(count):
             return None
-        request = self._flatten_messages_for_provider()
+        if wire_request is not None:
+            request = wire_request
+        elif messages is None:
+            request = self._flatten_messages_for_provider()
+        else:
+            conversation, _ = self._pruned_provider_conversation(messages)
+            conversation = self._project_provider_conversation(conversation)
+            request = [{"role": "system", "content": self._provider_system_prompt()},
+                       *self._flatten_conversation(conversation)]
         auth = self.model_registry.get_api_key_and_headers(self.model)
         if not auth.get("ok"):
             return None
@@ -4303,22 +4522,63 @@ class AgentSession:
         if self._storage_dir:
             kwargs["storage_dir"] = self._storage_dir
         if getattr(provider, "supports_native_tools", False):
-            kwargs["tools"] = native_tool_definitions(self._model_visible_tools())
+            kwargs["tools"] = self._native_tool_definitions()
         try:
             tokens = await count(**kwargs)
         except Exception:
             return None
         if isinstance(tokens, int) and tokens > 0:
-            self._exact_context_tokens = tokens
-            self._exact_context_signature = self._request_signature(request)
+            if messages is None and wire_request is None:
+                self._exact_context_tokens = tokens
+                self._exact_context_signature = self._request_signature(request)
             return tokens
         return None
+
+    def _native_input_bound(self, provider: Any, messages: list[dict[str, Any]],
+                            items: list[dict[str, Any]] | None, images: list[dict[str, Any]]) -> int:
+        # UTF-8 bytes upper-bound tokenizer input without knowing the tokenizer;
+        # count the serialized actual payload, including opaque content and tools.
+        payload = provider._build_payload(self.model.id, messages, self.thinking_level, True,
+                                          images=images, storage_dir=self._storage_dir or "",
+                                          tools=self._native_tool_definitions(),
+                                          native_compaction_threshold=1, native_input_items=items)
+        return len(json.dumps(payload, ensure_ascii=True, default=str).encode("utf-8")) + 256
 
     async def _preflight_compact(self) -> None:
         """Compact before a provider call when the full request nears its limit."""
         if not self.auto_compaction_enabled or self._is_compacting:
             return
         exact_tokens = await self._exact_request_tokens()
+        if self.settings_manager.get_compaction_experimental_v2():
+            tokens = exact_tokens if exact_tokens is not None else self._estimate_request_tokens()
+            view = self._get_native_view()
+            if view is not None:
+                settings = self.settings_manager.get_compaction_settings()
+                settings["enabled"] = self.auto_compaction_enabled
+                raw = self.session_manager.build_session_context(raw_messages=True)["messages"]
+                images = self._all_images()
+                items = view.prepare(raw, self.session_manager.get_message_entry_ids(), settings,
+                                     thinking_level=self.thinking_level, images=images, storage_dir=self._storage_dir or "")
+                if not view.disabled:
+                    request = [{"role": "system", "content": self._provider_system_prompt()},
+                               *self._flatten_conversation(raw)]
+                    tokens = self._native_input_bound(view.adapter, request, items, images)
+                    if tokens <= self._context_budget().input_budget:
+                        return
+                    view.disabled = True
+                    self.messages = raw
+                    exact_tokens = await self._exact_request_tokens()
+                    tokens = exact_tokens if exact_tokens is not None else self._estimate_request_tokens()
+            if self._v2_should_compact(tokens) and (self._get_native_view() is None
+                                                     or tokens > self._context_budget().input_budget):
+                await self.compact(reason="auto_preflight", allow_during_prompt=True)
+                exact_tokens = await self._exact_request_tokens()
+                tokens = exact_tokens if exact_tokens is not None else self._estimate_request_tokens()
+            if tokens > self._context_budget().input_budget:
+                raise _CompactionInputError(
+                    "Request exceeds the input budget after compaction; shorten the latest exchange or use a larger context window."
+                )
+            return
         usage = self.get_context_usage()
         if usage and exact_tokens is not None:
             usage = dict(usage)
@@ -4336,6 +4596,15 @@ class AgentSession:
             if effective_percent >= self.settings_manager.get_compaction_threshold_percent():
                 await self.compact(reason="auto_preflight", allow_during_prompt=True)
 
+    def _v2_should_compact(self, tokens: int) -> bool:
+        budget = self._context_budget()
+        if budget.input_budget <= 0:
+            return True
+        buffer = self.settings_manager.get_compaction_buffer()
+        return should_compact(tokens, budget.input_budget, budget.selected_context_window,
+                              self.settings_manager.get_compaction_threshold_percent(),
+                              buffer["percent"], buffer["minTokens"])
+
     async def _inject_pending_steering(self) -> None:
         """Make one pending steer visible before the next provider request.
 
@@ -4350,6 +4619,7 @@ class AgentSession:
         user_msg = {"role": "user", "content": text, "timestamp": int(time.time() * 1000)}
         self.messages.append(user_msg)
         self.session_manager.append_message(user_msg)
+        self._v2_compaction_failures = 0
         self._emit({"type": "message_start", "message": user_msg})
         self._emit({"type": "message_end", "message": user_msg})
         if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
@@ -4425,6 +4695,7 @@ class AgentSession:
             self.session_manager.set_automatic_name_from_prompt(text)
             self.messages.append(user_msg)
             self.session_manager.append_message(user_msg)
+            self._v2_compaction_failures = 0
             self._emit({"type": "message_start", "message": user_msg})
             self._emit({"type": "message_end", "message": user_msg})
             if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
@@ -4700,7 +4971,8 @@ class AgentSession:
                                     if (
                                         native_batch
                                     ):
-                                        self.session_manager.append_message(assistant)
+                                        assistant_id = self.session_manager.append_message(assistant)
+                                        self._commit_native(assistant_id)
                                     terminal_payload: dict[str, Any] | None = None
                                     for call_index, tool_call in enumerate(tool_calls):
                                         budget_hit = None if self._abort_requested else self._budget_exceeded()
@@ -4792,7 +5064,8 @@ class AgentSession:
                             # in public message events.
                             final_assistant.pop("_hadThinking", None)
                             final_assistant.pop("_hadNativeToolCall", None)
-                            self.session_manager.append_message(final_assistant)
+                            assistant_id = self.session_manager.append_message(final_assistant)
+                            self._commit_native(assistant_id)
                             streamed_started = bool(final_assistant.pop("_streamedStart", False))
                             streamed_suppressed = bool(final_assistant.pop("_streamedSuppressed", False))
                             streamed_msg = final_assistant.pop("_streamedMessage", None)
@@ -4896,11 +5169,12 @@ class AgentSession:
                                 is_ctx_limit
                                 and self.auto_compaction_enabled
                                 and not context_recovery_attempted
+                                and not isinstance(e, (_CompactionInputError, NativeCompactionProtocolError))
                             )
                             # ``unlimited`` deliberately ignores the finite cap,
                             # while ``on`` retains the explicit zero=no-retry
                             # semantics and the finite default from settings.
-                            generic_retry = not isinstance(e, _RunAdmissionError) and retries_enabled and self._is_retryable_error(error_text) and (
+                            generic_retry = not isinstance(e, (_RunAdmissionError, _CompactionInputError, NativeCompactionProtocolError)) and retries_enabled and self._is_retryable_error(error_text) and (
                                 getattr(getattr(e, "response", None), "status_code", None) not in {400, 401, 403, 404}
                             ) and (
                                 retry_mode == "unlimited" or attempt < max_retries
@@ -4921,7 +5195,7 @@ class AgentSession:
                             if not will_retry:
                                 terminal_error = True
                                 status = getattr(getattr(e, "response", None), "status_code", None)
-                                if status in {401, 403, 404} or not self._is_retryable_error(error_text):
+                                if not isinstance(e, _CompactionInputError) and (status in {401, 403, 404} or not self._is_retryable_error(error_text)):
                                     self._subagent_provider_failure = self._redact_provider_error(
                                         f"Provider/model unavailable: {self.model.provider}/{self.model.id}. "
                                         "Check the model ID, provider credentials and model access. "
@@ -4956,7 +5230,7 @@ class AgentSession:
                                 context_recovery_attempted = True
                                 try:
                                     await self.compact(reason="context_limit_retry", allow_during_prompt=True)
-                                except _RunAdmissionError:
+                                except (_RunAdmissionError, _CompactionInputError):
                                     raise
                                 except Exception:
                                     pass  # compaction failure → fall through to normal retry
@@ -5129,7 +5403,12 @@ class AgentSession:
         if self.auto_compaction_enabled and not self._is_compacting:
             usage = self.get_context_usage()
             effective_percent = usage.get("effectivePercent") if usage else None
-            if isinstance(effective_percent, (int, float)) and not isinstance(effective_percent, bool) and effective_percent >= self.settings_manager.get_compaction_threshold_percent():
+            v2 = self.settings_manager.get_compaction_experimental_v2()
+            trigger = self._v2_should_compact(self._current_request_tokens(self._flatten_messages_for_provider())) if v2 else (
+                isinstance(effective_percent, (int, float)) and not isinstance(effective_percent, bool)
+                and effective_percent >= self.settings_manager.get_compaction_threshold_percent()
+            )
+            if trigger and self._get_native_view() is None:
                 await self.compact(reason="auto")
 
         # Do not drain queued steering / follow-up messages when:
@@ -5201,6 +5480,10 @@ class AgentSession:
     ) -> dict[str, Any]:
         if self._is_compacting:
             raise BusySessionError("Compaction is already running")
+        if (reason != "manual" and self.settings_manager.get_compaction_experimental_v2()
+                and self._v2_compaction_failures >= self.settings_manager.get_compaction_failure()["latchAfter"]):
+            return {"aborted": False, "summary": "", "tokensBefore": 0, "kept": len(self.messages),
+                    "skipped": True, "skipReason": "failure_latch"}
         async def operation() -> dict[str, Any]:
             return await self._compact_impl(custom_instructions, reason, allow_during_prompt=allow_during_prompt)
         if self._is_streaming and not allow_during_prompt:
@@ -5214,50 +5497,99 @@ class AgentSession:
         *,
         allow_during_prompt: bool = False,
     ) -> dict[str, Any]:
+        # The outer check precedes run admission, which can yield to another caller.
+        if self._is_compacting:
+            raise BusySessionError("Compaction is already running")
+        v2 = self.settings_manager.get_compaction_experimental_v2()
+
+        def record_skip(*, busy: bool = False) -> None:
+            if not v2:
+                self.session_manager.append_compaction_skipped(reason, busy=busy)
+                return
+            try:
+                self.session_manager.append_compaction_skipped(reason, busy=busy, transactional_v2=True)
+            except Exception:
+                pass  # Skip telemetry is best effort.
+
         # Guard: refuse to compact while a prompt/stream is in flight to avoid
         # mutating messages concurrently with the provider loop.
         # The `allow_during_prompt` flag bypasses this guard for internal
         # error-recovery paths (e.g. context-limit) where the provider call has
         # already failed and the prompt loop is paused — safe to compact.
         if self._is_streaming and not allow_during_prompt:
-            self.session_manager.append_compaction_skipped(reason, busy=True)
+            record_skip(busy=True)
             return {
                 "aborted": False, "summary": "", "tokensBefore": 0,
                 "kept": 0, "skipped": True, "busy": True,
             }
         self._is_compacting = True
+        committed = False
+        generation = self._compaction_generation
+        snapshot = None
+        def check_current() -> None:
+            if v2 and self._abort_requested:
+                raise _AbortSignal()
+            if (v2 and self._run_context is not None and self._run_node_id is not None
+                    and self._run_context.node(self._run_node_id).state != NodeState.RUNNING):
+                raise asyncio.CancelledError
+            if v2 and (generation != self._compaction_generation or snapshot != (
+                self.messages, self.session_manager.get_message_entry_ids(), self.model, self._preset,
+                self.settings_manager.merged(), self._native_tool_definitions(),
+            )):
+                raise _CompactionStale()
         compaction_started_at = self._compaction_clock()
         self._emit({"type": "compaction_start", "reason": reason})
         try:
+            if v2:
+                snapshot = (copy.deepcopy(self.messages), self.session_manager.get_message_entry_ids(),
+                            copy.deepcopy(self.model), copy.deepcopy(self._preset),
+                            copy.deepcopy(self.settings_manager.merged()), copy.deepcopy(self._native_tool_definitions()))
+                cache_snapshot = copy.deepcopy(self._flatten_messages_for_provider())
             if not self.messages:
                 result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": 0, "skipped": True}
-                self.session_manager.append_compaction_skipped(reason)
+                record_skip()
                 self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                 return result
 
-            total = len(self.messages)
-            min_kept = max(1, self.settings_manager.get_compaction_min_kept_messages())
-            budget = self.settings_manager.get_compaction_recent_tokens()
-
-            # Raw window: keep the most recent messages that fit within the token
-            # budget, but always keep at least `min_kept` messages (never drop the last one).
-            max_keep_start = max(0, total - min_kept)
-            keep_start = 0
-            acc = 0
-            for i in range(total - 1, -1, -1):
-                acc += self._approx_message_tokens(self.messages[i])
-                if acc > budget and (total - i) >= min_kept:
-                    keep_start = min(i + 1, max_keep_start)
-                    break
-            keep_start = self._native_replay_keep_start(self.messages, keep_start)
-
+            source_messages = ([m for m in self.messages if m.get("customType") not in COMPACTION_DERIVATIVE_TYPES]
+                               if v2 else self.messages)
+            total = len(source_messages)
             manual = reason == "manual"
+            if v2:
+                fixed = self._estimate_request_tokens([])
+                reserve = self.settings_manager.get_compaction_summary()["maxOutputTokens"]
+                available = max(0, int((self._context_budget().input_budget - fixed - reserve) / 1.15))
+                retention = plan_retention(
+                    source_messages, self._approx_message_tokens,
+                    self.settings_manager.get_effective_compaction_recent_tokens(),
+                    self.settings_manager.get_effective_compaction_min_kept_messages(), available,
+                )
+                keep_start = retention.keep_start
+                if retention.reason != "ok" and not (manual and keep_start == 0 and retention.reason == "no_safe_reduction"):
+                    result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total,
+                              "skipped": True, "skipReason": "no_safe_reduction"}
+                    record_skip()
+                    self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
+                    return result
+            else:
+                # Legacy raw-window behavior remains unchanged.
+                min_kept = max(1, self.settings_manager.get_compaction_min_kept_messages())
+                budget = self.settings_manager.get_compaction_recent_tokens()
+                max_keep_start = max(0, total - min_kept)
+                keep_start = 0
+                acc = 0
+                for i in range(total - 1, -1, -1):
+                    acc += self._approx_message_tokens(self.messages[i])
+                    if acc > budget and (total - i) >= min_kept:
+                        keep_start = min(i + 1, max_keep_start)
+                        break
+                keep_start = self._native_replay_keep_start(self.messages, keep_start)
             if keep_start == 0 and not manual:
                 # auto_preflight, auto, and context_limit_retry only reduce
                 # context; when the raw recent window already contains
                 # everything, do not summarize.
                 result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total, "skipped": True}
-                self.session_manager.append_compaction_skipped(reason)
+                record_skip()
                 self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                 return result
 
@@ -5267,39 +5599,211 @@ class AgentSession:
             # than replacing the only useful context with a summary. Replace an
             # existing synthetic summary so repeated manual compactions do not
             # accumulate summaries that cannot be reconstructed from persistence.
-            dropped = self.messages if keep_start == 0 else self.messages[:keep_start]
+            dropped = source_messages if keep_start == 0 else source_messages[:keep_start]
             tokens_before = sum(self._approx_message_tokens(m) for m in dropped)
 
             # Extension hooks: experimental.session.compacting (opencode contract).
             context_items: list[dict[str, Any]] = []
             if self._extension_runtime is not None and self._extension_runtime.has_hooks("experimental.session.compacting"):
                 context_items, prompt_override = await self._invoke_extension_compacting()
+                check_current()
                 if prompt_override and not custom_instructions:
                     custom_instructions = prompt_override
 
-            if custom_instructions:
+            summary_usage: dict[str, Any] = {}
+            attempts = 0
+            fallback = False
+            strategy = "legacy"
+            constraint_counts = None
+            if v2:
+                def estimate_text(text: str) -> int:
+                    return self._approx_message_tokens({"role": "user", "content": text})
+
+                exact_request: tuple[str, int] | None = None
+
+                async def request_fits(request: list[dict[str, str]]) -> bool:
+                    nonlocal exact_request
+                    tokens = await self._exact_request_tokens(wire_request=request)
+                    check_current()
+                    exact_request = (self._request_signature(request), tokens) if tokens is not None else None
+                    if tokens is None:
+                        tokens = self._estimate_wire_request_tokens(request)
+                    return tokens <= self._context_budget().input_budget
+
+                async def invoke(request: list[dict[str, str]]) -> dict[str, Any]:
+                    check_current()
+                    old_tokens, old_signature = self._exact_context_tokens, self._exact_context_signature
+                    try:
+                        if exact_request and exact_request[0] == self._request_signature(request):
+                            self._exact_context_signature, self._exact_context_tokens = exact_request
+                        try:
+                            provider = self.providers.get(self.model.provider) if self.model else None
+                            if self.model and self.model.base_url and isinstance(provider, OpenAICompatibleAdapter):
+                                provider = provider.with_base_url(self.model.base_url)
+                            safe_disable = (getattr(provider, "supports_cache_aware_compaction", False)
+                                            and "disable_tool_calls" in inspect.signature(provider.chat).parameters)
+                            response = await self._invoke_provider(
+                                request, allow_live_stream=False, count_output_generation=False, purpose="compaction",
+                                **({"disable_tool_calls": True} if safe_disable else {}),
+                                **({"cache_prefix_length": len(cache_snapshot)} if use_cache
+                                   and request[:len(cache_snapshot)] == cache_snapshot else {}),
+                            )
+                        except Exception:
+                            check_current()
+                            raise
+                        check_current()
+                        return response
+                    finally:
+                        self._exact_context_tokens, self._exact_context_signature = old_tokens, old_signature
+
+                try:
+                    ledger = ()
+                    branch = self.session_manager.get_branch()
+                    constraint_settings = self.settings_manager.get_compaction_constraints()
+                    if constraint_settings["enabled"]:
+                        index = 0
+                        for entry in branch:
+                            if entry.get("type") not in self.session_manager._MESSAGE_ENTRY_TYPES:
+                                continue
+                            message = entry.get("message", {}) if entry.get("type") == "message" else {}
+                            ledger = extract_constraints(
+                                [{**message, "id": entry.get("id")}], ledger, estimate_tokens=estimate_text,
+                                max_tokens=constraint_settings["maxTokens"], index_offset=index,
+                            )
+                            index += 1
+                    previous_entry = next((e for e in reversed(branch) if e.get("type") == "compaction"), {})
+                    previous = str(previous_entry.get("summary") or "")
+                    objective_match = re.search(r"(?ms)^# Objective\s*\n(.*?)(?=^# |\Z)", previous)
+                    previous_objective = objective_match.group(1).strip() if objective_match else ""
+                    history = [m for m in dropped if m.get("customType") != "compaction_summary"]
+                    history += [{"role": "extension_context", "content": c.get("content", "")} for c in context_items]
+                    config = self.settings_manager.get_compaction_summary()
+                    provider = self.providers.get(self.model.provider) if self.model else None
+                    if self.model and self.model.base_url and isinstance(provider, OpenAICompatibleAdapter):
+                        provider = provider.with_base_url(self.model.base_url)
+                    safe_cache = (getattr(provider, "supports_cache_aware_compaction", False)
+                                  and "disable_tool_calls" in inspect.signature(provider.chat).parameters)
+                    use_cache = (safe_cache and not self._all_images() and not context_items and self.settings_manager.get_compaction_cache_aware()
+                                 and self.settings_manager.get_compaction_strategy() in ("auto", "local_cache_aware"))
+                    checkpoint = await generate_checkpoint(
+                        history, ledger, invoke_provider=invoke, estimate_tokens=estimate_text,
+                        request_fits=request_fits, max_output_tokens=config["maxOutputTokens"],
+                        max_input_tokens=self.settings_manager.get_compaction_max_summary_input_tokens(),
+                        clip_chars=config["clipChars"],
+                        retry_on_invalid=min(config["retryOnInvalid"], 1), hint=custom_instructions or "",
+                        previous_summary=previous, previous_objective=previous_objective,
+                        model_enabled=bool(self.model and self.settings_manager.get_compaction_summarize_with_model()
+                                           and self.settings_manager.get_compaction_strategy() != "extractive"),
+                        fatal_exceptions=(_RunAdmissionError, _AbortSignal, asyncio.CancelledError, _CompactionStale),
+                        cache_prefix=cache_snapshot if use_cache else None,
+                        append_instruction_role=("developer" if getattr(provider, "summary_position", "prefix")
+                                                 == "suffix" else "user"),
+                        is_cache_contract_rejection=lambda exc: getattr(exc, "status_code", None) in (400, 422)
+                        or getattr(getattr(exc, "response", None), "status_code", None) in (400, 422),
+                    )
+                except (CheckpointFailure, ValueError) as exc:
+                    raise CheckpointFailure(exc.reason if isinstance(exc, CheckpointFailure) else "invalid_constraints",
+                                            exc.attempts if isinstance(exc, CheckpointFailure) else 0) from None
+                summary_text = checkpoint.summary
+                strategy, attempts, fallback = checkpoint.strategy, checkpoint.attempts, checkpoint.fallback
+                summary_usage, constraint_counts = checkpoint.usage, checkpoint.constraints
+            elif custom_instructions:
                 summary_text = custom_instructions.strip() or f"Compacted previous {len(dropped)} messages."
             elif self.settings_manager.get_compaction_summarize_with_model():
-                summary_text = await self._summarize_context(dropped)
+                strategy = "local_separate"
+                attempts = int(self.model is not None)
+                try:
+                    summary_text = await self._summarize_context(dropped, reason=reason, usage_out=summary_usage)
+                except _CompactionSummaryTooLarge:
+                    result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total,
+                              "skipped": True, "skipReason": "no_safe_reduction"}
+                    record_skip()
+                    self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
+                    return result
                 if not summary_text:
+                    fallback = True
                     summary_text = f"Compacted previous {len(dropped)} messages."
             else:
                 summary_text = f"Compacted previous {len(dropped)} messages."
 
-            if context_items:
+            if context_items and not v2:
                 extra = [str(c.get("content", "")).strip() for c in context_items if c.get("content")]
                 if extra:
                     joined = "\n".join(e for e in extra if e)
                     summary_text = f"{summary_text}\n{joined}".strip() if summary_text else joined
 
+            if v2:
+                tail = [m for m in source_messages[keep_start:]
+                        if m.get("customType") != "compaction_summary"]
+                summary_message = {"role": "custom", "customType": "compaction_summary", "content": summary_text,
+                                   "tokensBefore": tokens_before, "timestamp": None}
+                base = [summary_message, *tail]
+                base_tokens = await self._exact_request_tokens(base)
+                check_current()
+                if base_tokens is None:
+                    base_tokens = self._estimate_request_tokens(base)
+                try:
+                    required = required_blocks(ledger, render_plan(self._plan), estimate_tokens=estimate_text,
+                                               available_tokens=max(0, self._context_budget().input_budget - base_tokens))
+                except ValueError:
+                    raise CheckpointFailure("invalid_constraints", attempts) from None
+                derivatives = []
+                for block in required:
+                    kind = "compaction_constraints" if block["text"].startswith("Preserved constraint ledger") else "compaction_plan"
+                    derivatives.append({"role": "custom", "customType": kind, "content": [block]})
+                required_candidate = [summary_message, *derivatives, *tail]
+                required_tokens = await self._exact_request_tokens(required_candidate)
+                check_current()
+                if required_tokens is None:
+                    required_tokens = self._estimate_request_tokens(required_candidate)
+                budget = self._context_budget()
+                buffer = self.settings_manager.get_compaction_buffer()
+                threshold = trigger_threshold(budget.input_budget, budget.selected_context_window,
+                                              self.settings_manager.get_compaction_threshold_percent(),
+                                              buffer["percent"], buffer["minTokens"])
+                rehydrate_config = self.settings_manager.get_compaction_rehydrate()
+                reread = rehydrate_files(
+                    summary_text, self.session_manager.cwd, estimate_tokens=estimate_text,
+                    read_allowed=lambda: "read" in self._active_tools and self._tool_policy.permits("read"),
+                    available_tokens=max(0, min(budget.input_budget, math.ceil(threshold) - 1) - required_tokens),
+                    enabled=rehydrate_config["enabled"], state=self.session_manager.get_rehydration_state(),
+                    ledger=ledger, max_files=rehydrate_config["maxFiles"], max_tokens=rehydrate_config["maxTokens"],
+                    max_output_tokens=config["maxOutputTokens"],
+                )
+                if reread.blocks:
+                    derivatives.append({"role": "custom", "customType": "compaction_file_context", "content": list(reread.blocks)})
+                candidate = [summary_message, *derivatives, *tail]
+                candidate_tokens = await self._exact_request_tokens(candidate)
+                check_current()
+                if candidate_tokens is None:
+                    candidate_tokens = self._estimate_request_tokens(candidate)
+                if reread.blocks and (candidate_tokens > budget.input_budget or self._v2_should_compact(candidate_tokens)):
+                    derivatives.pop()
+                    candidate, candidate_tokens = required_candidate, required_tokens
+                    reread = rehydrate_files(summary_text, self.session_manager.cwd, estimate_tokens=estimate_text,
+                                             read_allowed=lambda: False, available_tokens=0,
+                                             state=self.session_manager.get_rehydration_state())
+                if candidate_tokens > self._context_budget().input_budget or self._v2_should_compact(candidate_tokens):
+                    result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total,
+                              "skipped": True, "skipReason": "no_safe_reduction"}
+                    record_skip()
+                    self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
+                    return result
+
             # Map the first kept message back to its session-tree entry id. Message
             # indexes in self.messages are aligned with message-producing entries
             # except for the synthetic compaction summary (at most one, at index 0).
             entry_ids = self.session_manager.get_message_entry_ids()
+            if v2:
+                entry_ids = [entry_id for entry_id in entry_ids if (
+                    (entry := self.session_manager.get_entry(entry_id)).get("message", entry).get("customType") != "plan"
+                )]
             retained_short_history = keep_start == 0 and manual
-            offset = len(entry_ids) - total
+            offset = (len(entry_ids) - sum(m.get("customType") != "compaction_summary" for m in source_messages)
+                      if v2 else len(entry_ids) - total)
             first_kept_id = "root"
-            idx = 0 if retained_short_history else keep_start + offset
+            idx = (offset + sum(m.get("customType") != "compaction_summary" for m in source_messages[:keep_start])
+                   if v2 else (0 if retained_short_history else keep_start + offset))
             if 0 <= idx < len(entry_ids):
                 first_kept_id = entry_ids[idx]
             elif entry_ids:
@@ -5308,14 +5812,38 @@ class AgentSession:
             duration_sec = self._compaction_clock() - compaction_started_at
             if not math.isfinite(duration_sec) or duration_sec < 0:
                 duration_sec = 0.0
+            retained = source_messages[keep_start:] if keep_start else [
+                message for message in source_messages
+                if not (message.get("role") == "custom" and message.get("customType") == "compaction_summary")
+            ]
+            tokens_kept = sum(self._approx_message_tokens(message) for message in retained)
+            tokens_after = tokens_kept + self._approx_message_tokens({"role": "custom", "content": summary_text})
+            check_current()
+            if v2:
+                retained = tail
+                live_candidate = [summary_message, *derivatives, *retained]
+                tokens_kept = sum(self._approx_message_tokens(message) for message in retained)
+                tokens_after = sum(self._approx_message_tokens(message) for message in live_candidate)
             compaction_id = self.session_manager.append_compaction(
                 summary_text,
                 first_kept_id,
                 tokens_before=tokens_before,
                 reason=reason,
                 duration_ms=duration_sec * 1000,
+                tokens_after=tokens_after, tokens_kept=tokens_kept, strategy=strategy,
+                summary_schema="v2" if v2 else "legacy", attempts=attempts, fallback=fallback, usage=summary_usage,
+                constraints=constraint_counts,
+                derivative_blocks=derivatives if v2 else None,
+                rehydration_state=reread.state if v2 else None,
+                rehydrated={"files": reread.files, "tokens": reread.tokens} if v2 else None,
+                transactional_v2=v2,
             )
-            if retained_short_history:
+            if v2:
+                summary_message["timestamp"] = compaction_id["timestamp"]
+                self.messages = live_candidate
+                committed = True
+                self._v2_compaction_failures = 0
+            elif retained_short_history:
                 self.messages = [
                     message
                     for message in self.messages
@@ -5328,16 +5856,17 @@ class AgentSession:
                 self.messages = self.messages[keep_start:]
             # Keep the summary in the live context (rolling two-tier schema):
             # new_summary + last ~recentTokens raw messages.
-            self.messages.insert(
-                0,
-                {
-                    "role": "custom",
-                    "customType": "compaction_summary",
-                    "content": summary_text,
-                    "tokensBefore": tokens_before,
-                    "timestamp": self.session_manager.get_entry(compaction_id).get("timestamp"),
-                },
-            )
+            if not v2:
+                self.messages.insert(
+                    0,
+                    {
+                        "role": "custom",
+                        "customType": "compaction_summary",
+                        "content": summary_text,
+                        "tokensBefore": tokens_before,
+                        "timestamp": self.session_manager.get_entry(compaction_id).get("timestamp"),
+                    },
+                )
             result = {
                 "aborted": False,
                 "summary": summary_text,
@@ -5345,14 +5874,53 @@ class AgentSession:
                 "kept": len(self.messages),
                 "skipped": False,
             }
+            if v2:
+                result.update({"summarySchema": "v2", "attempts": attempts, "fallback": fallback,
+                               "strategy": strategy, "usage": summary_usage, "constraints": constraint_counts})
             self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
+            return result
+        except (_RunAdmissionError, _AbortSignal, asyncio.CancelledError):
+            if v2:
+                self._emit({"type": "compaction_end", "reason": reason, "result": None, "aborted": True, "willRetry": False})
+            raise
+        except Exception as exc:
+            if not v2 or committed:
+                raise
+            stale = isinstance(exc, _CompactionStale)
+            failure = exc.reason if isinstance(exc, CheckpointFailure) else "error"
+            attempts = exc.attempts if isinstance(exc, CheckpointFailure) else 0
+            metadata = compaction_failure_metadata(reason, failure, "local_separate", attempts,
+                                                   self.model.provider if self.model else None,
+                                                   self.model.id if self.model else None)
+            if not stale:
+                self._v2_compaction_failures += 1
+                try:
+                    self.session_manager.append_compaction_failed(reason, failure, strategy="local_separate",
+                        attempts=attempts, provider=metadata["provider"], model=metadata["model"], transactional_v2=True)
+                except Exception:
+                    pass
+                self._emit({"type": "compaction_failed", **metadata})
+            result = {"aborted": stale, "summary": "", "tokensBefore": 0, "kept": len(self.messages),
+                      "skipped": True, **({} if stale else {"failureReason": metadata["failureReason"]})}
+            self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": stale, "willRetry": False})
             return result
         finally:
             self._is_compacting = False
 
-    async def _summarize_context(self, dropped: list[dict[str, Any]]) -> str | None:
+    async def _summarize_context(self, dropped: list[dict[str, Any]], *, reason: str = "manual",
+                                 usage_out: dict[str, Any] | None = None) -> str | None:
         """Rolling summary: previous summary + context since last compaction -> new summary."""
+        def failed(failure_reason: str) -> None:
+            provider = self.model.provider if self.model else None
+            model = self.model.id if self.model else None
+            attempts = int(self.model is not None)
+            metadata = compaction_failure_metadata(reason, failure_reason, "local_separate", attempts, provider, model)
+            self.session_manager.append_compaction_failed(reason, failure_reason, strategy="local_separate",
+                                                          attempts=attempts, provider=provider, model=model)
+            self._emit({"type": "compaction_failed", **metadata})
+
         if not self.model:
+            failed("no_model")
             return None
         prev = self.session_manager.get_last_compaction()
         prev_summary = str((prev or {}).get("summary") or "").strip()
@@ -5383,19 +5951,39 @@ class AgentSession:
             {"role": "system", "content": "You are a conversation summarizer."},
             {"role": "user", "content": prompt_text},
         ]
+        exact_summary_tokens = None
+        if self.settings_manager.get_compaction_experimental_v2():
+            tokens = await self._exact_request_tokens(wire_request=msgs)
+            exact_summary_tokens = tokens
+            if tokens is None:
+                tokens = self._estimate_wire_request_tokens(msgs)
+            if tokens > self._context_budget().input_budget:
+                raise _CompactionSummaryTooLarge()
         try:
-            res = await self._invoke_provider(
-                msgs, allow_live_stream=False, count_output_generation=False, purpose="compaction"
-            )
+            old_tokens, old_signature = self._exact_context_tokens, self._exact_context_signature
+            try:
+                if exact_summary_tokens is not None:
+                    self._exact_context_tokens = exact_summary_tokens
+                    self._exact_context_signature = self._request_signature(msgs)
+                res = await self._invoke_provider(
+                    msgs, allow_live_stream=False, count_output_generation=False, purpose="compaction"
+                )
+            finally:
+                self._exact_context_tokens, self._exact_context_signature = old_tokens, old_signature
+            if usage_out is not None:
+                usage_out.update(res.get("_compactionUsage", {}))
             text = self._assistant_text(res).strip()
-            return text or None
-        except _RunAdmissionError:
+        except (_RunAdmissionError, _AbortSignal, _CompactionInputError):
             raise
         except Exception:
+            failed("error")
             return None
+        if not text:
+            failed("empty")
+        return text or None
 
     def abort_compaction(self) -> None:
-        self._is_compacting = False
+        self._compaction_generation += 1
 
     async def execute_bash(self, command: str) -> dict[str, Any]:
         if self._is_readonly:

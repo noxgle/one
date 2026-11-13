@@ -42,6 +42,7 @@ class MissingBlobError(AttachmentStorageError):
 
 
 class AnthropicAdapter(ProviderAdapter):
+    supports_cache_aware_compaction = True
     supports_native_tools = True
     name = "anthropic"
 
@@ -168,6 +169,9 @@ class AnthropicAdapter(ProviderAdapter):
         storage_dir: str = "",
         stream_transport_timeout: float | None = None,
         tools: list[dict[str, Any]] | None = None,
+        *,
+        disable_tool_calls: bool = False,
+        cache_prefix_length: int | None = None,
     ) -> ChatResult:
         # Validate all image blobs are present BEFORE building payload / making HTTP.
         if images:
@@ -200,7 +204,10 @@ class AnthropicAdapter(ProviderAdapter):
         paired_calls, paired_outputs = native_tool_replay_pairs(messages)
         content_messages = []
         system = None
+        prefix_content_length = 0
         for message_index, m in enumerate(messages):
+            if message_index == cache_prefix_length:
+                prefix_content_length = len(content_messages)
             if m.get("role") == "system":
                 system = m.get("content", "")
                 continue
@@ -227,6 +234,9 @@ class AnthropicAdapter(ProviderAdapter):
                 continue
             content_messages.append({"role": m.get("role"), "content": content})
 
+        if cache_prefix_length is not None and cache_prefix_length >= len(messages):
+            prefix_content_length = len(content_messages)
+
         # ── cache_control breakpoints (Anthropic prompt caching) ──
         payload_system: list[dict[str, Any]] | None = None
         if system is not None:
@@ -236,6 +246,8 @@ class AnthropicAdapter(ProviderAdapter):
         # Anthropic allows up to 4 breakpoints total (1 system + 3 on messages).
         last_user = -1
         for i, m in enumerate(content_messages):
+            if cache_prefix_length is not None and i >= prefix_content_length:
+                break
             if m.get("role") == "user":
                 last_user = i
         if last_user >= 0:
@@ -277,6 +289,8 @@ class AnthropicAdapter(ProviderAdapter):
             payload["system"] = payload_system
         if tools:
             payload["tools"] = [{"name": t["name"], "description": t.get("description", ""), "input_schema": t["parameters"]} for t in tools]
+        if disable_tool_calls and tools:
+            payload["tool_choice"] = {"type": "none"}
         req_headers = {
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",

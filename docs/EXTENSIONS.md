@@ -78,7 +78,7 @@ def register(ctx):
 | `tool.execute.before` | before every tool call (before `tool_call_start`) | `{directory, worktree, sessionID, tool, args}` | `{"args": args}` | **chaining**: each hook sees the effective args from the previous hook. See below for precedence, validation, and chaining details. |
 | `tool.execute.after` | after tool execution | `{directory, worktree, sessionID, tool, ok}` | `{"title", "output", "metadata"}` | info-only |
 | `chat.message` | for every new user message (before the prompt) | `{directory, worktree, sessionID, message}` | `{}` | info-only |
-| `experimental.session.compacting` | before generating a compaction summary | `{directory, worktree, sessionID}` | `{"context": [], "prompt": None}` | pushes items to `context` (dicts with `content`), `prompt` may override compaction instructions |
+| `experimental.session.compacting` | before generating a compaction summary | `{directory, worktree, sessionID}` | `{"context": [], "prompt": None}` | pushes items to `context` (dicts with `content`); `prompt` is a legacy override or V2 hint |
 | `dispose` | at `session.dispose()` | — | — | cleanup |
 
 #### Precedence, chaining, and validation
@@ -209,6 +209,13 @@ def compacting(input, output):
     output["context"].append({"content": "Prefer pydantic over dataclasses."})
     output["prompt"] = "Compress tightly, keep all decisions."
 ```
+
+With V2, `prompt` is a bounded hint (up to 4,000 characters), not a
+replacement checkpoint; validation and the constraint ledger still apply.
+Explicit manual instructions take precedence. There is no separate `hintV2`
+hook field. In legacy mode the prompt retains its replacement behavior.
+Extension context can contain sensitive data and forces separate summarization
+instead of cache-aware prefix reuse. See [compaction](COMPACTION.md).
 
 ## Extension UI (widget/overlay)
 

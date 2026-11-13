@@ -10,8 +10,21 @@ from typing import Any
 
 import pytest
 
-from one.core.agent_runtime_facade import AgentRuntimeFacade, RuntimeBootstrapSpec
+from one.core.agent_runtime_facade import AgentRuntimeFacade, RuntimeBootstrapSpec, _event_projection
 from one.core.threaded_agent_runtime import RuntimeClosedError
+
+
+def test_compaction_failure_projection_rejects_diagnostics():
+    event = {"type": "compaction_failed", "reason": "auto", "failureReason": "error",
+             "strategy": "local_separate", "attempts": 1, "provider": "openai", "model": "gpt-4.1",
+             "error": "private /path"}
+    projected = _event_projection(event)
+    assert projected == {key: value for key, value in event.items() if key != "error"}
+    event.update(provider="private", model="/path", strategy={"secret": "private"}, attempts=True)
+    projected = _event_projection(event)
+    assert projected["provider"] is None and projected["model"] is None
+    assert projected["strategy"] == "legacy" and projected["attempts"] == 0
+    assert "private" not in str(projected)
 
 
 class _Session:

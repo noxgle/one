@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -144,6 +146,94 @@ def _seed(agent: AgentSession, count: int = 10, prefix: str = "user message numb
         sm.append_message({"role": "user", "content": prefix.format(i)})
         sm.append_message({"role": "assistant", "content": f"answer {i}"})
     agent.messages = sm.build_session_context()["messages"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fixture", ["small", "medium", "large", "tool-heavy", "plan", "constraints"])
+async def test_synthetic_legacy_summary_contract(tmp_path, fixture):
+    directory = Path(__file__).parent / "fixtures" / "compaction"
+    messages = json.loads((directory / f"{fixture}.json").read_text())
+    if isinstance(messages, dict):
+        messages = [
+            {"role": role, "content": f"{role} turn {i:03d}: " + "x" * messages["padding"]}
+            for i in range(messages["turns"]) for role in ("user", "assistant")
+        ]
+    provider = _Provider(["SYNTHETIC SUMMARY"])
+    agent = _mk_agent(tmp_path, {"compaction": {
+        "summarizeWithModel": True, "recentTokens": 4, "minKeptMessages": 2,
+    }}, provider=provider)
+    for message in messages:
+        if message.get("customType") == "plan":
+            agent.session_manager.append_custom_message("plan", message["content"], message["display"])
+        else:
+            agent.session_manager.append_message(message)
+    if fixture == "plan":
+        assert any(entry.get("type") == "custom_message" and entry.get("customType") == "plan"
+                   for entry in agent.session_manager.get_entries())
+    agent.messages = agent.session_manager.build_session_context()["messages"]
+    events = []
+    agent.subscribe(events.append)
+
+    result = await agent.compact()
+
+    assert result["summary"] == "SYNTHETIC SUMMARY"
+    golden = json.loads((directory / "goldens" / f"{fixture}.json").read_text())
+    assert provider.last_messages == golden["prompt"]
+    assert [e["type"] for e in events if e["type"].startswith("compaction_")] == [
+        "compaction_start", "compaction_end"
+    ]
+
+    def projection(messages):
+        return [{k: m[k] for k in ("role", "customType", "content", "_nativeToolCalls", "_nativeToolCallId")
+                 if k in m} for m in messages]
+
+    assert projection(agent.messages) == golden["context"]
+    assert projection(agent.session_manager.build_session_context()["messages"]) == golden["context"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "failure"), [(_FailProvider(), "error"), (_Provider([""]), "empty")])
+async def test_summary_failure_is_recorded_without_diagnostics(tmp_path, provider, failure):
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": True}}, provider=provider)
+    _seed(agent, 2)
+    events = []
+    agent.subscribe(events.append)
+    result = await agent.compact()
+    assert result["summary"].startswith("Compacted previous ")
+    assert [e for e in events if e["type"] == "compaction_failed"] == [
+        {"type": "compaction_failed", "reason": "manual", "failureReason": failure,
+         "strategy": "local_separate", "attempts": 1, "provider": "openai", "model": "gpt-4.1"}
+    ]
+    stats = agent.session_manager.get_compaction_stats()
+    assert stats["failed"] == 1
+    assert stats["failureReasons"] == {failure: 1}
+    assert "summarizer down" not in str(stats)
+    assert agent.session_manager.get_last_compaction()["fallback"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported", [True, False])
+async def test_compaction_usage_and_retained_tokens(tmp_path, reported):
+    from one.providers.base import ChatResult
+
+    class UsageProvider(_Provider):
+        async def chat(self, *args, **kwargs):
+            return ChatResult(text="summary", raw={}, usage={
+                "prompt_tokens": 100, "completion_tokens": 8,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            } if reported else {}, stop_reason="stop")
+
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": True}}, provider=UsageProvider([]))
+    _seed(agent, 2)
+    await agent.compact()
+    entry = agent.session_manager.get_last_compaction()
+    assert entry["strategy"] == "local_separate" and entry["summarySchema"] == "legacy"
+    assert entry["attempts"] == 1 and entry["fallback"] is False
+    assert entry["tokensKept"] > 0 and entry["tokensAfter"] > entry["tokensKept"]
+    assert entry["usage"] == ({"inputTokens": 100, "cachedTokens": 40, "outputTokens": 8} if reported else None)
+    cache = agent.session_manager.get_compaction_stats()["cache"]
+    assert cache["input"] == (100 if reported else None)
+    assert cache["cacheRatio"] == (0.4 if reported else None)
 
 
 def test_context_usage_includes_runtime_prompt_and_uses_new_default_threshold(tmp_path):
@@ -1032,3 +1122,191 @@ async def test_wait_for_idle_waits_for_compaction(tmp_path):
     agent._is_compacting = False
     await task
     assert done.is_set()
+
+
+@pytest.mark.asyncio
+async def test_disabled_v2_knobs_do_not_change_legacy_compaction(tmp_path):
+    base = {"summarizeWithModel": True, "recentTokens": 50, "minKeptMessages": 2}
+    variants = [base, {**base, "experimentalV2": False, "strategy": "extractive", "cacheAware": False,
+                       "buffer": {"percent": 99, "minTokens": 1},
+                       "summary": {"maxOutputTokens": 1}, "constraints": {"enabled": False},
+                       "failure": {"latchAfter": 1}, "rehydrate": {"enabled": True},
+                       "precompute": {"enabled": True}}]
+    results = []
+    for config in variants:
+        provider = _Provider(["same summary"])
+        agent = _mk_agent(tmp_path, {"compaction": config}, provider=provider)
+        _seed(agent, 15)
+        result = await agent.compact()
+        retained = [{k: v for k, v in message.items() if k != "timestamp"} for message in agent.messages]
+        results.append((result["summary"], provider.last_messages, retained))
+    assert results[0] == results[1]
+
+
+@pytest.mark.asyncio
+async def test_v2_irreducible_and_long_summary_preserve_history(tmp_path):
+    from copy import deepcopy
+
+    model = ModelInfo("openai", "small", context_window=16000)
+    config = {"experimentalV2": True, "recentTokens": 10, "minKeptMessages": 1,
+              "summary": {"maxOutputTokens": 10}, "summarizeWithModel": True}
+    provider = _Provider(["x" * 100000])
+    agent = _mk_agent(tmp_path, {"compaction": config}, provider=provider, model=model)
+    _seed(agent, 10)
+    before = deepcopy(agent.messages)
+    result = await agent.compact()
+    assert result["failureReason"] == "invalid_fallback" and result["summary"] == ""
+    assert agent.messages == before and agent.session_manager.get_last_compaction() is None
+    assert provider.calls == 2
+    agent.messages = [{"role": "user", "content": "x" * 100000}]
+    before = deepcopy(agent.messages)
+    result = await agent.compact(reason="auto")
+    assert result["skipReason"] == "no_safe_reduction"
+    assert agent.messages == before and provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_v2_short_manual_and_resume(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True, "summarizeWithModel": False}})
+    _seed(agent, 2)
+    original = list(agent.messages)
+    result = await agent.compact()
+    assert not result["skipped"]
+    assert agent.messages[1:] == original
+    assert agent.session_manager.build_session_context()["messages"] == agent.messages
+
+
+@pytest.mark.asyncio
+async def test_v2_oversize_prompt_does_not_call_provider(tmp_path):
+    provider = _Provider(["unexpected"])
+    model = ModelInfo("openai", "small", context_window=16000)
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True}}, provider=provider, model=model)
+    await agent.prompt("x" * 100000)
+    assert provider.calls == 0
+    assert agent.session_manager.get_last_compaction() is None
+    assert "shorten the latest exchange" in str(agent.messages[-1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_v2_preflight_exact_threshold_and_no_stale_count(tmp_path):
+    class CountingProvider(_Provider):
+        async def count_request_tokens(self, **kwargs):
+            return self.count
+
+    provider = CountingProvider(["ok"])
+    provider.count = 11999
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True, "summarizeWithModel": False}},
+                      provider=provider, model=ModelInfo("openai", "small", context_window=32000))
+    _seed(agent, 2)
+    calls = []
+
+    async def compact(**kwargs):
+        calls.append(kwargs["reason"])
+        return {"skipped": True}
+
+    agent.compact = compact
+    await agent._preflight_compact()
+    assert calls == []
+    provider.count = 12000
+    await agent._preflight_compact()
+    assert calls == ["auto_preflight"]
+    provider.count = 28001
+    with pytest.raises(RuntimeError, match="shorten the latest exchange"):
+        await agent._preflight_compact()
+
+
+@pytest.mark.asyncio
+async def test_v2_resume_restores_dropped_plan_and_native_pair(tmp_path):
+    config = {"experimentalV2": True, "summarizeWithModel": False, "recentTokens": 1, "minKeptMessages": 1}
+    agent = _mk_agent(tmp_path, {"compaction": config})
+    sm = agent.session_manager
+    sm.append_message({"role": "user", "customType": "plan", "content": "fix it"})
+    for message in [
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "latest"},
+        {"role": "assistant", "content": "", "_nativeToolCalls": [{"id": "x", "name": "read", "arguments": {}}]},
+        {"role": "toolResult", "content": "result", "_nativeToolCallId": "x"},
+    ]:
+        sm.append_message(message)
+    agent.messages = sm.build_session_context()["messages"]
+    agent._restore_plan_from_messages(agent.messages)
+    assert not (await agent.compact())["skipped"]
+    resumed = AgentSession(sm, agent.settings_manager, agent.model_registry, _Loader(), agent.model, "medium")
+    assert resumed._plan == "fix it"
+    assert resumed.messages == agent.messages
+    assert resumed.messages[-2]["_nativeToolCalls"][0]["id"] == resumed.messages[-1]["_nativeToolCallId"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("large_previous", [False, True])
+async def test_v2_oversize_summary_request_skips_without_provider(tmp_path, large_previous):
+    from copy import deepcopy
+
+    provider = _Provider(["unexpected"])
+    config = {"experimentalV2": True, "recentTokens": 1, "minKeptMessages": 1,
+              "summary": {"maxOutputTokens": 10}}
+    agent = _mk_agent(tmp_path, {"compaction": config}, provider=provider,
+                      model=ModelInfo("openai", "small", context_window=16000))
+    _seed(agent, 2, prefix="x" * 70000 if not large_previous else "old {}")
+    if large_previous:
+        agent.session_manager.append_compaction("p" * 70000, agent.session_manager.get_message_entry_ids()[0], 0)
+    before = deepcopy(agent.messages)
+    result = await agent.compact()
+    if large_previous:
+        # V2 bounds previous checkpoints in the prompt, then repairs once.
+        assert result["failureReason"] == "invalid_fallback" and result["summary"] == ""
+    else:
+        assert result["skipReason"] == "no_safe_reduction"
+    assert agent.messages == before and provider.calls == (2 if large_previous else 0)
+    assert agent.session_manager.get_compaction_stats()["completed"] == int(large_previous)
+
+
+@pytest.mark.asyncio
+async def test_v2_summary_exact_wire_count_and_cache_restored(tmp_path):
+    class CountingProvider(_Provider):
+        async def count_request_tokens(self, **kwargs):
+            self.counted = kwargs["messages"]
+            return 1000
+
+    provider = CountingProvider(["summary"])
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True}}, provider=provider,
+                      model=ModelInfo("openai", "small", context_window=16000))
+    agent._exact_context_tokens, agent._exact_context_signature = 123, "old"
+    assert await agent._summarize_context([{"role": "user", "content": "hello"}]) == "summary"
+    assert provider.counted == provider.last_messages
+    assert provider.last_messages[0]["content"] == "You are a conversation summarizer."
+    assert (agent._exact_context_tokens, agent._exact_context_signature) == (123, "old")
+    assert provider.max_tokens == agent._context_budget(request_tokens=1000).outgoing_max_tokens
+
+
+@pytest.mark.asyncio
+async def test_v2_candidate_exact_count_uses_candidate_shape_without_caching(tmp_path):
+    class CountingProvider(_Provider):
+        async def count_request_tokens(self, **kwargs):
+            self.counted = kwargs["messages"]
+            return 1000
+
+    provider = CountingProvider([])
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True, "summarizeWithModel": False,
+                                                "recentTokens": 1, "minKeptMessages": 1}}, provider=provider)
+    _seed(agent, 3)
+    agent._exact_context_tokens, agent._exact_context_signature = 123, "old"
+    result = await agent.compact()
+    assert not result["skipped"]
+    assert provider.counted == agent._flatten_messages_for_provider()
+    assert (agent._exact_context_tokens, agent._exact_context_signature) == (123, "old")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_name", ["_RunAdmissionError", "_CompactionInputError"])
+async def test_v2_summary_admission_and_input_errors_propagate(tmp_path, error_name):
+    from one.core import agent_session
+
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True}})
+    async def fail(*args, **kwargs):
+        raise getattr(agent_session, error_name)("refused")
+
+    agent._invoke_provider = fail
+    with pytest.raises(getattr(agent_session, error_name), match="refused"):
+        await agent._summarize_context([{"role": "user", "content": "hello"}])

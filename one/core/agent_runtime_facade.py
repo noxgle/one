@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from one.core.session_manager import compaction_failure_metadata
 from one.core.subagent_monitor import SubagentMonitor
 from one.core.threaded_agent_runtime import (
     DEFAULT_COMMAND_DTO_MAX_BYTES,
@@ -185,6 +186,13 @@ def _event_projection(event: Mapping[str, Any]) -> dict[str, Any]:
             # validated, paginated command.
             if event_type == "message_end":
                 result.update(_fields(event, ("completed", "completedRef", "completedSource")))
+        return result
+
+    if event_type == "compaction_failed":
+        result.update(compaction_failure_metadata(
+            event.get("reason"), event.get("failureReason"), event.get("strategy"), event.get("attempts"),
+            event.get("provider"), event.get("model"),
+        ))
         return result
 
     lifecycle_fields = (

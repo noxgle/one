@@ -413,8 +413,11 @@ Migration tightens permissions but never fails the startup if it encounters erro
 
 Settings are stored in `settings.json` and include:
 - `tools.timeoutSec` (default: 30) — per-tool timeout.
-- `compaction.threshold` — automatic compaction threshold.
-- `compaction.maxTokens` — maximum tokens after compaction.
+- `compaction.thresholdPercent` — legacy automatic compaction threshold.
+- `compaction.experimentalV2` — opt-in budget-aware checkpoints, retention,
+  constraint ledger and failure-safe commit; defaults to false. Optional bounded
+  file rehydration defaults off. Native production capability is disabled. See
+  [compaction](COMPACTION.md) for compatibility and recovery.
 - `cooperation` — enable/disable approval gates.
 - `mcp.enabled` — enable/disable MCP servers.
 - `extensions` — enable/disable extensions.

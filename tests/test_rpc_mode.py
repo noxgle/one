@@ -1104,3 +1104,23 @@ async def test_run_tree_and_cancel_commands(tmp_path: Path, monkeypatch, capsys)
     assert not responses[5]["success"]
     assert context.node(child.node_id).state.value == "cancelling"
     assert context.node(sibling.node_id).state.value == "pending"
+
+
+@pytest.mark.asyncio
+async def test_rpc_native_private_data_is_not_exported(tmp_path, monkeypatch, capsys):
+    session = _mk_session(tmp_path)
+    storage = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    session.session_manager = storage
+    first = storage.append_message({"role": "user", "content": "visible"})
+    storage.append_native_compaction("p", "m", "e", [
+        {"type": "compaction", "encrypted_content": "opaque-private-marker"}], first, first)
+    session.messages = storage.build_session_context()["messages"]
+    path = tmp_path / "export.jsonl"
+    commands = ["get_state", "get_session_stats", "get_tree", "export_jsonl"]
+    responses = await _run_rpc(monkeypatch, capsys, session, [
+        json.dumps({"type": command, "id": command, **({"outputPath": str(path)} if command == "export_jsonl" else {})})
+        for command in commands])
+    assert all(_resp(responses, command, command)["success"] for command in commands)
+    assert "opaque-private-marker" not in json.dumps(responses)
+    assert "visible" in path.read_text()
+    assert "opaque-private-marker" not in path.read_text()

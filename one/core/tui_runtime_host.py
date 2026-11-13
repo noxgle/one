@@ -350,7 +350,7 @@ class TuiRuntimeHost:
                     stamped["completedRef"] = ref
                     stamped["completedSource"] = source_session_id
             if stamped.get("type") in {
-                "agent_end", "turn_end", "error", "compaction_end", "temperature_change",
+                "agent_end", "turn_end", "error", "compaction_end", "compaction_failed", "temperature_change",
                 "cooperation_changed", "provider_request_end", "tool_call_end",
             }:
                 self._schedule_sidebar_refresh(epoch)

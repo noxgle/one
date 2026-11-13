@@ -535,6 +535,69 @@ def test_compaction_defaults_preserved() -> None:
     assert settings.get_compaction_threshold_percent() == 80
 
 
+def test_compaction_v2_defaults_and_detached_values() -> None:
+    settings = SettingsManager.in_memory()
+    result = settings.get_compaction_settings()
+    assert {key: result[key] for key in (
+        "experimentalV2", "strategy", "cacheAware", "buffer", "summary", "constraints", "failure", "native",
+        "rehydrate", "precompute",
+    )} == {
+        "experimentalV2": False, "strategy": "auto", "cacheAware": True,
+        "buffer": {"percent": 15, "minTokens": 16000},
+        "summary": {"schema": "v2", "maxOutputTokens": 4000, "toolOutputs": "clipped", "clipChars": 2000, "retryOnInvalid": 1},
+        "constraints": {"enabled": True, "maxTokens": 2000},
+        "failure": {"mode": "keep_history", "latchAfter": 2},
+        "native": {"chatgpt": "auto", "anthropic": "off"},
+        "rehydrate": {"enabled": False, "maxFiles": 5, "maxTokens": 12000},
+        "precompute": {"enabled": False},
+    }
+    result["summary"]["clipChars"] = 1
+    assert settings.get_compaction_settings()["summary"]["clipChars"] == 2000
+
+
+def test_compaction_v2_validation_and_precedence() -> None:
+    settings = SettingsManager.in_memory({"compaction": {
+        "experimentalV2": True, "strategy": "extractive", "cacheAware": "yes",
+        "buffer": {"percent": 101, "minTokens": True},
+        "summary": {"schema": [], "maxOutputTokens": 0, "toolOutputs": "bad", "clipChars": -1, "retryOnInvalid": False},
+        "constraints": {"enabled": 1, "maxTokens": None},
+        "failure": {"mode": "bad", "latchAfter": 0},
+        "native": {"chatgpt": [], "anthropic": "bad"},
+        "rehydrate": {"enabled": True, "maxFiles": False, "maxTokens": -1},
+        "precompute": None,
+    }})
+    settings._project = {"compaction": {"strategy": "native_openai", "buffer": {"percent": 25}}}
+    result = settings.get_compaction_settings()
+    assert result["experimentalV2"] is True
+    assert result["strategy"] == "native_openai"
+    assert result["cacheAware"] is True
+    assert result["buffer"] == {"percent": 25, "minTokens": 16000}
+    defaults = SettingsManager.in_memory().get_compaction_settings()
+    for key in ("summary", "constraints", "failure", "native", "precompute"):
+        assert result[key] == defaults[key]
+    assert result["rehydrate"] == {"enabled": True, "maxFiles": 5, "maxTokens": 12000}
+    result["buffer"]["percent"] = 0
+    assert settings._project["compaction"]["buffer"]["percent"] == 25
+    assert settings._global["compaction"]["buffer"]["minTokens"] is True
+
+
+def test_compaction_v2_invalid_sections_and_valid_boundaries() -> None:
+    settings = SettingsManager.in_memory({"compaction": {
+        "strategy": {}, "buffer": None, "summary": [], "constraints": False, "failure": 0,
+        "native": None, "rehydrate": [], "precompute": "bad",
+    }})
+    defaults = SettingsManager.in_memory().get_compaction_settings()
+    assert settings.get_compaction_settings() == defaults
+    settings = SettingsManager.in_memory({"compaction": {
+        "buffer": {"percent": 0, "minTokens": 0}, "summary": {"retryOnInvalid": 0},
+        "native": {"chatgpt": "off", "anthropic": "auto"},
+    }})
+    result = settings.get_compaction_settings()
+    assert result["buffer"] == {"percent": 0, "minTokens": 0}
+    assert result["summary"]["retryOnInvalid"] == 0
+    assert result["native"] == {"chatgpt": "off", "anthropic": "auto"}
+
+
 def test_get_default_tool_max_steps_default_is_hundred() -> None:
     """get_tool_max_steps() returns 100 with default settings."""
     settings = SettingsManager.in_memory()
@@ -659,3 +722,37 @@ def test_read_only_missing_and_io_errors(tmp_path: Path, monkeypatch) -> None:
     errors = manager.drain_errors()
     assert [(e["scope"], e["error"]) for e in errors] == [("global", failure), ("project", failure)]
     assert list(tmp_path.iterdir()) == []
+
+
+def test_compaction_v2_section_getters_use_normalized_detached_settings():
+    settings = SettingsManager.in_memory(initial={"compaction": {
+        "experimentalV2": True, "buffer": {"percent": 200, "minTokens": 7},
+        "strategy": "extractive", "summary": {"clipChars": 9},
+    }})
+    assert settings.get_compaction_experimental_v2() is True
+    assert settings.get_compaction_strategy() == "extractive"
+    assert settings.get_compaction_cache_aware() is True
+    assert settings.get_compaction_buffer() == {"percent": 15, "minTokens": 7}
+    assert settings.get_compaction_summary()["clipChars"] == 9
+    for name in ("constraints", "failure", "native", "rehydrate", "precompute"):
+        assert getattr(settings, f"get_compaction_{name}")() == settings.get_compaction_settings()[name]
+    settings.get_compaction_buffer()["minTokens"] = 99
+    assert settings.get_compaction_buffer()["minTokens"] == 7
+
+
+def test_effective_v2_retention_defaults_and_explicit_scopes(tmp_path):
+    settings = SettingsManager.in_memory({"compaction": {"experimentalV2": True}})
+    assert (settings.get_effective_compaction_recent_tokens(), settings.get_effective_compaction_min_kept_messages()) == (15000, 8)
+    assert (settings.get_compaction_recent_tokens(), settings.get_compaction_min_kept_messages()) == (8192, 20)
+    settings.set_config_value("compaction.recentTokens", 8192)
+    assert settings.get_effective_compaction_recent_tokens() == 8192
+    settings.set_config_value("compaction.minKeptMessages", True)
+    assert settings.get_effective_compaction_min_kept_messages() == 8
+    agent = tmp_path / "agent"
+    project = tmp_path / "project"
+    agent.mkdir()
+    (project / ".one").mkdir(parents=True)
+    (agent / "settings.json").write_text(json.dumps({"compaction": {"experimentalV2": True, "recentTokens": 42}}))
+    (project / ".one" / "settings.json").write_text(json.dumps({"compaction": {"recentTokens": 23, "minKeptMessages": 3}}))
+    settings = SettingsManager(str(project), str(agent))
+    assert (settings.get_effective_compaction_recent_tokens(), settings.get_effective_compaction_min_kept_messages()) == (23, 3)

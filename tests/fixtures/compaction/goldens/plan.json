@@ -1,0 +1,27 @@
+{
+  "prompt": [
+    {
+      "role": "system",
+      "content": "You are a conversation summarizer."
+    },
+    {
+      "role": "user",
+      "content": "Summarize the conversation history below into one compact paragraph. Preserve decisions, file paths, tool outcomes, unresolved tasks and the user's goals. Do not invent new information.\n\nPrevious summary:\n(none)\n\nHistory since last compaction:\nuser: Make a plan"
+    }
+  ],
+  "context": [
+    {
+      "role": "custom",
+      "customType": "compaction_summary",
+      "content": "SYNTHETIC SUMMARY"
+    },
+    {
+      "role": "user",
+      "content": "Inspect completed"
+    },
+    {
+      "role": "assistant",
+      "content": "Implement in progress"
+    }
+  ]
+}

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
 
@@ -79,10 +79,18 @@ class ChatResult:
     native_tool_calls: list[NativeToolCall] | None = None
     output_truncated: bool = False
     requested_max_tokens: int | None = None
+    # Private provider replay material; never include it in diagnostics.
+    native_output_items: list[dict[str, Any]] | None = field(default=None, repr=False)
 
 
 class ProviderAdapter:
     name: str
+    summary_position: str = "prefix"
+    supports_cache_aware_compaction: bool = False
+
+    def supports_native_compaction_for(self, model: str, endpoint: str) -> bool:
+        """Native compaction requires verified support for the exact target."""
+        return False
 
     async def chat(
         self,
@@ -97,6 +105,8 @@ class ProviderAdapter:
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
         tools: list[dict[str, Any]] | None = None,
+        *,
+        disable_tool_calls: bool = False,
     ) -> ChatResult:
         raise NotImplementedError
 

@@ -8,6 +8,7 @@ import base64
 import json
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -30,6 +31,12 @@ _REASONING_EFFORT_BY_LEVEL = {
     "high": "high",
     "xhigh": "high",
 }
+
+
+class ProviderHTTPError(RuntimeError):
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class MissingBlobError(AttachmentStorageError):
@@ -60,6 +67,12 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         # OpenAI-compatible does not imply tool-compatible.  Local/custom
         # endpoints retain JSON-in-text unless explicitly opted in.
         self.supports_native_tools = supports_native_tools
+        endpoint_url = urlsplit(self.base_url)
+        self.supports_cache_aware_compaction = supports_native_tools and endpoint_url.scheme == "https" and (
+            (name == "openai" and endpoint_url.netloc == "api.openai.com" and endpoint_url.path in ("", "/v1"))
+            or (name == "azure-openai" and bool(endpoint_url.hostname)
+                and endpoint_url.hostname.endswith(".openai.azure.com") and endpoint_url.netloc == endpoint_url.hostname)
+        )
 
     def _build_image_part(self, image_ref: dict[str, Any], storage_dir: str) -> dict[str, Any]:
         """Build an ``image_url`` part from an image reference.
@@ -122,7 +135,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         return content
 
     def _build_payload(self, model: str, messages: list[dict[str, Any]], thinking_level: str,
-                       images: list[dict[str, Any]] | None = None, storage_dir: str = "", temperature: float | None = None, tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                       images: list[dict[str, Any]] | None = None, storage_dir: str = "", temperature: float | None = None, tools: list[dict[str, Any]] | None = None, *, disable_tool_calls: bool = False) -> dict[str, Any]:
         # Validate all image blobs are present BEFORE building payload / making HTTP.
         if images:
             for img in images:
@@ -179,6 +192,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         # JSON-in-text contract even though they share this adapter.
         if tools and self.supports_native_tools:
             payload["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t.get("description", ""), "parameters": t["parameters"]}} for t in tools]
+        if disable_tool_calls and tools and self.supports_native_tools:
+            payload["tool_choice"] = "none"
         return payload
 
     @staticmethod
@@ -326,7 +341,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     body = str(parsed.get("error") or parsed)
                 except Exception:
                     body = resp.text[:1000]
-                raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
+                raise ProviderHTTPError(f"{self.name} API error {resp.status_code}: {body}", resp.status_code)
             return resp.json()
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:
@@ -402,8 +417,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         temperature: float | None = None,
         stream_transport_timeout: float | None = None,
         tools: list[dict[str, Any]] | None = None,
+        *,
+        disable_tool_calls: bool = False,
     ) -> ChatResult:
-        payload = self._build_payload(model, messages, thinking_level, images=images, storage_dir=storage_dir, temperature=temperature, tools=tools)
+        payload = self._build_payload(model, messages, thinking_level, images=images, storage_dir=storage_dir, temperature=temperature, tools=tools, disable_tool_calls=disable_tool_calls)
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         use_stream = callable(on_delta)
@@ -426,7 +443,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         body = str(parsed.get("error") or parsed)
                     except Exception:
                         body = resp.text[:1000]
-                    raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
+                    raise ProviderHTTPError(f"{self.name} API error {resp.status_code}: {body}", resp.status_code)
                 data = resp.json()
 
             choice = (data.get("choices") or [{}])[0]
@@ -466,7 +483,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             async with client.stream("POST", f"{self.base_url}{self.endpoint}", json=payload, headers=req_headers) as resp:
                 if resp.is_error:
                     body = (await resp.aread()).decode("utf-8", errors="ignore")[:1000]
-                    raise RuntimeError(f"{self.name} API error {resp.status_code}: {body}")
+                    raise ProviderHTTPError(f"{self.name} API error {resp.status_code}: {body}", resp.status_code)
 
                 aiter = resp.aiter_lines()
                 while True:

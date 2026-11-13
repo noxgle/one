@@ -1,0 +1,18 @@
+[
+  {
+    "role": "user",
+    "content": "Use synthetic data only"
+  },
+  {
+    "role": "assistant",
+    "content": "Do not contact services"
+  },
+  {
+    "role": "user",
+    "content": "Keep existing behavior"
+  },
+  {
+    "role": "assistant",
+    "content": "Constraints acknowledged"
+  }
+]

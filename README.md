@@ -630,7 +630,22 @@ extraction preserves tables, links and fenced code; it never executes JavaScript
 or fetches embedded resources. Relative links use the final URL. No search,
 custom headers, authentication or non-GET methods are provided.
 
-Configure limits in `settings.json` (global/project merge applies):
+Experimental compaction V2 is opt-in; file reread is separately opt-in and
+native production capability remains disabled. For example, in `settings.json`:
+
+```json
+{
+  "compaction": {
+    "experimentalV2": true,
+    "rehydrate": {"enabled": false, "maxFiles": 5, "maxTokens": 12000}
+  }
+}
+```
+
+See [compaction](docs/COMPACTION.md) for limits, privacy, provider compatibility,
+rollback and offline evaluation. Project settings override global settings.
+
+Configure web limits in `settings.json` (global/project merge applies):
 
 ```json
 {

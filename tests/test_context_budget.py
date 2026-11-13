@@ -157,3 +157,11 @@ def test_reserve_does_not_cap_outgoing_for_small_context():
     budget = resolve_context_budget(model, request_tokens=1000)
     assert (budget.output_reserve, budget.input_budget, budget.outgoing_max_tokens) == (4000, 28_000, 31_000)
     assert budget.outgoing_limit_reason == "available context"
+
+
+def test_v2_threshold_uses_resolved_input_and_window():
+    from one.core.compaction.policy import trigger_threshold
+
+    resolved = resolve_context_budget(ModelInfo("openai", "small", context_window=32000))
+    assert resolved.input_budget == 28000
+    assert trigger_threshold(resolved.input_budget, resolved.selected_context_window) == 12000

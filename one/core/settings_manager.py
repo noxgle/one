@@ -32,6 +32,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "minKeptMessages": 20,
         "summarizeWithModel": True,
         "maxSummaryInputTokens": 20000,
+        "experimentalV2": False,
+        "strategy": "auto",
+        "cacheAware": True,
+        "buffer": {"percent": 15, "minTokens": 16000},
+        "summary": {"schema": "v2", "maxOutputTokens": 4000, "toolOutputs": "clipped", "clipChars": 2000, "retryOnInvalid": 1},
+        "constraints": {"enabled": True, "maxTokens": 2000},
+        "failure": {"mode": "keep_history", "latchAfter": 2},
+        "native": {"chatgpt": "auto", "anthropic": "off"},
+        "rehydrate": {"enabled": False, "maxFiles": 5, "maxTokens": 12000},
+        "precompute": {"enabled": False},
     },
     "toolOutputPruning": {
         "enabled": False,
@@ -385,7 +395,84 @@ class SettingsManager:
 
     def get_compaction_settings(self) -> dict[str, Any]:
         settings = self.merged().get("compaction", {})
-        return settings if isinstance(settings, dict) else {}
+        settings = deepcopy(settings) if isinstance(settings, dict) else {}
+        defaults = DEFAULT_SETTINGS["compaction"]
+
+        def boolean(values: dict[str, Any], key: str, default: bool) -> None:
+            if not isinstance(values.get(key), bool):
+                values[key] = default
+
+        def integer(values: dict[str, Any], key: str, default: int, minimum: int, maximum: int | None = None) -> None:
+            value = values.get(key)
+            if (isinstance(value, bool) or not isinstance(value, int) or value < minimum
+                    or (maximum is not None and value > maximum)):
+                values[key] = default
+
+        def choice(values: dict[str, Any], key: str, default: str, choices: tuple[str, ...]) -> None:
+            if not isinstance(values.get(key), str) or values[key] not in choices:
+                values[key] = default
+
+        boolean(settings, "experimentalV2", False)
+        boolean(settings, "cacheAware", True)
+        choice(settings, "strategy", "auto", ("auto", "local_cache_aware", "local_separate", "extractive", "native_openai"))
+        for key in ("buffer", "summary", "constraints", "failure", "native", "rehydrate", "precompute"):
+            if not isinstance(settings.get(key), dict):
+                settings[key] = deepcopy(defaults[key])
+
+        buffer = settings["buffer"]
+        integer(buffer, "percent", 15, 0, 100)
+        integer(buffer, "minTokens", 16000, 0)
+        summary = settings["summary"]
+        choice(summary, "schema", "v2", ("v2",))
+        choice(summary, "toolOutputs", "clipped", ("clipped",))
+        integer(summary, "maxOutputTokens", 4000, 1)
+        integer(summary, "clipChars", 2000, 1)
+        integer(summary, "retryOnInvalid", 1, 0)
+        constraints = settings["constraints"]
+        boolean(constraints, "enabled", True)
+        integer(constraints, "maxTokens", 2000, 1)
+        failure = settings["failure"]
+        choice(failure, "mode", "keep_history", ("keep_history",))
+        integer(failure, "latchAfter", 2, 1)
+        native = settings["native"]
+        choice(native, "chatgpt", "auto", ("auto", "off"))
+        choice(native, "anthropic", "off", ("auto", "off"))
+        rehydrate = settings["rehydrate"]
+        boolean(rehydrate, "enabled", False)
+        integer(rehydrate, "maxFiles", 5, 1)
+        integer(rehydrate, "maxTokens", 12000, 1)
+        boolean(settings["precompute"], "enabled", False)
+        return settings
+
+    def get_compaction_experimental_v2(self) -> bool:
+        return self.get_compaction_settings()["experimentalV2"]
+
+    def get_compaction_strategy(self) -> str:
+        return self.get_compaction_settings()["strategy"]
+
+    def get_compaction_cache_aware(self) -> bool:
+        return self.get_compaction_settings()["cacheAware"]
+
+    def get_compaction_buffer(self) -> dict[str, Any]:
+        return self.get_compaction_settings()["buffer"]
+
+    def get_compaction_summary(self) -> dict[str, Any]:
+        return self.get_compaction_settings()["summary"]
+
+    def get_compaction_constraints(self) -> dict[str, Any]:
+        return self.get_compaction_settings()["constraints"]
+
+    def get_compaction_failure(self) -> dict[str, Any]:
+        return self.get_compaction_settings()["failure"]
+
+    def get_compaction_native(self) -> dict[str, Any]:
+        return self.get_compaction_settings()["native"]
+
+    def get_compaction_rehydrate(self) -> dict[str, Any]:
+        return self.get_compaction_settings()["rehydrate"]
+
+    def get_compaction_precompute(self) -> dict[str, Any]:
+        return self.get_compaction_settings()["precompute"]
 
     def get_generation_max_output_tokens(self) -> int:
         generation = self.merged().get("generation", {})
@@ -413,6 +500,20 @@ class SettingsManager:
 
     def get_compaction_min_kept_messages(self) -> int:
         return int(self.get_compaction_settings().get("minKeptMessages", 20))
+
+    def _effective_compaction_retention(self, key: str, default: int) -> int:
+        configured = _deep_merge(self._initial if self._in_memory else self._global, self._project)
+        section = configured.get("compaction", {})
+        value = section.get(key) if isinstance(section, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else default
+
+    def get_effective_compaction_recent_tokens(self) -> int:
+        default = 15000 if self.get_compaction_experimental_v2() else 8192
+        return self._effective_compaction_retention("recentTokens", default)
+
+    def get_effective_compaction_min_kept_messages(self) -> int:
+        default = 8 if self.get_compaction_experimental_v2() else 20
+        return self._effective_compaction_retention("minKeptMessages", default)
 
     def get_compaction_summarize_with_model(self) -> bool:
         return bool(self.get_compaction_settings().get("summarizeWithModel", True))

@@ -4,11 +4,91 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from one.core.session_manager import SESSION_NAME_MAX_CHARS, SessionManager, normalize_session_name
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_v2_transaction_write_failure_preserves_session(tmp_path: Path, monkeypatch, existing: bool):
+    from one.core import persistence
+
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    if existing:
+        sm.append_message({"role": "user", "content": "kept"})
+    path = Path(sm.session_file)
+    original = path.read_bytes() if existing else None
+    entries = list(sm.get_entries())
+    leaf = sm.get_leaf_id()
+    context = sm.build_session_context()
+
+    def fail_write(fd, data):
+        os.write(fd, data[:10])
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(persistence, "_write_all", fail_write)
+    with pytest.raises(OSError, match="injected write failure"):
+        sm.append_compaction("summary", leaf or "root", 10, summary_schema="v2", transactional_v2=True)
+    assert sm.get_entries() == entries
+    assert sm.get_leaf_id() == leaf
+    if leaf:
+        assert sm.get_entry(leaf) == entries[-1]
+    assert sm.build_session_context() == context
+    if existing:
+        assert path.read_bytes() == original
+        reopened = SessionManager.open(str(path))
+        assert reopened.get_entries() == entries
+        assert reopened.get_leaf_id() == leaf
+        assert reopened.build_session_context() == context
+    else:
+        assert not path.exists()
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_v2_transaction_commit_is_detached_and_reloadable(tmp_path: Path, persistent: bool):
+    sm = (SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+          if persistent else SessionManager.in_memory(str(tmp_path)))
+    kept = sm.append_message({"role": "user", "content": "kept"})
+    details = {"nested": ["original"]}
+    entry = sm.append_compaction("summary", kept, 10, details=details, summary_schema="v2",
+                                 transactional_v2=True)
+    assert isinstance(entry, dict)
+    assert entry["id"] == sm.get_leaf_id()
+    assert entry["timestamp"]
+    assert entry["parentId"] == kept
+    details["nested"].append("input mutation")
+    entry["details"]["nested"].append("returned mutation")
+    assert sm.get_entry(entry["id"])["details"] == {"nested": ["original"]}
+    assert [m["content"] for m in sm.build_session_context()["messages"]] == ["summary", "kept"]
+    if persistent:
+        path = Path(sm.session_file)
+        assert path.stat().st_mode & 0o777 == 0o600
+        reopened = SessionManager.open(str(path))
+        assert reopened.get_leaf_id() == entry["id"]
+        assert reopened.get_entry(entry["id"]) == sm.get_entry(entry["id"])
+        assert reopened.build_session_context() == sm.build_session_context()
+
+
+def test_v2_transaction_requires_v2_schema(tmp_path: Path):
+    sm = SessionManager.in_memory(str(tmp_path))
+    with pytest.raises(ValueError, match="requires summary_schema"):
+        sm.append_compaction("summary", "root", 10, transactional_v2=True)
+    assert sm.get_entries() == []
+
+
+def test_v2_transaction_preserves_unparsed_disk_content(tmp_path: Path):
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    kept = sm.append_message({"role": "user", "content": "kept"})
+    path = Path(sm.session_file)
+    original = path.read_bytes() + b"unknown data without newline"
+    path.write_bytes(original)
+    entry = sm.append_compaction("summary", kept, 10, summary_schema="v2", transactional_v2=True)
+    assert isinstance(entry, dict)
+    assert path.read_bytes().startswith(original + b"\n")
+    assert SessionManager.open(str(path)).get_leaf_id() == entry["id"]
 
 
 def test_session_append_and_context(tmp_path: Path):
@@ -182,6 +262,32 @@ def test_compaction_stats_persist_reasons_and_skips(tmp_path: Path):
     assert stats["byReason"] == {"manual": 1, "automatic": 1, "recovery": 1}
     assert stats["last"]["reason"] == "context_limit_retry"
     assert stats["last"]["timestamp"]
+
+
+def test_compaction_telemetry_sanitizes_and_aggregates_old_and_new_entries(tmp_path: Path):
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    sm.append_compaction("old summary", "root", 9)
+    sm.append_compaction("new summary", "root", 10, tokens_after=8, tokens_kept=4,
+                         strategy="local_separate", summary_schema="legacy", attempts=1, fallback=False,
+                         duration_ms=20, usage={"inputTokens": 100, "cachedTokens": 25, "secret": "private"},
+                         constraints={"extracted": 2, "prompt": "private"}, rehydrated={"files": 1, "path": "private"})
+    sm.append_compaction("bad", "root", 3, tokens_after=True, duration_ms=float("nan"),
+                         strategy="private", usage={"inputTokens": True, "cachedTokens": -1},
+                         constraints={"extracted": float("inf")})
+    last = sm.get_last_compaction()
+    assert "tokensAfter" not in last and "durationMs" not in last and last["usage"] is None
+    assert "private" not in str(last)
+    # Historical extras may not have passed the writer's sanitizer.
+    last.update({"strategy": {"private": 1}, "usage": {"inputTokens": True, "cachedTokens": float("inf")},
+                 "constraints": {"extracted": -1, "path": "private"}, "rehydrated": {"files": True}})
+    stats = sm.get_compaction_stats()
+    assert stats["tokensBefore"] == 22 and stats["last"]["summary"] == "bad"
+    assert stats["byStrategy"] == {"legacy": 2, "local_separate": 1}
+    assert stats["cache"]["input"] == 100 and stats["cache"]["cacheRatio"] == .25
+    assert stats["cache"]["requestsMissingUsage"] == 2
+    assert stats["avgDurationMs"] == 20
+    assert stats["constraints"] == {"extracted": 2} and stats["rehydrated"] == {"files": 1}
+    assert "private" not in str(stats)
 
 
 def test_get_message_entry_ids_aligned_with_interleaved_entries(tmp_path: Path):
@@ -383,3 +489,31 @@ def test_append_timing_accepts_only_non_negative_integer_counters(tmp_path: Path
     assert "cachedTokens" not in entry
     assert "outputTokens" not in entry
     assert "reasoningTokens" not in entry
+
+
+def test_compaction_telemetry_disk_reload_and_fork(tmp_path: Path):
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    sm.append_message({"role": "user", "content": "old"})
+    kept = sm.append_message({"role": "user", "content": "kept"})
+    sm.append_compaction("legacy", kept, 12)
+    sm.append_compaction("checkpoint", kept, 10, summary_schema="v2", strategy="extractive",
+                         fallback=True, constraints={"extracted": 3, "preserved": 2},
+                         usage={"inputTokens": 8, "cachedTokens": 2}, tokens_after=4, duration_ms=5)
+    sm.append_message({"role": "assistant", "content": "after"})
+    path = sm.session_file
+    assert path is not None
+    reopened = SessionManager.open(path)
+    forked = SessionManager.fork_from(path, str(tmp_path), str(tmp_path / "fork"))
+    assert forked.session_file is not None
+    forked = SessionManager.open(forked.session_file)
+    for session in (reopened, forked):
+        entries = [e for e in session.get_entries() if e.get("type") == "compaction"]
+        assert len(entries) == 2 and "summarySchema" not in entries[0]
+        assert entries[1]["summarySchema"] == "v2" and entries[1]["fallback"] is True
+        stats = session.get_compaction_stats()
+        assert stats["constraints"] == {"extracted": 3, "preserved": 2}
+        assert stats["byStrategy"] == {"legacy": 1, "extractive": 1}
+        assert stats["cache"]["requestsMissingUsage"] == 1
+        assert [m["content"] for m in session.build_session_context()["messages"]] == [
+            "checkpoint", "kept", "after"
+        ]

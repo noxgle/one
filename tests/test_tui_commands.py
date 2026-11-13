@@ -623,6 +623,32 @@ async def test_tui_manual_compact_short_history_with_custom_instructions(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_tui_compact_v2_hint_reaches_checkpoint(tmp_path: Path, monkeypatch):
+    from one.core.compaction.checkpoint import generate_checkpoint
+
+    session = _mk_app_session(tmp_path, settings_override={"compaction": {
+        "experimentalV2": True, "summarizeWithModel": False,
+    }})
+    session.session_manager.append_message({"role": "user", "content": "Never delete files."})
+    session.messages = session.session_manager.build_session_context()["messages"]
+    seen = []
+
+    async def checkpoint(*args, **kwargs):
+        seen.append((kwargs["hint"], asyncio.get_running_loop()))
+        return await generate_checkpoint(*args, **kwargs)
+
+    monkeypatch.setattr("one.core.agent_session.generate_checkpoint", checkpoint)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "/compact Focus on parser")
+        assert seen == [("Focus on parser", asyncio.get_running_loop())]
+        entry = session.session_manager.get_last_compaction()
+        assert entry["summarySchema"] == "v2"
+        assert entry["summary"].startswith("# Objective")
+        assert "Never delete files." in entry["summary"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("result", "expected"),
     [

@@ -39,6 +39,12 @@ import httpx
 from one.core.attachments import AttachmentStorageError
 
 from .base import ChatResult, NativeToolCall, ProviderAdapter, native_tool_replay_pairs
+from .native_compaction import (
+    NativeCompactionHTTPError,
+    NativeCompactionProtocolError,
+    sanitize_native_raw,
+    validate_native_items,
+)
 
 
 class MissingBlobError(AttachmentStorageError):
@@ -94,6 +100,9 @@ def _safe_affinity_id(value: str | None) -> str | None:
 
 
 class CodexResponsesAdapter(ProviderAdapter):
+    summary_position = "suffix"
+    # ChatGPT backend support for tool_choice=none is not verified.
+    supports_cache_aware_compaction = False
     name = "chatgpt"
     supports_native_tools = True
 
@@ -170,7 +179,20 @@ class CodexResponsesAdapter(ProviderAdapter):
         images: list[dict[str, Any]] | None = None,
         storage_dir: str = "",
         tools: list[dict[str, Any]] | None = None,
+        *,
+        disable_tool_calls: bool = False,
+        native_compaction_threshold: int | None = None,
+        native_input_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        native_enabled = self.supports_native_compaction_for(model, f"{BASE_URL}/responses")
+        if not native_enabled and native_input_items is not None:
+            raise NativeCompactionProtocolError("Native compaction is unsupported")
+        if native_enabled and native_compaction_threshold is not None and (
+            isinstance(native_compaction_threshold, bool)
+            or not isinstance(native_compaction_threshold, int)
+            or native_compaction_threshold <= 0
+        ):
+            raise NativeCompactionProtocolError("Invalid native compaction threshold")
         instructions = ""
         input_items: list[dict[str, Any]] = []
         paired_calls, paired_outputs = native_tool_replay_pairs(messages)
@@ -279,6 +301,11 @@ class CodexResponsesAdapter(ProviderAdapter):
             "store": False,
             "stream": stream,
         }
+        if native_enabled:
+            if native_input_items is not None:
+                payload["input"] = validate_native_items(native_input_items)
+            if native_compaction_threshold is not None:
+                payload["context_management"] = [{"type": "compaction", "compact_threshold": native_compaction_threshold}]
         if max_tokens is not None:
             payload["max_output_tokens"] = max_tokens
         effort = _EFFORT_BY_LEVEL.get(thinking_level)
@@ -290,6 +317,8 @@ class CodexResponsesAdapter(ProviderAdapter):
             # claim Responses strict-mode conformance (which requires every
             # property to be required) on this compatibility schema.
             payload["tools"] = [{"type": "function", "name": t["name"], "description": t.get("description", ""), "parameters": t["parameters"]} for t in tools]
+        if disable_tool_calls and tools:
+            payload["tool_choice"] = "none"
         return payload
 
     @staticmethod
@@ -380,15 +409,24 @@ class CodexResponsesAdapter(ProviderAdapter):
         tools: list[dict[str, Any]] | None = None,
         stream_transport_timeout: float | None = None,
         codex_affinity_id: str | None = None,
+        *,
+        disable_tool_calls: bool = False,
+        native_compaction_threshold: int | None = None,
+        native_input_items: list[dict[str, Any]] | None = None,
+        safe_errors: bool = False,
     ) -> ChatResult:
         url = f"{BASE_URL}/responses"
+        native_enabled = self.supports_native_compaction_for(model, url) and (
+            native_compaction_threshold is not None or native_input_items is not None
+        )
         payload = self._build_payload(
             model, messages, thinking_level,
             # ChatGPT's Responses endpoint requires SSE, including calls made
             # for compaction where AgentSession intentionally supplies no live
             # callback.
             stream=True, max_tokens=max_tokens,
-            images=images, storage_dir=storage_dir, tools=tools,
+            images=images, storage_dir=storage_dir, tools=tools, disable_tool_calls=disable_tool_calls,
+            native_compaction_threshold=native_compaction_threshold, native_input_items=native_input_items,
         )
         req_headers = self._headers(api_key, extra=headers, affinity_id=codex_affinity_id)
         transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
@@ -399,6 +437,8 @@ class CodexResponsesAdapter(ProviderAdapter):
         stop_reason: str | None = None
         output_truncated = False
         raw_last: dict[str, Any] = {}
+        native_done: dict[int, dict[str, Any]] = {}
+        native_output: list[dict[str, Any]] | None = None
         summary_delta_keys: set[tuple[Any, ...]] = set()
         # Responses identifies a streamed output item by item.id/item_id.  A
         # call_id identifies the eventual replay item, not another pending
@@ -505,6 +545,8 @@ class CodexResponsesAdapter(ProviderAdapter):
         async with httpx.AsyncClient(timeout=httpx.Timeout(transport_timeout, connect=30, write=30)) as client:
             async with client.stream("POST", url, json=payload, headers=req_headers) as resp:
                 if resp.is_error:
+                    if native_enabled or safe_errors:
+                        raise NativeCompactionHTTPError(resp.status_code)
                     raw_body = await resp.aread()
                     raise _error_with_body(resp.status_code, raw_body.decode(errors="replace"))
                 aiter = resp.aiter_lines()
@@ -528,17 +570,28 @@ class CodexResponsesAdapter(ProviderAdapter):
                     try:
                         chunk = json.loads(data_str)
                     except Exception:
+                        if native_enabled:
+                            raise NativeCompactionProtocolError("Invalid native compaction stream") from None
                         continue
                     if not isinstance(chunk, dict):
+                        if native_enabled:
+                            raise NativeCompactionProtocolError("Invalid native compaction stream")
                         continue
                     ctype = chunk.get("type")
+                    if native_enabled and not isinstance(ctype, str):
+                        raise NativeCompactionProtocolError("Invalid native compaction stream")
+                    if native_enabled and ctype == "response.completed" and isinstance(chunk.get("response"), dict):
+                        if chunk["response"].get("status") == "incomplete":
+                            ctype = "response.incomplete"
+                    if (native_enabled or safe_errors) and ctype in {"response.failed", "error"}:
+                        raise RuntimeError("chatgpt responses failed")
                     raw_last = chunk
                     if ctype == "response.output_text.delta":
                         delta = chunk.get("delta")
                         if delta:
                             delta_s = str(delta)
                             text_parts.append(delta_s)
-                            if on_delta:
+                            if on_delta and not native_enabled:
                                 try:
                                     on_delta(delta_s)
                                 except Exception:
@@ -551,7 +604,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                         if reasoning_delta:
                             had_thinking = True
                             summary_delta_keys.add(self._summary_key(chunk))
-                        if reasoning_delta and on_thinking_delta:
+                        if reasoning_delta and on_thinking_delta and not native_enabled:
                             try:
                                 on_thinking_delta(reasoning_delta)
                             except Exception:
@@ -562,7 +615,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                         key = self._summary_key(chunk)
                         summary_text = self._summary_text(chunk.get("text"))
                         had_thinking = had_thinking or bool(summary_text)
-                        if summary_text and key not in summary_delta_keys and on_thinking_delta:
+                        if summary_text and key not in summary_delta_keys and on_thinking_delta and not native_enabled:
                             try:
                                 on_thinking_delta(summary_text)
                             except Exception:
@@ -573,7 +626,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                         key = self._summary_key(chunk)
                         summary_text = self._summary_text(chunk.get("part"))
                         had_thinking = had_thinking or bool(summary_text)
-                        if summary_text and key not in summary_delta_keys and on_thinking_delta:
+                        if summary_text and key not in summary_delta_keys and on_thinking_delta and not native_enabled:
                             try:
                                 on_thinking_delta(summary_text)
                             except Exception:
@@ -595,6 +648,11 @@ class CodexResponsesAdapter(ProviderAdapter):
                         # call_id and carries the complete JSON arguments.
                         update_call(chunk, final_arguments=True)
                     elif ctype == "response.output_item.done":
+                        if native_enabled:
+                            index = chunk.get("output_index")
+                            if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index in native_done:
+                                raise NativeCompactionProtocolError("Invalid native compaction stream")
+                            native_done[index] = validate_native_items([chunk.get("item")])[0]
                         item: dict[str, Any] = (
                             chunk["item"] if isinstance(chunk.get("item"), dict) else chunk
                         )
@@ -606,6 +664,24 @@ class CodexResponsesAdapter(ProviderAdapter):
                             finalize_call(item_with_event_ids)
                     elif ctype == "response.completed":
                         response_obj = chunk.get("response") or {}
+                        if native_enabled:
+                            if not isinstance(response_obj, dict) or response_obj.get("status") != "completed":
+                                raise NativeCompactionProtocolError("Native compaction did not complete")
+                            native_output = validate_native_items(response_obj.get("output"))
+                            if set(native_done) != set(range(len(native_output))) or any(
+                                native_output[i] != item for i, item in native_done.items()
+                            ):
+                                raise NativeCompactionProtocolError("Inconsistent native compaction output")
+                            final_text, _, _ = self._extract_output(response_obj)
+                            if text_parts and "".join(text_parts) != final_text:
+                                raise NativeCompactionProtocolError("Inconsistent native compaction text")
+                            text_parts = [final_text] if final_text else []
+                            finalized_calls.clear()
+                            finalized_item_ids.clear()
+                            finalized_call_ids.clear()
+                            call_parts.clear()
+                            item_keys.clear()
+                            output_keys.clear()
                         if not isinstance(response_obj, dict):
                             response_obj = {}
                         u = response_obj.get("usage")
@@ -615,11 +691,14 @@ class CodexResponsesAdapter(ProviderAdapter):
                         stop_reason = status if isinstance(status, str) else None
                         raw_last = response_obj or chunk
                         if stop_reason == "failed":
+                            if native_enabled or safe_errors:
+                                raise RuntimeError("chatgpt responses failed")
                             raise RuntimeError(f"chatgpt responses failed: {response_obj.get('error')}")
                         if stop_reason == "incomplete":
                             details = response_obj.get("incomplete_details")
                             if not isinstance(details, dict) or details.get("reason") != "max_output_tokens":
-                                raise self._incomplete_error(response_obj)
+                                raise (RuntimeError("chatgpt responses incomplete") if native_enabled or safe_errors
+                                       else self._incomplete_error(response_obj))
                             output_truncated = True
                             stop_reason = "max_output_tokens"
                         else:
@@ -634,10 +713,12 @@ class CodexResponsesAdapter(ProviderAdapter):
                     elif ctype == "response.incomplete":
                         response_obj = chunk.get("response") or chunk
                         if not isinstance(response_obj, dict):
-                            raise self._incomplete_error(response_obj)
+                            raise (RuntimeError("chatgpt responses incomplete") if native_enabled or safe_errors
+                                       else self._incomplete_error(response_obj))
                         details = response_obj.get("incomplete_details")
                         if not isinstance(details, dict) or details.get("reason") != "max_output_tokens":
-                            raise self._incomplete_error(response_obj)
+                            raise (RuntimeError("chatgpt responses incomplete") if native_enabled or safe_errors
+                                       else self._incomplete_error(response_obj))
                         u = response_obj.get("usage")
                         if isinstance(u, dict):
                             usage.update(u)
@@ -646,6 +727,11 @@ class CodexResponsesAdapter(ProviderAdapter):
                         stop_reason = "max_output_tokens"
                         break
 
+        if native_enabled:
+            if native_output is None and not output_truncated:
+                raise NativeCompactionProtocolError("Native compaction did not complete")
+            raw_last = sanitize_native_raw(raw_last)
+
         # Never promote unfinished stream accumulators: a function call is
         # executable only after output_item.done or a completed-output fallback.
         if output_truncated and not text_parts:
@@ -653,11 +739,17 @@ class CodexResponsesAdapter(ProviderAdapter):
             if terminal_text:
                 text_parts.append(terminal_text)
         native_calls = [] if output_truncated else finalized_calls
+        if native_enabled and not output_truncated and on_delta and text_parts:
+            try:
+                on_delta("".join(text_parts))
+            except Exception:
+                pass
         return ChatResult(
             text="".join(text_parts), raw=raw_last, usage=usage,
             output_truncated=output_truncated, requested_max_tokens=max_tokens,
             stop_reason=stop_reason, had_thinking=had_thinking, native_tool_calls=native_calls or None,
             had_native_tool_call=bool(native_calls),
+            native_output_items=native_output,
         )
 
     async def list_models(self, api_key: str, headers: dict[str, str] | None = None) -> list[str] | None:

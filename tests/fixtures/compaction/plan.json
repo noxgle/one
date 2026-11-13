@@ -1,0 +1,6 @@
+[
+  {"role":"user","content":"Make a plan"},
+  {"role":"custom","customType":"plan","content":[{"step":"inspect","status":"completed"},{"step":"implement","status":"in_progress"},{"step":"verify","status":"pending"}],"display":false},
+  {"role":"user","content":"Inspect completed"},
+  {"role":"assistant","content":"Implement in progress"}
+]
