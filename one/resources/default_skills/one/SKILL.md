@@ -10,6 +10,9 @@ description: Information about the 'one' autonomous terminal agent (noxgle/one).
 **one** is an autonomous Python terminal agent that executes assigned tasks on its own (shell / files / code) — plan, run tools, verify, report — and can optionally work in a cooperation mode where a human approves mutating tools, steers or aborts mid-task, and answers agent questions. Read the installed version's `one --help` for current CLI options; details here may vary between releases.
 
 - **Repository:** https://github.com/noxgle/one
+- **Documentation:** https://one.noxgle.com/docs/
+- **Quickstart:** https://one.noxgle.com/docs/library/quickstart/
+- **Local-model quickstart:** https://one.noxgle.com/docs/guides/local-first-quickstart/
 - **Language:** Python
 - **Maturity:** Alpha (0.1.x). Public APIs, tool contracts, and storage formats may change in 0.1 releases. Requires Python 3.12 or newer.
 - **Distribution name:** `one-agent` (PyPI); import and console-script name: `one`
@@ -103,7 +106,7 @@ reachable, and Readonly is not a network sandbox.
 - Ctrl+P → **MCP servers** opens a searchable browser with explicit enable/disable buttons and safe details
 - Servers appear in the sidebar with status and tool counts
 
-### Sessions &amp; Configuration
+### Sessions & Configuration
 - Global agent state defaults to `~/.config/one`; `XDG_CONFIG_HOME` changes the default root to `$XDG_CONFIG_HOME/one`, and `ONE_CODING_AGENT_DIR` overrides both. Global `settings.json`, `auth.json`, `models.json`, and saved sessions live under this agent directory.
 - The current project can provide `.one/settings.json`. Supported settings are merged over global settings, with project values taking precedence for those keys; project configuration is feature-specific, not an overlay for every setting or credential. For example, `tui.manualBashMode` is global-only so a repository cannot relax that command-safety setting.
 - Project `.one/settings.json` can configure MCP servers, and project `.one/extensions/` can supply extensions. These may run processes or code with ONE's permissions; only use them in repositories you trust. `--no-mcp` and `--no-extensions` disable those integrations for a run.
@@ -134,6 +137,7 @@ reachable, and Readonly is not a network sandbox.
 - `/paste-image` — Paste image from clipboard
 - `/reload` — Reload skills during active session
 - `/sessions` — List/select sessions; supports `rename` and confirmed `delete` subcommands
+- `/handoff <goal> | <brief>` — Switch to a new isolated session using only user-authored context and the effective preset snapshot; requires an idle session
 
 ### TUI Keyboard Shortcuts
 | Shortcut | Action |
@@ -238,7 +242,7 @@ files. Do not remove local overrides just to force a global value to win.
 
 ## Presets and tool policy
 
-Named presets request a set of capabilities, but requested capabilities are intersected with CLI and parent-agent ceilings and enforced at tool execution, not only during tool discovery. Child agents and refreshed MCP tools cannot exceed those ceilings. Readonly is application policy, not process isolation. Resuming or forking a session restores its saved effective preset snapshot; reapply a preset explicitly to adopt changes to its file. See `docs/PRESETS.md` for preset format and behavior.
+Named presets request a set of capabilities, but requested capabilities are intersected with CLI and parent-agent ceilings and enforced at tool execution, not only during tool discovery. Child agents and refreshed MCP tools cannot exceed those ceilings. Readonly is application policy, not process isolation. Resuming or forking a session restores its saved effective preset snapshot; reapply a preset explicitly to adopt changes to its file. See [Presets](https://one.noxgle.com/docs/library/presets/) for preset format and behavior.
 
 ## Session restoration
 
@@ -250,6 +254,15 @@ edits to the preset file. Explicitly reapply a preset to adopt its file changes.
 Manual overrides can retain the preset identity while marking it modified.
 Use `/state`, `/status`, or the sidebar for current effective state; do not infer
 it solely from global settings or a preset's current contents.
+
+### Isolated handoff
+
+Use `/handoff <goal> | <brief>` in TUI or interactive mode to start a fresh
+session with a bounded, user-authored brief. It preserves the effective preset
+snapshot, but does not copy source history, evidence sidecars or native provider
+state. The brief is user-supplied context, not a verified transcript. Wait until
+the session is idle (or abort active work) before handing off; this is not the
+same as resume, fork or automatic compaction.
 
 ## Tool-use reminders
 
@@ -321,8 +334,69 @@ A: No. Configuration, credentials, and saved sessions are preserved.
 **Q: What's the difference between `one` and `one-agent`?**
 A: `one-agent` is the PyPI distribution name. The import and console-script name is `one`.
 
+## Documentation portal and website maintenance
+
+The published manual is **https://one.noxgle.com/docs/**. In a source checkout,
+canonical English Markdown lives in `website/src/content/docs/`; `docs/*.md`
+are legacy compatibility pointers. Use `guides/` for tasks, `handbook/` for
+usage, `library/` for in-depth articles and `reference/` for inventories. Consult
+`maintainers/migration.md` for explicit audit gaps: generated defaults and schemas
+are not a complete semantic reference. Do not present incomplete contracts as
+fully verified.
+
+Astro + Starlight builds locally; the server receives static HTML, CSS, JavaScript
+and Pagefind search files only. Node.js is not required to install or run ONE.
+For portal development, use Node.js 22.22.1+ and npm 10.8.2+, then from `website/`:
+
+```sh
+npm ci
+npm run dev
+npm run build
+npm run check:links
+npm run preview
+```
+
+Search is indexed in production builds. For the deployed `/docs/` path, build
+with `DOCS_SITE=https://one.noxgle.com DOCS_BASE=/docs/ npm run build` and check
+with `DOCS_BASE=/docs/ npm run check:links`. The checker validates internal links,
+fragments and assets, not external destinations or browser behavior. Keep article
+links relative in Markdown; the build converts them to base-aware portal URLs.
+
+Regenerate CLI/settings/tool inventories from the repo root using isolated state:
+
+```sh
+export ONE_CODING_AGENT_DIR="$(mktemp -d)"
+.venv/bin/python scripts/generate_docs_reference.py
+```
+
+Review and commit generated source Markdown with the corresponding source changes;
+CI checks drift. Do not hand-edit generated reference pages. The environment
+reference is maintained manually. Keep `website/package-lock.json` tracked, but
+not `website/dist/`, `website/node_modules/` or `website/.astro/`.
+
+The separate product landing is `landing_page/index.html`; its update brief is
+`landing_page/prompt.md`. Link Docs to the public portal and Quickstart to
+`/docs/library/quickstart/`, not the old GitHub README/document destinations.
+
+For explicitly authorized publication, `landing_page/deploy.sh` delegates to
+`deploy.py`: `--landing` is the default; `--docs` locally builds/checks then uploads
+only `website/dist/`; `--all` prepares both before upload. `--dry-run` never contacts
+the deployment server, but may install npm dependencies. Use a scratch non-secret
+configuration via `--env-file` for tests, not production credentials. Read
+`website/README.md` and `landing_page/deploy.env.example` for configuration.
+
+FTPS certificate verification is enabled by default. An explicit
+`--allow-self-signed` or `FTP_ALLOW_SELF_SIGNED=true` skips certificate AND hostname
+verification while still requiring TLS; only use after the user accepts this
+risk. Do not silently downgrade to plain FTP or expose `.env` contents. Uploads
+are not atomic and do not delete stale remote files or provide backups. CI builds
+and checks only; it never deploys. Deploy tests must stub subprocess/network calls
+(`tests/test_landing_deploy.py`), not contact production. Public page/asset checks
+after publication are separate from the offline tests.
+
 ## References
 
+- **Documentation:** https://one.noxgle.com/docs/
 - **GitHub:** https://github.com/noxgle/one
 - **PyPI:** https://pypi.org/project/one-agent/
 - **CHANGELOG:** https://github.com/noxgle/one/blob/main/CHANGELOG.md
@@ -332,10 +406,10 @@ A: `one-agent` is the PyPI distribution name. The import and console-script name
 
 Use these for deeper investigation rather than duplicating their full contracts:
 
-- [Presets](https://github.com/noxgle/one/blob/main/docs/PRESETS.md) — capability ceilings and session snapshot restoration.
-- [Model capacity](https://github.com/noxgle/one/blob/main/docs/MODEL_CATALOG.md) — context metadata, generation budgets, and truncated responses.
-- [Skills](https://github.com/noxgle/one/blob/main/docs/SKILLS.md) — discovery, loading, and skill format.
-- [FAQ](https://github.com/noxgle/one/blob/main/docs/FAQ.md) — user troubleshooting.
+- [Presets](https://one.noxgle.com/docs/library/presets/) — capability ceilings and session snapshot restoration.
+- [Model capacity](https://one.noxgle.com/docs/library/model_catalog/) — context metadata, generation budgets, and truncated responses.
+- [Skills](https://one.noxgle.com/docs/library/skills/) — discovery, loading, and skill format.
+- [FAQ](https://one.noxgle.com/docs/library/faq/) — user troubleshooting.
 
 Prefer documentation from the installed version's checkout/tag when available;
-GitHub `main` can describe features newer than the installed package.
+The public portal and GitHub `main` can describe features newer than the installed package.

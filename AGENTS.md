@@ -35,6 +35,10 @@
   `/sessions rename ...`, and `/sessions delete ...`; titles are descriptive only.
   Preserve last-displayed numbering, fresh exact-ID validation, confirmation,
   session sidecars, and stale-listener protection.
+- `/handoff <goal> | <brief>` creates an isolated session with user-authored
+  context and the effective preset snapshot, not copied history/evidence/native
+  state. Preserve idle/source checks and failed-candidate cleanup in
+  `one/core/agent_session_runtime.py`.
 
 ## Safety and state
 
@@ -78,7 +82,7 @@
   contract when changing context handling.
 - Runs and descendants share an opt-in `runBudget`, frozen at run start; legacy
   session `budget` and local tool limits remain separate. Manual compaction is
-  a separate run. See `docs/RUNS.md` and `one/core/run_context.py`,
+  a separate run. See `website/src/content/docs/library/runs.md` and `one/core/run_context.py`,
   `run_usage.py`, `run_pricing.py`, and `run_history.py` before changing
   accounting, admission, cancellation, or inspection. Test the relevant
   `tests/test_run_*.py` modules with fake providers.
@@ -89,12 +93,13 @@
   overrides retain precedence. See `tests/test_tui_commands.py` and
   `tests/test_tui_runtime_boundary.py` for this behavior.
 - Extension hook failures emit `extension_load_error` rather than crashing the
-  session; contract details are in `docs/EXTENSIONS.md`.
+  session; contract details are in `website/src/content/docs/library/extensions.md`.
 
 ## Presets and capability policy
 
 - `one/core/presets.py` strictly loads Markdown with YAML frontmatter;
-  `one/core/tool_policy.py` defines capability ceilings. See `docs/PRESETS.md`
+  `one/core/tool_policy.py` defines capability ceilings. See
+  `website/src/content/docs/library/presets.md`
   and `one/resources/presets/` before changing preset behavior.
 - Preserve reserved `default`/`readonly` IDs, idle-only atomic activation,
   strict schema validation, and rejection of nonempty `sandboxes`. Readonly
@@ -143,6 +148,58 @@
 - POSIX shell/process assumptions are not Windows support. Windows is currently
   best-effort with no Windows CI; Windows 11 compatibility is future work and
   Windows 10 is deferred.
+
+## Documentation portal and landing
+
+- Canonical English documentation is in `website/src/content/docs/`: `guides/`
+  for tasks, `handbook/` for usage, `library/` for in-depth material, `reference/`
+  for inventories, and `maintainers/` for deployment and audit status. `docs/*.md`
+  are compatibility pointers; do not restore parallel article copies there.
+- Read `website/src/content/docs/maintainers/migration.md` and the implementation
+  status near the end of `TODO.md`. Migrated material and generated inventories
+  are not a completed semantic audit; keep explicit coverage gaps truthful.
+- Astro + Starlight is a separate local toolchain, not a Python runtime dependency.
+  Use Node.js 22.22.1+ and npm 10.8.2+. From `website/`: `npm ci`, `npm run dev`,
+  `npm run build`, `npm run check:links`, and `npm run preview`. Production search
+  is indexed during build; verify it in preview, not just dev.
+- For production-path checks, from `website/` run
+  `DOCS_SITE=https://one.noxgle.com DOCS_BASE=/docs/ npm run build`, then
+  `DOCS_BASE=/docs/ npm run check:links`. Repeat the base for preview. The docs CI
+  also checks root hosting and `/one/`; it builds/checks only, never deploys.
+- New article links should use relative Markdown paths. `website/astro.config.mjs`
+  rewrites these into base-aware portal URLs. The built-link checker validates
+  internal URLs, fragments and assets, not external links or browser behavior.
+- Regenerate CLI/settings/tool inventories from the repo root with isolated state:
+  `export ONE_CODING_AGENT_DIR="$(mktemp -d)"` then
+  `.venv/bin/python scripts/generate_docs_reference.py`. Commit reviewed generated
+  Markdown alongside source changes; CI rejects drift. Change the generator rather
+  than hand-editing its output. Environment reference is maintained manually.
+- `landing_page/` is the separate static product page. Its generation/update brief
+  is `landing_page/prompt.md`. Documentation links use
+  `https://one.noxgle.com/docs/`; quickstart uses `/docs/library/quickstart/`,
+  not the old GitHub README/document URLs. Do not rebuild the landing in Astro.
+- Deployment entry point is `landing_page/deploy.sh`, delegating to `deploy.py`.
+  From the repo root, `--landing` (also the default) uploads landing assets;
+  `--docs` locally installs/builds/checks and uploads only static `website/dist/`;
+  `--all` prepares both before uploads. The server needs no Node.js/Python runtime.
+  No real deployment without explicit user authorization.
+- `--dry-run` never contacts the deployment server, but docs builds may contact
+  npm. Use `--env-file` with a scratch, non-secret config for validation rather
+  than reading production `landing_page/.env`. See `deploy.env.example` and
+  `website/README.md`; never print or commit credentials. `PUBLIC_SITE_URL` is
+  the HTTPS origin, separate from `FTP_HOST`; `DOCS_BASE` defaults to `/docs/`
+  and maps to `FTP_DIR/docs/`.
+- FTPS is required by default. Explicit `--allow-self-signed` or
+  `FTP_ALLOW_SELF_SIGNED=true` disables certificate AND hostname verification,
+  warns, and still requires TLS. Use only when the user accepts that risk; never
+  silently enable it or downgrade to `FTP_TLS=false`. Uploads do not delete stale
+  remote files, provide backups, or switch releases atomically; failures may leave
+  a partial site. Verify public pages/assets after authorized publication.
+- Deploy regression tests must stub subprocess/network access. Run
+  `.venv/bin/python -m pytest -q tests/test_landing_deploy.py` with isolated state
+  and `bash -n landing_page/deploy.sh`; do not use production uploads as tests.
+- Ignore generated `website/dist/`, `website/node_modules/` and `website/.astro/`;
+  keep `website/package-lock.json` tracked for reproducible `npm ci`.
 
 ## Releases and user-visible changes
 
