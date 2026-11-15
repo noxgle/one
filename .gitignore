@@ -24,3 +24,8 @@ fix_bugs_idea.txt
 .env
 
 docker-data/
+
+# Documentation toolchain
+website/node_modules/
+website/.astro/
+website/dist/

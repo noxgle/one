@@ -139,3 +139,11 @@ The agent event contract (`tool_call_start/end`, `turn_*`, snapshots in
 ## Questions?
 
 Open an issue or start a discussion on GitHub.
+
+## Documentation portal
+
+Canonical user documentation lives in `website/src/content/docs/`; old `docs/`
+files are compatibility pointers. See [website/README.md](website/README.md) for
+Node requirements, local build/link checks and manual upload. CI never deploys.
+Regenerate the code reference with `scripts/generate_docs_reference.py` using
+a scratch `ONE_CODING_AGENT_DIR`, then review the generated diff.

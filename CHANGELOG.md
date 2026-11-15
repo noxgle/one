@@ -10,6 +10,17 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- Deploy supports explicit `--allow-self-signed` / `FTP_ALLOW_SELF_SIGNED=true`
+  for self-signed FTPS servers, with a warning and TLS still required.
+
+- Manual deploy script supports `--docs`, `--all` and `--dry-run`: builds
+  documentation locally, checks links and uploads static files recursively.
+  Credentials use curl stdin; FTPS is required unless explicitly disabled.
+
+- Static Astro + Starlight documentation portal with migrated manuals, offline
+  reference inventories, link-check CI and local-build/manual-upload instructions.
+  Application behavior is unchanged; version advanced for the user-facing documentation update.
+
 - **Explicit session handoff** — `/handoff <goal> | <brief>` in TUI and
   interactive mode creates and switches to an isolated session with bounded,
   user-authored context. The effective preset snapshot is preserved; history,

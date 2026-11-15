@@ -9,12 +9,43 @@ Before writing code, inspect the repository carefully, especially:
 * README.md
 * CHANGELOG.md
 * pyproject.toml
-* docs/
+* website/src/content/docs/ (canonical documentation source)
+* website/README.md (local build and manual static deployment)
+* docs/ (legacy compatibility pointers, not the canonical articles)
 * relevant CLI/TUI source code
 * existing assets, screenshots, examples, commands, branding, and terminology
 * any existing website or frontend code
 
 Do not invent product capabilities. Everything presented on the website must be supported by the repository.
+
+# Documentation links — canonical destinations
+
+The published documentation portal is **https://one.noxgle.com/docs/**.
+It uses Astro + Starlight; its canonical Markdown sources are in
+`website/src/content/docs/`. The landing page remains a separate static site in
+`landing_page/`; do not replace it with the documentation application.
+
+For every generation or update of the landing page:
+
+* Point the navigation “Docs”, footer “Documentation”, and “Read the docs” CTA
+  to `https://one.noxgle.com/docs/` (or `/docs/` for same-origin links).
+* Point documentation-oriented “Get started” and “Quickstart” links to
+  `https://one.noxgle.com/docs/library/quickstart/`.
+* If offering a separate local-model onboarding link, use
+  `https://one.noxgle.com/docs/guides/local-first-quickstart/`.
+* Do not use `https://github.com/noxgle/one#readme` or
+  `https://github.com/noxgle/one/blob/main/docs/QUICKSTART.md` as documentation
+  destinations. Keep GitHub links for the repository, source, issues, changelog,
+  contributing, security and license where appropriate.
+* Audit existing navigation, hero buttons, onboarding CTAs and footer links;
+  update outdated documentation URLs, not only newly added links.
+* Verify documentation destinations return HTTP 200 and contain the expected
+  article, rather than a soft-404 page. Do not claim browser checks unless run.
+
+The documentation is compiled locally to `website/dist/`. Only the generated
+static files are uploaded to the server; no server-side Astro/Node.js/Python
+runtime is required. Updating landing links does not require rebuilding or
+redeploying the portal.
 
 # Existing website handling
 
@@ -849,7 +880,7 @@ Buttons:
 Include:
 
 * GitHub
-* Documentation / README
+* Documentation → `https://one.noxgle.com/docs/`
 * Changelog
 * Contributing
 * Security
@@ -1115,13 +1146,22 @@ If any answer is “no”, improve it before finishing.
 
 After implementation is complete and all changes are verified:
 
-1. Run the deployment script from the `landing_page` directory:
+1. For a landing-only update, run the deployment script from the repository root:
 
    ```bash
-   ./landing_page/deploy.sh
+   ./landing_page/deploy.sh --landing
    ```
 
-2. The script reads credentials from `landing_page/.env` and uploads all landing page files to the server.
+2. The script reads credentials from ignored `landing_page/.env` and uploads only
+   the selected static landing assets. Never print credentials or include `.env`
+   in uploads. See `website/README.md` and `landing_page/deploy.env.example` for
+   configuration and transport requirements. Do not silently disable TLS
+   certificate verification or downgrade transport.
+
+   Only when documentation content also changed and its publication is requested,
+   use `--docs` (documentation only) or `--all` (both). Those options build the
+   portal locally, check links, then upload static `website/dist/` files.
+   `--dry-run` prepares and lists files without contacting the deployment server.
 
 3. Verify the deployed page loads correctly at `https://one.noxgle.com/`:
 
@@ -1129,6 +1169,10 @@ After implementation is complete and all changes are verified:
    curl -sI https://one.noxgle.com/
    ```
 
-4. Confirm the response returns `HTTP/1.1 200 OK` and the `Last-Modified` timestamp reflects the latest changes.
+4. Confirm an HTTP 200 response (HTTP/1.1, HTTP/2 or HTTP/3), verify the deployed
+   content reflects the update, and check the landing's documentation links:
+   `https://one.noxgle.com/docs/` and
+   `https://one.noxgle.com/docs/library/quickstart/`. Do not rely solely on a
+   `Last-Modified` header to prove the correct content was deployed.
 
 5. Report whether the deployment was successful in the final task report.

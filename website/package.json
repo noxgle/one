@@ -1,0 +1,20 @@
+{
+  "name": "one-documentation",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.1"
+  },
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1",
+    "build": "astro build",
+    "preview": "astro preview --host 127.0.0.1",
+    "check:links": "node scripts/check-links.mjs"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "^7.3.9",
+    "@astrojs/starlight": "0.43.1",
+    "astro": "7.4.12",
+    "sharp": "0.35.5"
+  }
+}
