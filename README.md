@@ -2,6 +2,8 @@
 
 ![ONE terminal agent](one.png)
 
+[Website](https://one.noxgle.com/) · [Documentation](https://one.noxgle.com/docs/)
+
 ## Why ONE?
 
 I believe the future of AI is **local-first**.
@@ -44,8 +46,9 @@ For hosted providers, configure authentication before running a task. Follow the
 
 ## Documentation
 
-The **[documentation portal](website/src/content/docs/index.md)** is the canonical
-manual. It includes:
+The **[documentation portal](https://one.noxgle.com/docs/)** is the canonical
+manual. Its [Markdown sources](website/src/content/docs/index.md) are maintained
+in this repository. It includes:
 
 - [Installation](website/src/content/docs/handbook/installation.md) and
   [updates](website/src/content/docs/handbook/updating.md)
