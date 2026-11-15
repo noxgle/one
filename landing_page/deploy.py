@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Build documentation locally and upload static files; never execute .env content."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import argparse

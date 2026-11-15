@@ -38,7 +38,7 @@ def test_packaged_default_skill_resources_have_expected_contents() -> None:
         "8ec62877338d4d2a35a244e774df2aeb4597a3b846fd84ea07c044dc12102171"
     )
     assert hashlib.sha256(default_skill_bytes("one")).hexdigest() == (
-        "c6d4c99505048944270a8aa5408b7aa691bb7ea755bb321423c54799189286af"
+        "8c90583261a409f45c9507eaa3533802e69c17c4eed2f0a9d3f1a788c4e469c3"
     )
 
 

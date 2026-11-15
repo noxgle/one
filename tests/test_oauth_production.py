@@ -153,13 +153,15 @@ class TestCodexToSViolations:
 
 
 class TestREADMENoExperimental:
-    """Verify README does not label OAuth as experimental."""
+    """Verify the canonical provider guide documents supported OAuth login."""
 
     def test_readme_no_experimental_oauth(self) -> None:
-        readme_path = Path(__file__).resolve().parent.parent / "README.md"
+        readme_path = (Path(__file__).resolve().parent.parent
+                       / "website/src/content/docs/handbook/providers-and-authentication.md")
         content = readme_path.read_text(encoding="utf-8").lower()
-        # The README should NOT mention OAuth as experimental
-        assert "experimental" not in content or "extension" in content  # extensions hook name is fine
+        # Scope the assertion to OAuth; temperature has an unrelated experimental mode.
+        oauth_section = content.split("### subscription login (oauth)", 1)[1]
+        assert "experimental" not in oauth_section
         # Subscription login should be documented as a feature
         assert "subscription" in content
         assert "oauth" in content

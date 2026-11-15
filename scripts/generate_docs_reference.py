@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Generate offline reference inventories; run from any directory with project Python."""
+# Copyright (c) 2026 picon
+# SPDX-License-Identifier: MIT
+# Source: https://github.com/noxgle/one
 from __future__ import annotations
 
 import ast

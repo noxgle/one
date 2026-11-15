@@ -10,11 +10,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 LOGO_PATH = ROOT / "one" / "assets" / "logo.txt"
 DOC_LOGO_LINKS = {
-    ROOT / "README.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
-    ROOT / "docs" / "architecture.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
-    ROOT / "docs" / "RELEASE_CHECKLIST.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
-    ROOT / "docs" / "SKILLS.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
-    ROOT / "docs" / "EXTENSIONS.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
+    ROOT / "website/src/content/docs/library" / "architecture.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
+    ROOT / "website/src/content/docs/library" / "release_checklist.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
+    ROOT / "website/src/content/docs/library" / "skills.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
+    ROOT / "website/src/content/docs/library" / "extensions.md": "https://github.com/noxgle/one/blob/main/one/assets/logo.txt",
 }
 
 
