@@ -2,7 +2,17 @@
 
 ![ONE terminal agent](one.png)
 
-**Your hardware. Your models. Your rules.** ONE is a local-first autonomous
+## Why ONE?
+
+I believe the future of AI is **local-first**.
+
+- **Local-first.** Most everyday AI tasks should run on your own hardware.
+- **You decide.** Local, cloud, or hybrid — the choice is yours.
+- **The future is local.** Local models will power the future of everyday work.
+
+**Your hardware. Your models. Your rules.**
+
+ONE is a local-first autonomous
 Python terminal agent: TUI, one-shot text/JSON, headless tasks and JSON-lines RPC.
 Use Ollama or llama.cpp locally, hosted providers, or a hybrid setup.
 
