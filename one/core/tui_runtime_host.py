@@ -560,6 +560,8 @@ class TuiRuntimeHost:
             return await self.approval_resolve(**payload)
         if command == "switch_session" and set(payload) == {"path", "id"}:
             return await self.switch_session(payload["path"], payload["id"])
+        if command == "handoff" and set(payload) == {"goal", "brief", "epoch"}:
+            return await self.handoff(**payload)
         if command == "new_session" and not payload:
             return await self.new_session()
         if command == "session_list" and not payload:
@@ -1122,6 +1124,17 @@ class TuiRuntimeHost:
             raise ValueError("Session from the last /sessions list is no longer available. Run /sessions again.")
         self._close_waits("Session changed")
         await self._host.switch_session(path)
+        self._epoch += 1
+        self._bind_session_events()
+        self._bind_monitor()
+        return self._snapshot()
+
+    async def handoff(self, goal: str, brief: str, epoch: int) -> dict[str, Any]:
+        if type(epoch) is not int or epoch != self._epoch:
+            raise ValueError("Session changed. Retry handoff in the current session.")
+        await self._host.handoff(goal, brief)
+        self._close_waits("Session changed")
+        self._sidebar_expensive = None
         self._epoch += 1
         self._bind_session_events()
         self._bind_monitor()
@@ -1944,6 +1957,7 @@ TUI_COMMANDS = frozenset(
         "approval_resolve",
         "switch_session",
         "new_session",
+        "handoff",
         "session_list",
         "session_list_page",
         "ui",

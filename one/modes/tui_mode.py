@@ -1037,6 +1037,7 @@ _SLASH_COMMANDS: tuple[str, ...] = (
     "/tree",
     "/navigate",
     "/fork",
+    "/handoff",
     "/new",
     "/sessions",
     "/checkpoints",
@@ -6245,7 +6246,7 @@ if TEXTUAL_AVAILABLE:
                     "info",
                 )
                 self._write(
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /sessions [number|full ID] | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>",
+                    "/steer <text> | /follow <text> | /compact [instructions] | /handoff <goal> | <brief> | /tree | /navigate <id> [--summary <text>] | /fork <id> | /new | /sessions [number|full ID] | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>",
                     "info",
                 )
                 self._write(
@@ -6841,6 +6842,35 @@ if TEXTUAL_AVAILABLE:
                     self._write(json.dumps(result, ensure_ascii=False), "info")
                 except ValueError as e:
                     self._write(str(e), "error")
+                self._refresh_sidebar()
+                return
+            if cmd == "/handoff" or cmd.startswith("/handoff "):
+                from one.core.agent_session_runtime import parse_handoff
+
+                try:
+                    goal, brief = parse_handoff(cmd[len("/handoff"):].strip())
+                    if self.runtime_host is None:
+                        raise ValueError("Runtime host unavailable: /handoff is not supported in this context.")
+                    if isinstance(self.session, TuiSessionView):
+                        await self.session.command("handoff", goal=goal, brief=brief, epoch=self.session.epoch)
+                    else:
+                        await self.runtime_host.handoff(goal, brief)
+                        self.session = self.runtime_host.session
+                    self._prepare_session_change()
+                    self._bind_session()
+                    self._invalidate_session_list_snapshot()
+                    self._stream_lines = []
+                    self._stream_front_trim_pending = 0
+                    self._reset_turn_timing()
+                    self._assistant_has_live_delta = False
+                    self._assistant_live_start_idx = -1
+                    self._assistant_live_buffer = ""
+                    self._assistant_live_line_count = 0
+                    self._clear_extension_ui_state()
+                    self._write("Handoff session started. Brief saved; send a message to begin. Original session unchanged.", "info")
+                    self._render_stream()
+                except ValueError as exc:
+                    self._write(str(exc), "error")
                 self._refresh_sidebar()
                 return
             if cmd == "/new":
@@ -8682,7 +8712,7 @@ if TEXTUAL_AVAILABLE:
 
         def action_help(self) -> None:
             self._write(
-                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /preset [id] /theme /queue /steer /follow /compact /tree /navigate /fork /new /sessions [number|full ID] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /agents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
+                "/help /stats /state /status /tools /model /model-cycle /providers /thinking /thinking-cycle /temperature [value|mode] /preset [id] /theme /queue /steer /follow /compact /handoff /tree /navigate /fork /new /sessions [number|full ID] /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] /logout /reload /retry /retry-cycle /skill [list] /skill:<name> [args] /config /extui /cooperation /subagents /agents /details-show /history /mcp /bash /paste-image /abort /clear /exit",
                 "info",
             )
 

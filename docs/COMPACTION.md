@@ -33,6 +33,50 @@ The legacy `compaction.last.summary` statistic is used by existing consumers;
 it contains session content and must not be treated as sanitized telemetry.
 Any new metrics should contain only bounded, non-content metadata.
 
+## Explicit handoff (not compaction)
+
+TUI and interactive mode support an intentionally user-authored handoff:
+
+```text
+/handoff Finish parser tests | Parser changes are ready. Run the focused tests and review error handling.
+```
+
+The first literal ` | ` separates the goal from the brief; subsequent separators
+belong to the brief. Both fields are required. The trimmed goal is limited to
+2,000 Unicode characters and the brief to 12,000; oversized input is rejected,
+not silently truncated. Invoking the complete command explicitly requests the
+new session and switch; a bare `/handoff` displays usage without changing state.
+No provider call or automatic summarization occurs. The brief is saved as a
+user message; send another message to start work. Review the brief before
+submitting it: anything included explicitly will be available to the new session.
+
+- The source JSONL/history is not modified. This is neither `/compact` (same
+  session) nor `/fork` (copies branch history). Persistent source sessions remain
+  selectable through `/sessions`; an in-memory source has no durable resume file.
+- A fresh session ID and provider/cache lineage are created. Only the supplied
+  goal/brief and effective preset snapshot (including manual overrides, model,
+  temperature, thinking and capability ceilings) transfer. Preset files are not
+  reapplied. Runtime/CLI ceilings still intersect saved permissions. The implicit
+  default preset is snapshotted too, so manual restrictions are not lost.
+- A non-message `handoff` provenance entry records version 1, source session ID
+  and leaf ID, `briefSource: user`, `presetPolicy: effective_snapshot`, and
+  `nativeStateTransferred: false`. The context message identifies the brief as
+  user-supplied, not a verified transcript.
+- Source messages, evidence sidecars, images, plans, queues, run history,
+  compaction checkpoints and provider-private/native opaque state are not copied.
+  Workspace files, configuration and extension/MCP infrastructure remain shared;
+  handoff is session-context isolation, not a filesystem or process sandbox.
+- Handoff requires an idle source (no streaming or compaction). Detached TUI
+  requests are bound to the current session epoch. A failed or cancelled build
+  keeps the old session/listeners active and deletes the unfinished candidate.
+  The fully constructed replacement is the commit point: cancellation during
+  predecessor disposal does not report a failed switch or leave the UI bound to
+  the old session. A completed switch can be reversed with `/sessions`.
+
+Offline coverage: `tests/test_handoff.py`, the handoff cases in
+`tests/test_interactive_mode.py`, `tests/test_tui_commands.py`, and
+`tests/test_tui_runtime_boundary.py` (threaded facade/owner-loop path).
+
 ## P0 settings and telemetry
 
 The normalized `compaction` settings expose `experimentalV2` (default false),

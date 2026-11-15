@@ -1185,3 +1185,27 @@ async def test_interactive_mcp_disable_unknown_server_does_not_persist(monkeypat
     await mode.run()
     assert "No running server named 'ghost'." in capsys.readouterr().out
     assert "ghost" not in session.settings_manager.get_mcp_servers()
+
+
+@pytest.mark.asyncio
+async def test_interactive_handoff_validation_and_switch(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    original = _DummySession()
+    replacement = _DummySession()
+    seen = []
+    host = SimpleNamespace(session=original)
+
+    async def handoff(goal, brief):
+        seen.append((goal, brief))
+        host.session = replacement
+        return {"cancelled": False}
+
+    host.handoff = handoff
+    monkeypatch.setattr("builtins.input", _mk_input(["/handoff", "/handoff goal | brief", "/exit"]))
+    await InteractiveMode(host).run()
+    out = capsys.readouterr().out
+    assert "Usage: /handoff" in out
+    assert "Original session unchanged" in out
+    assert seen == [("goal", "brief")]
+    assert host.session is replacement

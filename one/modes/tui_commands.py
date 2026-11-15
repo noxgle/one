@@ -40,6 +40,7 @@ def command_actions(state: dict) -> list[CommandAction]:
     return [
         CommandAction("sessions", "Sessions", "Browse and switch sessions.", "Session", "", "/sessions", ("sesje",), supports_sessions, sessions_reason if not supports_sessions else ""),
         CommandAction("new", "New session", "Start a new session.", "Session", "", "/new", ("nowa", "nowy"), not streaming, streaming_reason if streaming else ""),
+        CommandAction("handoff", "Handoff", "New session: /handoff <goal> | <brief>; original unchanged.", "Session", "", "/handoff", ("transfer",), supports_sessions and not streaming, streaming_reason if streaming else sessions_reason if not supports_sessions else ""),
         CommandAction("stats", "Session statistics", "Show statistics for this session.", "Session", "", "/stats", ("statystyki",)),
         CommandAction("history", "Session history", "Show this session's history.", "Session", "", "/history", ("historia",)),
         CommandAction("model", "Select model", "Choose the model used by the agent.", "Model & agent", "Ctrl+K", "/model", ("model",), not streaming, streaming_reason if streaming else ""),

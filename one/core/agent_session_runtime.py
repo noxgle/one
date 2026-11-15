@@ -3,7 +3,9 @@
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import asyncio
 import logging
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -244,7 +246,8 @@ class AgentSessionRuntimeHost:
         return self._runtime.session
 
     async def _replace(
-        self, session_manager: SessionManager, cwd: str | None = None, *, fresh_session: bool = False
+        self, session_manager: SessionManager, cwd: str | None = None, *, fresh_session: bool = False,
+        handoff_source: AgentSession | None = None
     ) -> dict[str, Any]:
         old_runtime = self._runtime
         try:
@@ -265,8 +268,19 @@ class AgentSessionRuntimeHost:
             manager = self._bootstrap.get("mcpManager")
             set_callback = getattr(manager, "set_tools_changed_callback", None)
             if callable(set_callback):
-                set_callback(old_runtime.session.sync_mcp_tools)
+                set_callback(self.session.sync_mcp_tools)
             raise
+        if handoff_source is not None and (
+            self.session is not handoff_source or handoff_source.is_streaming or handoff_source.is_compacting
+        ):
+            try:
+                await runtime.session.dispose()
+            finally:
+                manager = self._bootstrap.get("mcpManager")
+                set_callback = getattr(manager, "set_tools_changed_callback", None)
+                if callable(set_callback):
+                    set_callback(self.session.sync_mcp_tools)
+            raise ValueError("Session changed or became busy. Retry handoff when idle.")
         # Publish only a fully constructed replacement.  If construction fails
         # the old listener and session remain usable.  The MCP manager is a
         # shared worker resource and AgentSession.dispose deliberately does not
@@ -274,6 +288,12 @@ class AgentSessionRuntimeHost:
         self._runtime = runtime
         try:
             await old_runtime.session.dispose()
+        except asyncio.CancelledError:
+            if handoff_source is None:
+                raise
+            # Publication is the commit point: callers must rebind even if
+            # cancellation arrives while disposing the predecessor.
+            pass
         except Exception:
             # The replacement is already authoritative.  Do not report it as
             # failed after publishing the pointer: that would leave the TUI
@@ -299,6 +319,41 @@ class AgentSessionRuntimeHost:
             manager.get_header()["parentSession"] = options["parentSession"]
             manager._rewrite()  # noqa: SLF001
         return await self._replace(manager, fresh_session=True)
+
+    async def handoff(self, goal: str, brief: str) -> dict[str, Any]:
+        """Transfer only user-supplied text and effective preset, never history."""
+        goal, brief = validate_handoff(goal, brief)
+        source = self.session
+        if source.is_streaming or source.is_compacting:
+            raise ValueError("Handoff requires an idle session. Abort or wait, then retry.")
+        current = self._runtime.session_manager
+        manager = (
+            SessionManager.create(current.cwd, current.session_dir)
+            if current.session_file else SessionManager.in_memory(current.cwd)
+        )
+        try:
+            preset = source._preset or discover_presets(_resolve_runtime_agent_dir(self._bootstrap))["default"]
+            manager.append_preset_state(deepcopy(source._preset_state(
+                preset, source.model, source.temperature, source.thinking_level,
+                source._base_tools, source._tool_policy,
+            )))
+            manager.append_custom("handoff", {
+                "version": 1, "sourceSessionId": current.get_header()["id"],
+                "sourceLeafId": current.get_leaf_id(), "briefSource": "user",
+                "presetPolicy": "effective_snapshot", "nativeStateTransferred": False,
+            })
+            manager.append_message({"role": "user", "content": (
+                "Handoff to a new session. The following brief is user-supplied context, "
+                "not a verified transcript. No source history or native state was transferred.\n\n"
+                f"Goal:\n{goal}\n\nBrief:\n{brief}"
+            )})
+            await self._replace(manager, handoff_source=source)
+        except BaseException:
+            if self._runtime.session_manager is not manager and manager.session_file and Path(manager.session_file).exists():
+                SessionManager.delete(manager.session_file, manager.session_dir)
+            raise
+        return {"cancelled": False, "sourceSessionId": current.get_header()["id"],
+                "sessionId": manager.get_header()["id"], "briefSource": "user"}
 
     async def switch_session(self, session_path: str) -> dict[str, Any]:
         manager = SessionManager.open(session_path, self._runtime.session_manager.session_dir)
@@ -326,3 +381,20 @@ class AgentSessionRuntimeHost:
 
     async def dispose(self) -> None:
         await self._runtime.session.dispose()
+
+
+def validate_handoff(goal: str, brief: str) -> tuple[str, str]:
+    """Hard character caps; reject rather than silently truncate user intent."""
+    if not isinstance(goal, str) or not isinstance(brief, str):
+        raise ValueError("Handoff goal and brief must be text.")
+    goal, brief = goal.strip(), brief.strip()
+    if not goal or not brief or len(goal) > 2000 or len(brief) > 12000:
+        raise ValueError("Handoff requires a goal (1–2000 characters) and brief (1–12000 characters).")
+    return goal, brief
+
+
+def parse_handoff(text: str) -> tuple[str, str]:
+    goal, separator, brief = text.partition(" | ")
+    if not separator:
+        raise ValueError("Usage: /handoff <goal> | <brief> (creates and switches to a new session; no model call)")
+    return validate_handoff(goal, brief)

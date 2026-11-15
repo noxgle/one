@@ -1851,3 +1851,21 @@ async def test_theme_cybertrunk_handle_command_persists(tmp_path: Path) -> None:
         # Verify the command wrote the confirmation message
         output = "\n".join(app._stream_lines)
         assert "Theme set to cybertrunk" in output
+
+
+@pytest.mark.asyncio
+async def test_handoff_command_validation_and_session_rebind(tmp_path):
+    from tests.test_handoff import make_host
+
+    host = make_host(tmp_path)
+    source = host.session
+    app = _OneTextualApp(source, runtime_host=host)
+    async with app.run_test() as pilot:
+        await _submit(app, pilot, "/handoff")
+        assert app.session is source
+        assert "Usage: /handoff" in "\n".join(app._stream_lines)
+        await _submit(app, pilot, "/handoff goal | brief")
+        assert app.session is host.session and app.session is not source
+        assert "Original session unchanged" in "\n".join(app._stream_lines)
+        assert "Usage: /handoff" not in "\n".join(app._stream_lines)
+    await host.dispose()

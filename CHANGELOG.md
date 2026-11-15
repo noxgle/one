@@ -10,6 +10,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Explicit session handoff** — `/handoff <goal> | <brief>` in TUI and
+  interactive mode creates and switches to an isolated session with bounded,
+  user-authored context. The effective preset snapshot is preserved; history,
+  evidence and native opaque state are not copied. Failed or cancelled
+  construction leaves the source active and removes the candidate session.
+
 - **Cybertrunk TUI theme** — a high-contrast dark palette with cyan, yellow, and magenta accents (`/theme cybertrunk`).
 - Compaction summary failures are recorded as bounded, content-free reason codes
   and included in session statistics; legacy placeholder behavior is unchanged. Additive

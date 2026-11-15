@@ -21,7 +21,7 @@ def test_catalog_contains_ordered_actions_and_categories() -> None:
     actions = command_actions({})
 
     assert [action.id for action in actions] == [
-        "sessions", "new", "stats", "history", "model", "preset", "thinking", "temperature", "agents",
+        "sessions", "new", "handoff", "stats", "history", "model", "preset", "thinking", "temperature", "agents",
         "cooperation", "subagents", "details", "mcp", "theme", "layout", "sidebar", "shortcuts", "help",
         "clear", "quit",
     ]
@@ -31,7 +31,7 @@ def test_catalog_contains_ordered_actions_and_categories() -> None:
     )
     assert {action.category for action in actions} == {"Session", "Model & agent", "Tools & access", "Appearance", "Help"}
     assert {action.command for action in actions if action.command} == {
-        "/sessions", "/new", "/stats", "/history", "/model", "/thinking", "/temperature", "/cooperation", "/mcp", "/layout", "/sidebar", "/help",
+        "/sessions", "/new", "/handoff", "/stats", "/history", "/model", "/thinking", "/temperature", "/cooperation", "/mcp", "/layout", "/sidebar", "/help",
     }
 
 
@@ -45,7 +45,7 @@ def test_catalog_state_controls_disabled_and_toggle_actions() -> None:
         "supports_sessions": False,
     })}
 
-    for action_id in ("new", "model", "preset"):
+    for action_id in ("new", "handoff", "model", "preset"):
         assert actions[action_id].enabled is False
         assert actions[action_id].disabled_reason == "Unavailable while the agent is streaming."
     assert actions["sessions"].enabled is False

@@ -163,7 +163,8 @@ Status bramki offline: rodzic wykonał pełny pytest: 3506 passed, 2 skipped, 74
 ### Opcjonalne rozszerzenia — nie blokują P0–P5
 **Nakład / pewność:** każde M–L / niska; wymagają osobnej decyzji produktowej przed implementacją.
 
-- [ ] **T013 — Zaprojektować i dodać oddzielny /handoff**
+- [x] **T013 — Zaprojektować i dodać oddzielny /handoff**
+  - Status: wdrożono `/handoff <goal> | <brief>` w TUI i interactive; brief użytkownika, snapshot efektywnego presetu, izolacja native/history i transakcyjne przełączenie.
   - Zmiany: jawnie nowa sesja z bounded briefem i celem, bez zastępowania kompaktacji; potwierdzić UX, provenance, politykę przenoszenia presetów i brak automatycznego przenoszenia native opaque state.
   - Pliki: `one/core/agent_session_runtime.py`, `one/core/tui_runtime_host.py`, `one/core/agent_runtime_facade.py`, `one/modes/tui_commands.py`, `one/modes/interactive_mode.py`, `tests/test_tui_commands.py`, `tests/test_tui_runtime_boundary.py`, `docs/COMPACTION.md`.
   - Zależności: T009.

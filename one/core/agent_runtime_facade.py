@@ -403,6 +403,9 @@ class AgentRuntimeFacade:
                 self._epoch = result["epoch"]
         return reply
 
+    async def handoff(self, goal: str, brief: str, epoch: int) -> dict[str, Any]:
+        return await self.command("handoff", {"goal": goal, "brief": brief, "epoch": epoch})
+
     async def list_checkpoints(self, epoch: int) -> dict[str, Any]:
         return await self.command("checkpoints", {"action": "list", "epoch": epoch})
 

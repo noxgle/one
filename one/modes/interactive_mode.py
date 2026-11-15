@@ -551,7 +551,7 @@ class InteractiveMode:
                     "/exit /quit | /help | /stats | /state /status | /queue | /tools | /clear | /abort | /new\n"
                     "/model [provider/model] | /model-cycle | /providers [number|name [model-number|id]] | /thinking [level] | /thinking-cycle | /theme [name]\n"
                     "/preset [id] (list or apply an idle-time named preset)\n"
-                    "/steer <text> | /follow <text> | /compact [instructions] | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>\n"
+                    "/steer <text> | /follow <text> | /compact [instructions] | /handoff <goal> | <brief> | /tree | /navigate <id> [--summary <text>] | /fork <id> | /login [status|refresh <provider>|provider [apiKey] [model] [subscription]] | /logout <provider>\n"
                     "/retry <on|off|unlimited> | /retry-cycle | /config [key] [value] | /extui <list|request|respond|cancel|clear>\n"
                     "/cooperation [on|off] | /subagents [on|off] | /details-show [on|off] | /history [n] | /mcp [list|enable|disable] | /bash <command>\n"
                     "/inspect-timeout | /reload | /skill:<name> [args] (list with /skill: alone)\n"
@@ -844,6 +844,19 @@ class InteractiveMode:
                     print(json.dumps(result, ensure_ascii=False, indent=2))
                 except ValueError as e:
                     print(str(e))
+                continue
+            if line == "/handoff" or line.startswith("/handoff "):
+                from one.core.agent_session_runtime import parse_handoff
+
+                try:
+                    goal, brief = parse_handoff(line[len("/handoff"):].strip())
+                    result = await self.runtime_host.handoff(goal, brief)
+                    session = self.runtime_host.session
+                    session.subscribe(on_event)
+                    print("Handoff session started. Brief saved; send a message to begin. Original session unchanged.")
+                    print(json.dumps(result, ensure_ascii=False))
+                except ValueError as exc:
+                    print(str(exc))
                 continue
             if line.strip() == "/new":
                 result = await self.runtime_host.new_session({})

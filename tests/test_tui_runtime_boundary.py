@@ -2472,3 +2472,43 @@ async def test_agent_link_detached_response_races(outcome: str) -> None:
         await pilot.pause()
         assert app._agents_panel_open is (outcome == "open")
         assert app._selected_agent_id == ("child" if outcome == "open" else None)
+
+
+@pytest.mark.asyncio
+async def test_detached_handoff_facade_owner_loop_and_stale_epoch(tmp_path):
+    from one.modes.tui_mode import _OneTextualApp
+    from tests.support.tui import _submit
+    from tests.test_handoff import make_host
+
+    calls = []
+
+    async def factory(_spec):
+        host = make_host(tmp_path)
+        original = host.handoff
+
+        async def handoff(goal, brief):
+            calls.append(threading.get_ident())
+            return await original(goal, brief)
+
+        host.handoff = handoff
+        return TuiRuntimeHost(host, None)
+
+    facade = AgentRuntimeFacade(
+        RuntimeBootstrapSpec(cwd=str(tmp_path), agent_dir=str(tmp_path / "agent")),
+        factory, command_allowlist=TUI_COMMANDS,
+    )
+    await facade.start()
+    view = TuiSessionView(facade)
+    await view.refresh()
+    app = _OneTextualApp(view, runtime_host=object())
+    try:
+        async with app.run_test() as pilot:
+            await _submit(app, pilot, "/handoff goal | brief")
+            assert view.epoch == 1
+            assert "Original session unchanged" in "\n".join(app._stream_lines)
+            assert calls and calls[0] != threading.get_ident()
+            with pytest.raises(ValueError, match="Session changed"):
+                await facade.handoff("stale", "brief", 0)
+            assert view.epoch == 1
+    finally:
+        await facade.close()
