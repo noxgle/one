@@ -9,8 +9,9 @@ without arguments ONE normally starts its TUI, so use an interactive terminal.
 **Linux**, from the repository root:
 
 ```bash
-mkdir -p docker-data/config docker-data/workspace
-cp .env.example .env
+mkdir -p docker-data/workspace
+install -d -m 700 docker-data/config
+[ -e .env ] || (umask 077; cp .env.example .env)
 export ONE_UID="$(id -u)" ONE_GID="$(id -g)"
 docker compose build
 docker compose run --rm one
@@ -62,7 +63,7 @@ with the WSL2 backend (no host shell script required):
 
 ```powershell
 New-Item -ItemType Directory -Force docker-data/config, docker-data/workspace
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose build
 docker compose run --rm one
 docker compose run --rm -T one --version
@@ -155,3 +156,34 @@ with the agent's permissions; `--no-extensions --no-mcp` disables them for
 untrusted projects. A container and non-root UID are not a complete sandbox:
 avoid mounting sensitive directories, the Docker socket, or credentials that
 are not needed. Network access and provider costs remain possible.
+
+## Image releases and maintenance
+
+The container release workflow publishes `ghcr.io/noxgle/one` on version tags
+only after the package release succeeds and Docker smoke tests pass. Until the
+first successful workflow run, build locally; do not assume a tag already exists.
+Published tags are the full version (`0.1.x`), Git commit (`sha-...`), and `latest`.
+Only Linux amd64 is enabled; ARM64 and Windows are not validated. GHCR package
+visibility must be configured by a repository administrator for anonymous pulls.
+To use a published version directly, replace `one-agent:local` in the direct
+Docker command above with `ghcr.io/noxgle/one:VERSION`. Keep the same mounts,
+UID/GID, and provider environment. Pin a version or digest instead of `latest`
+when repeatable deployments matter.
+
+The Dockerfile pins the Python image's multi-platform index digest and uses
+`docker/constraints.txt` for all Python runtime dependencies. PyPI installation
+outside Docker is not constrained by this file. Debian apt repositories and
+build tools are not frozen, so this is not a bit-for-bit reproducible build.
+For updates, review a new Python image digest with `docker buildx imagetools
+inspect python:3.12-slim`. Regenerate constraints in a disposable Python 3.12
+container by installing this package without the old constraints and running
+`python -m pip freeze --exclude one-agent`. Review the full dependency diff,
+then run `scripts/test-docker.sh` and the test suite before accepting updates.
+The release workflow attaches SBOM/provenance and scans the candidate image;
+HIGH/CRITICAL findings block publication and require an update, not a silent bypass.
+
+Use `docker compose run --rm one` for the interactive application. There is no
+automatic restart policy: `docker compose up` is not the recommended TUI workflow.
+An arbitrary numeric UID may lack an `/etc/passwd` entry, which some external
+programs require even though ONE's configured HOME works. Test such integrations
+with your chosen UID; do not switch to root just to hide permission problems.

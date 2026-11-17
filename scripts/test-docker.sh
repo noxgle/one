@@ -63,4 +63,9 @@ assert pathlib.Path(os.environ["ONE_CODING_AGENT_DIR"], "persist-test").read_tex
 assert pathlib.Path("workspace-test").read_text() == "workspace"
 '
 [ "$(stat -c %u:%g "$tmp/docker-data/workspace/workspace-test")" = "$ONE_UID:$ONE_GID" ]
+# Run the harness against the installed image, without external networking.
+docker run --rm --network none --user "$ONE_UID:$ONE_GID" \
+    -v "$tmp/docker-data/config:/config" -v "$tmp/docker-data/workspace:/workspace" \
+    -v "$root/scripts/docker_smoke.py:/docker_smoke.py:ro" \
+    --entrypoint python "$image" /docker_smoke.py
 echo 'Docker smoke tests passed'

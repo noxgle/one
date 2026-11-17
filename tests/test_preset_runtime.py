@@ -368,8 +368,7 @@ async def test_rpc_set_preset_keeps_correlation_id_separate(tmp_path: Path, monk
             raise EOFError from None
 
     monkeypatch.setattr(builtins, "input", fake_input)
-    with pytest.raises(EOFError):
-        await run_rpc_mode(_Host(session))
+    await run_rpc_mode(_Host(session))
     responses = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [(item["id"], item["success"]) for item in responses] == [(42, True), ("corr", True), ("missing", False)]
     assert session.preset_id == "default"

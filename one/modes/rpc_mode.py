@@ -84,10 +84,10 @@ async def run_rpc_mode(runtime_host: Any, initial_images: list[dict[str, Any]] |
         try:
             line = await asyncio.to_thread(input)
         except EOFError:
-            # Test and pipe EOF must not drop already accepted wait responses.
+            # Pipe EOF must not drop already accepted wait responses.
             if wait_tasks:
                 await finish_wait_tasks()
-            raise
+            break
         if not line:
             continue
 

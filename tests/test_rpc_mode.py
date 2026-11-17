@@ -96,12 +96,7 @@ async def _run_rpc(
         return nxt
 
     monkeypatch.setattr(builtins, "input", fake_input)
-    try:
-        await run_rpc_mode(_RuntimeHost(session))
-    except EOFError:
-        # run_rpc_mode only catches EOFError inside command dispatch; EOF on
-        # stdin terminates the loop (same as in the real CLI).
-        pass
+    await run_rpc_mode(_RuntimeHost(session))
     out = capsys.readouterr().out
     return [json.loads(l) for l in out.splitlines() if l.strip()]
 
@@ -424,6 +419,61 @@ async def test_rpc_answer_question_accepts_legacy_id_only(tmp_path: Path, monkey
 
     assert _resp(responses, "answer_question", "question-1")["success"] is True
     assert answered == [("question-1", "yes")]
+
+
+@pytest.mark.asyncio
+async def test_rpc_empty_input_exits_cleanly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    assert await _run_rpc(monkeypatch, capsys, _mk_session(tmp_path), []) == []
+
+
+@pytest.mark.asyncio
+async def test_rpc_get_state_before_eof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    responses = await _run_rpc(monkeypatch, capsys, _mk_session(tmp_path), [json.dumps({"type": "get_state", "id": "state"})])
+    assert len(responses) == 1
+    assert _resp(responses, "get_state", "state")["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_rpc_eof_waits_for_accepted_prompt_and_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    from one.modes.rpc_mode import run_rpc_mode
+
+    session = _mk_session(tmp_path)
+    gate = asyncio.Event()
+    eof = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    lines = iter([json.dumps({"type": "prompt", "id": "p", "message": "run"}),
+                  json.dumps({"type": "wait_for_idle", "id": "w"})])
+
+    async def prompt(*_args, **_kwargs) -> None:
+        await gate.wait()
+
+    async def idle() -> None:
+        assert gate.is_set()
+
+    def fake_input() -> str:
+        try:
+            return next(lines)
+        except StopIteration:
+            loop.call_soon_threadsafe(eof.set)
+            raise EOFError from None
+
+    session.prompt = prompt  # type: ignore[method-assign]
+    session.wait_for_idle = idle  # type: ignore[method-assign]
+    monkeypatch.setattr(builtins, "input", fake_input)
+    task = asyncio.create_task(run_rpc_mode(_RuntimeHost(session)))
+    try:
+        await asyncio.wait_for(eof.wait(), timeout=5)
+        assert not task.done()
+        gate.set()
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        gate.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    responses = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert _resp(responses, "prompt", "p")["success"] is True
+    assert _resp(responses, "wait_for_idle", "w")["success"] is True
 
 
 @pytest.mark.asyncio

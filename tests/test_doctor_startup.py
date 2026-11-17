@@ -259,10 +259,8 @@ def test_headless_subprocess_with_fake_provider(tmp_path, mode):
         result = subprocess.run([sys.executable, "-m", "one.cli.main", *args],
                                 cwd=tmp_path, env=env, input='{"id":"1","type":"get_state"}\n' if mode == "rpc" else "",
                                 capture_output=True, text=True, timeout=30)
-        # RPC currently propagates EOF after processing the final request.
-        assert result.returncode == (1 if mode == "rpc" else 0), (result.stdout, result.stderr)
-        if mode == "rpc":
-            assert "EOFError" in result.stderr
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "EOFError" not in result.stderr
         assert "[hint]" not in result.stdout
         assert "one doctor" not in result.stdout
         assert {p.name: p.read_bytes() for p in (settings, models)} == before

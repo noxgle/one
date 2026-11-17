@@ -10,6 +10,9 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- Docker offline runtime smoke tests, pinned image/runtime dependencies, and a
+  gated amd64 GHCR release workflow with SBOM, provenance and vulnerability scanning.
+
 - Deploy supports explicit `--allow-self-signed` / `FTP_ALLOW_SELF_SIGNED=true`
   for self-signed FTPS servers, with a warning and TLS still required.
 
@@ -63,6 +66,10 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   are preserved and reported for review.
 
 ### Fixed
+
+- RPC now exits cleanly at stdin EOF after delivering accepted wait responses.
+- Docker onboarding avoids overwriting `.env`, restricts config directory access,
+  and no longer automatically restarts the interactive Compose service.
 
 - **TUI thinking shortcut** — keep the current thinking level visible in the
   compact header on narrow terminals when cycling with Ctrl+T.
