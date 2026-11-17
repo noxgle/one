@@ -504,10 +504,7 @@ async def _run_rpc_test(monkeypatch, capsys, session, lines):
         return nxt
 
     monkeypatch.setattr(builtins, "input", fake_input)
-    try:
-        await run_rpc_mode(_RuntimeHostFake(session))
-    except EOFError:
-        pass
+    await run_rpc_mode(_RuntimeHostFake(session))
     out = capsys.readouterr().out
     return [json.loads(l) for l in out.splitlines() if l.strip()]
 

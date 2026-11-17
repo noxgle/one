@@ -98,12 +98,7 @@ async def _run_rpc(
         return nxt
 
     monkeypatch.setattr(builtins, "input", fake_input)
-    try:
-        await run_rpc_mode(_RuntimeHost(session))
-    except EOFError:
-        # run_rpc_mode only catches EOFError inside command dispatch; EOF on
-        # stdin terminates the loop (same as in the real CLI).
-        pass
+    await run_rpc_mode(_RuntimeHost(session))
     out = capsys.readouterr().out
     return ([json.loads(l) for l in out.splitlines() if l.strip()], out)
 

@@ -23,6 +23,8 @@ Use Ollama or llama.cpp locally, hosted providers, or a hybrid setup.
 
 ## Install and start
 
+For container installation, see **[Running ONE with Docker](website/src/content/docs/library/docker.md)**.
+
 Requires Python **3.12+**. A virtual environment avoids system-package conflicts:
 
 ```sh

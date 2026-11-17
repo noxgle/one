@@ -4,7 +4,6 @@ services:
     image: one-agent:local
     user: "${ONE_UID:-1000}:${ONE_GID:-1000}"
     init: true
-    restart: unless-stopped
     stdin_open: true
     tty: true
     environment:
