@@ -5498,11 +5498,11 @@ if TEXTUAL_AVAILABLE:
             preset = sanitize_display_text(str(snapshot.get("presetName", snapshot.get("preset", "Default"))))
             modified = " (modified)" if snapshot.get("presetModified") else ""
             tool_limit = snapshot.get("toolMaxSteps", 100) or "unlimited"
-            suffix = (
-                f" | Preset: {preset}{modified} | Temp: {snapshot['temperature']:.1f}"
-                f" | Think: {thinking} | Tool Limit: {tool_limit} | Coop: {coop.lower()} | Status: {runtime_status}"
-            )
             prefix = f"v{VERSION} | "
+            suffix = (
+                f" | Think: {thinking} | Preset: {preset}{modified} | Temp: {snapshot['temperature']:.1f}"
+                f" | Tool Limit: {tool_limit} | Coop: {coop.lower()} | Status: {runtime_status}"
+            )
             # Account for main padding, header borders, and header padding.
             # Keep the variable provider/model segment within the available
             # width first; CSS still clips safely at exceptionally narrow sizes.

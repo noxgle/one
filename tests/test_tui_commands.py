@@ -1788,6 +1788,32 @@ async def test_tui_sessions_rename_is_blocked_while_streaming(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("layout,size", [("compact", (60, 24)), ("wide", (120, 40))])
+async def test_ctrl_t_updates_visible_thinking_in_layout(tmp_path: Path, layout: str, size: tuple[int, int]) -> None:
+    from textual.widgets import Static, TextArea
+
+    session = _mk_app_session(tmp_path, runtime_key="dummy")
+    app = _OneTextualApp(session)
+    async with app.run_test(size=size) as pilot:
+        await app._handle_command(f"/layout {layout}")
+        await pilot.pause()
+        draft = app.query_one("#input", TextArea)
+        draft.text = "draft"
+        panel = app.query_one("#header" if layout == "compact" else "#sidebar", Static)
+        label = "Think:" if layout == "compact" else "Thinking:"
+
+        def visible() -> str:
+            return "\n".join(panel.render_line(y).text for y in range(panel.size.height))
+
+        assert f"{label} medium" in visible()
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert session.thinking_level == "high"
+        assert f"{label} high" in visible()
+        assert draft.text == "draft"
+
+
+@pytest.mark.asyncio
 async def test_ctrl_t_cycles_thinking_once_without_changing_draft(tmp_path: Path):
     from textual.widgets import TextArea
 
@@ -1869,3 +1895,32 @@ async def test_handoff_command_validation_and_session_rebind(tmp_path):
         assert "Original session unchanged" in "\n".join(app._stream_lines)
         assert "Usage: /handoff" not in "\n".join(app._stream_lines)
     await host.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compact_header_model_before_think(tmp_path: Path) -> None:
+    """Regression: compact header renders model segment before the Think segment."""
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._refresh_sidebar()
+        await pilot.pause()
+        header_text = str(app.query_one("#header").render())
+        # Header format: v{VERSION} | <model> | Think: ...<rest>
+        # Verify the model segment appears before "Think:" and is non-empty.
+        think_pos = header_text.find("Think:")
+        assert think_pos >= 0, f"'Think:' not found in header: {header_text!r}"
+        # Model segment is the second pipe-delimited field.
+        parts = header_text.split(" | ")
+        model_segment = parts[1] if len(parts) > 1 else ""
+        assert model_segment.strip(), (
+            f"Model segment must be non-empty in compact header; "
+            f"header={header_text!r}"
+        )
+        # Narrow case: model segment must not be empty even when truncated.
+        # The segment should contain either the model id or a truncation marker.
+        assert "…" in model_segment or session.model.id in model_segment, (
+            f"Model segment should contain model id or truncation marker; "
+            f"header={header_text!r}"
+        )

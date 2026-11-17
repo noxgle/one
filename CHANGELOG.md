@@ -64,6 +64,8 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI thinking shortcut** — keep the current thinking level visible in the
+  compact header on narrow terminals when cycling with Ctrl+T.
 - **Local provider initialization** — start configuration loading only after the
   modal is mounted and active, preventing an early task from leaving setup stuck
   on “Loading configuration”. Configuration-load timeouts offer a retry; saves
