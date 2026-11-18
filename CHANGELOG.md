@@ -263,6 +263,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   absent rather than fabricated. Picker actions are visible bordered buttons
   with session/default labels at compact terminal sizes.
 
+- **OpenRouter and DeepSeek tool calls** — both providers now send native
+  `tools` and execute returned `tool_calls`; DeepSeek DSML text is parsed as a
+  fallback instead of appearing as the answer. OpenRouter non-streaming
+  reasoning reads the `reasoning` field, and mid-stream error chunks raise a
+  provider error instead of ending silently.
+
 ## [0.1.106] - 2026-10-26
 
 ### Changed

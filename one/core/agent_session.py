@@ -57,6 +57,7 @@ from one.core.subagent_monitor import SubagentMonitor
 from one.core.temperature import nearest_temperature_mode, normalize_temperature, temperature_for_mode
 from one.core.tool_output_pruning import prune_stale_tool_outputs
 from one.core.tool_policy import RESERVED_READONLY_POLICIES, ToolPolicy
+from one.core.tool_text_protocols import is_dsml_tool_call_candidate, parse_dsml_tool_calls
 from one.core.types import ModelInfo
 from one.mcp import McpManager
 from one.providers.native_compaction import NativeCompactionProtocolError
@@ -1384,6 +1385,8 @@ class AgentSession:
 
     def _tool_call_parse_failure_category(self, text: str) -> str:
         """Classify a rejected text tool candidate without retaining its content."""
+        if is_dsml_tool_call_candidate(text):
+            return "malformed_dsml_tool_call"
         candidates: list[str] = []
         stripped = text.strip()
         if stripped:
@@ -1431,6 +1434,8 @@ class AgentSession:
         if not stripped:
             return False
         if stripped.startswith(("TOOL_CALL:", "<|tool_call", "<tool_call")):
+            return True
+        if is_dsml_tool_call_candidate(stripped):
             return True
         # Markdown fences are frequently examples, not actions.
         if not stripped.startswith("{"):
@@ -4336,6 +4341,22 @@ class AgentSession:
             return [], True
         return normalized, True
 
+    def _parse_text_tool_calls(
+        self, assistant: dict[str, Any], text: str, provider_tool_call_id: str | None, step: int
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Parse text tool protocols, promoting DeepSeek DSML to a native batch.
+
+        DSML is attached to the assistant message so validation, dispatch and
+        provider replay share the native path.  The JSON contract remains the
+        fallback for every other endpoint.
+        """
+        dsml_calls = parse_dsml_tool_calls(text)
+        if dsml_calls:
+            assistant["_nativeToolCalls"] = dsml_calls
+            return self._native_tool_calls(assistant, step)
+        parsed = self._try_parse_tool_call(text, provider_tool_call_id)
+        return ([parsed] if parsed else []), False
+
     def _budget_exceeded_assistant_message(self, message: str) -> dict[str, Any]:
         return {
             "role": "assistant",
@@ -4784,8 +4805,9 @@ class AgentSession:
                                 self._tool_images = []
                                 tool_calls, native_present = self._native_tool_calls(assistant, step)
                                 if not native_present:
-                                    parsed = self._try_parse_tool_call(assistant_text, provider_tool_call_id)
-                                    tool_calls = [parsed] if parsed else []
+                                    tool_calls, native_present = self._parse_text_tool_calls(
+                                        assistant, assistant_text, provider_tool_call_id, step
+                                    )
                                 # Codex recipient syntax is neither JSON nor a
                                 # native call.  It is deliberately non-executable;
                                 # hide it and allow exactly the existing bounded
@@ -4851,10 +4873,9 @@ class AgentSession:
                                     nudged_text = self._assistant_text(nudged)
                                     nudged_tool_calls, nudged_native = self._native_tool_calls(nudged, step)
                                     if not nudged_native:
-                                        nudged_parsed = self._try_parse_tool_call(
-                                            nudged_text, nudged.pop("_providerToolCallId", None)
+                                        nudged_tool_calls, nudged_native = self._parse_text_tool_calls(
+                                            nudged, nudged_text, nudged.pop("_providerToolCallId", None), step
                                         )
-                                        nudged_tool_calls = [nudged_parsed] if nudged_parsed else []
                                     if nudged_tool_calls:
                                         tool_calls = nudged_tool_calls
                                         assistant = nudged
@@ -4919,10 +4940,9 @@ class AgentSession:
                                     repaired_text = self._assistant_text(repaired)
                                     repaired_tool_calls, repaired_native = self._native_tool_calls(repaired, step)
                                     if not repaired_native:
-                                        repaired_parsed = self._try_parse_tool_call(
-                                            repaired_text, repaired.pop("_providerToolCallId", None)
+                                        repaired_tool_calls, repaired_native = self._parse_text_tool_calls(
+                                            repaired, repaired_text, repaired.pop("_providerToolCallId", None), step
                                         )
-                                        repaired_tool_calls = [repaired_parsed] if repaired_parsed else []
                                     if repaired_tool_calls:
                                         tool_calls = repaired_tool_calls
                                         assistant = repaired

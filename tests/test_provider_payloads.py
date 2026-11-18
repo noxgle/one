@@ -366,6 +366,29 @@ def test_openrouter_uses_native_reasoning_object(level: str, effort: str | None)
     assert "reasoning_effort" not in payload
 
 
+def test_openrouter_and_deepseek_registry_enable_native_tools() -> None:
+    registry = build_provider_registry()
+    assert getattr(registry["openrouter"], "supports_native_tools", False) is True
+    assert getattr(registry["deepseek"], "supports_native_tools", False) is True
+
+
+def test_openrouter_payload_includes_native_tools_and_compaction_disable() -> None:
+    adapter = OpenAICompatibleAdapter(
+        "openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter", supports_native_tools=True
+    )
+    tools = [{"name": "read", "description": "Read a file", "parameters": {"type": "object", "properties": {}}}]
+    messages = [{"role": "user", "content": "hi"}]
+    payload = adapter._build_payload("~deepseek/deepseek-v4-flash-latest", messages, "off", tools=tools)
+    assert payload["model"] == "~deepseek/deepseek-v4-flash-latest"
+    assert payload["tools"] == [{"type": "function", "function": tools[0]}]
+    assert "tool_choice" not in payload
+    disabled = adapter._build_payload(
+        "~deepseek/deepseek-v4-flash-latest", messages, "off", tools=tools, disable_tool_calls=True
+    )
+    assert disabled["tool_choice"] == "none"
+    assert disabled["tools"] == payload["tools"]
+
+
 @pytest.mark.parametrize(
     ("level", "think"),
     [("off", False), ("on", True), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high")],

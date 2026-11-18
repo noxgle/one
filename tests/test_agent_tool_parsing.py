@@ -999,3 +999,95 @@ async def test_truncated_response_never_executes_or_repairs_and_preserves_usage(
     assert "Output token limit reached" in agent._assistant_text(final)
     assert any(e["type"] == "warning" and e.get("warning") == "output_truncated" for e in events)
     assert any(e["type"] == "turn_end" and e["ok"] is False for e in events)
+
+
+@pytest.mark.asyncio
+async def test_dsml_text_tool_call_executes_and_replays_natively(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}}),
+        registry, _Loader(), model, "medium", tools=["read", "finish"],
+    )
+    dsml = (
+        "<｜DSML｜tool_calls>\n"
+        '<｜DSML｜invoke name="read">\n'
+        '<｜DSML｜parameter name="path" string="true">a.txt</｜DSML｜parameter>\n'
+        "</｜DSML｜invoke>\n"
+        "</｜DSML｜tool_calls>"
+    )
+    provider = _RecordingNative([
+        ChatResult(text=dsml, raw={}, usage={}),
+        ChatResult(text='{"tool":"finish","args":{"summary":"DONE","goal_success":true}}', raw={}, usage={}),
+    ])
+    agent.providers = {"openai": provider}  # type: ignore[assignment]
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("read a.txt")
+
+    tool_results = [message for message in agent.messages if message.get("role") == "toolResult"]
+    assert tool_results and "hello" in tool_results[0]["content"]
+    assistant = next(message for message in agent.messages if message.get("_nativeToolCalls"))
+    call_id = assistant["_nativeToolCalls"][0]["id"]
+    assert str(call_id).startswith("native-")
+    assert assistant["_nativeToolCalls"][0]["arguments"] == {"path": "a.txt"}
+    replay = provider.requests[1]
+    replay_assistant = next(message for message in replay if message.get("_nativeToolCalls"))
+    assert replay_assistant["_nativeToolCalls"][0]["name"] == "read"
+    replay_result = next(message for message in replay if message.get("_nativeToolCallId") == call_id)
+    assert "hello" in replay_result["content"]
+    read_starts = [
+        event for event in events if event["type"] == "tool_call_start" and event.get("tool") == "read"
+    ]
+    read_ends = [
+        event for event in events if event["type"] == "tool_call_end" and event.get("toolCallId") == call_id
+    ]
+    assert [event["toolCallId"] for event in read_starts] == [call_id]
+    assert [event["toolCallId"] for event in read_ends] == [call_id]
+    assert agent.get_last_finish_result()["goalSuccess"] is True
+
+
+@pytest.mark.asyncio
+async def test_malformed_dsml_is_reported_and_never_echoed_as_answer(tmp_path: Path):
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"tools": {"maxSteps": 3, "timeoutSec": 5}}),
+        registry, _Loader(), model, "medium", tools=["read", "finish"],
+    )
+    bad = (
+        "<｜DSML｜tool_calls>\n"
+        '<｜DSML｜invoke name="read">\n'
+        '<｜DSML｜parameter name="limit" string="false">{not json</｜DSML｜parameter>\n'
+        "</｜DSML｜invoke>\n"
+        "</｜DSML｜tool_calls>"
+    )
+    finish = '{"tool":"finish","args":{"summary":"recovered","goal_success":true}}'
+    agent.providers = {"openai": _FakeProvider([bad, finish, finish])}
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    assert agent._is_explicit_tool_candidate(bad) is True
+    assert agent._tool_call_parse_failure_category(bad) == "malformed_dsml_tool_call"
+
+    await agent.prompt("go")
+
+    assert any(
+        event["type"] == "tool_call_parse_failed" and event.get("category") == "malformed_dsml_tool_call"
+        for event in events
+    )
+    assert agent.get_last_finish_result()["summary"] == "recovered"
+    assert "DSML" not in (agent.get_last_assistant_text() or "")
+    assert not any(
+        event["type"] == "tool_call_start" and event.get("tool") == "read" for event in events
+    )
