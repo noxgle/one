@@ -10,6 +10,18 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **GPT-6.2 prompt caching** — `gpt-6.2-sol` and `gpt-6.2-astra` are
+  selectable with a known ~1.05M context window. The ChatGPT/Codex adapter
+  moves the system prompt into the first `developer` message (GPT-6.2 never
+  caches top-level `instructions`) and, when `providerProfiles.<provider>.promptCache.enabled`
+  is set, sends `prompt_cache_options`, an explicit `prompt_cache_breakpoint`
+  after the stable block, and optional `prewarm`. Cache telemetry now splits
+  cache writes by TTL (`cacheWrite`, `cacheWrite30m`, `cacheWrite12h`) and
+  reports `nonCachedInput`; pricing supports a separate 12h write rate. A
+  400/422 from a backend without cache support triggers one bounded retry
+  without the cache fields. No live benchmark was performed; behavior is
+  unchanged when the flag is off.
+
 - Docker offline runtime smoke tests, pinned image/runtime dependencies, and a
   gated amd64 GHCR release workflow with SBOM, provenance and vulnerability scanning.
 
@@ -262,6 +274,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   reasoning, vision, and context metadata; unknown limits are identified as
   absent rather than fabricated. Picker actions are visible bordered buttons
   with session/default labels at compact terminal sizes.
+
+- **OpenRouter and DeepSeek tool calls** — both providers now send native
+  `tools` and execute returned `tool_calls`; DeepSeek DSML text is parsed as a
+  fallback instead of appearing as the answer. OpenRouter non-streaming
+  reasoning reads the `reasoning` field, and mid-stream error chunks raise a
+  provider error instead of ending silently.
 
 ## [0.1.106] - 2026-10-26
 

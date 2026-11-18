@@ -442,8 +442,10 @@ async def test_codex_adapter_nonlive_sse_payloads_images_as_input_image(tmp_path
         )
         assert result.text == "ok"
         payload = captured["payload"]
-        # System message is stripped; first (and only) input item is the user message.
-        user_item = payload["input"][0]
+        # System message becomes the first developer message; the user message
+        # (with images) is the second input item.
+        assert payload["input"][0]["role"] == "developer"
+        user_item = payload["input"][1]
         assert user_item["role"] == "user"
         content = user_item["content"]
         assert isinstance(content, list)

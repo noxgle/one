@@ -27,6 +27,48 @@ input, cached, output and reasoning totals, `cacheRatio`, and coverage
 (`requestsWithUsage`, `ratioRequests`, `usageComplete`). Missing provider usage
 is reported as `null` (unknown), never zero.
 
+### Prompt caching for GPT-6.2 (opt-in)
+
+GPT-6.2 models (`gpt-6.2-sol`, `gpt-6.2-astra`) never cache top-level
+`instructions`, so `one` moves the system prompt into the first `developer`
+message where it participates in provider-side prompt caching. Prompt caching
+is off by default and changes nothing until enabled:
+
+```json
+{
+  "providerProfiles": {
+    "chatgpt": {
+      "promptCache": {
+        "enabled": true,
+        "ttl": "30m",
+        "stableBreakpoint": true,
+        "toolResultBreakpoints": false,
+        "key": "off",
+        "prewarm": false
+      }
+    }
+  }
+}
+```
+
+- `ttl` accepts `30m` (default) or `12h` (Responses only). `24h` is legacy and
+  rejected for GPT-6.2.
+- `stableBreakpoint` adds an explicit `prompt_cache_breakpoint` after the
+  stable developer block so the dynamic tail (plan, date, tools) does not
+  invalidate the cached prefix.
+- `key` is `off` (default, no per-session key) or `account` (a stable,
+  non-secret key derived from the credential so all sessions of one account
+  share a cache partition).
+- `prewarm` issues a one-time `prompt_cache_options.prewarm` request at the
+  start of the first prompt to write the stable prefix into cache without
+  generating output.
+- If the backend rejects the cache fields (HTTP 400/422), `one` retries once
+  without them and disables caching for the session.
+
+Cache telemetry splits writes by TTL: `providerCache` now reports `cacheWrite`,
+`cacheWrite30m`, and `cacheWrite12h` alongside the existing counters. No live
+benchmark was performed; behavior is unchanged when the flag is off.
+
 ### Task checkpoints (opt-in)
 
 In the TUI, run `/checkpoints enable` before a task to retain undo records for

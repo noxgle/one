@@ -33,6 +33,11 @@ _REASONING_EFFORT_BY_LEVEL = {
 }
 
 
+def _is_gpt_62(model: str) -> bool:
+    """True for GPT-6.2 family slugs (e.g. gpt-6.2-sol, gpt-6.2-astra)."""
+    return isinstance(model, str) and model.startswith("gpt-6.2")
+
+
 class ProviderHTTPError(RuntimeError):
     def __init__(self, message: str, status_code: int) -> None:
         super().__init__(message)
@@ -171,10 +176,12 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "model": model,
             "messages": messages,
         }
-        if temperature is not None:
-            payload["temperature"] = temperature
-        elif self.default_temperature is not None:
-            payload["temperature"] = self.default_temperature
+        # GPT-6.2+ rejects temperature/top_p; leave them out for that family.
+        if not _is_gpt_62(model):
+            if temperature is not None:
+                payload["temperature"] = temperature
+            elif self.default_temperature is not None:
+                payload["temperature"] = self.default_temperature
         if self.reasoning_mode == "openrouter":
             effort = _REASONING_EFFORT_BY_LEVEL.get(thinking_level)
             if effort:
@@ -452,6 +459,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             # Reasoning is never parseable assistant content.  Non-streaming
             # callers can still surface it through the thinking callback.
             thinking = msg.get("reasoning_content") or ""
+            if not thinking and self.reasoning_mode == "openrouter":
+                # OpenRouter normalizes Chat Completions reasoning to the
+                # ``reasoning`` message field; upstreams may still send
+                # ``reasoning_content``.
+                thinking = msg.get("reasoning") or ""
             if thinking:
                 try:
                     if on_thinking_delta:
@@ -509,6 +521,15 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         chunk = json.loads(data_str)
                     except Exception:
                         continue
+                    stream_error = chunk.get("error")
+                    if isinstance(stream_error, dict) and stream_error:
+                        # Chat Completions reports mid-stream failures in a
+                        # normal SSE chunk with a top-level error object.  Never
+                        # turn that into an empty successful answer.
+                        code = stream_error.get("code")
+                        status = code if isinstance(code, int) and not isinstance(code, bool) else 502
+                        message = str(stream_error.get("message") or stream_error)
+                        raise ProviderHTTPError(f"{self.name} API error {status}: {message}", status)
                     raw_last = chunk
                     if isinstance(chunk.get("usage"), dict):
                         usage = chunk["usage"]
@@ -560,6 +581,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     if choice.get("finish_reason"):
                         stop_reason = choice.get("finish_reason")
                         break
+
+        if stop_reason == "error":
+            raise ProviderHTTPError(f"{self.name} API error 502: stream ended with finish_reason 'error'", 502)
 
         full_text = "".join(text_parts)
         native_calls = []

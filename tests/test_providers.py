@@ -19,7 +19,7 @@ from one.providers.anthropic import AnthropicAdapter
 from one.providers.codex_responses import CodexResponsesAdapter
 from one.providers.gemini import GeminiAdapter
 from one.providers.ollama import OllamaCloudAdapter
-from one.providers.openai_compatible import OpenAICompatibleAdapter
+from one.providers.openai_compatible import OpenAICompatibleAdapter, ProviderHTTPError
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -966,3 +966,57 @@ async def test_codex_output_limit_preserves_partial_usage_and_discards_tools(ter
     assert result.usage == response["usage"]
     assert result.raw == response
     assert not result.native_tool_calls
+
+
+@pytest.mark.asyncio
+async def test_openrouter_stream_raises_on_error_chunk() -> None:
+    adapter = OpenAICompatibleAdapter("openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter")
+    with pytest.raises(ProviderHTTPError) as excinfo:
+        await _stream_with(adapter, _sse(
+            {
+                "choices": [{"delta": {"content": ""}, "finish_reason": "error"}],
+                "error": {"code": 502, "message": "Provider disconnected unexpectedly"},
+            },
+        ))
+    assert excinfo.value.status_code == 502
+    assert "Provider disconnected unexpectedly" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_stream_error_finish_reason_without_error_object() -> None:
+    adapter = OpenAICompatibleAdapter("openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter")
+    with pytest.raises(ProviderHTTPError) as excinfo:
+        await _stream_with(adapter, _sse(
+            {"choices": [{"delta": {}, "finish_reason": "error"}]},
+        ))
+    assert excinfo.value.status_code == 502
+    assert "finish_reason 'error'" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_non_stream_reads_reasoning_field() -> None:
+    adapter = OpenAICompatibleAdapter("openrouter", "https://openrouter.ai/api", reasoning_mode="openrouter")
+    thinking_deltas: list[str] = []
+    post_resp = _PostResp({
+        "choices": [{
+            "message": {"role": "assistant", "content": "answer", "reasoning": "plan"},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+    })
+    with patch.object(httpx, "AsyncClient") as MockClient:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=post_resp)
+        MockClient.return_value = mock_client
+        result = await adapter.chat(
+            api_key="key",
+            model="deepseek/deepseek-v4-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            thinking_level="high",
+            on_thinking_delta=thinking_deltas.append,
+        )
+    assert thinking_deltas == ["plan"]
+    assert result.text == "answer"
+    assert result.had_thinking is True

@@ -32,7 +32,13 @@ or preset `mode`. Subagents inherit their parent's effective value unless their
 Anthropic and Codex omit temperature and emit a warning; requests still run.
 
 OpenRouter uses its native `reasoning: {"effort": ...}` request dialect and
-streams reasoning separately. Ollama Cloud uses native `think`; `minimal` and
+streams reasoning separately. OpenRouter and DeepSeek also use native Chat
+Completions tool calling: requests carry `tools`, `tool_calls` are replayed with
+matching tool results, and mid-stream error chunks surface as provider errors.
+DeepSeek models that emit their trained DSML text protocol
+(`<｜DSML｜tool_calls>`) are parsed as a fallback, so tool markup is executed
+instead of being shown as the final answer. Ollama Cloud uses native `think`;
+`minimal` and
 `low` map to `"low"`, `medium` to `"medium"`, `high` and `xhigh` to `"high"`,
 and `off` to `false`. ChatGPT/Codex Responses reasoning summaries
 also render separately from answer text. Local Ollama and llama.cpp retain their

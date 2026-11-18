@@ -57,8 +57,10 @@ from one.core.subagent_monitor import SubagentMonitor
 from one.core.temperature import nearest_temperature_mode, normalize_temperature, temperature_for_mode
 from one.core.tool_output_pruning import prune_stale_tool_outputs
 from one.core.tool_policy import RESERVED_READONLY_POLICIES, ToolPolicy
+from one.core.tool_text_protocols import is_dsml_tool_call_candidate, parse_dsml_tool_calls
 from one.core.types import ModelInfo
 from one.mcp import McpManager
+from one.providers.codex_responses import PromptCacheUnsupportedError
 from one.providers.native_compaction import NativeCompactionProtocolError
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
@@ -309,6 +311,8 @@ class AgentSession:
         self._compaction_generation = 0
         self._v2_compaction_failures = 0
         self._retrying = False
+        self._prompt_cache_disabled = False
+        self._prewarm_done = False
         self._pending_bash_messages: list[dict[str, Any]] = []
         self._steering: list[str] = []
         self._follow_up: list[str] = []
@@ -1384,6 +1388,8 @@ class AgentSession:
 
     def _tool_call_parse_failure_category(self, text: str) -> str:
         """Classify a rejected text tool candidate without retaining its content."""
+        if is_dsml_tool_call_candidate(text):
+            return "malformed_dsml_tool_call"
         candidates: list[str] = []
         stripped = text.strip()
         if stripped:
@@ -1431,6 +1437,8 @@ class AgentSession:
         if not stripped:
             return False
         if stripped.startswith(("TOOL_CALL:", "<|tool_call", "<tool_call")):
+            return True
+        if is_dsml_tool_call_candidate(stripped):
             return True
         # Markdown fences are frequently examples, not actions.
         if not stripped.startswith("{"):
@@ -3701,6 +3709,15 @@ class AgentSession:
                 )
             try:
                 return await attempt(allow_live_stream, safe=native, buffered=native)
+            except PromptCacheUnsupportedError as error:
+                # Backend rejected the prompt-cache fields. Retry once without
+                # them and remember the fallback for the rest of the session.
+                self._prompt_cache_disabled = True
+                self._emit({"type": "warning", "warning": "prompt_cache_fallback",
+                            "provider": self.model.provider, "model": self.model.id,
+                            "statusCode": error.status_code,
+                            "message": "Prompt caching is not supported by this backend; retrying without cache fields."})
+                return await attempt(allow_live_stream, safe=native, buffered=native)
             except Exception as error:
                 if not native or self._abort_requested or isinstance(error, (_RunAdmissionError, _CompactionInputError, _AbortSignal)):
                     raise
@@ -3878,6 +3895,13 @@ class AgentSession:
             chat_kwargs["disable_tool_calls"] = True
         if cache_prefix_length is not None and "cache_prefix_length" in sig.parameters:
             chat_kwargs["cache_prefix_length"] = cache_prefix_length
+        # Prompt-cache contract (GPT-6.2+). Only the ChatGPT/Codex Responses
+        # adapter consumes it today; other providers ignore the kwarg.
+        if "prompt_cache" in sig.parameters:
+            settings = self.settings_manager.get_prompt_cache_settings(self.model.provider)
+            if self._prompt_cache_disabled:
+                settings = {**settings, "enabled": False}
+            chat_kwargs["prompt_cache"] = settings
         if "temperature" in sig.parameters:
             chat_kwargs["temperature"] = self.temperature
         elif self.model.provider in {"anthropic", "chatgpt"}:
@@ -3980,6 +4004,10 @@ class AgentSession:
             provider_event["attempt"] = self._active_attempt
         if self._active_request_id:
             provider_event["parentRequestId"] = self._active_request_id
+        # Stable-prefix fingerprint for cache diagnostics. It covers the system
+        # prompt and the sorted native tool definitions — the parts that must
+        # stay byte-identical between requests for provider-side caching.
+        provider_event["prefixHash"] = self._stable_prefix_hash()
         # Listeners may mutate their event argument. Keep this captured request
         # metadata separate so provider end events and durable timing retain
         # their original correlation fields.
@@ -4114,6 +4142,9 @@ class AgentSession:
                 "cachedTokens": usage_counts.cached_tokens,
                 "outputTokens": usage_counts.output_tokens,
                 "reasoningTokens": usage_counts.reasoning_tokens,
+                "cacheWriteTokens": usage_counts.cache_write_tokens,
+                "cacheWrite30mTokens": usage_counts.cache_write_ttl_30m_tokens,
+                "cacheWrite12hTokens": usage_counts.cache_write_ttl_12h_tokens,
             }
             # Omit the whole group when the provider reported nothing; absence
             # means unknown.  Inside a reported group, explicit null preserves
@@ -4278,6 +4309,47 @@ class AgentSession:
             "instructions outside that boundary retain authority."
         )
 
+    def _stable_prefix_hash(self) -> str:
+        """Fingerprint the stable cache prefix (system prompt + sorted tools).
+
+        Used for offline cache diagnostics: a change between requests in the
+        same turn signals a prefix break (e.g. tool list or effort drift).
+        """
+        import hashlib
+
+        parts = [self._provider_system_prompt()]
+        provider = self.providers.get(self.model.provider) if self.model else None
+        if provider is not None and getattr(provider, "supports_native_tools", False):
+            parts.append(json.dumps(self._native_tool_definitions(), sort_keys=True, ensure_ascii=False))
+        return hashlib.sha256("\n\n".join(parts).encode("utf-8")).hexdigest()
+
+    async def _maybe_prewarm_cache(self) -> None:
+        """Issue a one-time prompt-cache prewarm when enabled and supported.
+
+        Uses ``prompt_cache_options.prewarm`` so the provider writes the stable
+        prefix into cache without generating output or appending history. A
+        backend rejection (400/422) disables prewarm for the session; other
+        failures are swallowed so they never block the first real prompt.
+        """
+        if self._prompt_cache_disabled or not self.model:
+            return
+        settings = self.settings_manager.get_prompt_cache_settings(self.model.provider)
+        if not settings.get("enabled") or not settings.get("prewarm"):
+            return
+        provider = self.providers.get(self.model.provider)
+        if provider is None or "prompt_cache" not in inspect.signature(provider.chat).parameters:
+            return
+        try:
+            messages = self._flatten_messages_for_provider()
+            await self._invoke_provider(
+                messages, allow_live_stream=False, count_output_generation=False, purpose="prewarm",
+            )
+        except PromptCacheUnsupportedError:
+            self._prompt_cache_disabled = True
+        except Exception:
+            # Prewarm is best-effort; never block the first prompt on it.
+            pass
+
     def _tool_nudge_prompt(self) -> str:
         prompt = (
             "Decide now. Reply with exactly one valid JSON tool call and no other content: "
@@ -4335,6 +4407,22 @@ class AgentSession:
             self._emit({"type": "tool_call_parse_failed", "reason": "control_tool_in_native_batch", "count": len(normalized)})
             return [], True
         return normalized, True
+
+    def _parse_text_tool_calls(
+        self, assistant: dict[str, Any], text: str, provider_tool_call_id: str | None, step: int
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Parse text tool protocols, promoting DeepSeek DSML to a native batch.
+
+        DSML is attached to the assistant message so validation, dispatch and
+        provider replay share the native path.  The JSON contract remains the
+        fallback for every other endpoint.
+        """
+        dsml_calls = parse_dsml_tool_calls(text)
+        if dsml_calls:
+            assistant["_nativeToolCalls"] = dsml_calls
+            return self._native_tool_calls(assistant, step)
+        parsed = self._try_parse_tool_call(text, provider_tool_call_id)
+        return ([parsed] if parsed else []), False
 
     def _budget_exceeded_assistant_message(self, message: str) -> dict[str, Any]:
         return {
@@ -4431,9 +4519,16 @@ class AgentSession:
 
     def _pruned_provider_conversation(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Build the ephemeral provider view without changing session history."""
+        pruning_enabled = self.settings_manager.get_tool_output_pruning_enabled()
+        # toolOutputPruning rewrites earlier tool results, which silently breaks
+        # the provider-side cache prefix. Warn once when both are active.
+        if pruning_enabled and self.settings_manager.get_prompt_cache_enabled(self.model.provider):
+            self._emit({"type": "warning", "warning": "tool_output_pruning_cache_conflict",
+                        "provider": self.model.provider, "model": self.model.id,
+                        "message": "toolOutputPruning rewrites earlier tool results and breaks the prompt cache prefix; consider disabling it when prompt caching is enabled."})
         return prune_stale_tool_outputs(
             messages,
-            enabled=self.settings_manager.get_tool_output_pruning_enabled(),
+            enabled=pruning_enabled,
             recent_tokens=self.settings_manager.get_tool_output_pruning_recent_tokens(),
             min_result_tokens=self.settings_manager.get_tool_output_pruning_min_result_tokens(),
             marker=self.settings_manager.get_tool_output_pruning_marker(),
@@ -4472,7 +4567,9 @@ class AgentSession:
                 schema = getattr(tool, "input_schema", None)
                 if isinstance(schema, dict):
                     definitions.append({"name": tool.name, "description": getattr(tool, "description", ""), "parameters": schema})
-        return definitions
+        # Stable ordering keeps the provider-side cache prefix byte-identical
+        # between requests even when tool discovery order changes.
+        return sorted(definitions, key=lambda d: d.get("name", ""))
 
     def _estimate_wire_request_tokens(self, request: list[dict[str, Any]]) -> int:
         """Estimate an already shaped request, including native tool definitions."""
@@ -4701,6 +4798,13 @@ class AgentSession:
             if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
                 await self._invoke_extension_chat_message(user_msg)
 
+            # Prompt-cache prewarm: fire once at the start of the first prompt
+            # when enabled. It writes the stable prefix into the provider cache
+            # without generating output; a backend rejection disables it.
+            if not self._prewarm_done:
+                self._prewarm_done = True
+                await self._maybe_prewarm_cache()
+
             # Fail-closed outer wrapper: if anything unexpected escapes the retry
             # loop (provider timeouts, unexpected exceptions, etc.), emit terminal
             # events, reset streaming/retry flags, and re-raise.  This prevents the
@@ -4784,8 +4888,9 @@ class AgentSession:
                                 self._tool_images = []
                                 tool_calls, native_present = self._native_tool_calls(assistant, step)
                                 if not native_present:
-                                    parsed = self._try_parse_tool_call(assistant_text, provider_tool_call_id)
-                                    tool_calls = [parsed] if parsed else []
+                                    tool_calls, native_present = self._parse_text_tool_calls(
+                                        assistant, assistant_text, provider_tool_call_id, step
+                                    )
                                 # Codex recipient syntax is neither JSON nor a
                                 # native call.  It is deliberately non-executable;
                                 # hide it and allow exactly the existing bounded
@@ -4851,10 +4956,9 @@ class AgentSession:
                                     nudged_text = self._assistant_text(nudged)
                                     nudged_tool_calls, nudged_native = self._native_tool_calls(nudged, step)
                                     if not nudged_native:
-                                        nudged_parsed = self._try_parse_tool_call(
-                                            nudged_text, nudged.pop("_providerToolCallId", None)
+                                        nudged_tool_calls, nudged_native = self._parse_text_tool_calls(
+                                            nudged, nudged_text, nudged.pop("_providerToolCallId", None), step
                                         )
-                                        nudged_tool_calls = [nudged_parsed] if nudged_parsed else []
                                     if nudged_tool_calls:
                                         tool_calls = nudged_tool_calls
                                         assistant = nudged
@@ -4919,10 +5023,9 @@ class AgentSession:
                                     repaired_text = self._assistant_text(repaired)
                                     repaired_tool_calls, repaired_native = self._native_tool_calls(repaired, step)
                                     if not repaired_native:
-                                        repaired_parsed = self._try_parse_tool_call(
-                                            repaired_text, repaired.pop("_providerToolCallId", None)
+                                        repaired_tool_calls, repaired_native = self._parse_text_tool_calls(
+                                            repaired, repaired_text, repaired.pop("_providerToolCallId", None), step
                                         )
-                                        repaired_tool_calls = [repaired_parsed] if repaired_parsed else []
                                     if repaired_tool_calls:
                                         tool_calls = repaired_tool_calls
                                         assistant = repaired

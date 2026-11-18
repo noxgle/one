@@ -41,7 +41,10 @@ def build_provider_registry() -> dict[str, ProviderAdapter]:
         # ChatGPT/Codex subscription backend (Responses API, OAuth only).
         "chatgpt": CodexResponsesAdapter(),
         "openrouter": OpenAICompatibleAdapter(
-            "openrouter", openrouter_base, reasoning_mode="openrouter"
+            "openrouter",
+            openrouter_base,
+            reasoning_mode="openrouter",
+            supports_native_tools=True,
         ),
         "ollama-cloud": OllamaCloudAdapter(ollama_cloud_base),
         # llama.cpp server mode (OpenAI-compatible endpoint, typically local).
@@ -60,7 +63,7 @@ def build_provider_registry() -> dict[str, ProviderAdapter]:
             default_temperature=None,
         ),
         "xai": OpenAICompatibleAdapter("xai", xai_base, endpoint="/chat/completions"),
-        "deepseek": OpenAICompatibleAdapter("deepseek", deepseek_base),
+        "deepseek": OpenAICompatibleAdapter("deepseek", deepseek_base, supports_native_tools=True),
         "mistral": OpenAICompatibleAdapter("mistral", mistral_base, endpoint="/chat/completions"),
         "groq": OpenAICompatibleAdapter("groq", groq_base, endpoint="/chat/completions"),
     }

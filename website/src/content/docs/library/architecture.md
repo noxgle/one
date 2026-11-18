@@ -580,7 +580,7 @@ Compaction maintains a rolling summary plus recent messages:
 
 ## 18. Versioning
 
-- Single source of truth: `one/config.py:VERSION` (currently `0.1.45`).
+- Single source of truth: `one/config.py:VERSION` (currently `0.1.146`).
 - Drives `pyproject.toml` dynamic version and `one --version` output.
 - Bump before tags; tags must equal the VERSION string.
 - User-visible changes require a version bump, `CHANGELOG.md` Unreleased entry,
@@ -590,8 +590,9 @@ Compaction maintains a rolling summary plus recent messages:
 ## 19. Known limitations
 
 - **No sandboxing:** Extensions, MCP servers, and tools run with full permissions.
-- **JSON-in-text tool calls:** The primary contract; native function-calling is
-  absorbed but not yet normalized into a common adapter layer.
+- **Tool calls:** Native function calling is used for OpenAI, Azure OpenAI,
+  Anthropic, Gemini, Codex, OpenRouter and DeepSeek; other compatible endpoints
+  use the JSON-in-text contract, with DeepSeek DSML accepted as a text fallback.
 - **Windows:** Best-effort support; no Windows CI. POSIX shell behavior may differ.
 - **Compaction is lossy:** Factual evidence survives in sidecars but the
   provider context loses detail after compaction.

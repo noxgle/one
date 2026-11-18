@@ -87,6 +87,11 @@ BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo("chatgpt", "gpt-5.6-luna", reasoning=True, context_window=None, input_image=True),
     ModelInfo("chatgpt", "gpt-6.1-sol", reasoning=True, context_window=None, input_image=True),
     ModelInfo("chatgpt", "gpt-6-luna", reasoning=True, context_window=None, input_image=True),
+    # GPT-6.2 exposes a real ~1.05M context window (models.dev reports
+    # 1_050_000); unlike earlier Codex slugs we advertise it so the gauge
+    # and context budget do not fall back to "unknown".
+    ModelInfo("chatgpt", "gpt-6.2-sol", reasoning=True, context_window=1_050_000, input_image=True),
+    ModelInfo("chatgpt", "gpt-6.2-astra", reasoning=True, context_window=1_050_000, input_image=True),
 ]
 
 NO_AUTH_PROVIDERS: set[str] = {"llama.cpp", "ollama"}
