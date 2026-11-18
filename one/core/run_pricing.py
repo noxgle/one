@@ -28,6 +28,7 @@ class PriceSnapshot:
     output: Decimal
     cache_read: Decimal | None = None
     cache_write: Decimal | None = None
+    cache_write_12h: Decimal | None = None
     cache_mode: str = "read_write"
     source: str | None = None
 
@@ -36,14 +37,14 @@ class PriceSnapshot:
             raise ValueError("cache_mode must be none, read or read_write")
         if self.source is not None and (not isinstance(self.source, str) or not self.source.strip()):
             raise ValueError("price source must be a non-empty string")
-        if self.cache_mode == "none" and (self.cache_read is not None or self.cache_write is not None):
+        if self.cache_mode == "none" and (self.cache_read is not None or self.cache_write is not None or self.cache_write_12h is not None):
             raise ValueError("cache rates conflict with cache mode none")
-        if self.cache_mode == "read" and self.cache_write is not None:
+        if self.cache_mode == "read" and (self.cache_write is not None or self.cache_write_12h is not None):
             raise ValueError("cache write rate conflicts with cache mode read")
         for value in (self.provider, self.model, self.version):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError("provider, model and price version must be non-empty strings")
-        for value in (self.input, self.output, self.cache_read, self.cache_write):
+        for value in (self.input, self.output, self.cache_read, self.cache_write, self.cache_write_12h):
             if value is not None and (not isinstance(value, Decimal) or not value.is_finite() or value < 0):
                 raise ValueError("rates must be non-negative finite Decimals")
         if self.input is None or self.output is None:
@@ -60,7 +61,7 @@ class PriceSnapshot:
         if input_tokens and ((self.cache_mode != "none" and self.cache_read is None)
                              or (self.cache_mode == "read_write" and self.cache_write is None)):
             return None
-        rates = [rate for rate in (self.input, self.cache_read, self.cache_write) if rate is not None]
+        rates = [rate for rate in (self.input, self.cache_read, self.cache_write, self.cache_write_12h) if rate is not None]
         return _cost(((input_tokens, max(rates)), (output_tokens, self.output)))
 
     @classmethod
@@ -75,7 +76,7 @@ class PriceSnapshot:
         """
         required = {"schemaVersion", "version", "source", "currency", "unit", "cacheMode", "input", "output"}
         if not isinstance(value, dict) or not required <= value.keys() or value.keys() - (
-            required | {"cacheRead", "cacheWrite"}
+            required | {"cacheRead", "cacheWrite", "cacheWrite12h"}
         ):
             raise ValueError("pricing requires schemaVersion, version, source, currency, unit, cacheMode, input, output")
         if type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
@@ -87,7 +88,7 @@ class PriceSnapshot:
 
         def rate(key: str) -> Decimal | None:
             raw = value.get(key)
-            if raw is None and key in {"cacheRead", "cacheWrite"}:
+            if raw is None and key in {"cacheRead", "cacheWrite", "cacheWrite12h"}:
                 return None
             if not isinstance(raw, str) and type(raw) is not int:
                 raise ValueError(f"pricing {key} must be a decimal string or integer")
@@ -97,7 +98,7 @@ class PriceSnapshot:
                 raise ValueError(f"invalid pricing {key}") from error
 
         return cls(provider, model, value["version"], rate("input"), rate("output"),
-                   rate("cacheRead"), rate("cacheWrite"), value["cacheMode"], value["source"])
+                   rate("cacheRead"), rate("cacheWrite"), rate("cacheWrite12h"), value["cacheMode"], value["source"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,11 +113,12 @@ class TokenUsage:
     output_tokens: int
     cache_read_tokens: int
     cache_write_tokens: int
+    cache_write_12h_tokens: int = 0
 
     def __post_init__(self) -> None:
-        for count in (self.input_tokens, self.output_tokens, self.cache_read_tokens, self.cache_write_tokens):
+        for count in (self.input_tokens, self.output_tokens, self.cache_read_tokens, self.cache_write_tokens, self.cache_write_12h_tokens):
             _count(count)
-        if self.cache_read_tokens + self.cache_write_tokens > self.input_tokens:
+        if self.cache_read_tokens + self.cache_write_tokens + self.cache_write_12h_tokens > self.input_tokens:
             raise ValueError("cache tokens exceed input total")
 
     @property
@@ -125,14 +127,18 @@ class TokenUsage:
 
     def cost(self, price: PriceSnapshot | None) -> Decimal | None:
         if price is None or (self.cache_read_tokens and price.cache_read is None) or (
-            self.cache_write_tokens and price.cache_write is None
+            (self.cache_write_tokens or self.cache_write_12h_tokens) and price.cache_write is None
         ):
             return None
+        # 12h writes bill at the 12h rate when known, otherwise fall back to
+        # the standard write rate (never silently free).
+        write_12h_rate = price.cache_write_12h if price.cache_write_12h is not None else price.cache_write
         return _cost((
-            (self.input_tokens - self.cache_read_tokens - self.cache_write_tokens, price.input),
+            (self.input_tokens - self.cache_read_tokens - self.cache_write_tokens - self.cache_write_12h_tokens, price.input),
             (self.output_tokens, price.output),
             (self.cache_read_tokens, price.cache_read or Decimal(0)),
             (self.cache_write_tokens, price.cache_write or Decimal(0)),
+            (self.cache_write_12h_tokens, write_12h_rate or Decimal(0)),
         ))
 
 

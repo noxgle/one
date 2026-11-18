@@ -658,6 +658,50 @@ class SettingsManager:
         value = profile.get("experimentalStableSessionId", True)
         return value if isinstance(value, bool) else True
 
+    def get_prompt_cache_settings(self, provider: str) -> dict[str, Any]:
+        """Return the validated ``promptCache`` profile for *provider*.
+
+        Defaults are all-off so existing users see no payload change.  The
+        returned dict always contains the full key set with defaults applied.
+        """
+        profiles = self.merged().get("providerProfiles")
+        profile = profiles.get(provider) if isinstance(profiles, dict) else None
+        raw = profile.get("promptCache") if isinstance(profile, dict) else None
+        if not isinstance(raw, dict):
+            raw = {}
+        defaults = {
+            "enabled": False,
+            "ttl": "30m",
+            "stableBreakpoint": True,
+            "toolResultBreakpoints": False,
+            "key": "off",
+            "prewarm": False,
+        }
+        out = dict(defaults)
+        for key in defaults:
+            if key in raw:
+                out[key] = raw[key]
+        # Validate the contract eagerly so misconfiguration fails loudly at
+        # read time instead of producing a payload the backend rejects.
+        ttl = out["ttl"]
+        if ttl not in ("30m", "12h"):
+            raise ValueError(
+                f"providerProfiles.{provider}.promptCache.ttl must be '30m' or '12h' "
+                f"(got {ttl!r}); '24h' is legacy and unsupported for GPT-6.2"
+            )
+        key = out["key"]
+        if key not in ("off", "account"):
+            raise ValueError(
+                f"providerProfiles.{provider}.promptCache.key must be 'off' or 'account' (got {key!r})"
+            )
+        for flag in ("enabled", "stableBreakpoint", "toolResultBreakpoints", "prewarm"):
+            if not isinstance(out[flag], bool):
+                raise ValueError(f"providerProfiles.{provider}.promptCache.{flag} must be a boolean")
+        return out
+
+    def get_prompt_cache_enabled(self, provider: str) -> bool:
+        return bool(self.get_prompt_cache_settings(provider).get("enabled"))
+
     def get_bash_show_output(self) -> bool:
         bash = self.merged().get("bash", {})
         return bool(bash.get("showOutput", False)) if isinstance(bash, dict) else False

@@ -436,7 +436,8 @@ class SessionManager:
         # Provider-reported token counters are additive diagnostics.  They are
         # stored as integers so later aggregation can distinguish a real zero
         # from an unknown (missing) counter.  Never accept arbitrary numbers.
-        for key in ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens"):
+        for key in ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens",
+                    "cacheWriteTokens", "cacheWrite30mTokens", "cacheWrite12hTokens"):
             value = metadata.get(key)
             if type(value) is int and value >= 0:
                 entry[key] = value
@@ -784,7 +785,8 @@ class SessionManager:
             }
         return result
 
-    _PROVIDER_CACHE_COUNTERS = ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens")
+    _PROVIDER_CACHE_COUNTERS = ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens",
+                                "cacheWriteTokens", "cacheWrite30mTokens", "cacheWrite12hTokens")
 
     def _provider_cache_summary(self, entries: list[dict[str, Any]]) -> dict[str, Any]:
         """Aggregate provider cache counters without inventing zeroes.
@@ -842,6 +844,9 @@ class SessionManager:
             "cached": total("cachedTokens"),
             "output": total("outputTokens"),
             "reasoning": total("reasoningTokens"),
+            "cacheWrite": total("cacheWriteTokens"),
+            "cacheWrite30m": total("cacheWrite30mTokens"),
+            "cacheWrite12h": total("cacheWrite12hTokens"),
             "cacheRatio": cache_ratio,
         }
 

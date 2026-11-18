@@ -81,6 +81,12 @@ independently verified server output hard cap. An endpoint's advertised output
 capability is not by itself proof of such a hard cap, and does not override the
 selection order above. No current adapter supplies a verified output hard cap.
 
+GPT-6.2 ChatGPT/Codex models (`gpt-6.2-sol`, `gpt-6.2-astra`) advertise a
+~1.05M context window (1_050_000) instead of the earlier Codex slugs' unknown
+window, so the context gauge and budget use the real capacity. They also accept
+`xhigh` reasoning effort natively (older models clamp it to `high`) and reject
+`temperature`/`top_p`, which `one` omits for that family.
+
 `/stats` → `contextUsage` exposes `selectedOutputLimit`, `outputLimitSource`
 (`models.json`, `catalog`, or `settings`), `outgoingMaxTokens`, and
 `outputLimitReason`. `lastRequest` separately records the last limit passed to

@@ -51,6 +51,17 @@ class MissingBlobError(AttachmentStorageError):
     """Raised when a required image blob is missing or corrupt before HTTP."""
 
 
+class PromptCacheUnsupportedError(RuntimeError):
+    """Raised when the backend rejects prompt-cache fields (400/422).
+
+    Carries the HTTP status so the session can retry once without the cache
+    fields and remember the fallback for the rest of the session.
+    """
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"chatgpt prompt cache unsupported (HTTP {status_code})")
+        self.status_code = status_code
+
 BASE_URL = "https://chatgpt.com/backend-api/codex"
 # The /models endpoint gates on client_version: a stale/too-low value returns
 # an empty {"models": []} with no error. Keep this at a current CLI version.
@@ -59,13 +70,29 @@ ORIGINATOR = "codex_cli_rs"
 
 # Responses does not expose minimal/xhigh; use its nearest supported bounds.
 _EFFORT_BY_LEVEL = {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high"}
+# GPT-6.2+ exposes xhigh natively; older models still clamp it to high.
+_EFFORT_BY_LEVEL_62 = {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}
+
+
+def _effort_for(model: str, thinking_level: str) -> str | None:
+    """Resolve the Responses reasoning effort for a model/level pair."""
+    table = _EFFORT_BY_LEVEL_62 if _is_gpt_62(model) else _EFFORT_BY_LEVEL
+    return table.get(thinking_level)
+
+
+def _is_gpt_62(model: str) -> bool:
+    """True for GPT-6.2 family slugs (e.g. gpt-6.2-sol, gpt-6.2-astra)."""
+    return isinstance(model, str) and model.startswith("gpt-6.2")
+
 
 # Backend rejects requests with empty `instructions`; sessions that carry no
-# system message fall back to this Codex-flavored base prompt.
+# system message fall back to this short, constant base prompt. It is kept
+# model-agnostic (no "GPT-5") so it stays byte-identical across requests and
+# does not break the stable cache prefix.
 _BASE_INSTRUCTIONS = (
-    "You are Codex, based on GPT-5. You are running as a coding agent inside "
-    "the `one` terminal agent. Help the user with software engineering tasks: "
-    "read and edit code, run commands, and explain your work concisely."
+    "You are a coding agent running inside the `one` terminal agent. Help the "
+    "user with software engineering tasks: read and edit code, run commands, "
+    "and explain your work concisely."
 )
 
 # 120 s is the direct-call/default finite transport watchdog. AgentSession
@@ -183,6 +210,8 @@ class CodexResponsesAdapter(ProviderAdapter):
         disable_tool_calls: bool = False,
         native_compaction_threshold: int | None = None,
         native_input_items: list[dict[str, Any]] | None = None,
+        prompt_cache: dict[str, Any] | None = None,
+        api_key: str = "",
     ) -> dict[str, Any]:
         native_enabled = self.supports_native_compaction_for(model, f"{BASE_URL}/responses")
         if not native_enabled and native_input_items is not None:
@@ -265,7 +294,19 @@ class CodexResponsesAdapter(ProviderAdapter):
                 )
                 continue
             if role == "system":
-                instructions = str(content)
+                # GPT-6.2+ never caches top-level `instructions`; the stable
+                # system prompt must live as the first `developer` message in
+                # `input` so it participates in prompt caching. `instructions`
+                # is left as a short, constant text (the backend rejects an
+                # empty value).
+                if str(content).strip():
+                    input_items.append(
+                        {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [{"type": "input_text", "text": str(content)}],
+                        }
+                    )
                 continue
             input_role = "user" if role == "user" else "assistant"
             if input_role == "user" and idx == last_user_idx:
@@ -308,7 +349,7 @@ class CodexResponsesAdapter(ProviderAdapter):
                 payload["context_management"] = [{"type": "compaction", "compact_threshold": native_compaction_threshold}]
         if max_tokens is not None:
             payload["max_output_tokens"] = max_tokens
-        effort = _EFFORT_BY_LEVEL.get(thinking_level)
+        effort = _effort_for(model, thinking_level)
         if effort:
             # Request readable summaries rather than only invisible reasoning.
             payload["reasoning"] = {"effort": effort, "summary": "auto"}
@@ -319,6 +360,28 @@ class CodexResponsesAdapter(ProviderAdapter):
             payload["tools"] = [{"type": "function", "name": t["name"], "description": t.get("description", ""), "parameters": t["parameters"]} for t in tools]
         if disable_tool_calls and tools:
             payload["tool_choice"] = "none"
+        if prompt_cache and prompt_cache.get("enabled"):
+            ttl = prompt_cache.get("ttl", "30m")
+            if ttl not in ("30m", "12h"):
+                raise ValueError(f"unsupported prompt cache ttl: {ttl}")
+            options: dict[str, Any] = {"mode": "implicit", "ttl": ttl}
+            if prompt_cache.get("prewarm"):
+                options["prewarm"] = True
+            payload["prompt_cache_options"] = options
+            # Explicit breakpoint after the stable developer block protects it
+            # from the dynamic tail (plan/date/tools) invalidating the prefix.
+            if prompt_cache.get("stableBreakpoint"):
+                payload["prompt_cache_breakpoint"] = {"mode": "explicit"}
+            key = prompt_cache.get("key")
+            if key and key != "off":
+                # `account` maps to a stable, non-secret key derived from the
+                # credential so all sessions of one account share a cache
+                # partition without leaking the token. Never per-session.
+                if key == "account":
+                    import hashlib
+
+                    key = "acct-" + hashlib.sha256((api_key or "").encode("utf-8")).hexdigest()[:16]
+                payload["prompt_cache_key"] = str(key)
         return payload
 
     @staticmethod
@@ -414,6 +477,7 @@ class CodexResponsesAdapter(ProviderAdapter):
         native_compaction_threshold: int | None = None,
         native_input_items: list[dict[str, Any]] | None = None,
         safe_errors: bool = False,
+        prompt_cache: dict[str, Any] | None = None,
     ) -> ChatResult:
         url = f"{BASE_URL}/responses"
         native_enabled = self.supports_native_compaction_for(model, url) and (
@@ -427,6 +491,8 @@ class CodexResponsesAdapter(ProviderAdapter):
             stream=True, max_tokens=max_tokens,
             images=images, storage_dir=storage_dir, tools=tools, disable_tool_calls=disable_tool_calls,
             native_compaction_threshold=native_compaction_threshold, native_input_items=native_input_items,
+            prompt_cache=prompt_cache,
+            api_key=api_key,
         )
         req_headers = self._headers(api_key, extra=headers, affinity_id=codex_affinity_id)
         transport_timeout = stream_transport_timeout or _IDLE_SSE_TIMEOUT
@@ -548,6 +614,11 @@ class CodexResponsesAdapter(ProviderAdapter):
                     if native_enabled or safe_errors:
                         raise NativeCompactionHTTPError(resp.status_code)
                     raw_body = await resp.aread()
+                    # A 400/422 while prompt-cache fields are present usually
+                    # means the backend does not support them. Signal a typed
+                    # fallback instead of leaking the raw body.
+                    if prompt_cache and prompt_cache.get("enabled") and resp.status_code in (400, 422):
+                        raise PromptCacheUnsupportedError(resp.status_code)
                     raise _error_with_body(resp.status_code, raw_body.decode(errors="replace"))
                 aiter = resp.aiter_lines()
                 while True:

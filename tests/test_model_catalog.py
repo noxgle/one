@@ -25,6 +25,28 @@ def test_catalog_uses_exact_provider_and_model_without_chatgpt_alias(tmp_path):
     assert catalog.apply(ModelInfo("openai", "gpt-6-luna")).provider == "openai"
 
 
+def test_gpt62_models_registered_with_known_context_window(tmp_path):
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+
+    registry = ModelRegistry(AuthStorage.in_memory(), str(tmp_path / "models.json"))
+    for mid in ("gpt-6.2-sol", "gpt-6.2-astra"):
+        model = registry.find("chatgpt", mid)
+        assert model is not None
+        assert model.context_window == 1_050_000
+        assert model.input_image is True
+
+
+def test_gpt62_models_in_catalog_snapshot():
+    import json
+    from importlib.resources import files
+
+    payload = json.loads(files("one.assets").joinpath("model_catalog.json").read_text("utf-8"))
+    openai = payload["providers"]["openai"]
+    assert openai["gpt-6.2-sol"]["contextWindow"] == 1_050_000
+    assert openai["gpt-6.2-astra"]["contextWindow"] == 1_050_000
+
+
 def test_catalog_manual_limits_are_authoritative(tmp_path):
     catalog = ModelCatalog(tmp_path)
     model = catalog.apply(ModelInfo("chatgpt", "gpt-6-luna", context_window=100_000, metadata_source="models.json"))

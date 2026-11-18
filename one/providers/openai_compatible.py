@@ -33,6 +33,11 @@ _REASONING_EFFORT_BY_LEVEL = {
 }
 
 
+def _is_gpt_62(model: str) -> bool:
+    """True for GPT-6.2 family slugs (e.g. gpt-6.2-sol, gpt-6.2-astra)."""
+    return isinstance(model, str) and model.startswith("gpt-6.2")
+
+
 class ProviderHTTPError(RuntimeError):
     def __init__(self, message: str, status_code: int) -> None:
         super().__init__(message)
@@ -171,10 +176,12 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "model": model,
             "messages": messages,
         }
-        if temperature is not None:
-            payload["temperature"] = temperature
-        elif self.default_temperature is not None:
-            payload["temperature"] = self.default_temperature
+        # GPT-6.2+ rejects temperature/top_p; leave them out for that family.
+        if not _is_gpt_62(model):
+            if temperature is not None:
+                payload["temperature"] = temperature
+            elif self.default_temperature is not None:
+                payload["temperature"] = self.default_temperature
         if self.reasoning_mode == "openrouter":
             effort = _REASONING_EFFORT_BY_LEVEL.get(thinking_level)
             if effort:

@@ -22,6 +22,17 @@ _CODEX_USAGE = {
     "output_tokens_details": {"reasoning_tokens": 20},
 }
 
+_CODEX_USAGE_WRITE = {
+    "input_tokens": 1000,
+    "output_tokens": 50,
+    "input_tokens_details": {
+        "cached_tokens": 100,
+        "cache_write_tokens": 300,
+        "cache_write_tokens_details": {"ttl_30m_tokens": 200, "ttl_12h_tokens": 100},
+    },
+    "output_tokens_details": {"reasoning_tokens": 20},
+}
+
 
 class _Loader:
     def get_system_prompt(self, **_: object) -> str:
@@ -154,3 +165,25 @@ async def test_each_retry_attempt_is_counted_once_without_hiding_unknown_usage(t
     assert cache["input"] == 1000
     assert cache["cached"] == 800
     assert cache["cacheRatio"] == 0.8
+
+
+@pytest.mark.asyncio
+async def test_cache_write_and_ttl_split_reported(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    agent.providers = {"openai": _Provider([_CODEX_USAGE_WRITE])}  # type: ignore[assignment]
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+
+    await agent.prompt("hello")
+
+    end = next(event for event in events if event["type"] == "provider_request_end")
+    assert end["cacheWriteTokens"] == 300
+    assert end["cacheWrite30mTokens"] == 200
+    assert end["cacheWrite12hTokens"] == 100
+
+    cache = agent.get_session_stats()["providerCache"]
+    assert cache["cacheWrite"] == 300
+    assert cache["cacheWrite30m"] == 200
+    assert cache["cacheWrite12h"] == 100
+    assert cache["cached"] == 100
+    assert cache["cacheRatio"] == 0.1

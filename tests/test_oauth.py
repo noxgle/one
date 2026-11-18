@@ -755,14 +755,14 @@ def test_codex_payload_building():
     ]
     p = ad._build_payload("gpt-5.3-codex", messages, "high", stream=False, max_tokens=77)
     assert p["model"] == "gpt-5.3-codex"
-    assert p["instructions"] == "be terse"
+    assert p["instructions"] != "be terse"
     assert p["store"] is False and p["stream"] is False
     assert p["max_output_tokens"] == 77
     assert p["reasoning"] == {"effort": "high", "summary": "auto"}
     # HOTFIX-5: backend requires Responses message items with explicit type.
     assert all(i["type"] == "message" for i in p["input"])
-    assert [i["content"][0]["type"] for i in p["input"]] == ["input_text", "output_text"]
-    assert [i["role"] for i in p["input"]] == ["user", "assistant"]
+    assert [i["content"][0]["type"] for i in p["input"]] == ["input_text", "input_text", "output_text"]
+    assert [i["role"] for i in p["input"]] == ["developer", "user", "assistant"]
     # xhigh clamps to high; off omits reasoning entirely.
     p2 = ad._build_payload("m", messages, "xhigh", stream=True)
     assert p2["reasoning"] == {"effort": "high", "summary": "auto"}
@@ -776,7 +776,7 @@ def test_codex_payload_instructions_fallback():
     must fall back to a non-empty base prompt when no system message exists."""
     ad = CodexResponsesAdapter()
     p = ad._build_payload("gpt-5.3-codex", [{"role": "user", "content": "hi"}], "medium", stream=False)
-    assert p["instructions"].startswith("You are Codex")
+    assert p["instructions"].startswith("You are a coding agent")
 
 
 @pytest.mark.asyncio

@@ -619,8 +619,46 @@ class TestCodexPayload:
         )
         assert payload.get("reasoning") == ({"effort": effort, "summary": "auto"} if effort else None)
 
+    @pytest.mark.parametrize(
+        ("level", "effort"),
+        [("off", None), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh")],
+    )
+    def test_codex_gpt62_reasoning_maps_xhigh(self, level: str, effort: str | None) -> None:
+        payload = CodexResponsesAdapter()._build_payload(
+            "gpt-6.2-sol", [{"role": "user", "content": "hi"}], level, stream=False
+        )
+        assert payload.get("reasoning") == ({"effort": effort, "summary": "auto"} if effort else None)
+
+    def test_codex_payload_with_cache_flags(self) -> None:
+        """Cache-enabled payload carries options + breakpoint, no per-session key."""
+        adapter = CodexResponsesAdapter()
+        payload = adapter._build_payload(
+            "gpt-6.2-sol",
+            [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+            "medium", stream=False,
+            prompt_cache={"enabled": True, "ttl": "30m", "stableBreakpoint": True,
+                          "toolResultBreakpoints": False, "key": "off", "prewarm": False},
+        )
+        assert payload["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+        assert payload["prompt_cache_breakpoint"] == {"mode": "explicit"}
+        assert "prompt_cache_key" not in payload
+
+    def test_codex_payload_without_cache_flags_unchanged(self) -> None:
+        """Flags off: no cache fields in the payload (zero diff vs legacy)."""
+        adapter = CodexResponsesAdapter()
+        payload = adapter._build_payload(
+            "gpt-6.2-sol",
+            [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+            "medium", stream=False,
+            prompt_cache={"enabled": False, "ttl": "30m", "stableBreakpoint": True,
+                          "toolResultBreakpoints": False, "key": "off", "prewarm": False},
+        )
+        assert "prompt_cache_options" not in payload
+        assert "prompt_cache_breakpoint" not in payload
+        assert "prompt_cache_key" not in payload
+
     def test_codex_text_only_payload(self) -> None:
-        """Text-only payload: input_text content part, no image parts."""
+        """Text-only payload: system becomes a developer message, no image parts."""
         from one.providers.codex_responses import CodexResponsesAdapter
 
         adapter = CodexResponsesAdapter()
@@ -631,22 +669,25 @@ class TestCodexPayload:
         ]
         payload = adapter._build_payload("gpt-5.6-sol", messages, "high", stream=False, max_tokens=77)
         assert payload["model"] == "gpt-5.6-sol"
-        assert payload["instructions"] == "be terse"
+        # GPT-6.2+ never caches top-level instructions; the system prompt is
+        # moved into the first developer message so it participates in caching.
+        assert payload["instructions"] != "be terse"
         assert payload["store"] is False and payload["stream"] is False
         assert payload["max_output_tokens"] == 77
         assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
         # HOTFIX-5: backend requires Responses message items with explicit type.
         assert all(i["type"] == "message" for i in payload["input"])
-        assert [i["content"][0]["type"] for i in payload["input"]] == ["input_text", "output_text"]
-        assert [i["role"] for i in payload["input"]] == ["user", "assistant"]
+        assert [i["content"][0]["type"] for i in payload["input"]] == ["input_text", "input_text", "output_text"]
+        assert [i["role"] for i in payload["input"]] == ["developer", "user", "assistant"]
+        assert payload["input"][0]["content"][0]["text"] == "be terse"
 
     def test_codex_payload_instructions_fallback(self) -> None:
-        """Empty instructions fall back to base Codex prompt."""
+        """Empty instructions fall back to the short constant base prompt."""
         from one.providers.codex_responses import CodexResponsesAdapter
 
         adapter = CodexResponsesAdapter()
         p = adapter._build_payload("gpt-5.6-sol", [{"role": "user", "content": "hi"}], "medium", stream=False)
-        assert p["instructions"].startswith("You are Codex")
+        assert p["instructions"].startswith("You are a coding agent")
 
     def test_codex_text_only_no_images(self) -> None:
         """When no images are present, _build_payload works normally."""
@@ -735,7 +776,7 @@ class TestCodexPayload:
             {"role": "assistant", "content": "a"},
         ]
         payload = adapter._build_payload("gpt-5.6-sol", messages, "off", stream=False)
-        assistant_item = payload["input"][1]
+        assistant_item = payload["input"][2]
         assert assistant_item["role"] == "assistant"
         assert assistant_item["content"][0]["type"] == "output_text"
         assert assistant_item["content"][0]["text"] == "a"
@@ -1040,6 +1081,7 @@ def test_codex_replays_native_calls_as_responses_input_items() -> None:
     ], "medium", stream=True)
 
     assert payload["input"] == [
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "system"}]},
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "read it"}]},
         {"type": "function_call", "call_id": "call_123", "name": "read", "arguments": '{"path": "a.txt"}'},
         {"type": "function_call_output", "call_id": "call_123", "output": "file contents"},
