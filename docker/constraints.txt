@@ -15,7 +15,7 @@ markdown-it-py==4.3.0
 markdownify==1.2.3
 mdit-py-plugins==0.7.0
 mdurl==0.1.2
-platformdirs==4.14.5
+platformdirs==4.14.7
 pydantic==2.14.3
 pydantic_core==2.50.4
 Pygments==2.21.0
