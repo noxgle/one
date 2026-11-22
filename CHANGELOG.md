@@ -21,6 +21,13 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   400/422 from a backend without cache support triggers one bounded retry
   without the cache fields. No live benchmark was performed; behavior is
   unchanged when the flag is off.
+- **Native llama.cpp tool calling** — `llama.cpp` now uses a dedicated
+  `LlamaCppAdapter` (a thin subclass of the shared OpenAI-compatible adapter)
+  that enables native `tools`/`tool_calls` by default instead of the legacy
+  JSON-in-text protocol. Server-specific `/props`, `/apply-template` and
+  `/tokenize` handling and `chat_template_kwargs` (`enable_thinking`) stay in
+  the adapter while the shared HTTP/SSE transport, tool serialization,
+  response normalization and `AgentSession` tool execution remain unchanged.
 
 - Docker offline runtime smoke tests, pinned image/runtime dependencies, and a
   gated amd64 GHCR release workflow with SBOM, provenance and vulnerability scanning.

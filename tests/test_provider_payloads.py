@@ -15,6 +15,7 @@ import pytest
 from one.providers.anthropic import AnthropicAdapter
 from one.providers.codex_responses import CodexResponsesAdapter
 from one.providers.gemini import GeminiAdapter
+from one.providers.llama_cpp import LlamaCppAdapter
 from one.providers.ollama import OllamaCloudAdapter
 from one.providers.openai_compatible import OpenAICompatibleAdapter
 from one.providers.registry import build_provider_registry
@@ -216,12 +217,9 @@ def test_openai_compatible_headers_without_api_key() -> None:
 def test_llama_cpp_disables_thinking_only_when_requested(
     level: str, template_kwargs: dict[str, bool] | None
 ) -> None:
-    payload = OpenAICompatibleAdapter(
-        "llama.cpp",
-        "http://127.0.0.1:8080",
-        supports_reasoning_effort=False,
-        default_temperature=None,
-    )._build_payload("local", [{"role": "user", "content": "hi"}], level)
+    payload = LlamaCppAdapter("http://127.0.0.1:8080")._build_payload(
+        "local", [{"role": "user", "content": "hi"}], level
+    )
     assert payload.get("chat_template_kwargs") == template_kwargs
     assert "reasoning_effort" not in payload
     assert "temperature" not in payload
@@ -229,7 +227,7 @@ def test_llama_cpp_disables_thinking_only_when_requested(
 
 @pytest.mark.asyncio
 async def test_llama_cpp_native_token_count_uses_rendered_request_and_falls_back(monkeypatch) -> None:
-    from one.providers import openai_compatible as module
+    from one.providers import llama_cpp as module
 
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -251,7 +249,7 @@ async def test_llama_cpp_native_token_count_uses_rendered_request_and_falls_back
             return Response({"prompt": "rendered"} if url.endswith("apply-template") else {"tokens": [1, 2, 3]})
 
     monkeypatch.setattr(module.httpx, "AsyncClient", Client)
-    adapter = OpenAICompatibleAdapter("llama.cpp", "http://local/v1", supports_reasoning_effort=False)
+    adapter = LlamaCppAdapter("http://local/v1")
     count = await adapter.count_request_tokens("", "local", [{"role": "user", "content": "hi"}], "off")
     assert count == 3
     assert calls[0][0] == "http://local/apply-template"
@@ -270,7 +268,7 @@ async def test_llama_cpp_native_token_count_uses_rendered_request_and_falls_back
 
 @pytest.mark.asyncio
 async def test_llama_cpp_context_window_uses_props_for_selected_alias(monkeypatch) -> None:
-    from one.providers import openai_compatible as module
+    from one.providers import llama_cpp as module
 
     captured: dict[str, Any] = {}
 
@@ -289,7 +287,7 @@ async def test_llama_cpp_context_window_uses_props_for_selected_alias(monkeypatc
             return Response()
 
     monkeypatch.setattr(module.httpx, "AsyncClient", Client)
-    adapter = OpenAICompatibleAdapter("llama.cpp", "http://local/v1", supports_reasoning_effort=False)
+    adapter = LlamaCppAdapter("http://local/v1")
     assert await adapter.get_context_window("token", "org/model:Q4", {"X-Test": "yes"}) == 16_384
     assert captured["url"] == "http://local/props"
     assert captured["params"] == {"model": "org/model:Q4"}
@@ -299,7 +297,7 @@ async def test_llama_cpp_context_window_uses_props_for_selected_alias(monkeypatc
 
 @pytest.mark.asyncio
 async def test_llama_stream_requests_and_returns_final_usage(monkeypatch) -> None:
-    from one.providers import openai_compatible as module
+    from one.providers import llama_cpp as module
 
     captured: dict[str, Any] = {}
 
@@ -322,7 +320,7 @@ async def test_llama_stream_requests_and_returns_final_usage(monkeypatch) -> Non
             return Response()
 
     monkeypatch.setattr(module.httpx, "AsyncClient", Client)
-    adapter = OpenAICompatibleAdapter("llama.cpp", "http://local", supports_reasoning_effort=False)
+    adapter = LlamaCppAdapter("http://local")
     result = await adapter.chat("", "local", [{"role": "user", "content": "hi"}], "off", on_delta=lambda _: None)
     assert captured["payload"]["stream_options"] == {"include_usage": True}
     assert result.usage == {"prompt_tokens": 12, "completion_tokens": 3}
@@ -337,18 +335,14 @@ def test_provider_registry_llama_cpp_uses_env_base_url(monkeypatch) -> None:
     monkeypatch.setenv("LLAMA_CPP_BASE_URL", "http://192.0.2.38:8089")
     registry = build_provider_registry()
     provider = registry["llama.cpp"]
-    assert isinstance(provider, OpenAICompatibleAdapter)
+    assert isinstance(provider, LlamaCppAdapter)
     assert provider.base_url == "http://192.0.2.38:8089"
 
 
 def test_openai_compatible_with_base_url_returns_reconfigured_adapter() -> None:
-    adapter = OpenAICompatibleAdapter(
-        "llama.cpp",
-        "http://127.0.0.1:8080",
-        supports_reasoning_effort=False,
-        default_temperature=None,
-    )
+    adapter = LlamaCppAdapter("http://127.0.0.1:8080")
     changed = adapter.with_base_url("http://192.0.2.38:8089")
+    assert isinstance(changed, LlamaCppAdapter)
     assert changed.base_url == "http://192.0.2.38:8089"
     assert changed.supports_reasoning_effort is False
     assert changed.default_temperature is None
@@ -406,7 +400,7 @@ def test_registry_keeps_llama_cpp_compatible_and_uses_native_cloud_adapter() -> 
     registry = build_provider_registry()
     assert type(registry["ollama-cloud"]).__name__ == "OllamaCloudAdapter"
     assert getattr(registry["ollama-cloud"], "endpoint") == "/api/chat"
-    assert isinstance(registry["llama.cpp"], OpenAICompatibleAdapter)
+    assert isinstance(registry["llama.cpp"], LlamaCppAdapter)
     assert registry["llama.cpp"].reasoning_mode == "openai"
 
 

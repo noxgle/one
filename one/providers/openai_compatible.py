@@ -190,11 +190,6 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             effort = _REASONING_EFFORT_BY_LEVEL.get(thinking_level)
             if effort:
                 payload["reasoning_effort"] = effort
-        # llama.cpp chat templates such as Qwen use this template argument to
-        # suppress their reasoning block. It is deliberately provider-specific:
-        # OpenAI-compatible APIs do not share this extension.
-        if self.name == "llama.cpp" and thinking_level in {"off", "on"}:
-            payload["chat_template_kwargs"] = {"enable_thinking": thinking_level == "on"}
         # Native tools are opt-in: local/legacy endpoints retain the proven
         # JSON-in-text contract even though they share this adapter.
         if tools and self.supports_native_tools:
@@ -267,64 +262,6 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             req_headers.update(headers)
         return req_headers
 
-    async def count_request_tokens(
-        self,
-        api_key: str,
-        model: str,
-        messages: list[dict[str, Any]],
-        thinking_level: str,
-        headers: dict[str, str] | None = None,
-        images: list[dict[str, Any]] | None = None,
-        storage_dir: str = "",
-        temperature: float | None = None,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> int | None:
-        """Count a llama.cpp chat request with its native template/tokenizer.
-
-        These endpoints are optional in llama.cpp builds and are not part of the
-        OpenAI-compatible API.  A failure is intentionally indistinguishable
-        from an unavailable endpoint so callers retain their local estimate.
-        """
-        if self.name != "llama.cpp":
-            return None
-        try:
-            payload = self._build_payload(
-                model, messages, thinking_level, images=images,
-                storage_dir=storage_dir, temperature=temperature, tools=tools,
-            )
-            template_payload: dict[str, Any] = {
-                "messages": payload["messages"],
-                "add_generation_prompt": True,
-            }
-            for key in ("tools", "chat_template_kwargs"):
-                if key in payload:
-                    template_payload[key] = payload[key]
-            # llama.cpp normally serves these endpoints at the server root even
-            # when a compatible base URL was configured with a /v1 suffix.
-            base = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
-            async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
-                rendered = await client.post(
-                    f"{base}/apply-template", json=template_payload,
-                    headers=self._build_headers(api_key, headers),
-                )
-                if rendered.is_error:
-                    return None
-                prompt = rendered.json().get("prompt")
-                if not isinstance(prompt, str):
-                    return None
-                tokenized = await client.post(
-                    f"{base}/tokenize", json={"content": prompt},
-                    headers=self._build_headers(api_key, headers),
-                )
-                if tokenized.is_error:
-                    return None
-                tokens = tokenized.json().get("tokens")
-                if not isinstance(tokens, list):
-                    return None
-                return len(tokens)
-        except Exception:
-            return None
-
     def _models_url(self) -> str:
         """OpenAI-compatible models endpoint.
 
@@ -372,42 +309,25 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     async def get_context_window(
         self, api_key: str, model: str, headers: dict[str, str] | None = None,
     ) -> int | None:
-        """Return llama.cpp's configured slot context, when its /props route exists.
+        """Return Ollama's model context length via its ``/api/show`` route.
 
-        OpenAI-compatible ``/v1/models`` metadata describes a model's training
-        limit at best.  llama.cpp's ``/props`` reports the actual server slot
-        configuration, so only that value is suitable for compaction/display.
+        Ollama's ``model_info`` describes a model training capability, not the
+        configured server ``num_ctx``; it is only used when no better value is
+        available.  llama.cpp's slot context is handled by ``LlamaCppAdapter``.
         """
-        if self.name != "llama.cpp" or not isinstance(model, str) or not model:
-            if self.name != "ollama" or not isinstance(model, str) or not model:
-                return None
-            root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
-            try:
-                async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                    response = await client.post(f"{root}/api/show", json={"name": model})
-                    if response.is_error:
-                        return None
-                    info = response.json().get("model_info", {})
-                values = [value for key, value in info.items() if isinstance(key, str) and key.endswith(".context_length")]
-                return next((value for value in values if isinstance(value, int) and not isinstance(value, bool) and value > 0), None)
-            except Exception:
-                return None
+        if self.name != "ollama" or not isinstance(model, str) or not model:
+            return None
         root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
         try:
             async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                response = await client.get(
-                    f"{root}/props",
-                    params={"model": model},
-                    headers=self._build_headers(api_key, headers),
-                )
+                response = await client.post(f"{root}/api/show", json={"name": model})
                 if response.is_error:
                     return None
-                payload = response.json()
+                info = response.json().get("model_info", {})
+            values = [value for key, value in info.items() if isinstance(key, str) and key.endswith(".context_length")]
+            return next((value for value in values if isinstance(value, int) and not isinstance(value, bool) and value > 0), None)
         except Exception:
             return None
-        settings = payload.get("default_generation_settings") if isinstance(payload, dict) else None
-        window = settings.get("n_ctx") if isinstance(settings, dict) else None
-        return window if isinstance(window, int) and not isinstance(window, bool) and window > 0 else None
 
     async def chat(
         self,
