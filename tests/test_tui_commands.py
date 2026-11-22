@@ -501,6 +501,7 @@ async def test_tui_thinking_uses_provider_native_payloads(
     """The TUI command's persisted level reaches each provider wire dialect."""
     from one.modes.tui_mode import _OneTextualApp
     from one.providers.codex_responses import CodexResponsesAdapter
+    from one.providers.llama_cpp import LlamaCppAdapter
     from one.providers.ollama import OllamaCloudAdapter
     from one.providers.openai_compatible import OpenAICompatibleAdapter
 
@@ -519,10 +520,9 @@ async def test_tui_thinking_uses_provider_native_payloads(
     ollama_cloud = OllamaCloudAdapter("https://ollama.com")._build_payload(
         "glm-5:cloud", messages, session.thinking_level
     )
-    llama_cpp = OpenAICompatibleAdapter(
-        "llama.cpp", "http://localhost:8080", supports_reasoning_effort=False,
-        default_temperature=None,
-    )._build_payload("local", messages, session.thinking_level)
+    llama_cpp = LlamaCppAdapter("http://localhost:8080")._build_payload(
+        "local", messages, session.thinking_level
+    )
 
     assert codex.get("reasoning") == reasoning
     openrouter_effort = {

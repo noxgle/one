@@ -253,7 +253,7 @@ responses. The registry maps provider names to adapter instances.
 | `chatgpt` | `CodexResponsesAdapter` | ChatGPT/Codex subscription (Responses API) |
 | `openrouter` | `OpenAICompatibleAdapter` | OpenRouter gateway (`reasoning_mode="openrouter"`) |
 | `ollama-cloud` | `OllamaCloudAdapter` | Ollama Cloud API |
-| `llama.cpp` | `OpenAICompatibleAdapter` | Local llama.cpp server (no API key, `supports_reasoning_effort=False`) |
+| `llama.cpp` | `LlamaCppAdapter` | Local llama.cpp server (no API key, `supports_reasoning_effort=False`, native tools enabled) |
 | `ollama` | `OpenAICompatibleAdapter` | Local Ollama server (no API key) |
 | `xai`, `deepseek`, `mistral`, `groq` | `OpenAICompatibleAdapter` | Various OpenAI-compatible backends |
 | `azure-openai` | `OpenAICompatibleAdapter` | Azure OpenAI (only when `AZURE_OPENAI_BASE_URL` is set) |
