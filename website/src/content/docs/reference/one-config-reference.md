@@ -1,3 +1,7 @@
+---
+title: "One configuration reference: settings.json and models.json"
+---
+
 # ONE — documentation of configuration files: `settings.json` and `models.json`
 
 Sources: the [`noxgle/one`](https://github.com/noxgle/one) repository (`main` branch),
