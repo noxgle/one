@@ -21,7 +21,7 @@ jobs:
           export ONE_CODING_AGENT_DIR="$(mktemp -d)"
           python scripts/generate_docs_reference.py
           git diff --exit-code -- website/src/content/docs/reference
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
