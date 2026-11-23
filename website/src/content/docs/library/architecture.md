@@ -190,6 +190,12 @@ per-purpose groups. Totals sum reported values only; `cacheRatio` covers
 requests that reported both input and cached counts, and `ratioRequests` /
 `usageComplete` expose that coverage.
 
+`AgentSession.get_session_stats()` also reports a `toolUsage` map of tool name
+→ call count for the current session. Counts are incremented in
+`_run_tool_call` for every tool call that reaches execution and in
+`_record_cancelled_tool_call` for cancelled/aborted calls, so the breakdown
+covers attempted work even when a call never completed.
+
 The `AgentSession` class is the central component. It implements a synchronous
 event-emitting loop that:
 
