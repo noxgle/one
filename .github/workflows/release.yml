@@ -128,7 +128,7 @@ jobs:
             REVISION=${{ github.sha }}
           cache-to: type=gha,mode=max
       - name: Scan candidate (block HIGH and CRITICAL)
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: one-agent:scan
           format: table
