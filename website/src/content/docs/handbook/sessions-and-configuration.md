@@ -25,7 +25,9 @@ affects only ChatGPT; other providers keep their existing behavior. `/stats`
 includes a `providerCache` section with request counts, provider-reported
 input, cached, output and reasoning totals, `cacheRatio`, and coverage
 (`requestsWithUsage`, `ratioRequests`, `usageComplete`). Missing provider usage
-is reported as `null` (unknown), never zero.
+is reported as `null` (unknown), never zero. `/stats` also includes a
+`toolUsage` map of tool name → call count for the current session, covering
+every tool call that reached execution (including cancelled/aborted calls).
 
 ### Prompt caching for GPT-6.2 (opt-in)
 

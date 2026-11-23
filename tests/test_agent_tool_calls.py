@@ -280,6 +280,37 @@ async def test_tool_call_start_listener_cannot_mutate_executed_arguments(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_session_stats_tool_usage_counts_executed_tools(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("openai", "dummy")
+    registry = ModelRegistry.create(auth)
+    model = registry.find("openai", "gpt-4.1")
+    assert model is not None
+    agent = AgentSession(
+        SessionManager.in_memory(str(tmp_path)),
+        SettingsManager.in_memory({"tools": {"maxSteps": 6, "timeoutSec": 5}}),
+        registry, _Loader(), model, "medium", tools=["read", "ls", "finish"],
+    )
+    agent.providers = {
+        "openai": _FakeProvider(
+            [
+                '{"tool":"read","args":{"path":"a.txt"}}',
+                '{"tool":"read","args":{"path":"a.txt"}}',
+                '{"tool":"ls","args":{}}',
+                "DONE",
+            ]
+        )
+    }
+
+    await agent.prompt("Read twice, list, and finish.")
+
+    assert agent.get_last_assistant_text() == "DONE"
+    stats = agent.get_session_stats()
+    assert stats["toolUsage"] == {"ls": 1, "read": 2}
+
+
+@pytest.mark.asyncio
 async def test_long_untrusted_tool_output_leak_is_repaired_into_a_tool_call(tmp_path: Path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
     auth = AuthStorage.in_memory()
