@@ -360,6 +360,10 @@ class AgentSession:
         # Nudge instrumentation (Task C4 — measure, don't change behaviour).
         self._nudge_fires: int = 0
         self._nudge_conversions: dict[str, int] = {"true": 0, "false": 0}
+        # Per-tool usage counters for session statistics. Incremented for every
+        # tool call that reaches execution (including cancelled/aborted calls
+        # recorded via _record_cancelled_tool_call).
+        self._tool_usage: dict[str, int] = {}
         self._extension_ui_history: list[dict[str, Any]] = []
         self._pending_questions: dict[str, dict[str, Any]] = {}
         self._extension_runtime: ExtensionRuntime | None = None
@@ -2111,6 +2115,8 @@ class AgentSession:
         native_replay_call_id: str | None = None,
     ) -> dict[str, Any]:
         tool_call_id = str(tool_call_id).strip()[:128] if tool_call_id else self._new_tool_call_id()
+        # Count every tool call that reaches execution for session statistics.
+        self._tool_usage[tool_name] = self._tool_usage.get(tool_name, 0) + 1
         # A real tool step after a newly created plan permits a later finish.
         # Do not count the guarded finish itself as that step.
         if tool_name not in {"plan", "finish"}:
@@ -4438,9 +4444,12 @@ class AgentSession:
     def _record_cancelled_tool_call(
         self, tool_call: dict[str, Any], *, native_batch: bool, aborted: bool,
     ) -> dict[str, Any]:
+        tool_name = tool_call["tool"]
+        # Cancelled/aborted calls still count toward per-tool usage.
+        self._tool_usage[tool_name] = self._tool_usage.get(tool_name, 0) + 1
         payload: dict[str, Any] = {
             "ok": False,
-            "tool": tool_call["tool"],
+            "tool": tool_name,
             "args": tool_call["args"],
             "error": "aborted before execution" if aborted else "budget exceeded before execution",
             "cancelled": True,
@@ -6489,6 +6498,7 @@ class AgentSession:
             "assistantMessages": assistant_messages,
             "toolCalls": tool_calls,
             "toolResults": tool_results,
+            "toolUsage": dict(sorted(self._tool_usage.items())),
             "totalMessages": len(self.messages),
             "tokens": {
                 "input": input_tokens,

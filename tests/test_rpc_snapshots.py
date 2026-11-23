@@ -206,6 +206,12 @@ def _normalize_event(obj: dict[str, Any]) -> dict[str, Any]:
         for key in ("requestId", "providerRequestId"):
             if key in cleaned:
                 cleaned[key] = "<provider-request-id>"
+        # prefixHash fingerprints the stable cache prefix (system prompt +
+        # sorted tools). The system prompt embeds the absolute cwd and skill
+        # file paths, so the hash legitimately varies per environment and
+        # cannot be a golden value.
+        if "prefixHash" in cleaned:
+            cleaned["prefixHash"] = "<prefix-hash>"
     return cleaned
 
 

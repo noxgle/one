@@ -10,6 +10,11 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Per-tool usage in session statistics** — `/stats`, interactive mode, and
+  RPC now include a `toolUsage` map of tool name → call count for the current
+  session, covering every tool call that reached execution (including
+  cancelled/aborted calls).
+
 - **GPT-6.2 prompt caching** — `gpt-6.2-sol` and `gpt-6.2-astra` are
   selectable with a known ~1.05M context window. The ChatGPT/Codex adapter
   moves the system prompt into the first `developer` message (GPT-6.2 never
