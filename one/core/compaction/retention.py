@@ -22,7 +22,7 @@ class RetentionPlan:
 
     keep_start: int
     tokens_kept: int
-    reason: Literal["ok", "no_safe_reduction", "oversized_exchange"]
+    reason: Literal["ok", "no_safe_reduction", "oversized_exchange", "split_exchange"]
 
 
 def native_replay_keep_start(messages: list[dict[str, Any]], keep_start: int) -> int:
@@ -32,6 +32,25 @@ def native_replay_keep_start(messages: list[dict[str, Any]], keep_start: int) ->
         if call_index < keep_start <= output_index:
             keep_start = call_index
     return keep_start
+
+
+def _step_boundaries(messages: list[dict[str, Any]], latest: int) -> list[int]:
+    """Return safe internal boundaries of an agentic exchange.
+
+    A single user message can span an entire tool loop, so the "last exchange"
+    is not necessarily indivisible. A boundary is only offered where the kept
+    tail starts with an assistant message that follows a tool result: that keeps
+    every tool call paired with its result and never starts the tail with an
+    orphaned ``toolResult``.
+    """
+    boundaries: list[int] = []
+    for index in range(latest + 1, len(messages)):
+        if messages[index].get("role") != "assistant":
+            continue
+        if index == 0 or messages[index - 1].get("role") != "toolResult":
+            continue
+        boundaries.append(index)
+    return boundaries
 
 
 def plan_retention(
@@ -44,8 +63,11 @@ def plan_retention(
     """Choose a safe suffix, prioritizing the latest exchange and message floor.
 
     A user boundary may expand the target by up to 15%, provided the resulting
-    suffix fits available_tokens. Failures are non-actionable: callers must not
-    compact with their boundary. Plan markers are not user exchange boundaries.
+    suffix fits available_tokens. When the latest exchange alone exceeds the
+    budget, an internal tool-step boundary is used instead of refusing to
+    compact; the message floor adapts downward to the effective budget. Failures
+    are non-actionable: callers must not compact with their boundary. Plan
+    markers are not user exchange boundaries.
     """
     if min(recent_tokens, min_kept_messages, available_tokens) < 0:
         raise ValueError("retention limits must be nonnegative")
@@ -69,10 +91,30 @@ def plan_retention(
     user_boundaries = [i for i, m in enumerate(messages) if m.get("role") == "user" and not m.get("customType")]
     latest = safe(user_boundaries[-1] if user_boundaries else max(0, total - 1))
     if suffix[latest] > available_tokens:
+        # The mandatory tail does not fit. Split the exchange at a tool-step
+        # boundary, keeping the largest suffix that still fits the budget.
+        for candidate in _step_boundaries(messages, latest):
+            start = safe(candidate)
+            if start <= latest or start >= total:
+                continue
+            if suffix[start] > available_tokens:
+                continue
+            return RetentionPlan(start, suffix[start], "split_exchange")
         return RetentionPlan(latest, suffix[latest], "oversized_exchange")
-    floor = safe(min(latest, max(0, total - min_kept_messages)))
-    if suffix[floor] > available_tokens:
-        return RetentionPlan(floor, suffix[floor], "no_safe_reduction")
+
+    # Adapt the message floor downward until the mandatory tail fits the budget.
+    # The lower bound is -1 so a configured ``minKeptMessages: 0`` is honored;
+    # stopping at 1 silently turned "keep nothing" into a refusal to compact.
+    floor = latest
+    for floor_size in range(min_kept_messages, -1, -1):
+        candidate = safe(min(latest, max(0, total - floor_size)))
+        if suffix[candidate] <= available_tokens:
+            floor = candidate
+            break
+    else:
+        # Nothing fits. Report the whole history so a manual compaction can still
+        # retain it alongside a summary (keep_start == 0 is that explicit signal).
+        return RetentionPlan(0, suffix[0], "no_safe_reduction")
 
     start = floor
     target = min(recent_tokens, available_tokens)

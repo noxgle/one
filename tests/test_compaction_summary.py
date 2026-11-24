@@ -70,3 +70,17 @@ def test_heading_terse_and_ledger_exemption():
     assert not validate_checkpoint(output.replace("# Objective", "## Objective"), estimate_tokens=len, ledger=ledger)
     assert not validate_checkpoint(output.replace("Unknown", "x" * 4001, 1), estimate_tokens=len,
                                    max_output_tokens=10000, ledger=ledger)
+
+
+def test_extractive_fallback_accepts_quoted_tool_json():
+    """Observed tool payloads are data, not model-generated tool-call syntax."""
+    messages = [
+        {"role": "user", "content": "Fix the build"},
+        {"role": "toolResult", "content": '{"tool": "bash", "ok": true, "output": "ok"}'},
+    ]
+    output = extractive_checkpoint(messages, (), estimate_tokens=len)
+    assert '"tool": "bash"' in output
+    # The strict validator still rejects the same text as a model candidate.
+    assert not validate_checkpoint(output, estimate_tokens=len)
+    # The fallback path explicitly opts out of the residue check.
+    assert validate_checkpoint(output, estimate_tokens=len, check_residue=False)

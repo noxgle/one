@@ -517,3 +517,56 @@ def test_compaction_telemetry_disk_reload_and_fork(tmp_path: Path):
         assert [m["content"] for m in session.build_session_context()["messages"]] == [
             "checkpoint", "kept", "after"
         ]
+
+
+def test_compaction_skipped_records_reason_and_budget(tmp_path: Path):
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    sm.append_compaction_skipped("auto_preflight", skip_reason="oversized_exchange",
+                                 tokens_before=99000, available_tokens=81000)
+    sm.append_compaction_skipped("auto")
+    assert sm.session_file is not None
+
+    reopened = SessionManager.open(sm.session_file, str(tmp_path / "sessions"))
+    stats = reopened.get_compaction_stats()
+    assert stats["skipped"] == 2
+    assert stats["skipReasons"] == {"oversized_exchange": 1, "unspecified": 1}
+    assert stats["lastSkip"]["skipReason"] == "unspecified"
+    assert stats["lastSkip"]["reason"] == "auto"
+    # The first skip keeps its diagnostic numbers.
+    first = next(e for e in reopened.get_entries() if e.get("type") == "compaction_skipped")
+    assert (first["skipReason"], first["tokensBefore"], first["availableTokens"]) == (
+        "oversized_exchange", 99000, 81000)
+
+
+def test_compaction_skipped_rejects_invalid_metadata(tmp_path: Path):
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    sm.append_compaction_skipped("auto", skip_reason="", tokens_before=-1, available_tokens=True)
+    entry = next(e for e in sm.get_entries() if e.get("type") == "compaction_skipped")
+    assert "skipReason" not in entry
+    assert "tokensBefore" not in entry
+    assert "availableTokens" not in entry
+
+
+def test_compaction_stats_aggregate_elided_counts(tmp_path: Path):
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    sm.append_compaction("s1", "root", 10, summary_schema="v2", transactional_v2=True,
+                         elided={"count": 3, "tokensReclaimed": 900})
+    sm.append_compaction("s2", "root", 10, summary_schema="v2", transactional_v2=True,
+                         elided={"count": 2, "tokensReclaimed": 100})
+    stats = sm.get_compaction_stats()
+    assert stats["elided"] == {"count": 5, "tokensReclaimed": 1000}
+
+
+def test_zero_elision_is_not_persisted(tmp_path: Path):
+    """A zero-gain elision must not write a misleading reduction record."""
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    sm.append_compaction("s", "root", 10, summary_schema="v2", transactional_v2=True,
+                         elided={"count": 0, "tokensReclaimed": 0})
+    entry = next(e for e in sm.get_entries() if e.get("type") == "compaction")
+    assert "elided" not in entry
+
+    sm.append_compaction("s2", "root", 10, summary_schema="v2", transactional_v2=True,
+                         elided={"count": -1, "tokensReclaimed": 500})
+    entries = [e for e in sm.get_entries() if e.get("type") == "compaction"]
+    assert all("elided" not in e for e in entries)
+    assert sm.get_compaction_stats()["elided"] == {}

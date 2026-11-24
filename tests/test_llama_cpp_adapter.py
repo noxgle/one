@@ -207,3 +207,134 @@ class _PostResp:
 
     def json(self) -> dict[str, Any]:
         return self._data
+
+
+def test_usage_falls_back_to_timings_when_usage_is_absent() -> None:
+    """llama-server builds may omit ``usage`` but always report ``timings``."""
+    adapter = LlamaCppAdapter("http://127.0.0.1:8080")
+    assert adapter._usage_from_timings({"timings": {"prompt_n": 1234, "predicted_n": 56}}) == {
+        "prompt_tokens": 1234, "completion_tokens": 56,
+    }
+    # Missing or invalid timings must not fabricate usage.
+    assert adapter._usage_from_timings({}) == {}
+    assert adapter._usage_from_timings({"timings": {"prompt_n": 0}}) == {}
+    assert adapter._usage_from_timings({"timings": {"prompt_n": True}}) == {}
+    assert adapter._usage_from_timings({"timings": "nope"}) == {}
+    assert adapter._usage_from_timings(None) == {}
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_derives_usage_from_final_timings() -> None:
+    adapter = LlamaCppAdapter("http://127.0.0.1:8080")
+    result, _, _ = await _stream_with(adapter, _sse(
+        {"choices": [{"delta": {"content": "answer"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "timings": {"prompt_n": 4321, "predicted_n": 17}},
+    ))
+    assert result.usage == {"prompt_tokens": 4321, "completion_tokens": 17}
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_keeps_reported_usage_over_timings() -> None:
+    adapter = LlamaCppAdapter("http://127.0.0.1:8080")
+    result, _, _ = await _stream_with(adapter, _sse(
+        {"choices": [{"delta": {"content": "answer"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+         "timings": {"prompt_n": 4321, "predicted_n": 17}},
+    ))
+    assert result.usage == {"prompt_tokens": 10, "completion_tokens": 2}
+
+
+def test_chat_signature_stays_introspectable() -> None:
+    """AgentSession gates request features on inspect.signature(provider.chat).
+
+    A bare ``*args/**kwargs`` override erased every gate: no streaming, no
+    tools, no temperature, no images, no max_tokens. That silently downgraded
+    every llama.cpp request.
+    """
+    import inspect
+
+    from one.providers.openai_compatible import OpenAICompatibleAdapter
+
+    llama = inspect.signature(LlamaCppAdapter.chat).parameters
+    base = inspect.signature(OpenAICompatibleAdapter.chat).parameters
+    assert list(llama) == list(base), "override must expose the inherited signature"
+    for gate in ("on_delta", "max_tokens", "tools", "images", "temperature",
+                 "storage_dir", "disable_tool_calls", "on_thinking_delta"):
+        assert gate in llama, f"{gate} gate lost"
+
+
+@pytest.mark.asyncio
+async def test_agent_session_sends_full_request_to_llama(tmp_path) -> None:
+    """End-to-end gate check through AgentSession, not the bare adapter.
+
+    Captures the final wire payload, which is the only place that proves
+    streaming, native tools, temperature and max_tokens all survived the
+    ``inspect.signature`` gates in ``_invoke_provider_impl``.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from one.core.agent_session import AgentSession
+    from one.core.auth_storage import AuthStorage
+    from one.core.model_registry import ModelRegistry
+    from one.core.session_manager import SessionManager
+    from one.core.settings_manager import SettingsManager
+    from one.core.types import ModelInfo
+
+    captured: dict[str, Any] = {}
+
+    class Loader:
+        def get_system_prompt(self, selected_tools=None):  # noqa: ARG002
+            return "sys"
+
+        async def reload(self) -> None:
+            return
+
+    class StreamCtx:
+        is_error = False
+        status_code = 200
+        text = ""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            pass
+
+        async def aread(self) -> bytes:
+            return b""
+
+        async def aiter_lines(self):
+            yield "data: " + json.dumps({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+            yield "data: [DONE]"
+
+    auth = AuthStorage.in_memory()
+    auth.set_runtime_api_key("llama.cpp", "dummy")
+    registry = ModelRegistry.create(auth)
+    session = SessionManager.in_memory(str(tmp_path))
+    model = ModelInfo("llama.cpp", "local", base_url="http://127.0.0.1:8080")
+    agent = AgentSession(session, SettingsManager.in_memory({}), registry, Loader(), model, "medium")
+    agent.providers = {"llama.cpp": LlamaCppAdapter("http://127.0.0.1:8080")}
+    session.append_message({"role": "user", "content": "hi"})
+    agent.messages = session.build_session_context()["messages"]
+
+    def stream(payload: dict[str, Any]) -> StreamCtx:
+        captured["payload"] = payload
+        return StreamCtx()
+
+    with patch.object(httpx, "AsyncClient") as client_cls:
+        client = AsyncMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.stream = lambda *a, **k: stream(k["json"])
+        client_cls.return_value = client
+        await agent._invoke_provider(agent._flatten_messages_for_provider(), allow_live_stream=True)
+
+    payload = captured.get("payload")
+    assert payload is not None, "the streaming path must be used (idle-timeout SSE), not a blocking POST"
+    assert payload.get("stream") is True
+    assert payload.get("tools"), "native tool definitions must reach llama.cpp"
+    assert payload.get("temperature") is not None, "temperature must reach llama.cpp"
+    assert payload.get("max_tokens") is not None, "max_tokens must be enforced for llama.cpp"
+    assert payload.get("stream_options") == {"include_usage": True}

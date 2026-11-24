@@ -18,6 +18,7 @@ normalizes into ``ChatResult.native_tool_calls``.
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 import httpx
@@ -49,6 +50,42 @@ class LlamaCppAdapter(OpenAICompatibleAdapter):
             supports_reasoning_effort=self.supports_reasoning_effort,
             default_temperature=self.default_temperature,
         )
+
+    @staticmethod
+    def _usage_from_timings(raw: Any) -> dict[str, int]:
+        """Derive token usage from llama-server's ``timings`` block.
+
+        Some builds omit the OpenAI ``usage`` object even when
+        ``stream_options.include_usage`` is requested, but they always report
+        ``timings.prompt_n`` / ``timings.predicted_n`` on the final chunk. Without
+        this fallback the session never calibrates its token estimator and
+        output-generation telemetry stays permanently empty.
+        """
+        timings = raw.get("timings") if isinstance(raw, dict) else None
+        if not isinstance(timings, dict):
+            return {}
+        prompt_n = timings.get("prompt_n")
+        predicted_n = timings.get("predicted_n")
+        if not isinstance(prompt_n, int) or isinstance(prompt_n, bool) or prompt_n <= 0:
+            return {}
+        usage = {"prompt_tokens": prompt_n}
+        if isinstance(predicted_n, int) and not isinstance(predicted_n, bool) and predicted_n >= 0:
+            usage["completion_tokens"] = predicted_n
+        return usage
+
+    # ``functools.wraps`` keeps the inherited signature introspectable.
+    # AgentSession gates fourteen request features on
+    # ``inspect.signature(provider.chat).parameters`` (streaming, tools,
+    # temperature, images, max_tokens, storage_dir...). A bare ``*args/**kwargs``
+    # override erased all of them and silently downgraded every request.
+    @functools.wraps(OpenAICompatibleAdapter.chat)
+    async def chat(self, *args: Any, **kwargs: Any) -> Any:
+        result = await super().chat(*args, **kwargs)
+        if not result.usage:
+            derived = self._usage_from_timings(result.raw)
+            if derived:
+                result.usage = derived
+        return result
 
     def _build_payload(
         self,
