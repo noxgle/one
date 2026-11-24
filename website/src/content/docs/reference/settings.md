@@ -52,6 +52,7 @@ See [configuration and security](../guides/configuration-security.md).
       "mode": "keep_history",
       "latchAfter": 2
     },
+    "elideToolResults": true,
     "native": {
       "chatgpt": "auto",
       "anthropic": "off"

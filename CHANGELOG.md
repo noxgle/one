@@ -10,6 +10,31 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Added
 
+- **Compaction works in single-turn agentic sessions** — a session with one
+  user message and dozens of tool steps used to be structurally uncompactable:
+  the whole history counted as the "latest exchange", so every attempt returned
+  `oversized_exchange` and the turn eventually died with "Request exceeds the
+  input budget after compaction". `plan_retention` now splits an oversized
+  exchange at a tool-step boundary (never orphaning a tool call/result pair) and
+  adapts the `minKeptMessages` floor downward to the effective budget.
+  `compaction.elideToolResults` (default `true`) elides stale tool observations
+  in the detached candidate as a last resort; durable history and evidence are
+  never rewritten. Survival compactions (`auto_preflight`,
+  `context_limit_retry`) are accepted when they fit the input budget instead of
+  being rejected by the hysteresis trigger, bounded to two per turn.
+
+- **Actionable compaction telemetry** — `compaction_skipped` entries now record
+  `skipReason`, `tokensBefore` and `availableTokens`; `get_compaction_stats`
+  aggregates `skipReasons`, `lastSkip` and `elided` counts. The preflight error
+  reports the actual token counts and the real cause instead of claiming a
+  compaction happened, and a `compaction_skipped` warning is emitted before the
+  hard failure. `get_context_usage` reports `countSource` (`exact`/`estimate`).
+
+- **llama.cpp usage from `timings`** — when a llama-server build omits the
+  OpenAI `usage` object, `prompt_tokens`/`completion_tokens` are derived from
+  the final chunk's `timings`, restoring estimator calibration and
+  output-generation telemetry.
+
 - **Per-tool usage in session statistics** — `/stats`, interactive mode, and
   RPC now include a `toolUsage` map of tool name → call count for the current
   session, covering every tool call that reached execution (including

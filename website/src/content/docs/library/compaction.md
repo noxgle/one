@@ -212,6 +212,25 @@ fits. The tail shrinks to available capacity but never sacrifices mandatory
 content. Active plans are maintained separately, not duplicated in the tail,
 and restored from durable plan messages on resume.
 
+A single user message can span an entire agentic tool loop, so the latest
+exchange is not always indivisible. When it alone exceeds the available
+budget, the planner splits it at a tool-step boundary — the kept tail starts
+with an assistant message that follows a tool result, so no tool call is
+orphaned and native replay pairs stay intact. This reports
+`reason: split_exchange`. The message floor also adapts downward: if the
+configured `minKeptMessages` cannot fit, fewer messages are kept rather than
+refusing to compact. Only a genuinely indivisible oversized message reports
+`oversized_exchange`.
+
+`compaction.elideToolResults` (default `true`) is the last resort. If the
+mandatory tail still does not fit, stale tool observations are replaced with a
+bounded marker in a detached copy of the candidate, and the plan is retried
+with progressively less protection for recent results. Durable session
+messages and evidence sidecars are never rewritten; the marker points back to
+the evidence. Elided counts are recorded as `elided: {count, tokensReclaimed}`
+and aggregated in session statistics. Set it to `false` to keep the previous
+fail-closed behavior.
+
 Preflight and after-turn auto compaction share the threshold: the smaller of
 `thresholdPercent` of the input budget and the input budget minus the larger
 of `buffer.minTokens` and `ceil(window * buffer.percent / 100)`. Unknown
@@ -226,9 +245,20 @@ against the input budget before commit. The separate summarizer request is also
 checked in its actual provider shape, including the previous summary, fixed
 instructions and native tool definitions; an oversized request is not sent.
 If retention or the resulting candidate cannot fit, compaction skips with
-`skipReason: no_safe_reduction`. An oversized summary request instead produces
+`skipReason: no_safe_reduction` (or `oversized_exchange` when the mandatory
+tail is indivisible). An oversized summary request instead produces
 `failureReason: oversize`. Neither changes live history or installs a
 placeholder. Estimates are not tokenizer guarantees.
+
+Survival compactions (`auto_preflight`, `context_limit_retry`) are accepted
+when the candidate fits the input budget, even if it remains above the
+hysteresis trigger; ordinary `auto` and `manual` compaction still target the
+trigger. At most two preflight compactions run per turn, so a candidate that
+only fits the budget cannot re-trigger on every tool step. Skipped attempts
+record `skipReason`, `tokensBefore` and `availableTokens`; session statistics
+aggregate `skipReasons`, `lastSkip` and `elided`. A `compaction_skipped`
+warning is emitted before the hard input-budget error, which reports the actual
+token counts and the real cause.
 
 Completed records optionally contain nonnegative finite `tokensAfter`,
 `tokensKept`, `durationMs`, and `attempts`; bounded `strategy` and
