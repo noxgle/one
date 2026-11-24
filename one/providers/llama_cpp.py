@@ -18,6 +18,7 @@ normalizes into ``ChatResult.native_tool_calls``.
 # Source: https://github.com/noxgle/one
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 import httpx
@@ -72,6 +73,12 @@ class LlamaCppAdapter(OpenAICompatibleAdapter):
             usage["completion_tokens"] = predicted_n
         return usage
 
+    # ``functools.wraps`` keeps the inherited signature introspectable.
+    # AgentSession gates fourteen request features on
+    # ``inspect.signature(provider.chat).parameters`` (streaming, tools,
+    # temperature, images, max_tokens, storage_dir...). A bare ``*args/**kwargs``
+    # override erased all of them and silently downgraded every request.
+    @functools.wraps(OpenAICompatibleAdapter.chat)
     async def chat(self, *args: Any, **kwargs: Any) -> Any:
         result = await super().chat(*args, **kwargs)
         if not result.usage:
