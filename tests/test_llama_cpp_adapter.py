@@ -207,3 +207,40 @@ class _PostResp:
 
     def json(self) -> dict[str, Any]:
         return self._data
+
+
+def test_usage_falls_back_to_timings_when_usage_is_absent() -> None:
+    """llama-server builds may omit ``usage`` but always report ``timings``."""
+    adapter = LlamaCppAdapter("http://127.0.0.1:8080")
+    assert adapter._usage_from_timings({"timings": {"prompt_n": 1234, "predicted_n": 56}}) == {
+        "prompt_tokens": 1234, "completion_tokens": 56,
+    }
+    # Missing or invalid timings must not fabricate usage.
+    assert adapter._usage_from_timings({}) == {}
+    assert adapter._usage_from_timings({"timings": {"prompt_n": 0}}) == {}
+    assert adapter._usage_from_timings({"timings": {"prompt_n": True}}) == {}
+    assert adapter._usage_from_timings({"timings": "nope"}) == {}
+    assert adapter._usage_from_timings(None) == {}
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_derives_usage_from_final_timings() -> None:
+    adapter = LlamaCppAdapter("http://127.0.0.1:8080")
+    result, _, _ = await _stream_with(adapter, _sse(
+        {"choices": [{"delta": {"content": "answer"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "timings": {"prompt_n": 4321, "predicted_n": 17}},
+    ))
+    assert result.usage == {"prompt_tokens": 4321, "completion_tokens": 17}
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_keeps_reported_usage_over_timings() -> None:
+    adapter = LlamaCppAdapter("http://127.0.0.1:8080")
+    result, _, _ = await _stream_with(adapter, _sse(
+        {"choices": [{"delta": {"content": "answer"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+         "timings": {"prompt_n": 4321, "predicted_n": 17}},
+    ))
+    assert result.usage == {"prompt_tokens": 10, "completion_tokens": 2}
