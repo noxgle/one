@@ -102,6 +102,17 @@ def _compaction_counts(value: Any, keys: tuple[str, ...]) -> dict[str, int | flo
     return result or None
 
 
+def _elision_counts(value: Any) -> dict[str, int] | None:
+    """Record elision counters only when something was actually elided."""
+    counts = _compaction_counts(value, ("count", "tokensReclaimed"))
+    if not counts:
+        return None
+    count = counts.get("count")
+    if not isinstance(count, (int, float)) or isinstance(count, bool) or count <= 0:
+        return None
+    return {"count": int(count), "tokensReclaimed": int(counts.get("tokensReclaimed", 0))}
+
+
 def compaction_failure_metadata(trigger: Any, failure: Any, strategy: Any, attempts: Any,
                                 provider: Any, model: Any) -> dict[str, Any]:
     # Built-in identities are known literals; configured model names can contain
@@ -532,11 +543,15 @@ class SessionManager:
             entry["summarySchema"] = summary_schema
         if type(fallback) is bool:
             entry["fallback"] = fallback
+        # Elision is only meaningful when something was elided; a zero total
+        # would otherwise persist a misleading "reduction" record.
+        cleaned_elided = _elision_counts(elided)
+        if cleaned_elided is not None:
+            entry["elided"] = cleaned_elided
         for key, value, keys in (
             ("usage", usage, ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens")),
             ("constraints", constraints, ("extracted", "preserved", "dropped")),
             ("rehydrated", rehydrated, ("files", "tokens")),
-            ("elided", elided, ("count", "tokensReclaimed")),
         ):
             cleaned = _compaction_counts(value, keys)
             if cleaned is not None:

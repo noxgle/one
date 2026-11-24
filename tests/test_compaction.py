@@ -1447,3 +1447,77 @@ async def test_context_usage_reports_count_source(tmp_path):
     agent._exact_context_signature = agent._request_signature(request)
     usage = agent.get_context_usage()
     assert usage["countSource"] == "exact" and usage["tokens"] == 1234
+
+
+def test_merge_elision_stats_accumulates_and_rejects_zero():
+    """Counter merging must add passes and never record a zero reduction."""
+    from one.core.agent_session import _merge_elision_stats
+
+    assert _merge_elision_stats(None, None) is None
+    assert _merge_elision_stats(None, {"count": 0, "tokensReclaimed": 0}) is None
+    assert _merge_elision_stats({"count": 0, "tokensReclaimed": 0}, {"count": 0, "tokensReclaimed": 0}) is None
+    assert _merge_elision_stats({"count": 4, "tokensReclaimed": 900}, None) == {
+        "count": 4, "tokensReclaimed": 900,
+    }
+    assert _merge_elision_stats({"count": 4, "tokensReclaimed": 900}, {"count": 0, "tokensReclaimed": 0}) == {
+        "count": 4, "tokensReclaimed": 900,
+    }, "a zero-gain later pass must not erase the earlier reduction"
+    assert _merge_elision_stats({"count": 4, "tokensReclaimed": 900}, {"count": 2, "tokensReclaimed": 100}) == {
+        "count": 6, "tokensReclaimed": 1000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_v2_preflight_guard_allows_many_needed_compactions(tmp_path):
+    """The guard must stop livelocks, not long turns with real reductions."""
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True}},
+                      model=ModelInfo("openai", "small", context_window=16000))
+    agent.messages = [{"role": "user", "content": "x" * 40000}]
+    agent.session_manager.append_message(agent.messages[0])
+    calls: list[str] = []
+
+    async def reducing(**kwargs):
+        calls.append(kwargs["reason"])
+        agent.messages = [{"role": "user", "content": "summary"}]
+        return {"skipped": False, "summary": "s"}
+
+    agent.compact = reducing
+
+    for need in range(1, 5):
+        for _ in range(12):
+            agent.messages.append({"role": "assistant", "content": "a" * 3000})
+            agent.messages.append({"role": "toolResult", "content": "t" * 3000})
+        await agent._preflight_compact()
+        assert len(calls) == need, f"needed compaction #{need} was blocked"
+
+
+@pytest.mark.asyncio
+async def test_v2_preflight_guard_stops_repeated_no_progress(tmp_path):
+    """Two consecutive no-progress attempts must stop the loop, not spin."""
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True}},
+                      model=ModelInfo("openai", "small", context_window=16000))
+    agent.messages = [{"role": "user", "content": "x" * 40000}]
+    agent.session_manager.append_message(agent.messages[0])
+    calls: list[str] = []
+
+    async def stuck(**kwargs):
+        calls.append(kwargs["reason"])
+        return {"skipped": True, "skipReason": "no_safe_reduction"}
+
+    agent.compact = stuck
+    for _ in range(5):
+        with pytest.raises(RuntimeError, match="Request needs"):
+            await agent._preflight_compact()
+    assert len(calls) == 2, "guard must cap consecutive no-progress attempts at two"
+
+
+@pytest.mark.asyncio
+async def test_v2_zero_min_kept_messages_still_compacts(tmp_path):
+    """minKeptMessages=0 is a valid setting and must not become a refusal."""
+    agent = _mk_agent(tmp_path, {"compaction": {
+        "experimentalV2": True, "summarizeWithModel": False,
+        "recentTokens": 20, "minKeptMessages": 0,
+    }}, model=ModelInfo("openai", "small", context_window=32000))
+    _seed(agent, 5)
+    result = await agent.compact()
+    assert not result["skipped"], result

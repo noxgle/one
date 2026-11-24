@@ -555,3 +555,18 @@ def test_compaction_stats_aggregate_elided_counts(tmp_path: Path):
                          elided={"count": 2, "tokensReclaimed": 100})
     stats = sm.get_compaction_stats()
     assert stats["elided"] == {"count": 5, "tokensReclaimed": 1000}
+
+
+def test_zero_elision_is_not_persisted(tmp_path: Path):
+    """A zero-gain elision must not write a misleading reduction record."""
+    sm = SessionManager.create(str(tmp_path), str(tmp_path / "sessions"))
+    sm.append_compaction("s", "root", 10, summary_schema="v2", transactional_v2=True,
+                         elided={"count": 0, "tokensReclaimed": 0})
+    entry = next(e for e in sm.get_entries() if e.get("type") == "compaction")
+    assert "elided" not in entry
+
+    sm.append_compaction("s2", "root", 10, summary_schema="v2", transactional_v2=True,
+                         elided={"count": -1, "tokensReclaimed": 500})
+    entries = [e for e in sm.get_entries() if e.get("type") == "compaction"]
+    assert all("elided" not in e for e in entries)
+    assert sm.get_compaction_stats()["elided"] == {}

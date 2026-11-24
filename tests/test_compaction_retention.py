@@ -170,3 +170,11 @@ def test_floor_adapts_below_min_kept():
     assert result.reason == "ok"
     assert result.keep_start > 0
     assert result.tokens_kept <= 1200
+
+
+def test_zero_min_kept_messages_is_honored():
+    """minKeptMessages=0 must not turn into a refusal."""
+    messages = [msg("user", 20), msg("assistant", 20)] * 5
+    result = plan(messages, recent=20, floor=0, available=10000)
+    assert result.reason == "ok"
+    assert result.keep_start > 0

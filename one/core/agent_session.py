@@ -208,6 +208,30 @@ class _CapabilityErrorCooperative(_CapabilityError):
     """
 
 
+def _merge_elision_stats(
+    previous: dict[str, int] | None, added: dict[str, int] | None,
+) -> dict[str, int] | None:
+    """Accumulate elision counters across passes without inventing a reduction.
+
+    Compaction may elide in two places: re-planning the retained window and
+    trimming the committed tail. Both reduce the same live view, so reporting
+    only the last pass loses real evidence. A zero total must stay ``None`` so
+    "nothing was elided" is never written to durable telemetry.
+    """
+    total = 0
+    reclaimed = 0
+    for stats in (previous, added):
+        if not isinstance(stats, dict):
+            continue
+        count = stats.get("count")
+        tokens = stats.get("tokensReclaimed")
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            total += count
+            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0:
+                reclaimed += tokens
+    return {"count": total, "tokensReclaimed": reclaimed} if total else None
+
+
 def _valid_limit(value: object) -> int | None:
     return valid_limit(value)
 
@@ -4678,11 +4702,13 @@ class AgentSession:
                     tokens = exact_tokens if exact_tokens is not None else self._estimate_request_tokens()
             if self._v2_should_compact(tokens) and (self._get_native_view() is None
                                                      or tokens > self._context_budget().input_budget):
-                # Bound the number of survival compactions per turn so a
-                # candidate that only fits the budget (not the trigger) cannot
-                # re-trigger on every tool step.
+                # Guard against a livelock, not against long turns. A genuine
+                # reduction resets the counter, so a turn that keeps growing can
+                # compact as often as it needs; only consecutive attempts that
+                # fail to shrink the request are capped. Counting skips or
+                # every success would kill a third needed compaction.
                 if self._v2_preflight_compactions < 2:
-                    self._v2_preflight_compactions += 1
+                    tokens_before_compaction = tokens
                     result = await self.compact(reason="auto_preflight", allow_during_prompt=True)
                     exact_tokens = await self._exact_request_tokens()
                     tokens = exact_tokens if exact_tokens is not None else self._estimate_request_tokens()
@@ -4700,6 +4726,11 @@ class AgentSession:
                                 "or raise the server context window."
                             ),
                         })
+                    # Progress resets the guard; anything else is one more strike.
+                    if result and not result.get("skipped") and tokens < tokens_before_compaction:
+                        self._v2_preflight_compactions = 0
+                    else:
+                        self._v2_preflight_compactions += 1
             budget = self._context_budget()
             if tokens > budget.input_budget:
                 raise _CompactionInputError(
@@ -5994,7 +6025,7 @@ class AgentSession:
                     # candidate only. Session history and evidence are untouched,
                     # so this cannot destroy recoverable data.
                     if self.settings_manager.get_compaction_elide_tool_results():
-                        elided_tail, elision_stats = prune_stale_tool_outputs(
+                        elided_tail, tail_elision = prune_stale_tool_outputs(
                             tail, enabled=True,
                             recent_tokens=max(0, int(budget.input_budget * 0.5)),
                             min_result_tokens=256,
@@ -6002,7 +6033,7 @@ class AgentSession:
                                    "Full output remains in session evidence; re-run the tool if needed.",
                             estimate_tokens=self._approx_message_tokens,
                         )
-                        if elision_stats["count"]:
+                        if tail_elision["count"]:
                             elided_candidate = [summary_message, *derivatives, *elided_tail]
                             elided_tokens = await self._exact_request_tokens(elided_candidate)
                             check_current()
@@ -6013,10 +6044,11 @@ class AgentSession:
                                 # candidate and the live context would diverge.
                                 tail = elided_tail
                                 candidate, candidate_tokens = elided_candidate, elided_tokens
-                            else:
-                                elision_stats = None
-                        else:
-                            elision_stats = None
+                                # Accumulate rather than overwrite: an earlier elision
+                                # pass may already have reduced ``source_messages``,
+                                # and replacing its statistics would report a
+                                # reduction of zero.
+                                elision_stats = _merge_elision_stats(elision_stats, tail_elision)
                 if candidate_tokens > limit or (not survival and self._v2_should_compact(candidate_tokens)):
                     result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total,
                               "skipped": True, "skipReason": "no_safe_reduction"}

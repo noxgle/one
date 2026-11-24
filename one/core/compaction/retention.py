@@ -103,8 +103,10 @@ def plan_retention(
         return RetentionPlan(latest, suffix[latest], "oversized_exchange")
 
     # Adapt the message floor downward until the mandatory tail fits the budget.
+    # The lower bound is -1 so a configured ``minKeptMessages: 0`` is honored;
+    # stopping at 1 silently turned "keep nothing" into a refusal to compact.
     floor = latest
-    for floor_size in range(min_kept_messages, 0, -1):
+    for floor_size in range(min_kept_messages, -1, -1):
         candidate = safe(min(latest, max(0, total - floor_size)))
         if suffix[candidate] <= available_tokens:
             floor = candidate
