@@ -539,10 +539,10 @@ def test_compaction_v2_defaults_and_detached_values() -> None:
     settings = SettingsManager.in_memory()
     result = settings.get_compaction_settings()
     assert {key: result[key] for key in (
-        "experimentalV2", "strategy", "cacheAware", "buffer", "summary", "constraints", "failure", "native",
-        "rehydrate", "precompute",
+        "experimentalV2", "strategy", "cacheAware", "elideToolResults", "buffer", "summary", "constraints",
+        "failure", "native", "rehydrate", "precompute",
     )} == {
-        "experimentalV2": False, "strategy": "auto", "cacheAware": True,
+        "experimentalV2": False, "strategy": "auto", "cacheAware": True, "elideToolResults": True,
         "buffer": {"percent": 15, "minTokens": 16000},
         "summary": {"schema": "v2", "maxOutputTokens": 4000, "toolOutputs": "clipped", "clipChars": 2000, "retryOnInvalid": 1},
         "constraints": {"enabled": True, "maxTokens": 2000},
@@ -756,3 +756,12 @@ def test_effective_v2_retention_defaults_and_explicit_scopes(tmp_path):
     (project / ".one" / "settings.json").write_text(json.dumps({"compaction": {"recentTokens": 23, "minKeptMessages": 3}}))
     settings = SettingsManager(str(project), str(agent))
     assert (settings.get_effective_compaction_recent_tokens(), settings.get_effective_compaction_min_kept_messages()) == (23, 3)
+
+
+def test_compaction_elide_tool_results_setting() -> None:
+    assert SettingsManager.in_memory().get_compaction_elide_tool_results() is True
+    disabled = SettingsManager.in_memory({"compaction": {"elideToolResults": False}})
+    assert disabled.get_compaction_elide_tool_results() is False
+    # A non-boolean value falls back to the safe default instead of truthiness.
+    invalid = SettingsManager.in_memory({"compaction": {"elideToolResults": "no"}})
+    assert invalid.get_compaction_elide_tool_results() is True

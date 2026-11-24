@@ -1161,7 +1161,9 @@ async def test_v2_irreducible_and_long_summary_preserve_history(tmp_path):
     agent.messages = [{"role": "user", "content": "x" * 100000}]
     before = deepcopy(agent.messages)
     result = await agent.compact(reason="auto")
-    assert result["skipReason"] == "no_safe_reduction"
+    # A single indivisible message that cannot fit is an oversized exchange,
+    # not a floor problem; the reason must say which one it was.
+    assert result["skipReason"] == "oversized_exchange"
     assert agent.messages == before and provider.calls == 2
 
 
@@ -1257,7 +1259,7 @@ async def test_v2_oversize_summary_request_skips_without_provider(tmp_path, larg
         # V2 bounds previous checkpoints in the prompt, then repairs once.
         assert result["failureReason"] == "invalid_fallback" and result["summary"] == ""
     else:
-        assert result["skipReason"] == "no_safe_reduction"
+        assert result["skipReason"] == "oversized_exchange"
     assert agent.messages == before and provider.calls == (2 if large_previous else 0)
     assert agent.session_manager.get_compaction_stats()["completed"] == int(large_previous)
 
@@ -1310,3 +1312,138 @@ async def test_v2_summary_admission_and_input_errors_propagate(tmp_path, error_n
     agent._invoke_provider = fail
     with pytest.raises(getattr(agent_session, error_name), match="refused"):
         await agent._summarize_context([{"role": "user", "content": "hello"}])
+
+
+# --- Single-turn (agentic loop) compaction regressions -----------------------
+# A session with one user message and many tool steps used to be structurally
+# uncompactable: the whole history counted as the "latest exchange".
+
+
+def _seed_agentic_loop(agent: AgentSession, steps: int = 12, tool_chars: int = 4000) -> None:
+    sm = agent.session_manager
+    sm.append_message({"role": "user", "content": "fix the failing test"})
+    for i in range(steps):
+        sm.append_message({
+            "role": "assistant", "content": "",
+            "_nativeToolCalls": [{"id": f"c{i}", "name": "bash", "arguments": {"command": f"cmd {i}"}}],
+        })
+        sm.append_message({
+            "role": "toolResult", "content": json.dumps({"tool": "bash", "ok": True, "output": "y" * tool_chars}),
+            "_nativeToolCallId": f"c{i}",
+        })
+    agent.messages = sm.build_session_context()["messages"]
+
+
+@pytest.mark.asyncio
+async def test_v2_single_user_turn_compacts_by_splitting_the_exchange(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {
+        "experimentalV2": True, "summarizeWithModel": False,
+        "recentTokens": 1000, "minKeptMessages": 8,
+    }}, model=ModelInfo("openai", "small", context_window=16000))
+    _seed_agentic_loop(agent, steps=12)
+    before = len(agent.messages)
+    result = await agent.compact(reason="auto_preflight")
+    assert not result["skipped"], result
+    assert len(agent.messages) < before
+    # The kept tail must start at a tool step, never with an orphaned result.
+    assert agent.messages[1]["role"] == "assistant"
+    assert agent.messages[1].get("_nativeToolCalls")
+    assert agent.messages[2]["role"] == "toolResult"
+    assert agent.messages[2]["_nativeToolCallId"] == agent.messages[1]["_nativeToolCalls"][0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_v2_skip_records_reason_and_budget_in_durable_stats(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {
+        "experimentalV2": True, "summarizeWithModel": False,
+        "recentTokens": 1, "minKeptMessages": 1,
+    }}, model=ModelInfo("openai", "small", context_window=16000))
+    agent.messages = [{"role": "user", "content": "x" * 200000}]
+    agent.session_manager.append_message(agent.messages[0])
+    result = await agent.compact(reason="auto_preflight")
+    assert result["skipped"] and result["skipReason"] == "oversized_exchange"
+    stats = agent.session_manager.get_compaction_stats()
+    assert stats["skipReasons"] == {"oversized_exchange": 1}
+    assert stats["lastSkip"]["skipReason"] == "oversized_exchange"
+    assert stats["lastSkip"]["reason"] == "auto_preflight"
+    assert stats["lastSkip"]["availableTokens"] is not None
+
+
+@pytest.mark.asyncio
+async def test_v2_preflight_accepts_candidate_above_trigger_but_within_budget(tmp_path):
+    """A survival compaction must not be rejected by the hysteresis threshold."""
+    class CountingProvider(_Provider):
+        async def count_request_tokens(self, **kwargs):
+            return self.count
+
+    class ShapeAwareProvider(_Provider):
+        """Count the fixed prompt small and the full request near the budget."""
+
+        def __init__(self):
+            super().__init__([])
+            self.full_count = 0
+
+        async def count_request_tokens(self, **kwargs):
+            messages = kwargs["messages"]
+            # Only the system prompt: the fixed overhead.
+            if len(messages) <= 1:
+                return 500
+            return self.full_count
+
+    provider = ShapeAwareProvider()
+    agent = _mk_agent(tmp_path, {"compaction": {
+        "experimentalV2": True, "summarizeWithModel": False,
+        "recentTokens": 1, "minKeptMessages": 1,
+    }}, provider=provider, model=ModelInfo("openai", "small", context_window=32000))
+    _seed(agent, 4)
+    budget = agent._context_budget()
+    # The trigger sits at 80% of the input budget; 95% is above it but still
+    # inside the hard budget, which is exactly the case that used to be refused.
+    provider.full_count = int(budget.input_budget * 0.95)
+    result = await agent.compact(reason="auto_preflight")
+    assert not result["skipped"], result
+
+
+@pytest.mark.asyncio
+async def test_v2_elision_fits_budget_without_mutating_history(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {
+        "experimentalV2": True, "summarizeWithModel": False,
+        "recentTokens": 1, "minKeptMessages": 1, "elideToolResults": True,
+    }}, model=ModelInfo("openai", "small", context_window=16000))
+    _seed_agentic_loop(agent, steps=6, tool_chars=20000)
+    durable_before = [dict(m) for m in agent.session_manager.build_session_context()["messages"]]
+    result = await agent.compact(reason="auto_preflight")
+    assert not result["skipped"], result
+    # Durable message entries are untouched; only the live provider view was
+    # reduced. The branch gains a compaction entry, not rewritten messages.
+    assert agent.session_manager.get_compaction_stats()["elided"]["count"] >= 1
+    durable_after = [e["message"] for e in agent.session_manager.get_branch()
+                     if e.get("type") == "message"]
+    assert durable_after == durable_before
+    # The live view is smaller than the durable history it was derived from.
+    assert sum(agent._approx_message_tokens(m) for m in agent.messages) < sum(
+        agent._approx_message_tokens(m) for m in durable_before)
+
+
+@pytest.mark.asyncio
+async def test_v2_elision_can_be_disabled(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {
+        "experimentalV2": True, "summarizeWithModel": False,
+        "recentTokens": 1, "minKeptMessages": 1, "elideToolResults": False,
+    }}, model=ModelInfo("openai", "small", context_window=16000))
+    _seed_agentic_loop(agent, steps=6, tool_chars=20000)
+    result = await agent.compact(reason="auto_preflight")
+    assert result["skipped"]
+    assert agent.session_manager.get_compaction_stats()["elided"] == {}
+
+
+@pytest.mark.asyncio
+async def test_context_usage_reports_count_source(tmp_path):
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True}})
+    _seed(agent, 2)
+    assert agent.get_context_usage()["countSource"] == "estimate"
+    request = agent._flatten_messages_for_provider()
+    agent._exact_context_tokens = 1234
+    agent._exact_context_signature = agent._request_signature(request)
+    usage = agent.get_context_usage()
+    assert usage["countSource"] == "exact" and usage["tokens"] == 1234

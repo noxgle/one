@@ -79,7 +79,12 @@ def test_floor_adaptation_short_and_empty():
     messages = [msg("user", 20), msg("assistant", 20)] * 5
     assert plan(messages, recent=20, floor=4).keep_start == 6
     assert plan(messages, recent=200, floor=2, available=60).keep_start == 7
-    assert plan(messages, recent=20, floor=4, available=60).reason == "no_safe_reduction"
+    # The message floor adapts downward instead of refusing to compact.
+    adapted = plan(messages, recent=20, floor=4, available=60)
+    assert (adapted.keep_start, adapted.reason) == (7, "ok")
+    # A single indivisible message with no internal step boundary is still an
+    # explicit refusal rather than a silently oversized request.
+    assert plan([msg("user", 100)], recent=20, floor=4, available=60).reason == "oversized_exchange"
     assert plan(messages[:2]).reason == "no_safe_reduction"
     assert plan([]).reason == "no_safe_reduction"
 
@@ -120,3 +125,48 @@ def test_invalid_limits_and_estimates():
         plan([], available=-1)
     with pytest.raises(ValueError):
         plan([msg("user", -1)])
+
+
+def test_single_user_message_splits_at_tool_boundary():
+    """One user message can span an entire tool loop; it must still be splittable."""
+    messages = [msg("user", 10)]
+    for _ in range(20):
+        messages.append(msg("assistant", 100))
+        messages.append(msg("toolResult", 400))
+    total = sum(m["tokens"] for m in messages)
+    # The whole history does not fit, but a suffix starting at a tool step does.
+    result = plan(messages, recent=15000, floor=8, available=total - 1000)
+    assert result.reason == "split_exchange"
+    assert result.keep_start > 0
+    assert result.tokens_kept <= total - 1000
+    assert messages[result.keep_start]["role"] == "assistant"
+    assert messages[result.keep_start - 1]["role"] == "toolResult"
+
+
+def test_split_never_starts_with_orphaned_tool_result():
+    messages = [msg("user", 10), msg("assistant", 100), msg("toolResult", 400),
+                msg("assistant", 100), msg("toolResult", 400)]
+    result = plan(messages, recent=15000, floor=1, available=500)
+    assert result.reason == "split_exchange"
+    assert messages[result.keep_start]["role"] == "assistant"
+
+
+def test_split_never_orphans_native_pair():
+    call = {"id": "x", "name": "read", "arguments": {}}
+    messages = [msg("user", 10)]
+    for _ in range(5):
+        messages.append(msg("assistant", 100, _nativeToolCalls=[call]))
+        messages.append(msg("toolResult", 400, _nativeToolCallId="x"))
+    result = plan(messages, recent=15000, floor=1, available=900)
+    assert result.reason == "split_exchange"
+    # The kept tail must not begin with a tool result whose call was dropped.
+    assert messages[result.keep_start].get("role") == "assistant"
+
+
+def test_floor_adapts_below_min_kept():
+    """Eight huge messages must not force a refusal when fewer still fit."""
+    messages = [msg("user", 10)] + [msg("assistant", 500) for _ in range(7)] + [msg("user", 10)]
+    result = plan(messages, recent=15000, floor=8, available=1200)
+    assert result.reason == "ok"
+    assert result.keep_start > 0
+    assert result.tokens_kept <= 1200

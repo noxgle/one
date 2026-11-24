@@ -39,6 +39,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "summary": {"schema": "v2", "maxOutputTokens": 4000, "toolOutputs": "clipped", "clipChars": 2000, "retryOnInvalid": 1},
         "constraints": {"enabled": True, "maxTokens": 2000},
         "failure": {"mode": "keep_history", "latchAfter": 2},
+        "elideToolResults": True,
         "native": {"chatgpt": "auto", "anthropic": "off"},
         "rehydrate": {"enabled": False, "maxFiles": 5, "maxTokens": 12000},
         "precompute": {"enabled": False},
@@ -414,6 +415,7 @@ class SettingsManager:
 
         boolean(settings, "experimentalV2", False)
         boolean(settings, "cacheAware", True)
+        boolean(settings, "elideToolResults", True)
         choice(settings, "strategy", "auto", ("auto", "local_cache_aware", "local_separate", "extractive", "native_openai"))
         for key in ("buffer", "summary", "constraints", "failure", "native", "rehydrate", "precompute"):
             if not isinstance(settings.get(key), dict):
@@ -452,6 +454,10 @@ class SettingsManager:
 
     def get_compaction_cache_aware(self) -> bool:
         return self.get_compaction_settings()["cacheAware"]
+
+    def get_compaction_elide_tool_results(self) -> bool:
+        """Whether compaction may elide stale tool results to fit the budget."""
+        return self.get_compaction_settings()["elideToolResults"]
 
     def get_compaction_buffer(self) -> dict[str, Any]:
         return self.get_compaction_settings()["buffer"]

@@ -492,6 +492,7 @@ class SessionManager:
         transactional_v2: bool = False,
         derivative_blocks: Any = None,
         rehydration_state: Any = None,
+        elided: Any = None,
     ) -> str | dict[str, Any]:
         """Append a compaction; V2 transactions return a detached committed entry.
 
@@ -535,6 +536,7 @@ class SessionManager:
             ("usage", usage, ("inputTokens", "cachedTokens", "outputTokens", "reasoningTokens")),
             ("constraints", constraints, ("extracted", "preserved", "dropped")),
             ("rehydrated", rehydrated, ("files", "tokens")),
+            ("elided", elided, ("count", "tokensReclaimed")),
         ):
             cleaned = _compaction_counts(value, keys)
             if cleaned is not None:
@@ -624,8 +626,17 @@ class SessionManager:
         return None
 
     def append_compaction_skipped(self, reason: str, *, busy: bool = False,
+                                  skip_reason: str | None = None,
+                                  tokens_before: int | None = None,
+                                  available_tokens: int | None = None,
                                   transactional_v2: bool = False) -> str | dict[str, Any]:
-        """Record a compaction request that deliberately made no summary."""
+        """Record a compaction request that deliberately made no summary.
+
+        ``skip_reason`` distinguishes a structural refusal (``oversized_exchange``,
+        ``no_safe_reduction``) from a transient one (``busy``, ``failure_latch``).
+        Without it the durable statistics only show a bare skip count, which made
+        a real incident impossible to diagnose after the fact.
+        """
         entry = {
             "type": "compaction_skipped",
             "id": _id(),
@@ -634,6 +645,11 @@ class SessionManager:
             "reason": reason,
             "busy": busy,
         }
+        if isinstance(skip_reason, str) and skip_reason:
+            entry["skipReason"] = skip_reason[:64]
+        for key, value in (("tokensBefore", tokens_before), ("availableTokens", available_tokens)):
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                entry[key] = value
         return self._append_transactional(entry) if transactional_v2 else self._append(entry)
 
     def append_compaction_failed(self, trigger: str, failure_reason: str, *, strategy: Any = None,
@@ -660,10 +676,12 @@ class SessionManager:
 
         completed = skipped = failed = tokens_before = 0
         failure_reasons: dict[str, int] = {}
+        skip_reasons: dict[str, int] = {}
+        last_skip: dict[str, Any] | None = None
         by_strategy: dict[str, int] = {}
         cache_entries: list[dict[str, Any]] = []
         durations: list[float] = []
-        aggregates: dict[str, dict[str, int | float]] = {"constraints": {}, "rehydrated": {}}
+        aggregates: dict[str, dict[str, int | float]] = {"constraints": {}, "rehydrated": {}, "elided": {}}
         last: dict[str, Any] | None = None
         for entry in self._entries[1:]:
             if entry.get("type") == "compaction":
@@ -679,7 +697,8 @@ class SessionManager:
                 if duration is not None:
                     durations.append(duration)
                 for key, keys in (("constraints", ("extracted", "preserved", "dropped")),
-                                  ("rehydrated", ("files", "tokens"))):
+                                  ("rehydrated", ("files", "tokens")),
+                                  ("elided", ("count", "tokensReclaimed"))):
                     for name, value in (_compaction_counts(entry.get(key), keys) or {}).items():
                         aggregates[key][name] = aggregates[key].get(name, 0) + value
                 before = _compaction_number(entry.get("tokensBefore"))
@@ -692,6 +711,17 @@ class SessionManager:
                 }
             elif entry.get("type") == "compaction_skipped":
                 skipped += 1
+                skip_reason = entry.get("skipReason")
+                skip_reason = skip_reason if isinstance(skip_reason, str) and skip_reason else "unspecified"
+                skip_reasons[skip_reason] = skip_reasons.get(skip_reason, 0) + 1
+                last_skip = {
+                    "id": entry.get("id"), "timestamp": entry.get("timestamp"),
+                    "reason": str(entry.get("reason") or "auto"),
+                    "skipReason": skip_reason,
+                    "busy": entry.get("busy") is True,
+                    "tokensBefore": _compaction_number(entry.get("tokensBefore")),
+                    "availableTokens": _compaction_number(entry.get("availableTokens")),
+                }
             elif entry.get("type") == "compaction_failed":
                 failed += 1
                 failure = entry.get("failureReason")
@@ -700,9 +730,11 @@ class SessionManager:
         return {
             "completed": completed, "skipped": skipped, "tokensBefore": tokens_before,
             "byReason": breakdown, "last": last, "failed": failed, "failureReasons": failure_reasons,
+            "skipReasons": skip_reasons, "lastSkip": last_skip,
             "byStrategy": by_strategy, "cache": self._provider_cache_summary(cache_entries),
             "avgDurationMs": sum(durations) / len(durations) if durations else None,
             "constraints": aggregates["constraints"], "rehydrated": aggregates["rehydrated"],
+            "elided": aggregates["elided"],
         }
 
     def get_compaction_timing(self) -> dict[str, Any]:

@@ -32,14 +32,21 @@ def checkpoint_prompt(ledger: Sequence[Constraint], hint: str = "") -> str:
 def validate_checkpoint(
     text: str, *, estimate_tokens: Callable[[str], int], max_output_tokens: int = 4000,
     tool_calls: Sequence[Any] = (), ledger: Sequence[Constraint] = (),
+    check_residue: bool = True,
 ) -> bool:
-    """Reject malformed, oversized, tool-calling or ledger-altering candidates."""
+    """Reject malformed, oversized, tool-calling or ledger-altering candidates.
+
+    ``check_residue`` guards against model-generated tool-call syntax. The
+    deterministic extractive fallback embeds real tool payloads as quoted data,
+    so it disables that check: a ``"tool":`` key in observed JSON is data, not a
+    call, and rejecting it made the fallback unusable for tool-heavy sessions.
+    """
     if not isinstance(text, str) or tool_calls or max_output_tokens < 0:
         return False
     cost = estimate_tokens(text)
     # Ledger lines are verbatim user data, not generated meta prose or tool calls.
     inspected = "\n".join(line for line in text.splitlines() if line not in render_ledger(ledger).splitlines())
-    if cost < 0 or cost > max_output_tokens or _RESIDUE.search(inspected):
+    if cost < 0 or cost > max_output_tokens or (check_residue and _RESIDUE.search(inspected)):
         return False
     matches = list(_HEAD.finditer(text))
     names = [m.group(2).strip() for m in matches]
@@ -144,6 +151,7 @@ def extractive_checkpoint(
             f"{clean(plan or assistant) or 'Unknown'}\n# Relevant Files\n"
             + ("\n".join(clean(p) for p in paths[:15]) or "None")
             + "\n# Important Context\n" + ("\n".join(clean(r) for r in results[-3:]) or "None") + "\n")
-    if not validate_checkpoint(text, estimate_tokens=estimate_tokens, max_output_tokens=max_output_tokens, ledger=ledger):
+    if not validate_checkpoint(text, estimate_tokens=estimate_tokens, max_output_tokens=max_output_tokens,
+                               ledger=ledger, check_residue=False):
         raise ValueError("fallback checkpoint cannot fit or contains invalid material")
     return text

@@ -310,6 +310,7 @@ class AgentSession:
         self._is_compacting = False
         self._compaction_generation = 0
         self._v2_compaction_failures = 0
+        self._v2_preflight_compactions = 0
         self._retrying = False
         self._prompt_cache_disabled = False
         self._prewarm_done = False
@@ -4677,12 +4678,34 @@ class AgentSession:
                     tokens = exact_tokens if exact_tokens is not None else self._estimate_request_tokens()
             if self._v2_should_compact(tokens) and (self._get_native_view() is None
                                                      or tokens > self._context_budget().input_budget):
-                await self.compact(reason="auto_preflight", allow_during_prompt=True)
-                exact_tokens = await self._exact_request_tokens()
-                tokens = exact_tokens if exact_tokens is not None else self._estimate_request_tokens()
-            if tokens > self._context_budget().input_budget:
+                # Bound the number of survival compactions per turn so a
+                # candidate that only fits the budget (not the trigger) cannot
+                # re-trigger on every tool step.
+                if self._v2_preflight_compactions < 2:
+                    self._v2_preflight_compactions += 1
+                    result = await self.compact(reason="auto_preflight", allow_during_prompt=True)
+                    exact_tokens = await self._exact_request_tokens()
+                    tokens = exact_tokens if exact_tokens is not None else self._estimate_request_tokens()
+                    if isinstance(result, dict) and result.get("skipped"):
+                        self._emit({
+                            "type": "warning", "warning": "compaction_skipped",
+                            "reason": "auto_preflight",
+                            "skipReason": result.get("skipReason") or "unknown",
+                            "tokens": tokens,
+                            "inputBudget": self._context_budget().input_budget,
+                            "message": (
+                                "Automatic compaction could not reduce the context "
+                                f"({result.get('skipReason') or 'unknown reason'}). "
+                                "Shorten the latest exchange, enable toolOutputPruning, "
+                                "or raise the server context window."
+                            ),
+                        })
+            budget = self._context_budget()
+            if tokens > budget.input_budget:
                 raise _CompactionInputError(
-                    "Request exceeds the input budget after compaction; shorten the latest exchange or use a larger context window."
+                    f"Request needs {tokens} tokens but the input budget is {budget.input_budget}; "
+                    "compaction could not reduce the context — shorten the latest exchange, "
+                    "enable toolOutputPruning, or raise the server context window."
                 )
             return
         usage = self.get_context_usage()
@@ -4726,6 +4749,7 @@ class AgentSession:
         self.messages.append(user_msg)
         self.session_manager.append_message(user_msg)
         self._v2_compaction_failures = 0
+        self._v2_preflight_compactions = 0
         self._emit({"type": "message_start", "message": user_msg})
         self._emit({"type": "message_end", "message": user_msg})
         if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
@@ -4802,6 +4826,7 @@ class AgentSession:
             self.messages.append(user_msg)
             self.session_manager.append_message(user_msg)
             self._v2_compaction_failures = 0
+            self._v2_preflight_compactions = 0
             self._emit({"type": "message_start", "message": user_msg})
             self._emit({"type": "message_end", "message": user_msg})
             if self._extension_runtime is not None and self._extension_runtime.has_hooks("chat.message"):
@@ -5614,12 +5639,18 @@ class AgentSession:
             raise BusySessionError("Compaction is already running")
         v2 = self.settings_manager.get_compaction_experimental_v2()
 
-        def record_skip(*, busy: bool = False) -> None:
+        def record_skip(*, busy: bool = False, skip_reason: str | None = None,
+                        tokens_before: int | None = None,
+                        available_tokens: int | None = None) -> None:
             if not v2:
                 self.session_manager.append_compaction_skipped(reason, busy=busy)
                 return
             try:
-                self.session_manager.append_compaction_skipped(reason, busy=busy, transactional_v2=True)
+                self.session_manager.append_compaction_skipped(
+                    reason, busy=busy, skip_reason=skip_reason,
+                    tokens_before=tokens_before, available_tokens=available_tokens,
+                    transactional_v2=True,
+                )
             except Exception:
                 pass  # Skip telemetry is best effort.
 
@@ -5667,20 +5698,75 @@ class AgentSession:
                                if v2 else self.messages)
             total = len(source_messages)
             manual = reason == "manual"
+            elision_stats: dict[str, int] | None = None
             if v2:
-                fixed = self._estimate_request_tokens([])
                 reserve = self.settings_manager.get_compaction_summary()["maxOutputTokens"]
-                available = max(0, int((self._context_budget().input_budget - fixed - reserve) / 1.15))
+                # Keep the planner in the same unit as the acceptance check below.
+                # The exact counter already includes the fixed prompt and tool
+                # schemas, so dividing by the estimator margin again made the
+                # planner ~13% more conservative than its own gate.
+                try:
+                    fixed_exact = await self._exact_request_tokens([])
+                except Exception:
+                    # Exact counting is an optional provider capability; a broken
+                    # endpoint must not turn a compaction into a hard failure.
+                    fixed_exact = None
+                check_current()
+                if fixed_exact is not None:
+                    available = max(0, self._context_budget().input_budget - fixed_exact - reserve)
+                else:
+                    fixed = self._estimate_request_tokens([])
+                    available = max(0, int((self._context_budget().input_budget - fixed - reserve) / 1.15))
                 retention = plan_retention(
                     source_messages, self._approx_message_tokens,
                     self.settings_manager.get_effective_compaction_recent_tokens(),
                     self.settings_manager.get_effective_compaction_min_kept_messages(), available,
                 )
+                if (retention.reason not in {"ok", "split_exchange"}
+                        and self.settings_manager.get_compaction_elide_tool_results()):
+                    # The mandatory tail itself does not fit. Elide stale tool
+                    # observations in a detached copy and re-plan; the durable
+                    # history and evidence stay untouched. Protection shrinks on
+                    # each attempt so a single huge recent result cannot block
+                    # the reduction entirely.
+                    for protect in (0.5, 0.25, 0.0):
+                        elided_source, stats = prune_stale_tool_outputs(
+                            source_messages, enabled=True,
+                            recent_tokens=max(0, int(self._context_budget().input_budget * protect)),
+                            min_result_tokens=256,
+                            marker="Elided during compaction to fit the input budget. "
+                                   "Full output remains in session evidence; re-run the tool if needed.",
+                            estimate_tokens=self._approx_message_tokens,
+                        )
+                        if not stats["count"]:
+                            continue
+                        retry = plan_retention(
+                            elided_source, self._approx_message_tokens,
+                            self.settings_manager.get_effective_compaction_recent_tokens(),
+                            self.settings_manager.get_effective_compaction_min_kept_messages(), available,
+                        )
+                        # Accept the re-plan when it produced a real reduction:
+                        # either a droppable tail, or an elided history that now
+                        # fits entirely (keep_start == 0 with a fitting suffix).
+                        if (retry.reason in {"ok", "split_exchange"}
+                                or (retry.keep_start == 0 and retry.tokens_kept <= available)):
+                            source_messages = elided_source
+                            retention = retry
+                            elision_stats = stats
+                            break
                 keep_start = retention.keep_start
-                if retention.reason != "ok" and not (manual and keep_start == 0 and retention.reason == "no_safe_reduction"):
+                # A manual compaction is an explicit request for a summary. When
+                # nothing can be dropped it still retains the full history next to
+                # the new summary, so keep_start == 0 is the actionable signal.
+                # The same applies when elision alone made the history fit: the
+                # reduced view is committed as summary + elided tail, which is a
+                # real reduction of the provider request, not a no-op.
+                if (retention.reason not in {"ok", "split_exchange"}
+                        and not (keep_start == 0 and (manual or elision_stats))):
                     result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total,
-                              "skipped": True, "skipReason": "no_safe_reduction"}
-                    record_skip()
+                              "skipped": True, "skipReason": retention.reason}
+                    record_skip(skip_reason=retention.reason, tokens_before=retention.tokens_kept,
+                                available_tokens=available)
                     self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                     return result
             else:
@@ -5696,12 +5782,14 @@ class AgentSession:
                         keep_start = min(i + 1, max_keep_start)
                         break
                 keep_start = self._native_replay_keep_start(self.messages, keep_start)
-            if keep_start == 0 and not manual:
+            if keep_start == 0 and not manual and not elision_stats:
                 # auto_preflight, auto, and context_limit_retry only reduce
                 # context; when the raw recent window already contains
-                # everything, do not summarize.
-                result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total, "skipped": True}
-                record_skip()
+                # everything, do not summarize. Elision is the exception: the
+                # elided tail is a real reduction even when nothing is dropped.
+                result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total,
+                          "skipped": True, "skipReason": "no_safe_reduction"}
+                record_skip(skip_reason="no_safe_reduction")
                 self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                 return result
 
@@ -5829,7 +5917,7 @@ class AgentSession:
                 except _CompactionSummaryTooLarge:
                     result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total,
                               "skipped": True, "skipReason": "no_safe_reduction"}
-                    record_skip()
+                    record_skip(skip_reason="no_safe_reduction")
                     self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                     return result
                 if not summary_text:
@@ -5889,16 +5977,51 @@ class AgentSession:
                 check_current()
                 if candidate_tokens is None:
                     candidate_tokens = self._estimate_request_tokens(candidate)
-                if reread.blocks and (candidate_tokens > budget.input_budget or self._v2_should_compact(candidate_tokens)):
+                # A survival compaction (preflight / context-limit recovery) only
+                # has to fit the input budget; the trigger threshold is a
+                # hysteresis target for ordinary auto compaction. Requiring the
+                # trigger here rejected candidates that would have saved the turn.
+                survival = reason in {"auto_preflight", "context_limit_retry"}
+                limit = budget.input_budget if survival else math.ceil(threshold)
+                if reread.blocks and (candidate_tokens > limit or (not survival and self._v2_should_compact(candidate_tokens))):
                     derivatives.pop()
                     candidate, candidate_tokens = required_candidate, required_tokens
                     reread = rehydrate_files(summary_text, self.session_manager.cwd, estimate_tokens=estimate_text,
                                              read_allowed=lambda: False, available_tokens=0,
                                              state=self.session_manager.get_rehydration_state())
-                if candidate_tokens > self._context_budget().input_budget or self._v2_should_compact(candidate_tokens):
+                if candidate_tokens > limit or (not survival and self._v2_should_compact(candidate_tokens)):
+                    # Last resort: elide stale tool observations in the detached
+                    # candidate only. Session history and evidence are untouched,
+                    # so this cannot destroy recoverable data.
+                    if self.settings_manager.get_compaction_elide_tool_results():
+                        elided_tail, elision_stats = prune_stale_tool_outputs(
+                            tail, enabled=True,
+                            recent_tokens=max(0, int(budget.input_budget * 0.5)),
+                            min_result_tokens=256,
+                            marker="Elided during compaction to fit the input budget. "
+                                   "Full output remains in session evidence; re-run the tool if needed.",
+                            estimate_tokens=self._approx_message_tokens,
+                        )
+                        if elision_stats["count"]:
+                            elided_candidate = [summary_message, *derivatives, *elided_tail]
+                            elided_tokens = await self._exact_request_tokens(elided_candidate)
+                            check_current()
+                            if elided_tokens is None:
+                                elided_tokens = self._estimate_request_tokens(elided_candidate)
+                            if elided_tokens <= limit:
+                                # Commit the elided tail too, otherwise the measured
+                                # candidate and the live context would diverge.
+                                tail = elided_tail
+                                candidate, candidate_tokens = elided_candidate, elided_tokens
+                            else:
+                                elision_stats = None
+                        else:
+                            elision_stats = None
+                if candidate_tokens > limit or (not survival and self._v2_should_compact(candidate_tokens)):
                     result = {"aborted": False, "summary": "", "tokensBefore": 0, "kept": total,
                               "skipped": True, "skipReason": "no_safe_reduction"}
-                    record_skip()
+                    record_skip(skip_reason="no_safe_reduction", tokens_before=candidate_tokens,
+                                available_tokens=limit)
                     self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                     return result
 
@@ -5948,6 +6071,7 @@ class AgentSession:
                 derivative_blocks=derivatives if v2 else None,
                 rehydration_state=reread.state if v2 else None,
                 rehydrated={"files": reread.files, "tokens": reread.tokens} if v2 else None,
+                elided=elision_stats if v2 else None,
                 transactional_v2=v2,
             )
             if v2:
@@ -6299,7 +6423,8 @@ class AgentSession:
         if not self.model:
             return None
         request = self._flatten_messages_for_provider()
-        if self._exact_context_signature == self._request_signature(request) and self._exact_context_tokens:
+        exact = bool(self._exact_context_signature == self._request_signature(request) and self._exact_context_tokens)
+        if exact:
             tokens = self._exact_context_tokens
         else:
             tokens = self._estimate_request_tokens()
@@ -6309,6 +6434,9 @@ class AgentSession:
         effective_percent = (tokens / resolved.input_budget) * 100 if resolved.input_budget else None
         return {
             "tokens": tokens,
+            # Distinguish a provider tokenizer measurement from a local estimate;
+            # without this the gauge cannot be interpreted after an incident.
+            "countSource": "exact" if exact else "estimate",
             "contextWindow": trusted if known else None,
             "percent": effective_percent if effective_percent is not None and known else None,
             "effectiveContextWindow": resolved.input_budget,
