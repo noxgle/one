@@ -453,12 +453,18 @@ class AgentSession:
         )
 
     def _current_request_tokens(self, request: list[dict[str, Any]]) -> int:
-        """Use an exact count only for this exact provider-shaped request."""
+        """Estimate the exact provider-shaped request that is about to be sent.
+
+        The ``request`` argument must be honored in both modes. The legacy path
+        used to ignore it and estimate ``self.messages`` instead, so a small
+        auxiliary request (the compaction summarizer, a nudge, or a repair) was
+        charged the full live history. That made the output-room check see
+        ``outgoing_max_tokens == 0`` and abort compaction with "Context window
+        has no room for output" even though the summarizer request fit easily.
+        """
         if self._exact_context_tokens and self._exact_context_signature == self._request_signature(request):
             return self._exact_context_tokens
-        if self.settings_manager.get_compaction_experimental_v2():
-            return self._estimate_wire_request_tokens(request)
-        return self._estimate_request_tokens()
+        return self._estimate_wire_request_tokens(request)
 
     def _restore_plan_from_messages(self, messages: list[dict[str, Any]]) -> None:
         """Restore _plan state from loaded messages and remove plan entries.
@@ -4246,7 +4252,12 @@ class AgentSession:
             assistant_message["_streamedSuppressed"] = False
             self._emit({"type": "warning", "warning": "output_truncated", "provider": self.model.provider,
                         "model": self.model.id, "message": notice, **assistant_message["outputTruncation"]})
-        self._record_context_usage(res.usage, messages)
+        # Calibrate only from the main response request. Auxiliary requests
+        # (the compaction summarizer, nudges, repairs) have a different shape
+        # and text density; folding their ratio into one global factor inflated
+        # the main estimate and made a fitting context look over budget.
+        if purpose == "response":
+            self._record_context_usage(res.usage, messages)
         if count_output_generation and generation_started_at is not None:
             output_usage = res.usage.get("completion_tokens")
             if output_usage is None:
@@ -5801,7 +5812,11 @@ class AgentSession:
                     self._emit({"type": "compaction_end", "reason": reason, "result": result, "aborted": False, "willRetry": False})
                     return result
             else:
-                # Legacy raw-window behavior remains unchanged.
+                # Legacy raw-window behavior, but the message floor must adapt
+                # to the real budget. A short history made of a few huge tool
+                # results can exceed the input budget while ``minKeptMessages``
+                # alone would keep everything, so compaction would drop nothing
+                # and the next request would fail with "no room for output".
                 min_kept = max(1, self.settings_manager.get_compaction_min_kept_messages())
                 budget = self.settings_manager.get_compaction_recent_tokens()
                 max_keep_start = max(0, total - min_kept)
@@ -5813,6 +5828,37 @@ class AgentSession:
                         keep_start = min(i + 1, max_keep_start)
                         break
                 keep_start = self._native_replay_keep_start(self.messages, keep_start)
+                # The raw-token loop above ignores the estimator's serialization
+                # margin and the tool-output boundary, so a tail that looks small
+                # can still overflow the real request. Verify with the same
+                # estimate the budget check uses and shrink the tail until it
+                # fits, even below the configured floor (survival compaction).
+                input_budget = self._context_budget().input_budget
+                # Reserve the configured summary output budget, not a guess.
+                summary_tokens = self.settings_manager.get_compaction_summary()["maxOutputTokens"]
+                fixed_tokens = self._estimate_request_tokens([])
+                # Cost each durable message exactly as it will be flattened, so
+                # the tool-output boundary and skipped local-only records are
+                # accounted for and indices stay aligned with ``self.messages``.
+                wire_costs = [
+                    sum(self._approx_message_tokens(f) for f in self._flatten_conversation([m]))
+                    for m in self.messages
+                ]
+                # Suffix sums keep the shrink loop O(n) overall.
+                suffix_cost = [0] * (total + 1)
+                for index in range(total - 1, -1, -1):
+                    suffix_cost[index] = suffix_cost[index + 1] + wire_costs[index]
+
+                # ``_estimate_request_tokens`` applies a 1.15 margin plus 256 on
+                # top of the raw sum; mirror that so the check matches the gate.
+                def tail_fits(start: int) -> bool:
+                    estimated = max(1, int(suffix_cost[start] * 1.15) + 256)
+                    return fixed_tokens + estimated + summary_tokens <= input_budget
+                while keep_start < total and not tail_fits(keep_start):
+                    next_start = self._native_replay_keep_start(self.messages, keep_start + 1)
+                    # A native replay pair can pull the boundary back; force
+                    # forward progress so this loop always terminates.
+                    keep_start = max(keep_start + 1, next_start)
             if keep_start == 0 and not manual and not elision_stats:
                 # auto_preflight, auto, and context_limit_retry only reduce
                 # context; when the raw recent window already contains
@@ -6508,8 +6554,19 @@ class AgentSession:
         if prompt_tokens <= 0:
             return
         # `_estimate_request_tokens` takes durable history, while this is the
-        # exact wire-shaped flattened request that just completed.
+        # exact wire-shaped flattened request that just completed. Include the
+        # native tool definitions exactly as `_estimate_wire_request_tokens`
+        # does: the provider counts them, so omitting them here inflates the
+        # ratio. A small auxiliary request (the compaction summarizer) is
+        # dominated by the tool schemas, so the omission produced a ~1.66x
+        # calibration that then inflated every later estimate and made a
+        # fitting context look over budget.
         raw = sum(self._approx_message_tokens(message) for message in request)
+        if self.settings_manager.get_compaction_experimental_v2():
+            provider = self.providers.get(self.model.provider) if self.model else None
+            if getattr(provider, "supports_native_tools", False):
+                definitions = self._native_tool_definitions()
+                raw += (len(json.dumps(definitions, ensure_ascii=False)) + 3) // 4
         estimated = max(1, int(raw * 1.15) + 256)
         self._context_calibration = max(
             self._context_calibration,

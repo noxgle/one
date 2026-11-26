@@ -338,3 +338,110 @@ async def test_agent_session_sends_full_request_to_llama(tmp_path) -> None:
     assert payload.get("temperature") is not None, "temperature must reach llama.cpp"
     assert payload.get("max_tokens") is not None, "max_tokens must be enforced for llama.cpp"
     assert payload.get("stream_options") == {"include_usage": True}
+
+
+class _JsonResponse:
+    def __init__(self, payload: Any, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.is_error = status_code >= 400
+        self.text = json.dumps(payload)
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class _RouterClient:
+    """Fake httpx client emulating a router-mode llama-server.
+
+    ``/props`` returns the router stub (``n_ctx: 0``); ``/slots`` and
+    ``/v1/models`` carry the real per-model slot size. ``/apply-template`` and
+    ``/tokenize`` reject requests that omit the model in the JSON body.
+    """
+
+    def __init__(self, model: str, n_ctx: int) -> None:
+        self.model = model
+        self.n_ctx = n_ctx
+        self.posts: list[tuple[str, dict[str, Any]]] = []
+
+    async def __aenter__(self) -> _RouterClient:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        pass
+
+    async def get(self, url: str, params: dict[str, Any] | None = None, headers: Any = None) -> _JsonResponse:
+        if url.endswith("/props"):
+            return _JsonResponse({"role": "router", "default_generation_settings": {"n_ctx": 0}})
+        if url.endswith("/slots"):
+            if not params or params.get("model") != self.model:
+                return _JsonResponse({"error": {"message": "model name is missing"}}, 400)
+            return _JsonResponse([{"id": 0, "n_ctx": self.n_ctx}])
+        if url.endswith("/v1/models"):
+            return _JsonResponse({"data": [{"id": self.model, "memory": {"effective": {"n_ctx": self.n_ctx}}}]})
+        return _JsonResponse({"error": {"message": "not found"}}, 404)
+
+    async def post(self, url: str, json: dict[str, Any] | None = None, headers: Any = None) -> _JsonResponse:
+        self.posts.append((url, json or {}))
+        if not json or json.get("model") != self.model:
+            return _JsonResponse({"error": {"message": "model name is missing from the request"}}, 400)
+        if url.endswith("/apply-template"):
+            return _JsonResponse({"prompt": "<|im_start|>user\nhi<|im_end|>"})
+        if url.endswith("/tokenize"):
+            return _JsonResponse({"tokens": [1, 2, 3, 4, 5]})
+        return _JsonResponse({"error": {"message": "not found"}}, 404)
+
+
+@pytest.mark.asyncio
+async def test_count_request_tokens_sends_model_in_body_for_router_mode() -> None:
+    """Router-mode llama-server rejects /apply-template and /tokenize without a body model."""
+    adapter = LlamaCppAdapter("http://router:8089")
+    client = _RouterClient("iq3s-mtp", 49152)
+    with patch.object(httpx, "AsyncClient", return_value=client):
+        count = await adapter.count_request_tokens("", "iq3s-mtp", [{"role": "user", "content": "hi"}], "off")
+    assert count == 5
+    assert all(body.get("model") == "iq3s-mtp" for _, body in client.posts)
+
+
+@pytest.mark.asyncio
+async def test_get_context_window_falls_back_to_slots_in_router_mode() -> None:
+    """A router's /props reports n_ctx 0; the real slot size comes from /slots."""
+    adapter = LlamaCppAdapter("http://router:8089")
+    client = _RouterClient("iq3s-mtp", 49152)
+    with patch.object(httpx, "AsyncClient", return_value=client):
+        window = await adapter.get_context_window("", "iq3s-mtp")
+    assert window == 49152
+
+
+@pytest.mark.asyncio
+async def test_get_context_window_falls_back_to_models_catalogue() -> None:
+    """When /slots is unavailable, memory.effective.n_ctx from /v1/models is used."""
+    adapter = LlamaCppAdapter("http://router:8089")
+
+    class _NoSlots(_RouterClient):
+        async def get(self, url, params=None, headers=None):
+            if url.endswith("/slots"):
+                return _JsonResponse({"error": {"message": "not found"}}, 404)
+            return await super().get(url, params, headers)
+
+    client = _NoSlots("longctx", 131072)
+    with patch.object(httpx, "AsyncClient", return_value=client):
+        window = await adapter.get_context_window("", "longctx")
+    assert window == 131072
+
+
+@pytest.mark.asyncio
+async def test_get_context_window_prefers_props_when_present() -> None:
+    """A single-model server's /props value still wins over the fallbacks."""
+    adapter = LlamaCppAdapter("http://single:8080")
+
+    class _Single(_RouterClient):
+        async def get(self, url, params=None, headers=None):
+            if url.endswith("/props"):
+                return _JsonResponse({"default_generation_settings": {"n_ctx": 65536}})
+            return _JsonResponse({"error": {"message": "unexpected"}}, 500)
+
+    client = _Single("local", 49152)
+    with patch.object(httpx, "AsyncClient", return_value=client):
+        window = await adapter.get_context_window("", "local")
+    assert window == 65536

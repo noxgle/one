@@ -143,6 +143,12 @@ class LlamaCppAdapter(OpenAICompatibleAdapter):
             # llama.cpp normally serves these endpoints at the server root even
             # when a compatible base URL was configured with a /v1 suffix.
             base = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+            # A router-mode llama-server (``--models``/``--models-dir``) rejects
+            # ``/apply-template`` and ``/tokenize`` with "model name is missing
+            # from the request" unless the model is named in the JSON body.  A
+            # single-model server ignores the extra field, so always send it.
+            if isinstance(model, str) and model:
+                template_payload["model"] = model
             async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
                 rendered = await client.post(
                     f"{base}/apply-template", json=template_payload,
@@ -153,8 +159,11 @@ class LlamaCppAdapter(OpenAICompatibleAdapter):
                 prompt = rendered.json().get("prompt")
                 if not isinstance(prompt, str):
                     return None
+                tokenize_payload: dict[str, Any] = {"content": prompt}
+                if isinstance(model, str) and model:
+                    tokenize_payload["model"] = model
                 tokenized = await client.post(
-                    f"{base}/tokenize", json={"content": prompt},
+                    f"{base}/tokenize", json=tokenize_payload,
                     headers=self._build_headers(api_key, headers),
                 )
                 if tokenized.is_error:
@@ -169,27 +178,60 @@ class LlamaCppAdapter(OpenAICompatibleAdapter):
     async def get_context_window(
         self, api_key: str, model: str, headers: dict[str, str] | None = None,
     ) -> int | None:
-        """Return llama.cpp's configured slot context, when its /props route exists.
+        """Return llama.cpp's configured slot context, when a route exposes it.
 
         OpenAI-compatible ``/v1/models`` metadata describes a model's training
         limit at best.  llama.cpp's ``/props`` reports the actual server slot
         configuration, so only that value is suitable for compaction/display.
+
+        A router-mode server answers ``/props`` with ``role: "router"`` and
+        ``n_ctx: 0`` because no single slot is configured globally; the real
+        per-model slot size is only available from ``/slots?model=`` (or the
+        ``memory.effective.n_ctx`` / ``meta.n_ctx`` fields of ``/v1/models``).
+        Falling back to those keeps the context gauge honest instead of treating
+        the router's zero as "unknown" and letting compaction run against a
+        stale training limit.
         """
         if not isinstance(model, str) or not model:
             return None
         root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+        req_headers = self._build_headers(api_key, headers)
         try:
             async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
                 response = await client.get(
                     f"{root}/props",
                     params={"model": model},
-                    headers=self._build_headers(api_key, headers),
+                    headers=req_headers,
                 )
-                if response.is_error:
-                    return None
-                payload = response.json()
+                if not response.is_error:
+                    payload = response.json()
+                    settings = payload.get("default_generation_settings") if isinstance(payload, dict) else None
+                    window = settings.get("n_ctx") if isinstance(settings, dict) else None
+                    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+                        return window
+                # Router mode (or a build without a usable /props): ask the
+                # per-model slot list, then the model catalogue.
+                slots = await client.get(
+                    f"{root}/slots", params={"model": model}, headers=req_headers,
+                )
+                if not slots.is_error:
+                    entries = slots.json()
+                    if isinstance(entries, list):
+                        for entry in entries:
+                            value = entry.get("n_ctx") if isinstance(entry, dict) else None
+                            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                                return value
+                models = await client.get(f"{root}/v1/models", headers=req_headers)
+                if not models.is_error:
+                    for entry in models.json().get("data", []) or []:
+                        if not isinstance(entry, dict) or entry.get("id") != model:
+                            continue
+                        memory = entry.get("memory") if isinstance(entry.get("memory"), dict) else {}
+                        effective = memory.get("effective") if isinstance(memory.get("effective"), dict) else {}
+                        meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
+                        for value in (effective.get("n_ctx"), meta.get("n_ctx")):
+                            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                                return value
         except Exception:
             return None
-        settings = payload.get("default_generation_settings") if isinstance(payload, dict) else None
-        window = settings.get("n_ctx") if isinstance(settings, dict) else None
-        return window if isinstance(window, int) and not isinstance(window, bool) and window > 0 else None
+        return None

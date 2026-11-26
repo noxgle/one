@@ -276,6 +276,26 @@ Native structured tool calls (OpenAI function calling, Anthropic tool use,
 Gemini tool calls) are absorbed into a normalized `{id, name, arguments}` shape
 that the session loop treats identically to JSON-in-text parsed calls.
 
+### 4.2.1 llama.cpp server modes
+
+`LlamaCppAdapter` targets `llama-server` and works in both single-model and
+router modes:
+
+- **Token counting** uses `/apply-template` + `/tokenize`. The model is named in
+the JSON body (not only as a query parameter) because a router-mode server
+(`--models`/`--models-dir`) rejects requests without it; a single-model server
+ignores the extra field.
+- **Context window** prefers `/props` (`default_generation_settings.n_ctx`). A
+router answers `/props` with `role: "router"` and `n_ctx: 0`, so the adapter
+falls back to `/slots?model=` and then the `/v1/models` catalogue
+(`memory.effective.n_ctx` / `meta.n_ctx`). This keeps the context gauge and
+compaction on the real per-model slot size instead of a stale training limit.
+- **Usage** falls back to the final chunk's `timings.prompt_n` /
+`timings.predicted_n` when a build omits the OpenAI `usage` object.
+
+The adapter does not call `/metrics` or `/health`; those are operator endpoints,
+not part of the request path.
+
 ### 4.3 Image support
 
 Image attachments are stored in the blob store (`one/core/attachments.py`)
