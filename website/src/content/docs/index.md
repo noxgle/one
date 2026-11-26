@@ -29,7 +29,8 @@ plan work, delegate to subagents and preserve sessions.
 - **Automate:** [CLI inventory](reference/cli.md), [tool schemas](reference/tools.md),
   [one run and RPC](guides/automation-rpc.md).
 - **Troubleshoot:** [FAQ](library/faq.md), [Doctor](library/doctor.md).
-- **Develop:** [workflow and runtime boundary](guides/developer-workflow.md),
+- **Develop:** [contributing and testing](handbook/development.md),
+  [workflow and runtime boundary](guides/developer-workflow.md),
   [architecture](library/architecture.md), [release checklist](library/release_checklist.md).
 
 ## Stability and platform limits

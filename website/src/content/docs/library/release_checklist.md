@@ -16,6 +16,11 @@ title: "Release Checklist"
 Reproducible commands for verifying the `one-agent` package before publication.
 Run from the repository root.
 
+Steps 1–2 are the ordinary contributor gate; see
+[Contributing to ONE](../handbook/development.md) for the full workflow and
+`CONTRIBUTING.md` in the checkout. Steps 3–10 are maintainer release preparation
+and must not be run as a substitute for the test gate on a feature branch.
+
 ## Prerequisites
 
 ```bash
@@ -34,6 +39,8 @@ python -m pytest -q
 ```bash
 python -m ruff check .
 ```
+
+Also run `git diff --check` for whitespace errors in the staged diff.
 
 ## 3. Build packages
 

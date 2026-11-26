@@ -159,7 +159,7 @@
   status near the end of `TODO.md`. Migrated material and generated inventories
   are not a completed semantic audit; keep explicit coverage gaps truthful.
 - Astro + Starlight is a separate local toolchain, not a Python runtime dependency.
-  Use Node.js 22.22.1+ and npm 10.8.2+. From `website/`: `npm ci`, `npm run dev`,
+  Use Node.js 22.23.4+ (the minimum Astro 7 accepts) and npm 10.8.2+. From `website/`: `npm ci`, `npm run dev`,
   `npm run build`, `npm run check:links`, and `npm run preview`. Production search
   is indexed during build; verify it in preview, not just dev.
 - For production-path checks, from `website/` run

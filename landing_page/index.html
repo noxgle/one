@@ -15,6 +15,7 @@
 <meta name="twitter:title" content="one — autonomous terminal agent">
 <meta name="twitter:description" content="An open-source Python agent for real work in your terminal.">
 <link rel="canonical" href="https://one.noxgle.com/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -398,13 +399,13 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
           <div class="agent-line"><span class="icon arrow">&#8594;</span> inspecting repository</div>
           <div class="agent-line"><span class="icon arrow">&#8594;</span> reading failing tests</div>
           <div class="agent-line"><span class="icon arrow">&#8594;</span> planning changes</div>
-          <div class="agent-line"><span class="icon arrow">&#8594;</span> editing <code style="color:var(--text-muted)">src/auth.py</code></div>
-          <div class="agent-line"><span class="icon arrow">&#8594;</span> editing <code style="color:var(--text-muted)">src/middleware.py</code></div>
+          <div class="agent-line"><span class="icon arrow">&#8594;</span> editing <code style="color:var(--text-muted)">one/core/agent_session.py</code></div>
+          <div class="agent-line"><span class="icon arrow">&#8594;</span> editing <code style="color:var(--text-muted)">tests/test_agent_tool_parsing.py</code></div>
           <div class="agent-line"><span class="icon arrow">&#8594;</span> running <code style="color:var(--text-muted)">pytest</code></div>
           <div class="agent-line done"><span class="icon check">&#10003;</span> <span style="color:var(--green)">verification complete</span></div>
           <div class="agent-line done"><span class="icon check">&#10003;</span> goal completed</div>
-          <div><br><span class="agent-line" style="color:var(--text-muted)">Fixed auth session handling and middleware error propagation.</span></div>
-          <div><span class="agent-line" style="color:var(--text-muted)">result verified. Changes summarized.</span></div>
+          <div><br><span class="agent-line" style="color:var(--text-muted)">Fixed tool-call parsing and re-ran the focused tests.</span></div>
+          <div><span class="agent-line" style="color:var(--text-muted)">Result verified. Changes summarized.</span></div>
         </div>
       </div>
     </div>
@@ -530,16 +531,16 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
             <div class="dots"><div class="d" style="background:#ff5f57"></div><div class="d" style="background:#febc2e"></div><div class="d" style="background:#28c840"></div></div>
           </div>
           <div class="t-body">
-            <div class="line"><span class="t-blue">one</span> <span class="t-muted">v0.1.x &mdash; session: parser fix</span></div>
+            <div class="line"><span class="t-blue">one</span> <span class="t-muted">v0.1.154 &mdash; session: compaction fix</span></div>
             <div class="line" style="margin-top:8px"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> read(</div>
-            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;parser/tokenize.py</div>
+            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;one/core/compaction/constraints.py</div>
             <div class="line"><span class="t-muted">thought:</span> Checking the regression&hellip;</div>
             <div class="line"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> edit(</div>
-            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;parser/tokenize.py:23</div>
+            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;one/core/compaction/constraints.py</div>
             <div class="line"><span class="t-muted">thought:</span> Applying fix and retesting.</div>
             <div class="line" style="margin-top:8px"><span class="t-green">&#10003;</span> <span class="t-muted">tool:</span> bash(python -m pytest -q)</div>
             <div class="line"><span class="t-muted">&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-green">focused verification passed</span></div>
-            <div class="line" style="margin-top:8px"><span class="t-blue">&#8594;</span> <span class="t-muted">/details-show</span> <span class="t-muted">[Ctrl+D]</span></div>
+            <div class="line" style="margin-top:8px"><span class="t-blue">&#8594;</span> <span class="t-muted">/details-show</span> <span class="t-muted">[Ctrl+O]</span></div>
           </div>
         </div>
       </div>
@@ -675,19 +676,19 @@ footer .container{display:flex;justify-content:space-between;align-items:center;
         <span style="font-family:var(--mono);font-size:.6875rem;color:var(--text-muted);margin-left:8px">bash &mdash; one</span>
       </div>
       <div class="t-body" id="showcaseTerminal">
-        <div class="cmd-line"><span class="prompt">$ </span>one run "find the bug causing the failing parser tests and fix it"</div>
+        <div class="cmd-line"><span class="prompt">$ </span>one run "find the bug causing the failing compaction tests and fix it"</div>
         <div class="showcase-tree" id="showcaseTree">
           <div class="tree-branch">one</div>
           <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Inspecting repository</div>
           <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Running targeted tests</div>
-          <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Found regression in parser/tokenize.py</div>
+          <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Found regression in one/core/compaction/</div>
           <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Applying patch</div>
           <div class="tree-node tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&ndash; Running tests</div>
           <div class="tree-node tree-leaf tree-branch">&#9500;&#8203;&#8203;&#8203;&#8203;&#9492;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&ndash; <span class="tree-ok">verification passed</span></div>
           <div class="tree-node tree-branch">&#9492;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;&ndash; Verifying diff</div>
           <div style="margin-top:8px" class="tree-done">&#10003; Goal completed</div>
-          <div style="margin-top:4px" class="tree-node"><span class="t-muted">Fixed parser handling for escaped delimiters.</span></div>
-          <div class="tree-node"><span class="t-muted">84 tests passed.</span></div>
+          <div style="margin-top:4px" class="tree-node"><span class="t-muted">Fixed compaction constraints and re-ran the focused suite.</span></div>
+          <div class="tree-node"><span class="t-muted">tests/test_compaction_constraints.py &mdash; passed</span></div>
         </div>
       </div>
     </div>
@@ -822,6 +823,7 @@ one --help</pre>
     </div>
     <ul class="footer-links">
       <li><a href="https://github.com/noxgle/one" target="_blank" rel="noopener">GitHub</a></li>
+      <li><a href="https://one.noxgle.com/docs/" target="_blank" rel="noopener">Documentation</a></li>
       <li><a href="https://one.noxgle.com/docs/library/quickstart/" target="_blank" rel="noopener">Quickstart</a></li>
       <li><a href="https://github.com/noxgle/one/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
       <li><a href="https://github.com/noxgle/one/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
@@ -833,7 +835,7 @@ one --help</pre>
       <div class="built-by-label">Updated by <strong>one</strong></div>
       <div class="built-by-meta">Autonomous terminal agent &middot; <span class="build-status">Task: landing page &middot; Status: completed</span></div>
       <div class="built-by-runtime">
-        model: <code>qwen3.6-35b-a3b-q5-k-m-mtp</code> · provider: <code>llama.cpp</code>
+        agent <code>one 0.1.154</code> · model: <code>qwen3.8-flash-next-iq3_xxs</code> · provider: <code>llama.cpp</code> · updated <code>2026-11-26</code>
       </div>
     </div>
   </div>

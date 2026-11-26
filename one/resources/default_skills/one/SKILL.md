@@ -346,7 +346,7 @@ fully verified.
 
 Astro + Starlight builds locally; the server receives static HTML, CSS, JavaScript
 and Pagefind search files only. Node.js is not required to install or run ONE.
-For portal development, use Node.js 22.22.1+ and npm 10.8.2+, then from `website/`:
+For portal development, use Node.js 22.23.4+ (the minimum Astro 7 accepts) and npm 10.8.2+, then from `website/`:
 
 ```sh
 npm ci

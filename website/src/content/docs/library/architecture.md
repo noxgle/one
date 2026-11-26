@@ -72,7 +72,7 @@ scroll container.
            │                              │
     ┌──────▼──────┐              ┌────────▼────────┐
     │ one/tools/  │              │ one/providers/  │
-    │  14 tools   │              │  adapters       │
+    │  15 tools   │              │  adapters       │
     └──────┬──────┘              └────────┬────────┘
            │                              │
     ┌──────▼──────────────────────────────▼────────┐
@@ -221,16 +221,18 @@ Key configuration:
 ### 3.1 Tool dispatch
 
 Tools are registered in `one/tools/index.py`. Each tool has a name, description,
-and function. Dispatch happens in `AgentSession._run_tool_call()`:
+and function. Dispatch happens in `AgentSession._run_tool_call()`, which resolves
+the name in `AgentSession._execute_tool_by_name()`:
 
 1. Match the tool name against `all_tools`.
-2. Validate arguments against the schema in `resource_loader.py`.
+2. Validate arguments against the schema in `resource_loader.py` and the active
+   capability policy; policy is enforced at execution, not only at tool discovery.
 3. Call `tool.execute.before` extension hooks (can deny the call).
 4. Execute the tool function with validated arguments.
 5. Call `tool.execute.after` extension hooks.
 6. Emit `tool_call_start` and `tool_call_end` events.
-7. Store results in `self.messages` (bounded to 12,000 chars) and write
-   complete evidence to the session sidecar.
+7. Store a bounded preview in `self.messages` (`_TOOL_RESULT_MAX_CHARS`, 12,000
+   chars) and write complete evidence to the session sidecar for `evidence_read`.
 
 ### 3.2 Event contract
 
@@ -580,14 +582,18 @@ Compaction maintains a rolling summary plus recent messages:
 
 **Directory:** `tests/`
 
-- ~1000+ tests across 50+ files.
-- Full suite: `.venv/bin/python -m pytest -q`.
-- Lint: `.venv/bin/ruff check .`.
+- ~3,700 tests across 170+ test modules (`.venv/bin/python -m pytest -q --collect-only`
+  reports the current count).
+- Full gate: `.venv/bin/python -m pytest -q`, then `.venv/bin/ruff check .`, then
+  `git diff --check`.
 - TUI snapshots: `ONE_UPDATE_SNAPSHOTS=1 .venv/bin/python -m pytest -q tests/test_tui_snapshots.py`.
-- Focused suites: `scripts/test.sh <suite>` (quick, mcp, tui, providers, tools, auth, extensions, cli, rpc, core, sessions, failed/last, full/all).
+- Focused suites: `scripts/test.sh <suite>` (quick, mcp, tui, providers, tools, auth, extensions, cli, rpc, core, sessions, failed/last, full/all). `scripts/test.sh --help` lists them.
+- Packaging and container checks: `python -m build`, `twine check dist/*`, and `scripts/test-docker.sh`.
 - Async tests require explicit `@pytest.mark.asyncio`.
 - All tests use `ONE_CODING_AGENT_DIR` pointing to a scratch directory.
-- Tests never contact real API servers or MCP servers.
+- Tests never contact real API servers or MCP servers; providers and MCP clients are faked or stubbed.
+- Contributor workflow, scope agreement, and validation reporting live in
+  `CONTRIBUTING.md` and [Contributing to ONE](../handbook/development.md).
 
 ### Test organization
 
@@ -603,10 +609,13 @@ Compaction maintains a rolling summary plus recent messages:
 | `tests/test_session_*.py` | Session persistence and reload |
 | `tests/test_image_*.py` | Image attachment storage and processing |
 | `tests/test_cli_*.py` | CLI subprocess and argument parsing |
+| `tests/test_preset_*.py`, `tests/test_subagent_presets.py` | Preset loading, capability ceilings, session and subagent policy |
+| `tests/test_run_*.py` | Run budgets, admission, pricing, usage, and history with fake providers |
+| `tests/test_tui_runtime_boundary.py`, `tests/test_agent_runtime_facade.py` | TUI worker runtime boundary and facade contract |
 
 ## 18. Versioning
 
-- Single source of truth: `one/config.py:VERSION` (currently `0.1.146`).
+- Single source of truth: `one/config.py:VERSION` (currently `0.1.154`).
 - Drives `pyproject.toml` dynamic version and `one --version` output.
 - Bump before tags; tags must equal the VERSION string.
 - User-visible changes require a version bump, `CHANGELOG.md` Unreleased entry,
