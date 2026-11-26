@@ -4734,29 +4734,45 @@ if TEXTUAL_AVAILABLE:
             self._rendered_stream_lines = ()
             self._schedule_stream_render()
 
-        def _write_compaction_result(self, result: dict[str, Any]) -> None:
-            """Render a compact human-readable result for the TUI."""
+        def _write_compaction_result(self, result: dict[str, Any], *, reason: str = "manual") -> None:
+            """Render a compact human-readable result for the TUI.
+
+            A manual ``/compact`` shows the summary. Automatic compaction can
+            fire several times in one turn, so it prints a single status line
+            (token counts) instead of repeating the full summary each time.
+            """
             if result.get("aborted"):
                 self._write("Compaction aborted.", "warn")
                 return
 
             if result.get("skipped"):
-                reason = (
+                reason_text = (
                     "the session is busy"
                     if result.get("busy")
                     else "the history is already within the configured limit"
                 )
-                self._write(f"Compaction skipped: {reason}.", "info")
+                self._write(f"Compaction skipped: {reason_text}.", "info")
                 return
 
             summary = str(result.get("summary") or "").strip()
+            tokens_before = result.get("tokensBefore")
+            kept = result.get("kept")
+            if reason != "manual":
+                parts = ["Compaction complete."]
+                if tokens_before is not None:
+                    parts.append(f"Tokens before: {tokens_before}")
+                if kept is not None:
+                    parts.append(f"Messages kept: {kept}")
+                self._write(" ".join(parts), "info")
+                return
+
             lines = ["Compaction complete."]
             if summary:
                 lines.extend(["Summary:", summary])
-            if "tokensBefore" in result:
-                lines.append(f"Tokens before: {result['tokensBefore']}")
-            if "kept" in result:
-                lines.append(f"Messages kept: {result['kept']}")
+            if tokens_before is not None:
+                lines.append(f"Tokens before: {tokens_before}")
+            if kept is not None:
+                lines.append(f"Messages kept: {kept}")
             self._write("\n".join(lines), "info")
 
         def _write_lifecycle_separator(self) -> None:
@@ -6768,7 +6784,7 @@ if TEXTUAL_AVAILABLE:
             if cmd.startswith("/compact"):
                 instructions = cmd[len("/compact") :].strip() or None
                 result = await session.compact(instructions)
-                self._write_compaction_result(result)
+                self._write_compaction_result(result, reason="manual")
                 self._refresh_sidebar()
                 return
             if cmd.strip() == "/tree":
@@ -8913,6 +8929,16 @@ if TEXTUAL_AVAILABLE:
                     self._turn_provider_measurements += 1
             elif et == "compaction_start":
                 self._write_lifecycle_separator()
+            elif et == "compaction_end":
+                # Render the compaction outcome so the user sees the summary and
+                # token counts instead of jumping straight to the next thinking
+                # block. The facade projects a bounded ``result`` DTO.
+                result = event.get("result")
+                if isinstance(result, dict):
+                    self._write_compaction_result(result, reason=str(event.get("reason") or "auto"))
+                elif event.get("aborted"):
+                    self._write("Compaction aborted.", "warn")
+                self._refresh_sidebar()
             elif et == "tool_call_start":
                 tool_name = str(event.get("tool") or "tool")
                 # The detached facade never sends raw argument dictionaries.

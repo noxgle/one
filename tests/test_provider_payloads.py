@@ -254,7 +254,10 @@ async def test_llama_cpp_native_token_count_uses_rendered_request_and_falls_back
     assert count == 3
     assert calls[0][0] == "http://local/apply-template"
     assert calls[0][1]["messages"] == [{"role": "user", "content": "hi"}]
-    assert calls[1][1] == {"content": "rendered"}
+    # The model is named in the body so router-mode servers accept the request;
+    # single-model servers ignore the extra field.
+    assert calls[0][1]["model"] == "local"
+    assert calls[1][1] == {"content": "rendered", "model": "local"}
 
     class MissingEndpoint(Client):
         async def post(self, url: str, **kwargs: Any) -> Response:

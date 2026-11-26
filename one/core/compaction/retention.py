@@ -90,21 +90,47 @@ def plan_retention(
 
     user_boundaries = [i for i, m in enumerate(messages) if m.get("role") == "user" and not m.get("customType")]
     latest = safe(user_boundaries[-1] if user_boundaries else max(0, total - 1))
-    if suffix[latest] > available_tokens:
-        # The mandatory tail does not fit. Split the exchange at a tool-step
-        # boundary, keeping the largest suffix that still fits the budget.
+    target = min(recent_tokens, available_tokens)
+    if suffix[latest] > target:
+        # The mandatory tail (from the latest user message to the end) exceeds
+        # the soft token target. This is the common single-turn agentic shape:
+        # one user message followed by a long tool loop. Split it at a tool-step
+        # boundary so the kept tail targets ``recent_tokens`` instead of filling
+        # the budget. Filling the budget (observed 90-99%) leaves no headroom,
+        # so the next tool result overflows again and the turn thrashes
+        # (compact -> grow -> compact -> fail).
+        #
+        # Keep the smallest suffix that still retains at least the target; fall
+        # back to the largest suffix that fits ``available`` only when every
+        # boundary keeps less than the target. A boundary that does not fit
+        # ``available`` is never chosen.
+        fitting: list[tuple[int, int]] = []
         for candidate in _step_boundaries(messages, latest):
             start = safe(candidate)
             if start <= latest or start >= total:
                 continue
             if suffix[start] > available_tokens:
                 continue
-            return RetentionPlan(start, suffix[start], "split_exchange")
-        return RetentionPlan(latest, suffix[latest], "oversized_exchange")
+            fitting.append((start, suffix[start]))
+        if fitting:
+            at_least_target = [(start, kept) for start, kept in fitting if kept >= target]
+            if at_least_target:
+                start, kept = min(at_least_target, key=lambda item: item[1])
+            else:
+                start, kept = max(fitting, key=lambda item: item[1])
+            return RetentionPlan(start, kept, "split_exchange")
+        if suffix[latest] > available_tokens:
+            # No internal boundary fits the budget: the mandatory tail is
+            # genuinely indivisible.
+            return RetentionPlan(latest, suffix[latest], "oversized_exchange")
+        # No internal boundary exists (e.g. a single assistant/tool pair). Keep
+        # the mandatory tail as-is; it fits the budget even if above the target.
+        return RetentionPlan(latest, suffix[latest], "ok" if latest else "no_safe_reduction")
 
     # Adapt the message floor downward until the mandatory tail fits the budget.
     # The lower bound is -1 so a configured ``minKeptMessages: 0`` is honored;
     # stopping at 1 silently turned "keep nothing" into a refusal to compact.
+    target = min(recent_tokens, available_tokens)
     floor = latest
     for floor_size in range(min_kept_messages, -1, -1):
         candidate = safe(min(latest, max(0, total - floor_size)))
@@ -117,7 +143,20 @@ def plan_retention(
         return RetentionPlan(0, suffix[0], "no_safe_reduction")
 
     start = floor
-    target = min(recent_tokens, available_tokens)
+    # The message floor is a minimum count, but it must not force keeping more
+    # than the soft token target: a floor of huge tool results fills the budget
+    # (observed 90-99%), leaving no headroom, so the next tool result overflows
+    # again and the turn thrashes (compact -> grow -> compact -> fail). Shrink
+    # toward the target, never dropping the mandatory tail.
+    if suffix[start] > target:
+        while start < latest:
+            nxt = safe(start + 1)
+            if nxt <= start:
+                nxt = start + 1  # a native pair pulled it back; force progress
+            start = nxt
+            if suffix[start] <= target:
+                break
+    # Expand backward to the largest suffix that still fits the target.
     while start > 0:
         candidate = safe(start - 1)
         if suffix[candidate] > target:

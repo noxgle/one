@@ -90,6 +90,20 @@ Cache-aware local summary, bounded rehydration and an offline native implementat
 are present; precompute remains future work. Production native
 capability remains disabled because the ChatGPT backend contract is unverified.
 
+### Legacy (V1) retention budget check
+
+The legacy raw-window path keeps the most recent messages up to
+`recentTokens`, honoring `minKeptMessages` as a floor. That floor is a message
+count, not a size bound: a single-turn tool loop with a few large tool results
+can exceed the input budget while the floor alone would keep everything, so
+compaction would drop almost nothing and the next request would fail with
+"Context window has no room for output". The legacy path therefore verifies the
+retained tail against the same estimate the request gate uses (fixed prompt,
+tool schemas, the 1.15 serialization margin and the summary reserve) and shrinks
+the tail — even below the configured floor — until it fits. This is a survival
+compaction: it always produces a sendable request instead of a hard failure.
+The check is O(n) because per-message wire costs are computed once.
+
 ## Rehydration and recovery
 
 V2 preserves the constraint ledger and active plan as bounded derivative data;
@@ -213,14 +227,22 @@ content. Active plans are maintained separately, not duplicated in the tail,
 and restored from durable plan messages on resume.
 
 A single user message can span an entire agentic tool loop, so the latest
-exchange is not always indivisible. When it alone exceeds the available
-budget, the planner splits it at a tool-step boundary — the kept tail starts
-with an assistant message that follows a tool result, so no tool call is
+exchange is not always indivisible. When it alone exceeds the soft token target
+(`recentTokens`), the planner splits it at a tool-step boundary — the kept tail
+starts with an assistant message that follows a tool result, so no tool call is
 orphaned and native replay pairs stay intact. This reports
-`reason: split_exchange`. The message floor also adapts downward: if the
-configured `minKeptMessages` cannot fit, fewer messages are kept rather than
-refusing to compact. Only a genuinely indivisible oversized message reports
-`oversized_exchange`.
+`reason: split_exchange`. The split targets `recentTokens`, not the budget
+ceiling: it keeps the smallest suffix that still retains the target, so the
+result leaves headroom. Filling the budget to ~99% would make the next tool
+result overflow again and the turn would thrash (compact → grow → compact →
+fail). The split triggers whenever the tail exceeds the target, even if the tail
+would still fit the budget — a 32k tail in a 34k budget is still twice the 15k
+target and must be split. A genuinely indivisible tail (no internal step
+boundary) that fits the budget is kept as-is. The message floor also adapts
+downward: if the configured `minKeptMessages` cannot fit, fewer messages are
+kept rather than refusing to compact, and a floor that would keep more than the
+token target yields to it (the mandatory latest exchange is never dropped). Only
+a genuinely indivisible oversized message reports `oversized_exchange`.
 
 `compaction.elideToolResults` (default `true`) is the last resort. If the
 mandatory tail still does not fit, stale tool observations are replaced with a
@@ -249,6 +271,15 @@ If retention or the resulting candidate cannot fit, compaction skips with
 tail is indivisible). An oversized summary request instead produces
 `failureReason: oversize`. Neither changes live history or installs a
 placeholder. Estimates are not tokenizer guarantees.
+
+The output-room check charges each request its own size, not the live history.
+A small auxiliary request (the summarizer, a nudge, or a repair) is estimated as
+itself, so it is never rejected for the size of the conversation it is about to
+summarize. Estimator calibration counts the native tool schemas (matching the
+provider's `prompt_tokens`) and is recorded only from the main response request;
+auxiliary requests (summarizer, nudge, repair) have a different shape and text
+density, so folding their ratio into one global factor inflated the main
+estimate and made a fitting context look over budget.
 
 Survival compactions (`auto_preflight`, `context_limit_retry`) are accepted
 when the candidate fits the input budget, even if it remains above the

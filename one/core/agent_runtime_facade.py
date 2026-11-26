@@ -214,6 +214,21 @@ def _event_projection(event: Mapping[str, Any]) -> dict[str, Any]:
         if event_type == "tool_call_parse_failed":
             # Safe parser diagnostics only: never forward candidate text/args.
             result.update(_fields(event, ("source", "category", "reason", "tool", "toolCallId")))
+        if event_type == "compaction_end":
+            # The TUI renders the compaction outcome (summary, token counts,
+            # kept count, skip/failure reason). Project only the bounded scalar
+            # fields it needs; never forward the raw result object.
+            raw_result = event.get("result")
+            if isinstance(raw_result, Mapping):
+                projected = _fields(raw_result, (
+                    "aborted", "skipped", "busy", "tokensBefore", "kept",
+                    "skipReason", "failureReason", "summarySchema", "strategy",
+                    "attempts", "fallback",
+                ))
+                summary = raw_result.get("summary")
+                if isinstance(summary, str) and summary:
+                    projected["summary"] = _display_text(summary)
+                result["result"] = projected
     return result
 
 

@@ -1521,3 +1521,191 @@ async def test_v2_zero_min_kept_messages_still_compacts(tmp_path):
     _seed(agent, 5)
     result = await agent.compact()
     assert not result["skipped"], result
+
+
+def _seed_tool_heavy(agent: AgentSession, results: int, size: int) -> None:
+    """One user turn followed by ``results`` tool calls with huge observations."""
+    sm = agent.session_manager
+    sm.append_message({"role": "user", "content": "do the task"})
+    for i in range(results):
+        sm.append_message({"role": "assistant", "content": "",
+                           "_nativeToolCalls": [{"id": f"c{i}", "name": "web_deepsearch", "arguments": {}}]})
+        sm.append_message({"role": "toolResult", "content": "x" * size, "_nativeToolCallId": f"c{i}"})
+    agent.messages = sm.build_session_context()["messages"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("v2", [False, True])
+@pytest.mark.parametrize(
+    ("results", "size"),
+    [
+        (30, 30_000),   # many medium results, far over budget
+        (8, 60_000),    # few large results
+        (3, 120_000),   # very few huge results
+        (2, 400_000),   # a single result larger than the input budget
+        (1, 500_000),   # one indivisible oversized observation
+    ],
+)
+async def test_compaction_survives_tool_heavy_single_turn(tmp_path, v2, results, size):
+    """A single-turn tool loop must always compact down to a sendable request.
+
+    Regression for the incident where ``maxOutputTokens: 32768`` left no output
+    room and the turn died with "Context window has no room for output" because
+    the legacy retention kept ``minKeptMessages`` huge tool results verbatim.
+    """
+    provider = _Provider(["done"])
+    model = ModelInfo("openai", "test-model", context_window=131_072)
+    agent = _mk_agent(
+        tmp_path,
+        {"generation": {"maxOutputTokens": 32_768},
+         "compaction": {"summarizeWithModel": False, "experimentalV2": v2}},
+        provider=provider,
+        model=model,
+    )
+    _seed_tool_heavy(agent, results, size)
+    assert agent.get_context_usage()["tokens"] > agent.get_context_usage()["effectiveContextWindow"]
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("continue")
+
+    # The turn must complete with a real provider response, not a hard error.
+    assert provider.calls >= 1
+    final = agent.messages[-1]
+    assert "done" in str(final.get("content"))
+    assert "no room for output" not in str(final.get("content"))
+    # And the live context must now fit the input budget.
+    usage = agent.get_context_usage()
+    assert usage["tokens"] <= usage["effectiveContextWindow"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("v2", [False, True])
+async def test_compaction_keeps_output_room_with_large_max_output_tokens(tmp_path, v2):
+    """A large generation.maxOutputTokens must not starve the output reserve.
+
+    The reserve is capped at a fraction of the window, so a 32k output setting
+    on a 131k window still leaves a usable input budget and a positive
+    ``outgoingMaxTokens`` after compaction.
+    """
+    provider = _Provider(["done"])
+    model = ModelInfo("openai", "test-model", context_window=131_072)
+    agent = _mk_agent(
+        tmp_path,
+        {"generation": {"maxOutputTokens": 32_768},
+         "compaction": {"summarizeWithModel": False, "experimentalV2": v2}},
+        provider=provider,
+        model=model,
+    )
+    _seed_tool_heavy(agent, 6, 40_000)
+    await agent.prompt("continue")
+    usage = agent.get_context_usage()
+    assert usage["outgoingMaxTokens"] > 0
+    assert usage["tokens"] <= usage["effectiveContextWindow"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("v2", [False, True])
+async def test_summarizer_request_is_charged_its_own_size_not_full_history(tmp_path, v2):
+    """The compaction summarizer must not be rejected for the live history's size.
+
+    Regression: ``_current_request_tokens`` ignored its ``request`` argument in
+    legacy mode and estimated ``self.messages`` instead. The summarizer sends a
+    small request, but the output-room check charged it the full 73k-token
+    history, computed ``outgoing_max_tokens == 0`` and aborted compaction with
+    "Context window has no room for output" — the exact incident symptom.
+    """
+    provider = _Provider(["SUMMARY: did stuff"])
+    model = ModelInfo("openai", "test-model", context_window=49_152)
+    agent = _mk_agent(
+        tmp_path,
+        {"generation": {"maxOutputTokens": 32_768},
+         "compaction": {"summarizeWithModel": True, "experimentalV2": v2,
+                        "minKeptMessages": 20}},
+        provider=provider,
+        model=model,
+    )
+    _seed_tool_heavy(agent, 11, 17_000)
+    usage = agent.get_context_usage()
+    assert usage["tokens"] > usage["effectiveContextWindow"]
+
+    events: list[dict[str, Any]] = []
+    agent.subscribe(events.append)
+    await agent.prompt("continue")
+
+    final = str(agent.messages[-1].get("content"))
+    assert "no room for output" not in final
+    # The summarizer ran (a compaction completed) and the live context now fits.
+    assert any(e["type"] == "compaction_end" and not (e.get("result") or {}).get("skipped")
+               for e in events)
+    after = agent.get_context_usage()
+    assert after["tokens"] <= after["effectiveContextWindow"]
+
+
+def test_current_request_tokens_honors_the_passed_request(tmp_path):
+    """A small auxiliary request must be estimated as itself, not as the history."""
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}})
+    _seed_tool_heavy(agent, 8, 20_000)
+    small = [{"role": "system", "content": "summarize"},
+             {"role": "user", "content": "short prompt"}]
+    full = agent._estimate_request_tokens()
+    assert agent._current_request_tokens(small) < full
+    assert agent._current_request_tokens(small) < 1_000
+
+
+def test_calibration_includes_tool_schemas(tmp_path):
+    """Calibration must count tool schemas, matching the wire request.
+
+    Regression: ``_record_context_usage`` summed only message tokens. A small
+    summarizer request is dominated by the tool schemas, so the provider's
+    prompt_tokens (which include them) produced a ~1.66x calibration that then
+    inflated every later estimate and made a fitting context look over budget.
+    """
+    class _NativeProvider(_Provider):
+        supports_native_tools = True
+
+    provider = _NativeProvider(["ok"])
+    agent = _mk_agent(tmp_path, {"compaction": {"experimentalV2": True}}, provider=provider)
+    agent.providers["openai"].supports_native_tools = True
+    _seed(agent, 2)
+    # A small request: messages are tiny, tool schemas dominate.
+    request = [{"role": "system", "content": "summarize"},
+               {"role": "user", "content": "short"}]
+    tools_tokens = (len(json.dumps(agent._native_tool_definitions(), ensure_ascii=False)) + 3) // 4
+    assert tools_tokens > 0
+    # Report prompt_tokens equal to the full wire estimate (messages + tools).
+    raw = sum(agent._approx_message_tokens(m) for m in request) + tools_tokens
+    wire_estimate = max(1, int(raw * 1.15) + 256)
+    agent._record_context_usage({"prompt_tokens": wire_estimate}, request)
+    # Calibration stays ~1.0 instead of inflating by the tool-schema share.
+    assert agent._context_calibration == pytest.approx(1.0, abs=0.05)
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_requests_do_not_calibrate_the_estimator(tmp_path):
+    """Only the main response request may calibrate the token estimator.
+
+    Regression: the compaction summarizer's usage folded its (denser) ratio into
+    the single global calibration factor, inflating the main estimate so a
+    fitting context looked over budget.
+    """
+    class _UsageProvider(_Provider):
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            from one.providers.base import ChatResult
+            # Report a prompt_tokens far above the estimate so calibration would
+            # move if this request were allowed to calibrate.
+            return ChatResult(text="ok", raw={}, usage={"prompt_tokens": 100_000, "completion_tokens": 1},
+                              stop_reason="stop")
+
+    provider = _UsageProvider(["ok"])
+    agent = _mk_agent(tmp_path, {"compaction": {"summarizeWithModel": False}}, provider=provider)
+    _seed(agent, 2)
+    before = agent._context_calibration
+    request = [{"role": "system", "content": "summarize"},
+               {"role": "user", "content": "short"}]
+    await agent._invoke_provider(request, allow_live_stream=False, count_output_generation=False,
+                                 purpose="compaction")
+    assert agent._context_calibration == before, "auxiliary request must not calibrate"
+    await agent._invoke_provider(agent._flatten_messages_for_provider(), allow_live_stream=False,
+                                 count_output_generation=False, purpose="response")
+    assert agent._context_calibration > before, "response request must calibrate"

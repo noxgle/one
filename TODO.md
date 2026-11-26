@@ -96,14 +96,97 @@ w `get_compaction_stats`.
 `completion_tokens` z `timings.prompt_n` / `timings.predicted_n` ostatniego chunku SSE.
 `get_context_usage` — nowe pole `countSource: "exact" | "estimate"`.
 
+### [DONE] P8 — legacy (V1) budżet zachowanego ogona
+
+`one/core/agent_session.py` — ścieżka legacy trzymała `minKeptMessages` wiadomości
+bez względu na rozmiar, więc kilka dużych `toolResult` przekraczało budżet wejścia,
+a kompaktacja prawie nic nie usuwała → `Context window has no room for output`.
+Teraz ogon jest weryfikowany tym samym estymatorem co bramka żądania (fixed prompt,
+tool schemas, margines 1.15, rezerwa summary) i kurczony — nawet poniżej floor —
+aż się zmieści. O(n): koszty per-wiadomość liczone raz.
+
+### [DONE] P9 — llama.cpp tryb router
+
+`one/providers/llama_cpp.py` — `count_request_tokens` wysyła `model` w JSON body
+do `/apply-template` i `/tokenize` (router odrzucał bez niego: `400 model name is
+missing`). `get_context_window`: `/props` → fallback `/slots?model=` → fallback
+`/v1/models` (`memory.effective.n_ctx` / `meta.n_ctx`), bo router zwraca
+`role:"router"`, `n_ctx:0`. Zweryfikowane na żywym serwerze `192.168.200.38:8089`.
+
+### [DONE] P10 — `_current_request_tokens` ignorował `request` (główna przyczyna)
+
+`one/core/agent_session.py` — w trybie legacy `_current_request_tokens(request)`
+ignorował argument i estymował całe `self.messages`. Sumaryzator wysyła mały
+request (~2 wiadomości), ale bramka output-room liczyła mu pełną historię 73k
+tokenów → `outgoing_max_tokens == 0` → `_CompactionInputError` „Context window
+has no room for output” **przed** uruchomieniem streszczenia. Teraz funkcja
+estymuje dokładnie ten request, który zostanie wysłany, w obu trybach.
+
+(Próba pominięcia schematów narzędzi w sumaryzatorze została wycofana: koliduje
+z cache-aware compaction, która celowo wysyła narzędzia, by odtworzyć prefiks
+cache providera. Prawdziwą przyczyną był P14 — kalibracja.)
+
+### [DONE] P14 — kalibracja estymatora zawyżała główny request
+
+`one/core/agent_session.py` — dwa problemy w `_record_context_usage`:
+1. `raw` liczył tylko treść wiadomości, ale `prompt_tokens` providera zawierają
+   schematy narzędzi. Mały request sumaryzatora jest zdominowany przez schematy,
+   więc współczynnik sięgał ~1.66x.
+2. Ten współczynnik trafiał do jednego globalnego `_context_calibration` i był
+   stosowany do **głównego** requestu, który ma inny kształt i gęstość tekstu.
+
+Efekt: kontekst mieszczący się w budżecie wyglądał na przekroczony („Request
+needs N tokens but the input budget is M”). Teraz kalibracja dolicza schematy
+jak estymata wire **i** jest zapisywana tylko z requestu `purpose="response"`;
+requesty pomocnicze (sumaryzator, nudge, repair) jej nie ruszają. Zweryfikowane
+na realnym JSONL: kalibracja 1.66 → 1.00, kompaktacja 102% → 62-80%.
+
+### [DONE] P11 — TUI nie pokazywał wyniku kompaktacji
+
+`one/core/agent_runtime_facade.py` + `one/modes/tui_mode.py` — TUI obsługiwał
+`compaction_start` (separator), ale nigdy `compaction_end`, więc podsumowanie
+i liczniki tokenów nie pojawiały się, a od razu szedł blok thinking. Facade
+projektuje teraz ograniczony DTO `result` (summary, `tokensBefore`, `kept`,
+`skipReason`, `failureReason`, strategy) dla `compaction_end`, a TUI renderuje
+go przez `_write_compaction_result`.
+
+### [DONE] P12 — V2 „thrashing” do 99% budżetu
+
+`one/core/compaction/retention.py` — `split_exchange` trzymał **największy**
+sufiks, który się mieści (99% budżetu), a floor mógł trzymać `minKeptMessages`
+dużych `toolResult` bez względu na rozmiar (90%). Brak zapasu → następny wynik
+narzędzia znowu przepełniał → pętla compact → grow → compact → błąd „Request
+needs N tokens but the input budget is M”. Teraz retencja celuje w
+`recentTokens` (miękki cel ogona), nie w sufit budżetu: split bierze najmniejszy
+sufiks zachowujący cel, a floor, który przekracza cel, ustępuje mu (nigdy nie
+porzucając obowiązkowej ostatniej wymiany). Kompaktacja zostawia teraz ~35-55%
+zapasu.
+
+### [DONE] P13 — split nie odpalał, gdy ogon mieścił się w budżecie
+
+`one/core/compaction/retention.py` — warunek splitu sprawdzał tylko
+`suffix[latest] > available_tokens`. Ogon jedno-userowego tool-loopu (np. 32k)
+mieścił się w budżecie (34k), ale był 2x większy od celu (15k), więc był trzymany
+w całości → kompaktacja zostawiała 88-99% budżetu → następny wynik narzędzia
+znowu przepełniał. Teraz split odpala, gdy ogon przekracza **cel**
+(`recentTokens`), nie dopiero budżet; bierze najmniejszy sufiks na granicy kroku
+zachowujący cel. Naprawdę niepodzielny ogon, który mieści się w budżecie, jest
+trzymany bez zmian. Zweryfikowane na realnym JSONL z incydentu: 88% → 65%.
+
 ## Testy (dodane)
 
 - `tests/test_compaction_retention.py`: `split_exchange` dla 1 user + N kroków,
-  adaptacyjny floor, brak osieroconych par native.
+  adaptacyjny floor, brak osieroconych par native; split i adaptacja floor
+  celują w `recentTokens`, nie w budżet; split odpala też, gdy ogon mieści się
+  w budżecie, ale przekracza cel.
 - `tests/test_compaction.py`: akceptacja kandydata powyżej triggera dla
-  `auto_preflight`, elizja `toolResult` bez mutacji `self.messages`.
+  `auto_preflight`, elizja `toolResult` bez mutacji `self.messages`; macierz
+  wariantów V1/V2 (30×30k, 8×60k, 3×120k, 2×400k, 1×500k) przy
+  `maxOutputTokens: 32768`.
 - `tests/test_session_manager.py`: `skipReason` w JSONL i w `get_compaction_stats`.
-- Nowy test adaptera: `timings.prompt_n` → `usage.prompt_tokens`.
+- `tests/test_llama_cpp_adapter.py`: `timings.prompt_n` → `usage.prompt_tokens`;
+  tryb router (`model` w body, fallback `/slots`, fallback `/v1/models`, priorytet
+  `/props`).
 
 ## Weryfikacja (wykonana)
 

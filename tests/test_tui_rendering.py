@@ -2151,3 +2151,69 @@ async def test_tui_ctrlv_key_inserts_once(tmp_path: Path, monkeypatch):
         await pilot.pause()
         # Should have inserted once via the binding → action_paste path.
         assert input_widget.text == "via-ctrlv-key"
+
+
+@pytest.mark.asyncio
+async def test_tui_renders_compaction_end_result(tmp_path: Path):
+    """A compaction result must be visible in the stream, not skipped to thinking.
+
+    Regression: the TUI handled ``compaction_start`` (separator) but never
+    ``compaction_end``, so the summary and token counts never appeared and the
+    next thinking block followed immediately. Automatic compaction prints a
+    compact status line (it can fire several times per turn); a manual
+    ``/compact`` shows the summary.
+    """
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "compaction_end", "reason": "auto_preflight", "aborted": False, "willRetry": False,
+            "result": {"aborted": False, "skipped": False, "tokensBefore": 5000, "kept": 12,
+                       "summary": "# Objective\nDo the thing", "summarySchema": "v2"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Compaction complete." in stream
+        assert "Tokens before: 5000" in stream
+        assert "Messages kept: 12" in stream
+        # Automatic compaction stays a single status line, not the full summary.
+        assert "Do the thing" not in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_manual_compaction_shows_summary(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._write_compaction_result(
+            {"aborted": False, "skipped": False, "tokensBefore": 5000, "kept": 12,
+             "summary": "# Objective\nDo the thing"},
+            reason="manual",
+        )
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Compaction complete." in stream
+        assert "Do the thing" in stream
+
+
+@pytest.mark.asyncio
+async def test_tui_renders_compaction_skip(tmp_path: Path):
+    from one.modes.tui_mode import _OneTextualApp
+
+    session = _mk_app_session(tmp_path)
+    app = _OneTextualApp(session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session._emit({
+            "type": "compaction_end", "reason": "auto_preflight", "aborted": False, "willRetry": False,
+            "result": {"aborted": False, "skipped": True, "kept": 25, "skipReason": "no_safe_reduction"},
+        })
+        await pilot.pause()
+        stream = "\n".join(app._stream_lines)
+        assert "Compaction skipped" in stream

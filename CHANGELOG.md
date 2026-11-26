@@ -116,6 +116,75 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 
 ### Fixed
 
+- **TUI shows the compaction result** — the TUI handled `compaction_start` (a
+  separator) but never `compaction_end`, so the summary and token counts never
+  appeared and the next thinking block followed immediately. The runtime facade
+  now projects a bounded `result` DTO (summary, `tokensBefore`, `kept`,
+  `skipReason`, `failureReason`, strategy) for `compaction_end`, and the TUI
+  renders it. A manual `/compact` shows the summary; automatic compaction (which
+  can fire several times per turn) prints a single status line with the token
+  counts instead of repeating the full summary.
+
+- **V2 compaction no longer thrashes to the budget ceiling** — `split_exchange`
+  kept the largest suffix that merely fit, and the message floor could keep
+  `minKeptMessages` huge tool results verbatim. Both filled the input budget to
+  90-99%, leaving no headroom, so the next tool result overflowed again and the
+  turn cycled compact → grow → compact until it failed with "Request needs N
+  tokens but the input budget is M". Retention now targets `recentTokens` (the
+  soft tail target) instead of the budget ceiling: a split keeps the smallest
+  suffix that still retains the target, and a floor that would exceed the target
+  yields to it (never dropping the mandatory latest exchange). Compaction now
+  leaves ~35-55% headroom, so a growing turn compacts once per threshold instead
+  of thrashing.
+
+- **Single-turn tool loops are split even when the tail fits the budget** — the
+  split only triggered when the mandatory tail exceeded the *available* budget.
+  A one-user-message tool loop whose tail (e.g. 32k tokens) fit a 34k budget but
+  was twice the 15k target was kept whole, so compaction left 88-99% of the
+  budget and the next tool result overflowed again. The split now triggers when
+  the tail exceeds the soft target, keeping the smallest step-boundary suffix
+  that still retains `recentTokens`; a genuinely indivisible tail that fits the
+  budget is kept as-is.
+
+- **Compaction no longer aborts with "Context window has no room for output"** —
+  the summarizer request was charged the size of the full live history instead
+  of its own size. `_current_request_tokens` ignored its `request` argument in
+  legacy mode and estimated `self.messages`, so a small summarizer request on a
+  73k-token history computed `outgoing_max_tokens == 0` and raised before the
+  summary could run. It now estimates the exact request that is about to be
+  sent in both modes.
+
+- **Estimator calibration no longer inflates the main request** — two problems
+  in `_record_context_usage` made a context that fit the budget look over it
+  ("Request needs N tokens but the input budget is M"). First, it summed only
+  message tokens while the provider's `prompt_tokens` include the native tool
+  schemas, so a small summarizer request (dominated by those schemas) produced a
+  ~1.66x ratio. Second, that ratio was folded into one global factor and applied
+  to the main request, whose shape and text density differ. Calibration now
+  counts the tool schemas exactly as the wire estimate does and is recorded only
+  from the main response request; auxiliary requests (summarizer, nudge, repair)
+  no longer move it. Verified on the incident session: calibration 1.66 → 1.00,
+  compaction 102% → 62-80% of the budget.
+
+- **Legacy (V1) compaction no longer fails with "Context window has no room for
+  output"** — the raw-window retention kept `minKeptMessages` messages verbatim
+  regardless of their size, so a single-turn tool loop with a few large tool
+  results could exceed the input budget while compaction dropped almost nothing.
+  The legacy path now verifies the retained tail against the same estimate the
+  request gate uses and shrinks it (even below the configured floor) until it
+  fits, so a survival compaction always produces a sendable request. This
+  complements the V2 single-turn fix and covers both `experimentalV2` modes.
+
+- **llama.cpp router-mode token counting and context window** — a router-mode
+  `llama-server` (`--models`/`--models-dir`) rejected `/apply-template` and
+  `/tokenize` with "model name is missing from the request" because the model
+  was only sent as a query parameter. The adapter now names the model in the
+  JSON body (single-model servers ignore the extra field), restoring exact token
+  counts. `get_context_window` also falls back to `/slots?model=` and then the
+  `/v1/models` catalogue (`memory.effective.n_ctx` / `meta.n_ctx`) when `/props`
+  reports the router stub (`n_ctx: 0`), so the context gauge and compaction use
+  the real per-model slot size instead of a stale training limit.
+
 - RPC now exits cleanly at stdin EOF after delivering accepted wait responses.
 - Docker onboarding avoids overwriting `.env`, restricts config directory access,
   and no longer automatically restarts the interactive Compose service.

@@ -77,11 +77,16 @@ def test_boundary_tolerance_and_budget():
 
 def test_floor_adaptation_short_and_empty():
     messages = [msg("user", 20), msg("assistant", 20)] * 5
-    assert plan(messages, recent=20, floor=4).keep_start == 6
+    # The soft token target is authoritative: a floor that would keep more than
+    # recent_tokens yields to it, so the kept tail leaves headroom instead of
+    # filling the budget (which caused compact -> grow -> compact thrashing).
+    # latest (the last user message) is the mandatory tail; the floor yields to
+    # the token target but never drops below latest.
+    assert plan(messages, recent=20, floor=4).keep_start == 8
     assert plan(messages, recent=200, floor=2, available=60).keep_start == 7
     # The message floor adapts downward instead of refusing to compact.
     adapted = plan(messages, recent=20, floor=4, available=60)
-    assert (adapted.keep_start, adapted.reason) == (7, "ok")
+    assert (adapted.keep_start, adapted.reason) == (8, "ok")
     # A single indivisible message with no internal step boundary is still an
     # explicit refusal rather than a silently oversized request.
     assert plan([msg("user", 100)], recent=20, floor=4, available=60).reason == "oversized_exchange"
@@ -178,3 +183,74 @@ def test_zero_min_kept_messages_is_honored():
     result = plan(messages, recent=20, floor=0, available=10000)
     assert result.reason == "ok"
     assert result.keep_start > 0
+
+
+def test_split_exchange_targets_recent_tokens_not_full_budget():
+    """A split must leave headroom, not fill the budget to ~99%.
+
+    Regression: ``split_exchange`` kept the largest suffix that merely fit, so
+    the next tool result overflowed again and the turn thrashed
+    (compact -> grow -> compact -> fail).
+    """
+    messages = [msg("user", 1)]
+    for i in range(13):
+        messages.append(msg("assistant", 1))
+        messages.append(msg("toolResult", 3000))
+    available = 33452
+    result = plan(messages, recent=15000, floor=20, available=available)
+    assert result.reason == "split_exchange"
+    # Kept tail targets recent_tokens (15k), not the full 33k budget.
+    assert result.tokens_kept <= 15000 + 3000
+    assert result.tokens_kept < available * 0.6
+
+
+def test_floor_adaptation_targets_recent_tokens_when_floor_does_not_fit():
+    """When the requested floor overflows, adapt toward recent_tokens, not the budget."""
+    # Summary + 7 tool pairs, no user boundary; floor 20 cannot fit.
+    messages = [msg("custom", 1)]
+    for i in range(7):
+        messages.append(msg("assistant", 1))
+        messages.append(msg("toolResult", 3000))
+    available = 33452
+    result = plan(messages, recent=15000, floor=20, available=available)
+    assert result.reason == "ok"
+    assert result.tokens_kept <= 15000 + 3000
+    assert result.tokens_kept < available * 0.6
+
+
+def test_floor_yields_to_token_target_but_keeps_mandatory_tail():
+    """A floor above the token target shrinks toward it, never below latest."""
+    messages = [msg("user", 20), msg("assistant", 20)] * 5
+    # latest is index 8 (last user); the tail is 40 tokens even though the
+    # target is 20, because the mandatory tail cannot be dropped.
+    assert plan(messages, recent=20, floor=4).keep_start == 8
+
+
+def test_mandatory_tail_above_target_but_below_budget_is_split():
+    """A single-turn tool loop whose tail fits the budget but exceeds the target
+    must still be split, not kept whole.
+
+    Regression: the split only triggered when the tail exceeded ``available``.
+    A tail of 32k tokens fit a 34k budget but was 2x the 15k target, so
+    compaction kept 88-99% of the budget and the next tool result overflowed
+    again (compact -> grow -> compact -> fail).
+    """
+    messages = [msg("user", 12), msg("assistant", 8), msg("user", 12)]
+    for i in range(7):
+        messages.append(msg("assistant", 4))
+        messages.append(msg("toolResult", 4500))
+    available = 34754
+    result = plan(messages, recent=15000, floor=20, available=available)
+    assert result.reason == "split_exchange"
+    # The kept tail targets recent_tokens, leaving real headroom.
+    assert result.tokens_kept <= 15000 + 4500
+    assert result.tokens_kept < available * 0.6
+
+
+def test_indivisible_tail_above_target_but_below_budget_is_kept():
+    """With no internal step boundary, a fitting tail is kept whole (nothing to drop)."""
+    messages = [msg("user", 12), msg("assistant", 4), msg("toolResult", 20000)]
+    result = plan(messages, recent=15000, floor=20, available=34754)
+    # keep_start == 0 is the explicit "nothing to drop" signal; the tail fits.
+    assert result.keep_start == 0
+    assert result.reason == "no_safe_reduction"

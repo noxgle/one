@@ -605,3 +605,34 @@ async def test_shutdown_attempts_dispose_when_abort_fails() -> None:
     await facade.close()
     assert runtime.disposed
     assert facade.finalize()
+
+
+def test_compaction_end_projection_carries_bounded_result():
+    """The TUI needs the compaction outcome to render it; the raw object must not leak."""
+    event = {
+        "type": "compaction_end", "reason": "auto_preflight", "aborted": False, "willRetry": False,
+        "result": {
+            "aborted": False, "skipped": False, "tokensBefore": 5000, "kept": 12,
+            "summary": "# Objective\nDo the thing", "summarySchema": "v2",
+            "strategy": "local_separate", "attempts": 1, "fallback": False,
+            "usage": {"inputTokens": 100}, "constraints": {"extracted": 0},
+        },
+    }
+    projected = _event_projection(event)
+    assert projected["type"] == "compaction_end"
+    result = projected["result"]
+    assert result["tokensBefore"] == 5000 and result["kept"] == 12
+    assert result["summary"] == "# Objective\nDo the thing"
+    assert result["summarySchema"] == "v2"
+    # Structured sub-objects are not forwarded.
+    assert "usage" not in result and "constraints" not in result
+
+
+def test_compaction_end_projection_keeps_skip_reason():
+    event = {
+        "type": "compaction_end", "reason": "auto_preflight", "aborted": False, "willRetry": False,
+        "result": {"aborted": False, "skipped": True, "kept": 25, "skipReason": "no_safe_reduction"},
+    }
+    projected = _event_projection(event)
+    assert projected["result"]["skipped"] is True
+    assert projected["result"]["skipReason"] == "no_safe_reduction"
