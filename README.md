@@ -88,7 +88,9 @@ lists reference gaps rather than claiming an exhaustive contract review.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md),
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to join, test and submit changes,
+[AGENTS.md](AGENTS.md),
+[the portal contributor guide](website/src/content/docs/handbook/development.md),
 [architecture](website/src/content/docs/library/architecture.md),
 [CHANGELOG.md](CHANGELOG.md), and [TODO.md](TODO.md).
 No Node.js dependency is required to install or run the Python application.

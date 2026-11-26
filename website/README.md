@@ -5,7 +5,7 @@ runtime, credentials, automatic deployment, or change to `landing_page/`.
 
 ## Local workflow
 
-Use **Node.js 22.22.1+** (Node 22 LTS recommended) and npm 10.8.2+.
+Use **Node.js 22.23.4+** (Astro 7 requires `>=22.23.4`) and npm 10.8.2+.
 From this directory:
 
 ```sh
@@ -86,7 +86,7 @@ old file paths remain navigable via compatibility pointers.
 
 ## Integrated landing/documentation deploy script
 
-From the repository root (Python 3, curl and Node.js 22.22.1+ on the local machine):
+From the repository root (Python 3, curl and Node.js 22.23.4+ on the local machine):
 
 ```sh
 ./landing_page/deploy.sh --docs --dry-run

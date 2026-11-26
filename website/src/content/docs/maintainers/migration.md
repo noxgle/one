@@ -13,6 +13,7 @@ title: Content migration and audit status
 | `docs/RUNS.md`, `COMPACTION.md`, `CHECKPOINTS.md` | matching lowercase `library/` articles | run context, compaction, checkpoint implementation |
 | `docs/DOCTOR.md`, `MODEL_CATALOG.md` | matching lowercase `library/` articles | diagnostics and model registry |
 | `docs/architecture.md`, `RELEASE_CHECKLIST.md` | `library/architecture`, `release_checklist` | runtime and contributor workflow |
+| `CONTRIBUTING.md` (repository root) | `handbook/development` mirrors the join, test and validation workflow | `CONTRIBUTING.md`, `AGENTS.md`, `scripts/test.sh --help`, CI workflows |
 | New task guides | `guides/` | configuration, auth storage, RPC and runtime code |
 | New generated inventories | `reference/cli`, `settings`, `tools` | offline generator and Python source |
 

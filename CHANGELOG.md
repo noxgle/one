@@ -204,6 +204,12 @@ pre-1.0 (breaking changes may occur in 0.x releases).
 - **Doctor diagnostics** — flag ignored or normalized configuration values without exposing their contents.
 - **Doctor repairs** — report interruptions and partial outcomes, and avoid unverified rollback after an interrupted settings replacement.
 
+- **Documentation portal Node.js requirement** — `website/package.json` declared
+  `node >=22.22.1`, but Astro 7 refuses to build below `22.23.4`, so the
+  documented minimum failed with "Node.js v22.22.1 is not supported by Astro!".
+  The declared engine and every documented Node requirement now state
+  `22.23.4+`.
+
 ### Added
 
 - **Docker** — build a non-root container with persistent configuration and workspace binds; see [the Docker guide](docs/DOCKER.md).
@@ -386,6 +392,19 @@ pre-1.0 (breaking changes may occur in 0.x releases).
   fallback instead of appearing as the answer. OpenRouter non-streaming
   reasoning reads the `reasoning` field, and mid-stream error chunks raise a
   provider error instead of ending silently.
+
+### Documentation
+
+- **Contributor guide** — `CONTRIBUTING.md` now covers the whole contributor
+  workflow: environment setup, focused test suites and the full verification
+  gate, the validation report expected in a pull request, docs and generated
+  reference checks, and release ownership. The portal mirrors it in
+  [the contributor guide](website/src/content/docs/handbook/development.md),
+  cross-linked from the portal landing page, the developer workflow guide, the
+  release checklist and the README.
+- **Architecture reference corrections** — the tool registry count, dispatch
+  notes, test suite inventory and version reference now match `one/tools/index.py`,
+  `one/core/agent_session.py`, `scripts/test.sh --help` and `one/config.py`.
 
 ## [0.1.106] - 2026-10-26
 
