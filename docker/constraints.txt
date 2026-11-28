@@ -17,7 +17,7 @@ mdit-py-plugins==0.7.0
 mdurl==0.1.2
 platformdirs==4.14.7
 pydantic==2.14.3
-pydantic_core==2.50.4
+pydantic_core==2.50.5
 Pygments==2.21.0
 PyYAML==6.0.3
 rich==15.0.0
