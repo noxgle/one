@@ -1,6 +1,6 @@
 # Runtime constraints for the Docker image (Python 3.12, Linux amd64).
 # Regenerate and validate using the procedure in the Docker documentation.
-annotated-doc==0.0.6
+annotated-doc==0.0.7
 annotated-types==0.8.0
 anyio==4.16.0
 beautifulsoup4==4.15.0
